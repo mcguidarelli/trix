@@ -1,0 +1,14 @@
+% Save tokens are Integers; restore validates gen, supports -N relative pop.
+save dup is-integer exch restore
+save dup type /integer-type eq exch restore
+save dup save-level? 1 eq exch restore
+save save -1 restore -1 restore
+save save save -3 restore
+save save { -99 restore } try -2 restore
+{ 0 restore } try
+save 1 recover-save save-level? 1 eq pop pop -1 restore
+save save 1 recover-save 2 recover-save -2 restore pop pop
+save save dup restore { restore } try
+save { 99 recover-save } try -1 restore
+save { 0 recover-save } try -1 restore
+1000 { save -1 restore } repeat

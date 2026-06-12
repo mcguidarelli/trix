@@ -1,0 +1,56 @@
+% ====================================================================
+% test_b6_lazy_validation.trx -- B6 group 2 (lazy validation guards)
+% ====================================================================
+% lazy:1-1  lazy-cons accepted a bare 2-element array as a lazy-seq tail without
+%           checking element[1] is a thunk -> a node that looked valid but blew
+%           up with a confusing deferred error when later forced.  Now validated
+%           at the cons site via is_lazy_seq_nonempty.
+% lazy:2-0  lazy-scan was the only proc-taking lazy combinator with no
+%           verify_operands callability check -> a non-callable proc was silently
+%           pushed as data inside the forced tail, corrupting results far from the
+%           call site.  Now verifies (VerifyCallable, VerifyAny, VerifyLazySeq).
+% lazy:4-0  lazy-count's async terminal write lacked the op-stack-depth guard its
+%           lazy-to-array sibling has; a misbehaving forced tail-thunk could leave
+%           the write clobbering an unrelated operand / below the stack base.  Now
+%           guarded with require_op_count(1) before the terminal write.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% lazy:1-1 -- lazy-cons tail validation
+% ====================================================================
+% A bare 2-element array whose [1] is not a thunk is rejected AT the cons site.
+{ 0 [ 1 2 ] lazy-cons } try /type-check eq (lazy-cons: bare 2-array tail rejected) rt-ok
+% A genuine lazy-seq tail (element[1] IS a thunk) is still accepted.
+{ 0  1 lazy-from  lazy-cons pop } try /no-error eq (lazy-cons: real lazy-seq tail accepted) rt-ok
+% null and thunk tails still accepted.
+{ 0 lazy-nil lazy-cons pop } try /no-error eq (lazy-cons: null tail accepted) rt-ok
+
+% ====================================================================
+% lazy:2-0 -- lazy-scan proc callability
+% ====================================================================
+% Non-callable proc rejected up front (was silently accepted -> garbage).
+{ [ 1 2 3 ] lazy-seq 0 99 lazy-scan } try /type-check eq (lazy-scan: non-callable proc rejected) rt-ok
+% Callable proc still accepted, correct running fold.
+{ [ 1 2 3 ] lazy-seq 0 { add } lazy-scan pop } try /no-error eq (lazy-scan: callable proc accepted) rt-ok
+[ 1 2 3 ] lazy-seq 0 { add } lazy-scan lazy-to-array /sc exch def
+0  0 1 3 { sc exch get add } for  10 eq (lazy-scan: running fold values [0,1,3,6]) rt-ok
+
+% ====================================================================
+% lazy:4-0 -- lazy-count guard does not break normal counting
+% ====================================================================
+[ 10 20 30 40 ] lazy-seq lazy-count 4 eq (lazy-count: finite array seq) rt-ok
+1 lazy-from 7 lazy-take lazy-count 7 eq (lazy-count: forced take chain) rt-ok
+lazy-nil lazy-count 0 eq (lazy-count: empty seq) rt-ok
+
+(test_b6_lazy_validation.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

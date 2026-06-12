@@ -1,0 +1,250 @@
+% ====================================================================
+% Recursive == Output Tests
+% ====================================================================
+% Tests for recursive object-form printing of composite types.
+% The == operator now recursively prints contents of arrays, dicts,
+% sets, tagged values, records, curry, and thunks.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% Helper: capture object-form output as a string.
+% Uses load to avoid executing executable objects (procs).
+/==s { /==s-v exch def =string ({0:O}) [ /==s-v load ] asprint-fmt pop } def
+
+% Helper: test that string contains a substring (returns bool)
+/has { search { pop pop pop true } { pop false } if-else } def
+
+% ====================================================================
+% SECTION 1: ARRAY -- basic
+% ====================================================================
+
+[1 2 3] ==s ([1i 2i 3i]) eq
+    (array: flat integers) rt-ok clear
+
+[] ==s ([]) eq
+    (array: empty literal) rt-ok clear
+
+[true false] ==s ([--true-- --false--]) eq
+    (array: booleans) rt-ok clear
+
+[/a /b /c] ==s ([/a /b /c]) eq
+    (array: names) rt-ok clear
+
+% ====================================================================
+% SECTION 2: ARRAY -- nested
+% ====================================================================
+
+[[1 2] [3 4]] ==s ([[1i 2i] [3i 4i]]) eq
+    (array: nested) rt-ok clear
+
+[1 [2 [3]]] ==s ([1i [2i [3i]]]) eq
+    (array: deeply nested) rt-ok clear
+
+[[]] ==s ([[]]) eq
+    (array: nested empty) rt-ok clear
+
+% ====================================================================
+% SECTION 3: ARRAY -- executable (packed)
+% ====================================================================
+
+% Procedures are packed executable arrays; test they print with { }
+{ dup } ==s length 0 gt
+    (packed: non-empty output) rt-ok clear
+
+{ dup } ==s 0 get ({) 0 get eq
+    (packed: starts with {) rt-ok clear
+
+{ dup } ==s dup length 1 sub get (}) 0 get eq
+    (packed: ends with }) rt-ok clear
+
+% Names inside packed show as \name (executable)
+{ dup } ==s (dup) has
+    (packed: contains operator name) rt-ok clear
+
+% ====================================================================
+% SECTION 4: ARRAY -- mixed types
+% ====================================================================
+
+[1 /x] ==s ([1i /x]) eq
+    (array: int and name) rt-ok clear
+
+% ====================================================================
+% SECTION 5: DICT -- basic
+% ====================================================================
+
+% Single-entry dict for deterministic test
+<< /a 1 >> ==s (/a) has
+    (dict: contains key /a) rt-ok clear
+
+<< /a 1 >> ==s (1i) has
+    (dict: contains value 1i) rt-ok clear
+
+<< /a 1 >> ==s 0 2 get-interval (<<) eq
+    (dict: starts with <<) rt-ok clear
+
+<< /a 1 >> ==s dup length 2 sub 2 get-interval (>>) eq
+    (dict: ends with >>) rt-ok clear
+
+% Empty dict
+<< >> ==s (<<>>) eq
+    (dict: empty) rt-ok clear
+
+clear
+
+% ====================================================================
+% SECTION 6: SET -- basic
+% ====================================================================
+
+% Single-element set
+{{ 42 }} /s exch def
+s ==s 0 2 get-interval ({{) eq
+    (set: starts with {{) rt-ok clear
+
+s ==s dup length 2 sub 2 get-interval (}}) eq
+    (set: ends with }}) rt-ok clear
+
+s ==s (42i) has
+    (set: contains 42i) rt-ok clear
+
+clear
+
+% Empty set
+{{ }} /es exch def
+es ==s ({{}}) eq
+    (set: empty) rt-ok clear
+
+% ====================================================================
+% SECTION 7: TAGGED -- basic
+% ====================================================================
+
+42 /ok tag ==s (/ok 42i) eq
+    (tagged: simple) rt-ok clear
+
+(oops) /err tag ==s (/err (oops)#lw) eq
+    (tagged: string payload) rt-ok clear
+
+[1 2 3] /some tag ==s (/some [1i 2i 3i]) eq
+    (tagged: array payload) rt-ok clear
+
+true /flag tag ==s (/flag --true--) eq
+    (tagged: boolean payload) rt-ok clear
+
+% ====================================================================
+% SECTION 8: TAGGED -- lvar unchanged
+% ====================================================================
+
+logic-var ==s (--lvar:unbound--) eq
+    (tagged: lvar unbound unchanged) rt-ok clear
+
+logic-var dup 42 unify pop ==s (--lvar:42--) eq
+    (tagged: lvar bound unchanged) rt-ok clear
+
+% ====================================================================
+% SECTION 9: RECORD
+% ====================================================================
+
+/point [/x /y] record-type def
+1 2 point ==s (--record {/x: 1i /y: 2i}--) eq
+    (record: two fields) rt-ok clear
+
+/named [/name] record-type def
+(Alice) named ==s (--record {/name: (Alice)#lw}--) eq
+    (record: string field) rt-ok clear
+
+% ====================================================================
+% SECTION 10: CURRY
+% ====================================================================
+
+5 { dup } curry ==s (--curry) has
+    (curry: starts with --curry) rt-ok clear
+
+5 { dup } curry ==s (5i ) has
+    (curry: contains captured value) rt-ok clear
+
+% ====================================================================
+% SECTION 11: CYCLE DETECTION -- array
+% ====================================================================
+
+% Create self-referencing array: a[0] = a
+[1 2 3] /a exch def
+a 0 a put
+a ==s (--cycle--) has
+    (cycle: self-ref array detected) rt-ok clear
+
+% ====================================================================
+% SECTION 12: CYCLE DETECTION -- dict
+% ====================================================================
+
+% Create self-referencing dict: d /self = d
+1 dict /d exch def
+d /self d put
+d ==s (--cycle--) has
+    (cycle: self-ref dict detected) rt-ok clear
+
+% ====================================================================
+% SECTION 13: DEPTH LIMIT
+% ====================================================================
+
+% Build a 20-deep nested array (exceeds MaxPrintDepth=16)
+[0] 1 1 19 { pop dup 1 array dup 0 4 -1 roll put } for
+==s (...) has
+    (depth: ... at max depth) rt-ok clear
+
+% ====================================================================
+% SECTION 14: OPERATOR FORMAT
+% ====================================================================
+
+% Top-level operator: --\add--
+//add ==s (--\\add--) eq
+    (operator: top-level format) rt-ok clear
+
+% ====================================================================
+% SECTION 15: NESTED COMPOSITES
+% ====================================================================
+
+% Array containing a tagged value
+[42 /ok tag] ==s ([/ok 42i]) eq
+    (nested: tagged inside array) rt-ok clear
+
+% Tagged containing an array
+[1 2] /pair tag ==s (/pair [1i 2i]) eq
+    (nested: array inside tagged) rt-ok clear
+
+% ====================================================================
+% SECTION 16: = OPERATOR UNCHANGED
+% ====================================================================
+
+% The = operator should still print simple form (not recursive)
+=string ({0}) mark [1 2 3] sprint-fmt pop (array) eq
+    (=: array prints simple form) rt-ok clear
+
+=string ({0}) mark << /a 1 >> sprint-fmt pop (dict) eq
+    (=: dict prints simple form) rt-ok clear
+
+=string ({0}) mark 42 /ok tag sprint-fmt pop (tagged) eq
+    (=: tagged prints simple form) rt-ok clear
+
+% ====================================================================
+% SECTION 17: EMPTY CONTAINER EDGE CASES
+% ====================================================================
+
+% Verify empty containers work correctly even with shared offsets
+[[] []] ==s ([[] []]) eq
+    (empty: two empty arrays in array) rt-ok clear
+
+[<< >>] ==s ([<<>>]) eq
+    (empty: empty dict in array) rt-ok clear
+
+% ====================================================================
+
+clear
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

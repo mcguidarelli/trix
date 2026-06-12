@@ -1,0 +1,146 @@
+% ====================================================================
+% test_save_token.trx -- Phase C: save tokens are Integers, with gen
+% validation and -N relative-pop semantics.
+% ====================================================================
+% Save tokens encode (level | gen ^ barrier_low23) into a 32-bit signed
+% Integer.  Positive = absolute token (validated against gen on restore).
+% Negative = relative pop: -N pops |N| save levels.  Zero = error.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Save tokens are Integers
+% ====================================================================
+
+save dup is-integer exch restore             (s1: save returns Integer) rt-ok clear
+save dup type /integer-type eq exch restore  (s1: type is integer-type) rt-ok clear
+
+% Token is positive (level >= 1, level is in low byte).
+save dup 0 gt exch restore                   (s1: positive token) rt-ok clear
+
+% save-level? extracts the level from the token.
+save dup save-level? 1 eq exch restore       (s1: save-level? returns 1 at level 1) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Stale-token rejection
+% ====================================================================
+
+% Capture a token, restore past it, save again, try to use the stale token.
+% Use the stack (not def) to keep the token alive across the restore -- def
+% writes get journaled and rolled back, and tokens are inline integers so
+% they survive on the operand stack without ExtValue concerns.
+save                  % stack: stale-tok
+dup restore           % stack: stale-tok (consumed dup, restored to level 0)
+save                  % stack: stale-tok fresh-tok
+{ exch restore } try
+/invalid-restore eq                          (s2: stale token rejected) rt-ok clear
+% After try, the failed restore left residue.  Drain via try's standard
+% pattern (clear after the assertion).  Now finish unwinding fresh-tok.
+% (The fresh-tok is gone -- consumed by the failed try? No, restore raises
+% before consuming.  Use -1 to be safe.)
+-1 restore
+
+% ====================================================================
+% SECTION 3: Relative-pop -N
+% ====================================================================
+
+% -1 pops one save level.  After save+save, -1 leaves us at level 1.
+save save -1 restore
+% Now we should be at level 1.  Verify by using a relative -1 again.
+-1 restore
+% Now back to level 0 (BASE).  Try -1 again -> should error.
+{ -1 restore } try /invalid-restore eq       (s3: -1 at BASE -> error) rt-ok clear
+
+% -N for arbitrary N
+save save save save
+-3 restore                                   % pop 3 levels
+% Now at level 1
+-1 restore                                   % back to BASE
+
+% Overshoot: -N where N exceeds curr_save_level.
+save save
+{ -99 restore } try /invalid-restore eq      (s3: overshoot -> error) rt-ok clear
+-2 restore
+
+% ====================================================================
+% SECTION 4: Zero token rejected
+% ====================================================================
+
+{ 0 restore } try /invalid-restore eq        (s4: zero token rejected) rt-ok clear
+
+% ====================================================================
+% SECTION 5: recover-save round-trip
+% ====================================================================
+
+save save save
+% Recover at each level.  All three should produce valid tokens that can
+% restore in any order (LIFO).
+1 recover-save save-level? 1 eq              (s5: recover level 1) rt-ok clear
+2 recover-save save-level? 2 eq              (s5: recover level 2) rt-ok clear
+3 recover-save save-level? 3 eq              (s5: recover level 3) rt-ok clear
+
+% Recovered token is interchangeable with the original.
+3 recover-save restore                       % pop level 3
+2 recover-save restore                       % pop level 2
+1 recover-save restore                       % pop level 1
+
+% recover-save at out-of-range level errors.
+{ 0 recover-save } try /range-check eq       (s5: recover level 0 -> error) rt-ok clear
+{ 99 recover-save } try /range-check eq      (s5: recover level 99 -> error) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Mixed absolute + relative
+% ====================================================================
+
+save                                         % stack: tok1   (levels: 1)
+save pop save pop save pop                   % stack: tok1   (levels: 1,2,3,4 active)
+-3 restore                                   % pop 3 levels  (back to level 1)
+dup save-level? 1 eq                         (s6: token still valid after -N pop to its level) rt-ok
+restore                                      % use the level-1 token (back to BASE)
+
+% ====================================================================
+% SECTION 7: No-op opaque round-trip through pure data flow
+% ====================================================================
+
+% A dup'd token becomes stale once one copy restores past the level.
+save                                         % stack: tok1; levels: 1
+save dup                                     % stack: tok1 tok2 tok2; levels: 1,2
+restore                                      % consume top tok2, pop level 2. Stack: tok1 tok2 (stale).
+{ restore } try                              % stale tok2 rejected
+/invalid-restore eq                          (s7: stale duplicate rejected) rt-ok
+clear                                        % drain try residue
+% Re-establish state for the unwind: we're at level 1 (the first save
+% above is still active because the stale-tok try didn't successfully
+% restore).  Pop it now.
+-1 restore
+
+% ====================================================================
+% SECTION 8: Stress -- many save/restore cycles
+% ====================================================================
+
+100 { save -1 restore } repeat               % no leaks, no errors
+true                                         (s8: 100 save/restore cycles ok) rt-ok clear
+
+% Nested loops with absolute tokens.
+/inner-test {
+  save /t1 exch def
+  save /t2 exch def
+  t2 restore
+  t1 restore
+  true
+} def
+
+50 { inner-test pop } repeat
+true                                         (s8: 50 nested-with-absolute cycles ok) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_save_token: ALL TESTS PASSED) =
+(__test_ok__) =

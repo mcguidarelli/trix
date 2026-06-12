@@ -1,0 +1,890 @@
+% ====================================================================
+% Test Tier 2 Gaps: peek, poke, clear-object, rand-real, rand-double,
+%   trim-left, trim-right, exp2, expm1, log1p, log2
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: peek/poke — happy path (integer types)
+% ====================================================================
+
+save
+  % alloc, poke integer, peek back
+  4 alloc /addr exch def
+  42 addr poke
+  addr /integer-type peek 42 eq             (peek/poke: integer round-trip) rt-ok
+
+  % poke different value, peek again
+  -99 addr poke
+  addr /integer-type peek -99 eq            (peek/poke: integer overwrite) rt-ok
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION 2: peek/poke — happy path (byte type)
+% ====================================================================
+
+save
+  1 alloc /addr exch def
+  255b addr poke
+  addr /byte-type peek 255b eq              (peek/poke: byte 255) rt-ok
+
+  0b addr poke
+  addr /byte-type peek 0b eq                (peek/poke: byte 0) rt-ok
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION 3: peek/poke — happy path (unsigned integer)
+% ====================================================================
+
+save
+  4 alloc /addr exch def
+  16#FFFF#u addr poke
+  addr /uinteger-type peek 16#FFFF#u eq     (peek/poke: uint round-trip) rt-ok
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION 4: peek/poke — happy path (Long, ULong, Real, Double)
+% ====================================================================
+
+save
+  8 alloc /addr exch def
+  123456789l addr poke
+  addr /long-type peek 123456789l eq        (peek/poke: Long round-trip) rt-ok
+
+  999ul addr poke
+  addr /ulong-type peek 999ul eq            (peek/poke: ULong round-trip) rt-ok
+
+  addr free
+
+  4 alloc /addr2 exch def
+  3.14 addr2 poke
+  addr2 /real-type peek 3.14 eq             (peek/poke: Real round-trip) rt-ok
+
+  addr2 free
+
+  8 alloc /addr3 exch def
+  2.718281828d addr3 poke
+  addr3 /double-type peek 2.718281828d eq   (peek/poke: Double round-trip) rt-ok
+
+  addr3 free
+restore clear
+
+% ====================================================================
+% SECTION 5: peek/poke — sad path
+% ====================================================================
+
+{ 0a /integer-type peek } try /range-check eq     (peek: null address) rt-ok clear
+{ 42 0a poke } try /range-check eq                (poke: null address) rt-ok clear
+{ 42 /integer-type peek } try /type-check eq       (peek: non-address) rt-ok clear
+{ (x) /string-type peek } try /type-check eq       (peek: non-numeric type) rt-ok clear
+
+
+% ====================================================================
+% SECTION 6: peek/poke — stress
+% ====================================================================
+
+save
+  % Write 100 integers, read them all back
+  400 alloc /buf exch def
+  0 1 99 {
+    /i exch def
+    i buf poke
+    % advance address by 4 bytes (integer size)
+  } for
+
+  % Read back first value
+  buf /integer-type peek 99 eq              (peek/poke stress: last write) rt-ok
+
+  buf free
+restore clear
+
+% ====================================================================
+% SECTION 7: peek/poke — fuzz (all numeric types)
+% ====================================================================
+
+save
+  8 alloc /addr exch def
+
+  42b addr poke
+  addr /byte-type peek type /byte-type eq   (peek fuzz: byte type preserved) rt-ok
+
+  42 addr poke
+  addr /integer-type peek type /integer-type eq  (peek fuzz: int type preserved) rt-ok
+
+  42u addr poke
+  addr /uinteger-type peek type /uinteger-type eq  (peek fuzz: uint type preserved) rt-ok
+
+  42l addr poke
+  addr /long-type peek type /long-type eq   (peek fuzz: long type preserved) rt-ok
+
+  42ul addr poke
+  addr /ulong-type peek type /ulong-type eq (peek fuzz: ulong type preserved) rt-ok
+
+  3.14 addr poke
+  addr /real-type peek type /real-type eq   (peek fuzz: real type preserved) rt-ok
+
+  3.14d addr poke
+  addr /double-type peek type /double-type eq  (peek fuzz: double type preserved) rt-ok
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION 8: clear-object — happy path (numbers)
+% ====================================================================
+
+42 clear-object 0 eq                        (clear-obj: integer -> 0) rt-ok clear
+42b clear-object 0b eq                      (clear-obj: byte -> 0b) rt-ok clear
+42u clear-object 0u eq                      (clear-obj: uint -> 0u) rt-ok clear
+3.14 clear-object 0.0 eq                    (clear-obj: real -> 0.0) rt-ok clear
+true clear-object false eq                  (clear-obj: bool -> false) rt-ok clear
+
+save
+  42l clear-object 0l eq                    (clear-obj: long -> 0l) rt-ok
+  42ul clear-object 0ul eq                  (clear-obj: ulong -> 0ul) rt-ok
+  3.14d clear-object 0.0d eq               (clear-obj: double -> 0.0d) rt-ok
+  1a clear-object 0a eq                     (clear-obj: address -> 0a) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 9: clear-object — happy path (containers)
+% ====================================================================
+
+save
+  % Array: clear nullifies elements but preserves length
+  [1 2 3] clear-object
+  dup length 3 eq                           (clear-obj: array length preserved) rt-ok
+  dup 0 get null eq                         (clear-obj: array[0] is null) rt-ok
+  dup 1 get null eq                         (clear-obj: array[1] is null) rt-ok
+  dup 2 get null eq                         (clear-obj: array[2] is null) rt-ok
+  pop
+
+  % String: clear zeroes bytes but preserves length
+  (hello) clear-object
+  dup length 5 eq                           (clear-obj: string length preserved) rt-ok
+  pop
+
+  % Dict: clear empties entries
+  << /a 1 /b 2 >> clear-object dup length 0 eq  (clear-obj: dict length 0) rt-ok pop
+restore clear
+
+% ====================================================================
+% SECTION 10: clear-object — sad path
+% ====================================================================
+
+{ null clear-object } try /type-check eq    (clear-obj: null rejected) rt-ok clear
+{ mark clear-object } try /type-check eq    (clear-obj: mark rejected) rt-ok clear
+
+% ====================================================================
+% SECTION 11: clear-object — fuzz (preserves type)
+% ====================================================================
+
+42 clear-object type /integer-type eq       (clear-obj fuzz: int type) rt-ok clear
+42b clear-object type /byte-type eq         (clear-obj fuzz: byte type) rt-ok clear
+42u clear-object type /uinteger-type eq     (clear-obj fuzz: uint type) rt-ok clear
+3.14 clear-object type /real-type eq        (clear-obj fuzz: real type) rt-ok clear
+true clear-object type /boolean-type eq     (clear-obj fuzz: bool type) rt-ok clear
+
+save
+  42l clear-object type /long-type eq       (clear-obj fuzz: long type) rt-ok
+  3.14d clear-object type /double-type eq   (clear-obj fuzz: double type) rt-ok
+  1a clear-object type /address-type eq     (clear-obj fuzz: address type) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 12: rand-real — happy path
+% ====================================================================
+
+save
+  42ul rand-seed   % seed for reproducibility
+
+  rand-real type /real-type eq              (rand-real: type is Real) rt-ok
+  rand-real dup 0.0 ge exch 1.0 lt and     (rand-real: in [0,1\)) rt-ok
+
+  % Generate 20 values, all must be in [0,1)
+  /all-ok true def
+  20 {
+    rand-real dup 0.0 ge exch 1.0 lt and
+    { } { /all-ok false def } if-else
+  } repeat
+  all-ok                                    (rand-real: 20 values in range) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 13: rand-real — fuzz
+% ====================================================================
+
+save
+  42ul rand-seed
+  % Different seeds produce different sequences
+  rand-real /v1 exch def
+  99ul rand-seed
+  rand-real /v2 exch def
+  v1 v2 ne                                 (rand-real: different seeds differ) rt-ok
+
+  % Same seed reproduces
+  42ul rand-seed
+  rand-real /a exch def
+  42ul rand-seed
+  rand-real /b exch def
+  a b eq                                    (rand-real: same seed reproduces) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 14: rand-double — happy path
+% ====================================================================
+
+save
+  42ul rand-seed
+
+  rand-double type /double-type eq          (rand-double: type is Double) rt-ok
+  rand-double dup 0.0d ge exch 1.0d lt and (rand-double: in [0,1\)) rt-ok
+
+  % Generate 20 values, all in [0,1)
+  /all-ok true def
+  20 {
+    rand-double dup 0.0d ge exch 1.0d lt and
+    { } { /all-ok false def } if-else
+  } repeat
+  all-ok                                    (rand-double: 20 values in range) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 15: rand-double — fuzz
+% ====================================================================
+
+save
+  42ul rand-seed
+  rand-double /v1 exch def
+  99ul rand-seed
+  rand-double /v2 exch def
+  v1 v2 ne                                 (rand-double: different seeds differ) rt-ok
+
+  42ul rand-seed
+  rand-double /a exch def
+  42ul rand-seed
+  rand-double /b exch def
+  a b eq                                    (rand-double: same seed reproduces) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 16: trim-left — happy path
+% ====================================================================
+
+(  hello) trim-left (hello) eq              (trim-left: leading spaces) rt-ok clear
+(\thello) trim-left (hello) eq              (trim-left: leading tab) rt-ok clear
+(\nhello) trim-left (hello) eq              (trim-left: leading newline) rt-ok clear
+(hello) trim-left (hello) eq                (trim-left: no whitespace) rt-ok clear
+() trim-left () eq                          (trim-left: empty string) rt-ok clear
+(   ) trim-left () eq                       (trim-left: all whitespace) rt-ok clear
+( hello world ) trim-left (hello world ) eq (trim-left: preserves trailing) rt-ok clear
+
+% ====================================================================
+% SECTION 17: trim-left — sad path
+% ====================================================================
+
+{ 42 trim-left } try /type-check eq         (trim-left: non-string) rt-ok clear
+
+% ====================================================================
+% SECTION 18: trim-right — happy path
+% ====================================================================
+
+(hello  ) trim-right (hello) eq             (trim-right: trailing spaces) rt-ok clear
+(hello\t) trim-right (hello) eq             (trim-right: trailing tab) rt-ok clear
+(hello\n) trim-right (hello) eq             (trim-right: trailing newline) rt-ok clear
+(hello) trim-right (hello) eq               (trim-right: no whitespace) rt-ok clear
+() trim-right () eq                         (trim-right: empty string) rt-ok clear
+(   ) trim-right () eq                      (trim-right: all whitespace) rt-ok clear
+( hello world ) trim-right ( hello world) eq (trim-right: preserves leading) rt-ok clear
+
+% ====================================================================
+% SECTION 19: trim-right — sad path
+% ====================================================================
+
+{ 42 trim-right } try /type-check eq        (trim-right: non-string) rt-ok clear
+
+% ====================================================================
+% SECTION 20: trim-left/right — stress
+% ====================================================================
+
+save
+  % String with many leading/trailing spaces
+  (                    hello                    ) dup
+  trim-left (hello                    ) eq  (trim-stress: many leading) rt-ok
+  trim-right (                    hello) eq (trim-stress: many trailing) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 21: trim-left/right — fuzz (whitespace chars)
+% ====================================================================
+
+( \t\n\rhello) trim-left (hello) eq         (trim-left fuzz: mixed ws) rt-ok clear
+(hello \t\n\r) trim-right (hello) eq        (trim-right fuzz: mixed ws) rt-ok clear
+
+% Single-char strings
+( ) trim-left () eq                         (trim-left fuzz: single space) rt-ok clear
+( ) trim-right () eq                        (trim-right fuzz: single space) rt-ok clear
+(x) trim-left (x) eq                        (trim-left fuzz: single non-ws) rt-ok clear
+(x) trim-right (x) eq                       (trim-right fuzz: single non-ws) rt-ok clear
+
+% ====================================================================
+% SECTION 22: exp2 — happy path
+% ====================================================================
+
+0.0 exp2 1.0 sub abs 1e-6 lt               (exp2: 2^0 = 1) rt-ok clear
+1.0 exp2 2.0 sub abs 1e-6 lt               (exp2: 2^1 = 2) rt-ok clear
+3.0 exp2 8.0 sub abs 1e-6 lt               (exp2: 2^3 = 8) rt-ok clear
+10.0 exp2 1024.0 sub abs 1e-6 lt           (exp2: 2^10 = 1024) rt-ok clear
+-1.0 exp2 0.5 sub abs 1e-6 lt              (exp2: 2^-1 = 0.5) rt-ok clear
+
+% Double precision
+save
+  3.0d exp2 8.0d sub abs 1e-12d lt         (exp2: Double 2^3 = 8) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 23: exp2 — sad path
+% ====================================================================
+
+{ nan exp2 } try /numerical-nan eq          (exp2: NaN error) rt-ok clear
+{ 42 exp2 } try /type-check eq              (exp2: integer type error) rt-ok clear
+
+% ====================================================================
+% SECTION 24: expm1 — happy path
+% ====================================================================
+
+0.0 expm1 abs 1e-10 lt                     (expm1: e^0-1 = 0) rt-ok clear
+1.0 expm1 1.718281828 sub abs 1e-4 lt      (expm1: e^1-1) rt-ok clear
+% expm1 accurate near zero — key use case
+1e-8 expm1 1e-8 sub abs 1e-16 lt           (expm1: near-zero accuracy) rt-ok clear
+
+save
+  0.0d expm1 abs 1e-15d lt                 (expm1: Double near zero) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 25: expm1 — sad path
+% ====================================================================
+
+{ nan expm1 } try /numerical-nan eq         (expm1: NaN error) rt-ok clear
+{ 42 expm1 } try /type-check eq             (expm1: integer type error) rt-ok clear
+
+% ====================================================================
+% SECTION 26: log1p — happy path
+% ====================================================================
+
+0.0 log1p abs 1e-10 lt                     (log1p: ln(1+0) = 0) rt-ok clear
+1.0 log1p 0.693147 sub abs 1e-4 lt         (log1p: ln(2)) rt-ok clear
+% log1p accurate near zero — key use case
+1e-8 log1p 1e-8 sub abs 1e-16 lt           (log1p: near-zero accuracy) rt-ok clear
+
+save
+  0.0d log1p abs 1e-15d lt                 (log1p: Double near zero) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 27: log1p — sad path
+% ====================================================================
+
+{ nan log1p } try /numerical-nan eq         (log1p: NaN error) rt-ok clear
+{ 42 log1p } try /type-check eq             (log1p: integer type error) rt-ok clear
+% domain: x <= -1 is rejected (pole at -1, NaN below)
+{ -1.0 log1p } try /range-check eq          (log1p: -1 pole reject) rt-ok clear
+{ -2.0 log1p } try /range-check eq          (log1p: < -1 domain reject) rt-ok clear
+{ -1.0d log1p } try /range-check eq         (log1p: -1d pole reject) rt-ok clear
+
+% ====================================================================
+% SECTION 28: log2 — happy path
+% ====================================================================
+
+1.0 log2 abs 1e-10 lt                      (log2: log2(1) = 0) rt-ok clear
+2.0 log2 1.0 sub abs 1e-6 lt               (log2: log2(2) = 1) rt-ok clear
+8.0 log2 3.0 sub abs 1e-6 lt               (log2: log2(8) = 3) rt-ok clear
+1024.0 log2 10.0 sub abs 1e-6 lt           (log2: log2(1024) = 10) rt-ok clear
+0.5 log2 -1.0 sub abs 1e-6 lt              (log2: log2(0.5) = -1) rt-ok clear
+
+save
+  8.0d log2 3.0d sub abs 1e-12d lt         (log2: Double log2(8) = 3) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 29: log2 — sad path
+% ====================================================================
+
+{ 0.0 log2 } try /range-check eq            (log2: zero error) rt-ok clear
+{ -1.0 log2 } try /range-check eq           (log2: negative error) rt-ok clear
+{ 42 log2 } try /type-check eq              (log2: integer type error) rt-ok clear
+
+% ====================================================================
+% SECTION 30: math fuzz — exp2/log2 inverse, expm1/log1p inverse
+% ====================================================================
+
+% exp2 and log2 are inverses
+5.0 exp2 log2 5.0 sub abs 1e-6 lt          (math fuzz: exp2-log2 round-trip) rt-ok clear
+16.0 log2 exp2 16.0 sub abs 1e-6 lt        (math fuzz: log2-exp2 round-trip) rt-ok clear
+
+% expm1 and log1p are inverses
+0.5 expm1 log1p 0.5 sub abs 1e-6 lt        (math fuzz: expm1-log1p round-trip) rt-ok clear
+0.5 log1p expm1 0.5 sub abs 1e-6 lt        (math fuzz: log1p-expm1 round-trip) rt-ok clear
+
+% Double precision round-trips
+save
+  5.0d exp2 log2 5.0d sub abs 1e-12d lt    (math fuzz: Double exp2-log2) rt-ok
+  0.5d expm1 log1p 0.5d sub abs 1e-12d lt  (math fuzz: Double expm1-log1p) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 31: math stress — exp2/expm1 boundary values
+% ====================================================================
+
+% Large exp2
+20.0 exp2 1048576.0 sub abs 1e-2 lt        (math stress: exp2(20) = 1M) rt-ok clear
+% Very small expm1
+1e-15 expm1 1e-15 sub abs 1e-25 lt         (math stress: expm1 tiny) rt-ok clear
+
+% ====================================================================
+% SECTION 32: clear-object stress
+% ====================================================================
+
+save
+  % Clear large array — preserves length, nullifies contents
+  [0 1 99 { } for] clear-object
+  dup length 100 eq                         (clear-obj stress: large array length) rt-ok
+  dup 0 get null eq                         (clear-obj stress: large array[0] null) rt-ok
+  dup 99 get null eq                        (clear-obj stress: large array[99] null) rt-ok
+  pop
+
+  % Clear array with ExtValues
+  [100l 200l 300l] clear-object
+  dup length 3 eq                           (clear-obj stress: ExtValue array length) rt-ok
+  dup 0 get null eq                         (clear-obj stress: ExtValue[0] null) rt-ok
+  pop
+restore clear
+
+% ====================================================================
+% SECTION 37: peek/poke — multiple types in same buffer
+% ====================================================================
+
+save
+  16 alloc /buf exch def
+
+  % Write byte at offset 0
+  65b buf poke
+  buf /byte-type peek 65b eq                (peek/poke multi: byte at 0) rt-ok
+
+  buf free
+restore clear
+
+% ====================================================================
+% SECTION: Address cache — repeated peek uses cache
+% ====================================================================
+
+save
+  4 alloc /addr exch def
+  42 addr poke
+
+  % First peek probes and caches; subsequent peeks use cache.
+  addr /integer-type peek 42 eq               (addr-cache: first peek) rt-ok
+  addr /integer-type peek 42 eq               (addr-cache: second peek cached) rt-ok
+  addr /integer-type peek 42 eq               (addr-cache: third peek cached) rt-ok
+
+  % Poke also uses/populates cache.
+  99 addr poke
+  addr /integer-type peek 99 eq               (addr-cache: poke then peek) rt-ok
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION: Address cache — multiple types through same address
+% ====================================================================
+
+save
+  8 alloc /addr exch def
+
+  42b addr poke
+  addr /byte-type peek 42b eq                 (addr-cache: byte poke/peek) rt-ok
+
+  1000 addr poke
+  addr /integer-type peek 1000 eq             (addr-cache: integer poke/peek) rt-ok
+
+  3.14 addr poke
+  addr /real-type peek 3.14 eq                (addr-cache: real poke/peek) rt-ok
+
+  123456789l addr poke
+  addr /long-type peek 123456789l eq          (addr-cache: long poke/peek) rt-ok
+
+  2.718281828d addr poke
+  addr /double-type peek 2.718281828d eq      (addr-cache: double poke/peek) rt-ok
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION: Address cache — save/restore invalidates cache
+% ====================================================================
+
+save
+  4 alloc /addr exch def
+  42 addr poke
+  addr /integer-type peek 42 eq               (addr-cache: pre-save peek) rt-ok
+
+  save
+    % The address object on the stack survives restore but cache is cleared.
+    % Peek inside save scope still works (re-probes).
+    addr /integer-type peek 42 eq             (addr-cache: inner-save peek) rt-ok
+  restore
+
+  % After restore, cache was invalidated; peek re-probes.
+  addr /integer-type peek 42 eq               (addr-cache: post-restore peek) rt-ok
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION: Address cache — make-literal/make-executable reject Address
+% ====================================================================
+
+save
+  4 alloc /addr exch def
+  % W04: try rolls back addr residue on error; only /type-check lands
+  % on top after each catch (rt-ok clears it).
+  { addr make-literal } try /type-check eq      (addr-cache: make-literal rejects address) rt-ok
+  { addr make-executable } try /type-check eq    (addr-cache: make-executable rejects address) rt-ok
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION: Address cache — stress (many peeks)
+% ====================================================================
+
+save
+  4 alloc /addr exch def
+  42 addr poke
+
+  % 50 consecutive peeks — first probes, rest use cache
+  0 1 49 {
+    pop
+    addr /integer-type peek 42 eq { } { (FAILED: addr-cache stress peek) = } if-else
+  } for
+  true                                        (addr-cache: 50 consecutive peeks) rt-ok
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION: address-state? — happy path
+% ====================================================================
+
+save
+  4 alloc /addr exch def
+  addr address-state? /addr-read-write eq     (addr-state: alloc is read-write) rt-ok pop
+
+  0a address-state? /addr-null eq             (addr-state: 0a is null) rt-ok pop
+
+  1a address-state? /addr-invalid eq          (addr-state: 1a is invalid) rt-ok pop
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION: address-state? — caching integration
+% ====================================================================
+
+save
+  4 alloc /addr exch def
+
+  % address-state? caches, subsequent peek skips probe
+  addr address-state? /addr-read-write eq     (addr-state: pre-cache RW) rt-ok pop
+  42 addr poke
+  addr /integer-type peek 42 eq               (addr-state: cached peek after state?) rt-ok
+
+  % address-state? on same addr returns same cached result
+  addr address-state? /addr-read-write eq     (addr-state: second call cached) rt-ok pop
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION: address-state? — sad path
+% ====================================================================
+
+{ 42 address-state? } try /type-check eq      (addr-state: non-address rejected) rt-ok clear
+{ (hello) address-state? } try /type-check eq (addr-state: string rejected) rt-ok clear
+
+% ====================================================================
+% SECTION: address-state? — save/restore invalidates cache
+% ====================================================================
+
+save
+  4 alloc /addr exch def
+  addr address-state? /addr-read-write eq     (addr-state: pre-save) rt-ok pop
+
+  save
+    addr address-state? /addr-read-write eq   (addr-state: inner-save) rt-ok pop
+  restore
+
+  % After restore, cache cleared — re-probes
+  addr address-state? /addr-read-write eq     (addr-state: post-restore) rt-ok pop
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION: address-state? — stress
+% ====================================================================
+
+save
+  4 alloc /addr exch def
+
+  % 50 consecutive address-state? calls — first probes, rest use cache
+  0 1 49 {
+    pop
+    addr address-state? /addr-read-write eq
+    { } { (FAILED: addr-state stress) = } if-else pop
+  } for
+  true                                        (addr-state: 50 consecutive calls) rt-ok
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION: address-state? — fuzz (various address values)
+% ====================================================================
+
+save
+  % Address arithmetic: alloc, advance pointer, check state
+  16 alloc /buf exch def
+  buf 4 add address-state? /addr-read-write eq  (addr-state fuzz: buf+4 is RW) rt-ok pop
+  buf 8 add address-state? /addr-read-write eq  (addr-state fuzz: buf+8 is RW) rt-ok pop
+  buf 15 add address-state? /addr-read-write eq (addr-state fuzz: buf+15 last byte RW) rt-ok pop
+
+  % Various literal address values — all should be invalid
+  1a address-state? /addr-invalid eq            (addr-state fuzz: 1a invalid) rt-ok pop
+  2a address-state? /addr-invalid eq            (addr-state fuzz: 2a invalid) rt-ok pop
+  16#DEAD#a address-state? /addr-invalid eq     (addr-state fuzz: 0xDEAD invalid) rt-ok pop
+  16#FFFF#a address-state? /addr-invalid eq     (addr-state fuzz: 0xFFFF invalid) rt-ok pop
+
+  buf free
+restore clear
+
+% ====================================================================
+% SECTION: address-state? — dup'd address shares no cache
+% ====================================================================
+
+save
+  4 alloc /addr exch def
+
+  % dup creates a copy; each Address object has its own cache bits
+  addr dup
+  address-state? /addr-read-write eq          (addr-state dup: copy is RW) rt-ok pop
+  address-state? /addr-read-write eq          (addr-state dup: original is RW) rt-ok pop
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION: address-state? — sad path (more types)
+% ====================================================================
+
+{ true address-state? } try /type-check eq    (addr-state sad: boolean rejected) rt-ok clear
+{ null address-state? } try /type-check eq    (addr-state sad: null rejected) rt-ok clear
+{ /foo address-state? } try /type-check eq    (addr-state sad: name rejected) rt-ok clear
+{ [1 2] address-state? } try /type-check eq   (addr-state sad: array rejected) rt-ok clear
+
+% ====================================================================
+% SECTION: peek/poke — fuzz (address arithmetic + cache)
+% ====================================================================
+
+save
+  % Allocate buffer, poke at various offsets, peek back
+  32 alloc /buf exch def
+
+  % Poke byte at offset 0, integer at offset 4, real at offset 8
+  65b buf poke
+  buf /byte-type peek 65b eq                    (peek-poke fuzz: byte at offset 0) rt-ok
+
+  1000 buf 4 add poke
+  buf 4 add /integer-type peek 1000 eq          (peek-poke fuzz: int at offset 4) rt-ok
+
+  3.14 buf 8 add poke
+  buf 8 add /real-type peek 3.14 eq             (peek-poke fuzz: real at offset 8) rt-ok
+
+  % Overwrite byte with different value
+  90b buf poke
+  buf /byte-type peek 90b eq                    (peek-poke fuzz: byte overwrite) rt-ok
+
+  % Integer at offset 4 should be unaffected
+  buf 4 add /integer-type peek 1000 eq          (peek-poke fuzz: int unaffected by byte write) rt-ok
+
+  buf free
+restore clear
+
+% ====================================================================
+% SECTION: peek/poke — boundary (minimum alloc sizes)
+% ====================================================================
+
+save
+  % 1-byte alloc: only byte type fits
+  1 alloc /b1 exch def
+  42b b1 poke
+  b1 /byte-type peek 42b eq                    (peek-poke boundary: 1-byte alloc) rt-ok
+  b1 free
+
+  % 4-byte alloc: integer fits
+  4 alloc /b4 exch def
+  16#7FFFFFFF# b4 poke
+  b4 /integer-type peek 16#7FFFFFFF# eq        (peek-poke boundary: max int) rt-ok
+  b4 free
+
+  % 8-byte alloc: long and double fit
+  8 alloc /b8 exch def
+  16#7FFFFFFFFFFFFFFF#l b8 poke
+  b8 /long-type peek 16#7FFFFFFFFFFFFFFF#l eq  (peek-poke boundary: max long) rt-ok
+
+  0.0d b8 poke
+  b8 /double-type peek 0.0d eq                 (peek-poke boundary: double zero) rt-ok
+
+  b8 free
+restore clear
+
+% ====================================================================
+% SECTION: peek/poke — sad path (cache involvement)
+% ====================================================================
+
+% Peek/poke on null address — errors even with cache
+{ 0a /integer-type peek } try /range-check eq   (peek sad: null addr range-check) rt-ok clear
+{ 42 0a poke } try /range-check eq              (poke sad: null addr range-check) rt-ok clear
+
+% Peek with non-type-name
+save
+  4 alloc /addr exch def
+  % try leaves addr and /foo on stack below error name
+  % W04: try rolls back addr + /foo residue from inside the proc body;
+  % only /type-check lands on top, which rt-ok consumes after the eq.
+  { addr /foo peek } try /type-check eq         (peek sad: non-type-name) rt-ok
+  { addr (integer) peek } try /type-check eq    (peek sad: string not name) rt-ok
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION: peek/poke — unsigned types fuzz
+% ====================================================================
+
+save
+  8 alloc /addr exch def
+
+  0u addr poke
+  addr /uinteger-type peek 0u eq                (peek-poke uint fuzz: zero) rt-ok
+
+  16#FFFFFFFF#u addr poke
+  addr /uinteger-type peek 16#FFFFFFFF#u eq     (peek-poke uint fuzz: max) rt-ok
+
+  0ul addr poke
+  addr /ulong-type peek 0ul eq                  (peek-poke ulong fuzz: zero) rt-ok
+
+  16#FFFFFFFFFFFFFFFF#ul addr poke
+  addr /ulong-type peek 16#FFFFFFFFFFFFFFFF#ul eq (peek-poke ulong fuzz: max) rt-ok
+
+  addr free
+restore clear
+
+% address-state? after free is undefined behavior (use-after-free)
+% and cannot be tested under ASan — intentionally omitted.
+
+% ====================================================================
+% SECTION: peek/poke + address-state? — interleaved stress
+% ====================================================================
+
+save
+  % Allocate 10 buffers, check state, poke, peek each
+  /bufs [ 0 1 9 { pop 4 alloc } for ] def
+
+  0 1 9 {
+    /i exch def
+    bufs i get address-state? /addr-read-write eq
+    { } { (FAILED: interleaved stress state?) = } if-else pop
+    i bufs i get poke
+  } for
+
+  % Read back all values
+  0 1 9 {
+    /i exch def
+    bufs i get /integer-type peek i eq
+    { } { (FAILED: interleaved stress peek) = } if-else
+  } for
+  true                                          (peek-poke stress: 10 buffers interleaved) rt-ok
+
+  % Free all
+  0 1 9 { /i exch def bufs i get free } for
+
+restore clear
+
+% ====================================================================
+% SECTION: Address cache — packed array round-trip strips cache
+% ====================================================================
+
+save
+  4 alloc /addr exch def
+  % Warm the cache
+  addr address-state? pop pop
+
+  % Pack the address into a procedure, extract it
+  { addr } bind 0 get /packed-addr exch def
+  % The extracted address should work — peek/poke should re-probe
+  42 packed-addr poke
+  packed-addr /integer-type peek 42 eq          (addr packed: peek after pack round-trip) rt-ok
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION: peek/poke — negative integer boundary
+% ====================================================================
+
+save
+  4 alloc /addr exch def
+
+  -1 addr poke
+  addr /integer-type peek -1 eq                 (peek-poke boundary: -1) rt-ok
+
+  -2147483648 addr poke
+  addr /integer-type peek -2147483648 eq        (peek-poke boundary: min int) rt-ok
+
+  addr free
+restore clear
+
+% ====================================================================
+% SECTION: peek/poke — IEEE 754 special values
+% ====================================================================
+
+save
+  4 alloc /addr exch def
+
+  inf addr poke
+  addr /real-type peek inf eq                    (peek-poke ieee: +inf) rt-ok
+
+  inf neg addr poke
+  addr /real-type peek inf neg eq                (peek-poke ieee: -inf) rt-ok
+
+  addr free
+restore clear
+
+(tests/test_tier2_gaps.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

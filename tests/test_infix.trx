@@ -1,0 +1,1453 @@
+% ====================================================================
+% Infix Expression Tests
+% ====================================================================
+% Tests for $( ) strict infix and $[ ] auto-promote infix syntax.
+% Scanner-level desugar of infix expressions to postfix.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Basic arithmetic
+% ====================================================================
+
+$( 1 + 2 ) 3 eq
+    (basic: 1 + 2 = 3) rt-ok clear
+
+$( 10 - 3 ) 7 eq
+    (basic: 10 - 3 = 7) rt-ok clear
+
+$( 4 * 5 ) 20 eq
+    (basic: 4 * 5 = 20) rt-ok clear
+
+$( 20 / 4 ) 5 eq
+    (basic: 20 / 4 = 5) rt-ok clear
+
+$( 17 % 5 ) 2 eq
+    (basic: 17 % 5 = 2) rt-ok clear
+
+$( 2.0 ** 10.0 ) 1024.0 eq
+    (basic: 2.0 ** 10.0 = 1024) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Operator precedence
+% ====================================================================
+
+% * binds tighter than +
+$( 2 + 3 * 4 ) 14 eq
+    (prec: 2 + 3 * 4 = 14) rt-ok clear
+
+% * binds tighter than -
+$( 10 - 2 * 3 ) 4 eq
+    (prec: 10 - 2 * 3 = 4) rt-ok clear
+
+% / same precedence as *
+$( 12 / 3 * 2 ) 8 eq
+    (prec: 12 / 3 * 2 = 8) rt-ok clear
+
+% % same precedence as *
+$( 7 % 3 + 1 ) 2 eq
+    (prec: 7 % 3 + 1 = 2) rt-ok clear
+
+% + and - are left-associative
+$( 10 - 3 - 2 ) 5 eq
+    (prec: 10 - 3 - 2 = 5) rt-ok clear
+
+% ** is right-associative: 2 ** (3 ** 2) = 2 ** 9 = 512
+$( 2.0 ** 3.0 ** 2.0 ) 512.0 eq
+    (prec: 2.0 ** 3.0 ** 2.0 = 512) rt-ok clear
+
+% ** binds tighter than *
+$( 3.0 * 2.0 ** 3.0 ) 24.0 eq
+    (prec: 3.0 * 2.0 ** 3.0 = 24) rt-ok clear
+
+% comparison lower than arithmetic
+$( 2 + 3 < 10 ) true eq
+    (prec: 2 + 3 < 10 = true) rt-ok clear
+
+$( 2 * 3 == 6 ) true eq
+    (prec: 2 * 3 == 6 = true) rt-ok clear
+
+% bitwise lower than comparison
+$( 3u < 5u & 7u > 2u ) true eq
+    (prec: comparison & comparison) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Grouping parentheses
+% ====================================================================
+
+$( (2 + 3) * 4 ) 20 eq
+    (group: (2+3)*4 = 20) rt-ok clear
+
+$( 2 * (3 + 4) ) 14 eq
+    (group: 2*(3+4) = 14) rt-ok clear
+
+$( (10 - 2) / (1 + 1) ) 4 eq
+    (group: (10-2)/(1+1) = 4) rt-ok clear
+
+$( ((1 + 2) * (3 + 4)) ) 21 eq
+    (group: nested ((1+2)*(3+4)) = 21) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Unary operators
+% ====================================================================
+
+$( -5 + 8 ) 3 eq
+    (unary: -5 + 8 = 3) rt-ok clear
+
+$( -(3 + 2) ) -5 eq
+    (unary: -(3+2) = -5) rt-ok clear
+
+$( -(-7) ) 7 eq
+    (unary: -(-7) = 7) rt-ok clear
+
+$( +5 ) 5 eq
+    (unary: +5 = 5) rt-ok clear
+
+$( +5 + 3 ) 8 eq
+    (unary: +5 + 3 = 8) rt-ok clear
+
+$( +(3 + 2) ) 5 eq
+    (unary: +(3+2) = 5) rt-ok clear
+
+$( -+7 ) -7 eq
+    (unary: -+7 = -7) rt-ok clear
+
+$( +-7 ) -7 eq
+    (unary: +-7 = -7) rt-ok clear
+
+$( !true ) false eq
+    (unary: !true = false) rt-ok clear
+
+$( !false ) true eq
+    (unary: !false = true) rt-ok clear
+
+$( ~true ) false eq
+    (unary: ~true = false) rt-ok clear
+
+% IF-C1: unary minus binds LOOSER than `**` -- the Python / MATLAB /
+% Fortran / Ruby convention.  `-2 ** 2` parses as -(2**2) = -4, not
+% (-2)**2 = 4.  Same logic applies to right-side operands of `**`.
+$( -2.0 ** 2.0 ) -4.0 eq
+    (IF-C1: -2.0 ** 2.0 = -4 (not 4)) rt-ok clear
+
+$( -2.0 ** 3.0 ) -8.0 eq
+    (IF-C1: -2.0 ** 3.0 = -8) rt-ok clear
+
+$( 2.0 ** -3.0 ) 0.125 eq
+    (IF-C1: 2.0 ** -3.0 = 0.125) rt-ok clear
+
+$( -2.0 ** 2.0 + 3.0 ) -1.0 eq
+    (IF-C1: -2.0 ** 2.0 + 3.0 = -1) rt-ok clear
+
+% Explicit parens still beat unary precedence:
+$( (-2.0) ** 2.0 ) 4.0 eq
+    (IF-C1: (-2.0) ** 2.0 = 4 (parens win)) rt-ok clear
+
+$( -(2.0 ** 2.0) ) -4.0 eq
+    (IF-C1: -(2.0 ** 2.0) = -4 (parens are no-op here)) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Function calls
+% ====================================================================
+
+$( sqrt(9.0) ) 3.0 eq
+    (func: sqrt(9.0) = 3.0) rt-ok clear
+
+$( abs(-7) ) 7 eq
+    (func: abs(-7) = 7) rt-ok clear
+
+$( max(3, 7) ) 7 eq
+    (func: max(3,7) = 7) rt-ok clear
+
+$( min(3, 7) ) 3 eq
+    (func: min(3,7) = 3) rt-ok clear
+
+$( pow(2.0, 10.0) ) 1024.0 eq
+    (func: pow(2.0,10.0) = 1024) rt-ok clear
+
+% Function call in expression
+$( sqrt(16.0) + 1.0 ) 5.0 eq
+    (func: sqrt(16.0) + 1.0 = 5.0) rt-ok clear
+
+$( max(3, 7) + min(1, 2) ) 8 eq
+    (func: max+min combined) rt-ok clear
+
+% Nested function calls
+$( abs(min(3, -5)) ) 5 eq
+    (func: abs(min(3,-5)) = 5) rt-ok clear
+
+$( max(abs(-3), abs(-7)) ) 7 eq
+    (func: max(abs(-3),abs(-7)) = 7) rt-ok clear
+
+% Nullary function call
+$( clock() ) type /ulong-type eq
+    (func: clock() returns ulong) rt-ok clear
+
+% Expression as function argument
+$( abs(3 - 10) ) 7 eq
+    (func: abs(3-10) = 7) rt-ok clear
+
+$( max(2 + 3, 1 * 10) ) 10 eq
+    (func: max(2+3,1*10) = 10) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Name resolution and variables
+% ====================================================================
+
+/x 10 def
+$( x + 5 ) 15 eq
+    (name: x + 5 = 15) rt-ok clear
+
+/y 3 def
+$( x * y + 1 ) 31 eq
+    (name: x * y + 1 = 31) rt-ok clear
+
+/pi 3.14159 def
+$( pi * 2.0 ) 3.14159 2.0 mul eq
+    (name: pi * 2.0) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Number literal types
+% ====================================================================
+
+$( 42 ) type /integer-type eq
+    (type: integer) rt-ok clear
+
+$( 42u ) type /uinteger-type eq
+    (type: uinteger) rt-ok clear
+
+$( 42l ) type /long-type eq
+    (type: long) rt-ok clear
+
+$( 42ul ) type /ulong-type eq
+    (type: ulong) rt-ok clear
+
+$( 3.14 ) type /real-type eq
+    (type: real) rt-ok clear
+
+$( 3.14d ) type /double-type eq
+    (type: double) rt-ok clear
+
+$( 65b ) type /byte-type eq
+    (type: byte) rt-ok clear
+
+% Radix prefix
+$( 16#FF# ) 255 eq
+    (type: hex radix) rt-ok clear
+
+$( 2#1010# ) 10 eq
+    (type: binary radix) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Comparison operators
+% ====================================================================
+
+$( 3 < 5 ) true eq
+    (cmp: 3 < 5) rt-ok clear
+
+$( 5 < 3 ) false eq
+    (cmp: 5 < 3 false) rt-ok clear
+
+$( 3 <= 3 ) true eq
+    (cmp: 3 <= 3) rt-ok clear
+
+$( 3 <= 2 ) false eq
+    (cmp: 3 <= 2 false) rt-ok clear
+
+$( 5 > 3 ) true eq
+    (cmp: 5 > 3) rt-ok clear
+
+$( 3 >= 3 ) true eq
+    (cmp: 3 >= 3) rt-ok clear
+
+$( 5 == 5 ) true eq
+    (cmp: 5 == 5) rt-ok clear
+
+$( 5 == 6 ) false eq
+    (cmp: 5 == 6 false) rt-ok clear
+
+$( 3 != 4 ) true eq
+    (cmp: 3 != 4) rt-ok clear
+
+$( 3 != 3 ) false eq
+    (cmp: 3 != 3 false) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Bitwise operators (unsigned)
+% ====================================================================
+
+$( 16#FF#u & 16#0F#u ) 15u eq
+    (bit: FF & 0F = 0F) rt-ok clear
+
+$( 16#F0#u | 16#0F#u ) 255u eq
+    (bit: F0 | 0F = FF) rt-ok clear
+
+$( 16#FF#u ^ 16#0F#u ) 240u eq
+    (bit: FF ^ 0F = F0) rt-ok clear
+
+$( ~0u ) 4294967295u eq
+    (bit: ~0u = max uint) rt-ok clear
+
+% Shift operators (value is unsigned, amount is integer)
+$( 1u << 8 ) 256u eq
+    (bit: 1u << 8 = 256u) rt-ok clear
+
+$( 256u >> 4 ) 16u eq
+    (bit: 256u >> 4 = 16u) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Auto-promote $[ ]
+% ====================================================================
+
+$[ 3 + 4.0 ] 7.0 eq
+    (auto: 3 + 4.0 = 7.0) rt-ok clear
+
+$[ 3 + 4.0 ] type /real-type eq
+    (auto: result type is real) rt-ok clear
+
+$[ 10 - 2.5 ] 7.5 eq
+    (auto: 10 - 2.5 = 7.5) rt-ok clear
+
+$[ 3 * 2.0 ] 6.0 eq
+    (auto: 3 * 2.0 = 6.0) rt-ok clear
+
+$[ 7 / 2.0 ] 3.5 eq
+    (auto: 7 / 2.0 = 3.5) rt-ok clear
+
+% Auto-promote is no-op when types match
+$[ 3 + 4 ] 7 eq
+    (auto: same type no-op) rt-ok clear
+
+$[ 3.0 + 4.0 ] 7.0 eq
+    (auto: same real type no-op) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Interaction with procedures and locals
+% ====================================================================
+
+% Infix inside a proc
+{ $( 2 * 3 ) } exec 6 eq
+    (proc: inline infix) rt-ok clear
+
+% Infix with local variables
+{ |a b| $( a + b ) } 3 5 3 -1 roll exec 8 eq
+    (proc: locals a+b) rt-ok clear
+
+% Quadratic: a*x^2 + b*x + c
+/quadratic { |a b c x| $( a * x * x + b * x + c ) } def
+1 0 0 3 quadratic 9 eq
+    (proc: quadratic 1*3*3+0*3+0 = 9) rt-ok clear
+
+2 3 1 5 quadratic 66 eq
+    (proc: quadratic 2*5*5+3*5+1 = 66) rt-ok clear
+
+% Lerp with auto-promote
+/lerp { |a b t| $[ a + t * (b - a) ] } def
+0.0 10.0 0.5 lerp 5.0 eq
+    (proc: lerp(0,10,0.5) = 5) rt-ok clear
+
+% Multiple infix expressions in one proc
+/foo { |x| $( x + 1 ) $( x * 2 ) } def
+5 foo 10 eq exch 6 eq and
+    (proc: multiple infix) rt-ok clear
+
+% ====================================================================
+% SECTION 12: Multiple infix expressions in sequence
+% ====================================================================
+
+$( 1 + 2 ) $( 3 + 4 ) add 10 eq
+    (seq: two infix + postfix add) rt-ok clear
+
+$( 10 ) 10 eq
+    (seq: single literal) rt-ok clear
+
+$( x ) /x load eq
+    (seq: single name) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Complex expressions
+% ====================================================================
+
+% Quadratic formula component: b^2 - 4ac
+/a 1.0 def /b 5.0 def /c 6.0 def
+$( b * b - 4.0 * a * c ) 1.0 eq
+    (complex: discriminant b^2-4ac = 1) rt-ok clear
+
+% Nested operations
+$( (1 + 2) * (3 + 4) * (5 + 6) ) 231 eq
+    (complex: triple group) rt-ok clear
+
+% Mixed arithmetic and comparison
+$( (3 + 4) > (2 * 3) ) true eq
+    (complex: group compare) rt-ok clear
+
+% Chained comparisons via bitwise AND (not short-circuit)
+$( (3u < 5u) & (10u > 7u) ) true eq
+    (complex: chained compare) rt-ok clear
+
+% ====================================================================
+% SECTION 14: Underscore separators in numbers
+% ====================================================================
+
+$( 1_000 + 234 ) 1234 eq
+    (underscore: 1_000 + 234 = 1234) rt-ok clear
+
+$( 1_000_000 ) 1000000 eq
+    (underscore: 1_000_000) rt-ok clear
+
+% ====================================================================
+% SECTION 15: Hyphenated function names
+% ====================================================================
+
+/data [1.0 2.0 3.0 4.0] def
+$( kahan-sum(data) ) 10.0d eq
+    (hyphen: kahan-sum) rt-ok clear
+
+% ====================================================================
+% SECTION 16: Edge cases
+% ====================================================================
+
+% Unary minus precedence
+$( -3 * 2 ) -6 eq
+    (edge: -3 * 2 = -6) rt-ok clear
+
+% Double unary minus
+$( --5 ) 5 eq
+    (edge: --5 = 5) rt-ok clear
+
+% Whitespace variations
+$(1+2) 3 eq
+    (edge: no whitespace) rt-ok clear
+
+$(  1  +  2  ) 3 eq
+    (edge: extra whitespace) rt-ok clear
+
+% Boolean operators
+$( true & true ) true eq
+    (edge: bool and) rt-ok clear
+
+$( true | false ) true eq
+    (edge: bool or) rt-ok clear
+
+$( true ^ false ) true eq
+    (edge: bool xor) rt-ok clear
+
+% && and || synonyms
+$( true && true ) true eq
+    (edge: && synonym for &) rt-ok clear
+
+$( true && false ) false eq
+    (edge: && false case) rt-ok clear
+
+$( false || true ) true eq
+    (edge: || synonym for |) rt-ok clear
+
+$( false || false ) false eq
+    (edge: || false case) rt-ok clear
+
+% Infix result on stack for postfix use
+$( 3 + 4 ) dup mul 49 eq
+    (edge: infix then postfix) rt-ok clear
+
+% ====================================================================
+% SECTION 17: Ternary expressions
+% ====================================================================
+
+% Basic ternary
+$( true ? 10 : 20 ) 10 eq
+    (ternary: true case) rt-ok clear
+
+$( false ? 10 : 20 ) 20 eq
+    (ternary: false case) rt-ok clear
+
+% Ternary with expressions in all positions
+$( 3 > 0 ? 3 : -3 ) 3 eq
+    (ternary: positive abs) rt-ok clear
+
+$( -5 > 0 ? -5 : 5 ) 5 eq
+    (ternary: negative abs) rt-ok clear
+
+$( 1 + 1 == 2 ? 100 + 1 : 200 + 2 ) 101 eq
+    (ternary: expressions in branches) rt-ok clear
+
+% Ternary with comparison condition
+$( 10 < 20 ? 1 : 0 ) 1 eq
+    (ternary: comparison condition) rt-ok clear
+
+% Nested ternary (right-associative): a ? b : c ? d : e = a ? b : (c ? d : e)
+$( true ? 1 : true ? 2 : 3 ) 1 eq
+    (ternary: nested true first) rt-ok clear
+
+$( false ? 1 : true ? 2 : 3 ) 2 eq
+    (ternary: nested false-true) rt-ok clear
+
+$( false ? 1 : false ? 2 : 3 ) 3 eq
+    (ternary: nested false-false) rt-ok clear
+
+% Ternary in true branch: (a ? (b ? c : d) : e)
+$( true ? (true ? 10 : 20) : 30 ) 10 eq
+    (ternary: grouped in true branch) rt-ok clear
+
+$( true ? (false ? 10 : 20) : 30 ) 20 eq
+    (ternary: grouped in true branch false) rt-ok clear
+
+% Ternary with variables
+/tv 42 def
+$( tv > 0 ? tv : -1 ) 42 eq
+    (ternary: with variable) rt-ok clear
+
+% Ternary with function calls
+$( true ? abs(-7) : 0 ) 7 eq
+    (ternary: function in true branch) rt-ok clear
+
+$( false ? 0 : max(3, 7) ) 7 eq
+    (ternary: function in false branch) rt-ok clear
+
+% Ternary lower precedence than all binary ops
+$( 1 + 2 > 0 ? 10 * 2 : 5 * 3 ) 20 eq
+    (ternary: lower prec than binary) rt-ok clear
+
+% Ternary with ExtValue types (Long)
+$( true ? 100l : 200l ) 100l eq
+    (ternary: ExtValue true) rt-ok clear
+
+$( false ? 100l : 200l ) 200l eq
+    (ternary: ExtValue false) rt-ok clear
+
+% select operator directly
+10 20 true select 10 eq
+    (select: true case) rt-ok clear
+
+10 20 false select 20 eq
+    (select: false case) rt-ok clear
+
+% Ternary error: missing colon
+{ ($( true ? 1 )) token } try /syntax-error eq
+    (error: ternary missing colon) rt-ok clear
+
+% ====================================================================
+% SECTION 18: Number format coverage
+% ====================================================================
+
+% Prefix forms
+$( 0xFF ) 255 eq
+    (numfmt: 0xFF = 255) rt-ok clear
+
+$( 0o77 ) 63 eq
+    (numfmt: 0o77 = 63) rt-ok clear
+
+$( 0b1010 ) 10 eq
+    (numfmt: 0b1010 = 10) rt-ok clear
+
+% Scientific notation
+$( 1.5e2 ) 150.0 eq
+    (numfmt: 1.5e2 = 150.0) rt-ok clear
+
+$( 3.0e-1 ) 0.3 sub abs 1.0e-7 lt
+    (numfmt: 3.0e-1 ~ 0.3) rt-ok clear
+
+$( 1.0e+3 ) 1000.0 eq
+    (numfmt: 1.0e+3 = 1000.0) rt-ok clear
+
+$( 2.5E2 ) 250.0 eq
+    (numfmt: 2.5E2 = 250.0) rt-ok clear
+
+% Hex float with exponent sign
+$( 0x1.0p+10 ) 1024.0 eq
+    (numfmt: 0x1.0p+10 = 1024) rt-ok clear
+
+$( 0x1.0p-2 ) 0.25 eq
+    (numfmt: 0x1.0p-2 = 0.25) rt-ok clear
+
+% Radix with underscore (hex digits in radix region)
+$( 16#F_F# ) 255 eq
+    (numfmt: 16#F_F# = 255) rt-ok clear
+
+$( 16#FF_FF#u ) 65535u eq
+    (numfmt: 16#FF_FF#u = 65535u) rt-ok clear
+
+% Negative zero
+$( -0.0 ) -0.0 eq
+    (numfmt: -0.0) rt-ok clear
+
+% Integer boundary
+$( 2147483647 ) 2147483647 eq
+    (numfmt: max int32) rt-ok clear
+
+% Long suffix
+$( 100l + 200l ) 300l eq
+    (numfmt: long addition) rt-ok clear
+
+% Double suffix
+$( 1.5d + 2.5d ) 4.0d eq
+    (numfmt: double addition) rt-ok clear
+
+% ====================================================================
+% SECTION 18: Error paths (try catches SyntaxError)
+% ====================================================================
+
+% Empty expression: $( ) raises SyntaxError
+{ ($( )) token } try /syntax-error eq
+    (error: empty expression) rt-ok clear
+
+% Unexpected character in primary position
+{ ($( + )) token } try /syntax-error eq
+    (error: unexpected operator) rt-ok clear
+
+% Unexpected comma
+{ ($( , )) token } try /syntax-error eq
+    (error: unexpected comma) rt-ok clear
+
+% Invalid number raises SyntaxError
+{ ($( 0x )) token } try /syntax-error eq
+    (error: invalid number) rt-ok clear
+
+% Trailing operator: missing right operand
+{ ($( 1 + )) token } try /syntax-error eq
+    (error: trailing operator) rt-ok clear
+
+% Missing operator between values
+{ ($( 1 2 )) token } try /syntax-error eq
+    (error: missing operator) rt-ok clear
+
+% Double binary operator
+{ ($( 1 * * 2 )) token } try /syntax-error eq
+    (error: double operator) rt-ok clear
+
+% Trailing comma in function call
+{ ($( sqrt(3.0, ) )) token } try /syntax-error eq
+    (error: trailing comma in function) rt-ok clear
+
+% ====================================================================
+% SECTION 19: Multi-line expressions
+% ====================================================================
+
+% Simple expression across two lines
+$(
+    1 + 2
+) 3 eq
+    (multiline: simple two lines) rt-ok clear
+
+% Operands and operators on separate lines
+$(
+    10
+    -
+    3
+) 7 eq
+    (multiline: operands on separate lines) rt-ok clear
+
+% Multi-line with precedence
+$(
+    2 + 3
+    *
+    4
+) 14 eq
+    (multiline: precedence across lines) rt-ok clear
+
+% Multi-line grouped expression
+$(
+    (1 + 2)
+    *
+    (3 + 4)
+) 21 eq
+    (multiline: grouped across lines) rt-ok clear
+
+% Multi-line function call
+$(
+    max(
+        3,
+        7
+    ) + min(
+        1,
+        2
+    )
+) 8 eq
+    (multiline: function calls) rt-ok clear
+
+% Multi-line ternary
+$(
+    true
+    ? 10
+    : 20
+) 10 eq
+    (multiline: ternary) rt-ok clear
+
+% Multi-line auto-promote
+$[
+    3
+    +
+    4.0
+] 7.0 eq
+    (multiline: auto-promote) rt-ok clear
+
+% Multi-line with local variables
+/ml-quad { |a b c x|
+    $(
+        a * x * x
+        + b * x
+        + c
+    )
+} def
+2 3 1 5 ml-quad 66 eq
+    (multiline: quadratic with locals) rt-ok clear
+
+% Multi-line nested ternary
+$(
+    false
+    ? 1
+    : true
+      ? 2
+      : 3
+) 2 eq
+    (multiline: nested ternary) rt-ok clear
+
+% Multi-line with unary operators
+$(
+    -3
+    *
+    -(2 + 1)
+) 9 eq
+    (multiline: unary operators) rt-ok clear
+
+% ====================================================================
+% SECTION 20: bind interaction
+% ====================================================================
+
+% bind replaces executable operator names (add, mul, etc.) with Operator values.
+% Infix emits those names, so bind should early-bind them.
+
+% Basic: bind an infix proc, execute it
+{ $( 2 + 3 ) } bind exec 5 eq
+    (bind: basic add) rt-ok clear
+
+% Arithmetic operators all bindable
+{ $( 10 - 3 ) } bind exec 7 eq
+    (bind: sub) rt-ok clear
+
+{ $( 4 * 5 ) } bind exec 20 eq
+    (bind: mul) rt-ok clear
+
+{ $( 20 / 4 ) } bind exec 5 eq
+    (bind: div) rt-ok clear
+
+{ $( 17 % 5 ) } bind exec 2 eq
+    (bind: mod) rt-ok clear
+
+% Exponentiation
+{ $( 2.0 ** 10.0 ) } bind exec 1024.0 eq
+    (bind: pow) rt-ok clear
+
+% Comparison operators
+{ $( 3 < 5 ) } bind exec true eq
+    (bind: lt) rt-ok clear
+
+{ $( 5 == 5 ) } bind exec true eq
+    (bind: eq) rt-ok clear
+
+{ $( 3 != 4 ) } bind exec true eq
+    (bind: ne) rt-ok clear
+
+% Bitwise shift
+{ $( 1u << 8 ) } bind exec 256u eq
+    (bind: shift-left) rt-ok clear
+
+% Logical/bitwise operators
+{ $( true & true ) } bind exec true eq
+    (bind: and) rt-ok clear
+
+{ $( true | false ) } bind exec true eq
+    (bind: or) rt-ok clear
+
+{ $( true ^ false ) } bind exec true eq
+    (bind: xor) rt-ok clear
+
+% Unary operators: neg, not
+{ $( -5 ) } bind exec -5 eq
+    (bind: neg) rt-ok clear
+
+{ $( !true ) } bind exec false eq
+    (bind: not) rt-ok clear
+
+% Function calls inside infix
+{ $( abs(-7) ) } bind exec 7 eq
+    (bind: function call) rt-ok clear
+
+{ $( max(3, 7) ) } bind exec 7 eq
+    (bind: multi-arg function) rt-ok clear
+
+% Complex expression with multiple operators
+{ $( (1 + 2) * (3 + 4) ) } bind exec 21 eq
+    (bind: complex expression) rt-ok clear
+
+% Auto-promote: bind should also bind 'promote'
+{ $[ 3 + 4.0 ] } bind exec 7.0 eq
+    (bind: auto-promote) rt-ok clear
+
+% Ternary: bind should bind 'rot' and 'select'
+{ $( true ? 10 : 20 ) } bind exec 10 eq
+    (bind: ternary true) rt-ok clear
+
+{ $( false ? 10 : 20 ) } bind exec 20 eq
+    (bind: ternary false) rt-ok clear
+
+% bind with local variables: operators bound, variable names left as-is
+/bind-add { |a b| $( a + b ) } bind def
+3 5 bind-add 8 eq
+    (bind: with locals) rt-ok clear
+
+% bind on quadratic with locals
+/bind-quad { |a b c x| $( a * x * x + b * x + c ) } bind def
+2 3 1 5 bind-quad 66 eq
+    (bind: quadratic with locals) rt-ok clear
+
+% Bound proc used multiple times (operators resolved, not re-looked-up)
+/bind-sq { |n| $( n * n ) } bind def
+5 bind-sq 25 eq
+    (bind: reuse 1) rt-ok clear
+7 bind-sq 49 eq
+    (bind: reuse 2) rt-ok clear
+
+% ====================================================================
+% SECTION 21: Packed / binary token round-trip
+% ====================================================================
+% Infix emits the same postfix tokens as hand-written code.
+% These tests verify that infix-generated procs survive round-trips
+% through packed encoding, bind, early binding, and binary tokens.
+
+% --- Infix proc deep-eq against hand-written postfix ---
+% { $( expr ) } produces the same packed array as { postfix }.
+{ $( 2 + 3 ) }  { 2 3 add }  deep-eq
+    (roundtrip: infix deep-eq postfix add) rt-ok clear
+
+{ $( 10 - 3 ) }  { 10 3 sub }  deep-eq
+    (roundtrip: infix deep-eq postfix sub) rt-ok clear
+
+{ $( 4 * 5 ) }  { 4 5 mul }  deep-eq
+    (roundtrip: infix deep-eq postfix mul) rt-ok clear
+
+{ $( 2 + 3 * 4 ) }  { 2 3 4 mul add }  deep-eq
+    (roundtrip: infix deep-eq postfix precedence) rt-ok clear
+
+{ $( -5 ) }  { 5 neg }  deep-eq
+    (roundtrip: infix deep-eq postfix neg) rt-ok clear
+
+{ $( !true ) }  { true not }  deep-eq
+    (roundtrip: infix deep-eq postfix not) rt-ok clear
+
+{ $( abs(-7) ) }  { 7 neg abs }  deep-eq
+    (roundtrip: infix deep-eq postfix func) rt-ok clear
+
+{ $( max(3, 7) ) }  { 3 7 max }  deep-eq
+    (roundtrip: infix deep-eq postfix multi-arg) rt-ok clear
+
+% --- Packed round-trip: infix proc survives unpack/repack ---
+/pk-n 0 def
+/pk-proc-rt {
+  dup
+  dup length /pk-n exch def
+  array-load pop pk-n packed
+  deep-eq
+} def
+
+{ $( 2 + 3 ) } pk-proc-rt
+    (roundtrip: pack/unpack add) rt-ok clear
+
+{ $( 2 + 3 * 4 ) } pk-proc-rt
+    (roundtrip: pack/unpack precedence) rt-ok clear
+
+{ $( (1 + 2) * (3 + 4) ) } pk-proc-rt
+    (roundtrip: pack/unpack grouped) rt-ok clear
+
+{ $( abs(max(3, -7)) ) } pk-proc-rt
+    (roundtrip: pack/unpack nested func) rt-ok clear
+
+{ $( true ? 10 : 20 ) } pk-proc-rt
+    (roundtrip: pack/unpack ternary) rt-ok clear
+
+% --- Functional execution after round-trip ---
+% Unpack, repack, execute, verify result.
+{ $( 2 + 3 ) } dup length /pk-n exch def
+array-load pop pk-n packed make-executable
+exec 5 eq
+    (roundtrip: exec after repack) rt-ok clear
+
+{ $( (1 + 2) * (3 + 4) ) } dup length /pk-n exch def
+array-load pop pk-n packed make-executable
+exec 21 eq
+    (roundtrip: exec complex after repack) rt-ok clear
+
+% --- Early binding (#e) with infix ---
+save
+{ $( 2 + 3 ) }#e exec 5 eq
+    (roundtrip: early-bound infix add) rt-ok
+
+{ $( 2 + 3 * 4 ) }#e exec 14 eq
+    (roundtrip: early-bound infix precedence) rt-ok
+
+{ $( abs(-7) ) }#e exec 7 eq
+    (roundtrip: early-bound infix func) rt-ok
+restore clear
+
+% --- Early binding freezes infix operators ---
+save
+{ $( 3 + 4 ) }#e /frozen-infix-add exch def
+/add { sub } def
+frozen-infix-add exec 7 eq
+    (roundtrip: early-bound infix ignores redefinition) rt-ok
+restore clear
+
+% --- Array mode (#a) with infix ---
+save
+{ $( 2 + 3 ) }#a
+dup type /array-type eq
+    (roundtrip: #a infix produces Array) rt-ok
+exec 5 eq
+    (roundtrip: #a infix array executes) rt-ok
+restore clear
+
+% --- Auto-promote round-trip ---
+{ $[ 3 + 4.0 ] }  { 3 4.0 promote add }  deep-eq
+    (roundtrip: auto-promote deep-eq) rt-ok clear
+
+{ $[ 3 + 4.0 ] } pk-proc-rt
+    (roundtrip: auto-promote pack/unpack) rt-ok clear
+
+% --- Ternary round-trip ---
+{ $( true ? 10 : 20 ) }  { true 10 20 rot select }  deep-eq
+    (roundtrip: ternary deep-eq postfix) rt-ok clear
+
+% --- Binary token round-trip of infix-produced values ---
+% Individual values produced by infix should survive to-binary-token encoding.
+$( 42 ) dup to-binary-token make-executable exec eq
+    (roundtrip: bt integer from infix) rt-ok clear
+
+$( 3.14 ) dup to-binary-token make-executable exec eq
+    (roundtrip: bt real from infix) rt-ok clear
+
+$( 100l ) dup to-binary-token make-executable exec eq
+    (roundtrip: bt long from infix) rt-ok clear
+
+$( 2.5d ) dup to-binary-token make-executable exec eq
+    (roundtrip: bt double from infix) rt-ok clear
+
+$( true ) dup to-binary-token make-executable exec eq
+    (roundtrip: bt boolean from infix) rt-ok clear
+
+$( 255b ) dup to-binary-token make-executable exec eq
+    (roundtrip: bt byte from infix) rt-ok clear
+
+% ====================================================================
+% SECTION 22: Stress tests
+% ====================================================================
+
+% Deeply nested parentheses
+$( ((((((((1 + 2)))))))) ) 3 eq
+    (stress: deep parens) rt-ok clear
+
+% Deeply nested function calls
+$( abs(abs(abs(abs(abs(-5))))) ) 5 eq
+    (stress: deep function calls) rt-ok clear
+
+% Long addition chain (25 terms)
+$( 1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1 ) 25 eq
+    (stress: 25-term chain) rt-ok clear
+
+% Complex expression with many operators: 3*7 + 11*15 - 19 = 167
+$( (1+2)*(3+4) + (5+6)*(7+8) - (9+10) ) 167 eq
+    (stress: complex multi-op) rt-ok clear
+
+% Multiple infix in sequence
+$( 1+1 ) $( 2+2 ) $( 3+3 ) add add 12 eq
+    (stress: triple infix sequence) rt-ok clear
+
+% Token limit: expression near 128-token boundary
+% 3 tokens per term (value op value), ~40 terms = ~120 tokens
+$( 1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1 ) 40 eq
+    (stress: near token limit) rt-ok clear
+
+% Token limit exceeded
+{ ($( 1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1 )) token } try /limit-check eq
+    (stress: token limit exceeded) rt-ok clear
+
+% Save/restore: infix buffer allocated after save is reclaimed on restore
+/save-restore-infix-save null def
+/save-restore-infix-result null def
+/save-restore-infix-save save def
+/save-restore-infix-result $( 10 + 20 ) def
+save-restore-infix-result 30 eq
+    (stress: infix after save produces correct result) rt-ok clear
+save-restore-infix-save restore
+% After restore, the infix buffer allocation was rolled back via journal.
+% A second $( ) must re-allocate and work correctly.
+$( 100 + 200 ) 300 eq
+    (stress: infix after restore re-allocates) rt-ok clear
+
+% ====================================================================
+% SECTION 24: Packed buffer - ExtValue types (Long, ULong, Double)
+% ====================================================================
+% The infix packed buffer stores vm_offset_t to heap ExtValues.
+% These tests verify correct roundtrip through pack/extract for 64-bit types.
+
+% Long literals
+$( 42l + 1l ) 43l eq
+    (packed-ext: long addition) rt-ok clear
+
+$( 100l * 3l ) 300l eq
+    (packed-ext: long multiplication) rt-ok clear
+
+$( 1000000000l + 2000000000l ) 3000000000l eq
+    (packed-ext: long large values) rt-ok clear
+
+% ULong literals
+$( 42ul + 8ul ) 50ul eq
+    (packed-ext: ulong addition) rt-ok clear
+
+% Double literals (use exact representable values)
+$( 1.5d + 2.5d ) 4.0d eq
+    (packed-ext: double addition) rt-ok clear
+
+$( 2.0d * 3.5d ) 7.0d eq
+    (packed-ext: double multiplication) rt-ok clear
+
+% Mixed Long and Integer in auto-promote mode
+$[ 42l + 1 ] 43l eq
+    (packed-ext: auto-promote long + int) rt-ok clear
+
+% Long in function call syntax
+/double-long { 2l mul } def
+$( double-long(21l) ) 42l eq
+    (packed-ext: long function call) rt-ok clear
+
+% ====================================================================
+% SECTION 25: ExtValue save-level in packed buffer (regression)
+% ====================================================================
+% Validates the fix for the packed ExtValue save-level bug:
+% extract_next_packed must preserve m_extvalue_save_level from the
+% packing source so that maybe_free_extvalue frees to the correct
+% per-level bucket.  Without this fix, ExtValues allocated at level 1
+% were freed to free_list[0], leaving stale offsets above the restore
+% barrier — eventually causing misaligned access (UBSan).
+
+% --- save/restore cycles with Long infix ---
+/cnt 0 def
+{
+    /s save def
+    $( 999999999999l + 1l ) 1000000000000l eq
+        { } { (FAILED: Long infix inside save) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 50 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (save-ext: 50 cycles Long infix) rt-ok
+
+% --- save/restore cycles with Double infix ---
+/cnt 0 def
+{
+    /s save def
+    $( 1.0d + 2.0d ) 3.0d eq
+        { } { (FAILED: Double infix inside save) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 50 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (save-ext: 50 cycles Double infix) rt-ok
+
+% --- save/restore cycles with multiple Long ops ---
+/cnt 0 def
+{
+    /s save def
+    $( 42l * 2l + 100l ) 184l eq
+        { } { (FAILED: multi-Long infix inside save) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 50 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (save-ext: 50 cycles multi-Long) rt-ok
+
+% --- save/restore cycles with mixed Long + Double ---
+/cnt 0 def
+{
+    /s save def
+    $( 100l + 200l ) 300l eq
+    $( 5.0d * 3.0d ) 15.0d eq and
+        { } { (FAILED: Long+Double mix) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 50 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (save-ext: 50 cycles Long+Double mixed) rt-ok
+
+% ====================================================================
+% SECTION 26: ExtValue stress — many allocations per cycle
+% ====================================================================
+
+% --- 10 Long operations per cycle, 30 cycles ---
+/cnt 0 def
+{
+    /s save def
+    $( 1l + 2l ) $( 3l + 4l ) add
+    $( 5l + 6l ) $( 7l + 8l ) add add
+    $( 9l + 10l ) add 55l eq
+        { } { (FAILED: 10-Long stress) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 30 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (stress-ext: 30 cycles, 10 Longs each) rt-ok
+
+% --- alternating Long and Double per cycle, 30 cycles ---
+/cnt 0 def
+{
+    /s save def
+    $( 100l + 200l ) 300l eq
+    $( 1.5d + 3.5d ) 5.0d eq and
+    $( 400l - 100l ) 300l eq and
+    $( 10.0d / 2.0d ) 5.0d eq and
+        { } { (FAILED: alternating Long/Double) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 30 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (stress-ext: 30 cycles alternating Long/Double) rt-ok
+
+% --- ULong inside save/restore ---
+/cnt 0 def
+{
+    /s save def
+    $( 100ul + 200ul ) 300ul eq
+    $( 4000000000ul + 1ul ) 4000000001ul eq and
+        { } { (FAILED: ULong save cycle) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 30 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (stress-ext: 30 cycles ULong) rt-ok
+
+% ====================================================================
+% SECTION 27: ExtValue boundary — single-token optimization
+% ====================================================================
+% Single-token infix expressions bypass the packed buffer (returned
+% directly from scan_infix_expression).  Verify these also work
+% correctly across save/restore.
+
+/cnt 0 def
+{
+    /s save def
+    $( 42l ) 42l eq
+        { } { (FAILED: single Long) = } if-else
+    $( 3.14d ) 3.14d eq
+        { } { (FAILED: single Double) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 30 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (boundary-ext: 30 cycles single-token ExtValue) rt-ok
+
+% ====================================================================
+% SECTION 28: ExtValue fuzz — packed proc bodies with Long/Double
+% ====================================================================
+% Packed procs created via { } at level 1, containing Long/Double,
+% also go through make_packed_data / extract_next_packed.
+
+% Long literals survive through packed proc execution
+/cnt 0 def
+{
+    /s save def
+    { 42l } exec 42l eq
+        { } { (FAILED: packed proc Long) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 30 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (fuzz-ext: 30 cycles packed proc Long) rt-ok
+
+% Double literals survive through packed proc execution
+/cnt 0 def
+{
+    /s save def
+    { 2.5d } exec 2.5d eq
+        { } { (FAILED: packed proc Double) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 30 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (fuzz-ext: 30 cycles packed proc Double) rt-ok
+
+% Packed proc with Long arithmetic
+/cnt 0 def
+{
+    /s save def
+    { 100l 200l add } exec 300l eq
+        { } { (FAILED: packed proc Long arith) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 30 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (fuzz-ext: 30 cycles packed proc Long arith) rt-ok
+
+% Packed proc with mixed types
+/cnt 0 def
+{
+    /s save def
+    { 42l 10ul 1.5d } exec 1.5d eq exch 10ul eq and exch 42l eq and
+        { } { (FAILED: packed proc mixed ExtValue) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 30 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (fuzz-ext: 30 cycles packed proc mixed) rt-ok
+
+% ====================================================================
+% SECTION 29: ExtValue save-level — cross-level packed procs
+% ====================================================================
+% Packed proc compiled at level 0, executed at level 1, with Long.
+% The save level in the packed data must be 0 (compilation level).
+
+/long-adder { 100l 200l add } def
+/cnt 0 def
+{
+    /s save def
+    long-adder 300l eq
+        { } { (FAILED: cross-level packed Long) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 30 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (cross-level: 30 cycles level-0 packed proc with Long) rt-ok
+
+/dbl-adder { 1.5d 3.5d add } def
+/cnt 0 def
+{
+    /s save def
+    dbl-adder 5.0d eq
+        { } { (FAILED: cross-level packed Double) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 30 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (cross-level: 30 cycles level-0 packed proc with Double) rt-ok
+
+% ====================================================================
+% SECTION 30: ExtValue ternary — ternary with Long/Double branches
+% ====================================================================
+% Ternary produces Long/Double tokens in the packed buffer with only
+% one branch consumed (the other is never extracted/freed).
+
+/cnt 0 def
+{
+    /s save def
+    $( true ? 100l : 200l ) 100l eq
+    $( false ? 100l : 200l ) 200l eq and
+    $( true ? 1.5d : 2.5d ) 1.5d eq and
+    $( false ? 1.5d : 2.5d ) 2.5d eq and
+        { } { (FAILED: ternary ExtValue) = } if-else
+    s restore
+    /cnt cnt 1 add def
+    cnt 30 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (ternary-ext: 30 cycles ternary Long/Double) rt-ok
+
+% ====================================================================
+% SECTION 31: ExtValue nested save/restore
+% ====================================================================
+% Two levels of save/restore with Long infix at each level.
+
+/cnt 0 def
+{
+    /s1 save def
+    $( 10l + 20l ) 30l eq
+        { } { (FAILED: outer Long) = } if-else
+    /s2 save def
+    $( 100l + 200l ) 300l eq
+        { } { (FAILED: inner Long) = } if-else
+    s2 restore
+    s1 restore
+    /cnt cnt 1 add def
+    cnt 20 ge { exit } if
+} loop
+:status:extvalue-validate true eq
+    (nested-ext: 20 cycles nested save/restore Long) rt-ok
+
+% ====================================================================
+% SECTION 32: Integer/UInteger boundary pack/unpack
+% ====================================================================
+% Verify that min/max integer and uinteger values survive the packed
+% binary token round-trip used by the infix scanner.  These exercise
+% the bit-exact pack_infix_tokens / unpack path for 32-bit boundaries.
+
+% --- Integer limits ---
+
+% INT_MAX = 2147483647
+{ $( 2147483647 + 0 ) } exec 2147483647 eq
+    (pack-limit: INT_MAX + 0) rt-ok clear
+
+{ $( 0 + 2147483647 ) } exec 2147483647 eq
+    (pack-limit: 0 + INT_MAX) rt-ok clear
+
+{ $( 2147483647 * 1 ) } exec 2147483647 eq
+    (pack-limit: INT_MAX * 1) rt-ok clear
+
+% INT_MAX standalone in infix proc
+{ $( 2147483647 ) } exec 2147483647 eq
+    (pack-limit: INT_MAX standalone) rt-ok clear
+
+% INT_MIN via arithmetic (literal -2147483648 overflows scanner)
+{ $( 0 - 2147483647 - 1 ) } exec -2147483648 eq
+    (pack-limit: INT_MIN via 0-INT_MAX-1) rt-ok clear
+
+% -INT_MAX
+{ $( -2147483647 + 0 ) } exec -2147483647 eq
+    (pack-limit: -INT_MAX + 0) rt-ok clear
+
+{ $( -2147483647 ) } exec -2147483647 eq
+    (pack-limit: -INT_MAX standalone) rt-ok clear
+
+% Zero boundary
+{ $( 0 + 0 ) } exec 0 eq
+    (pack-limit: int zero) rt-ok clear
+
+% --- UInteger limits ---
+
+% UINT_MAX = 4294967295
+{ $( 4294967295u + 0u ) } exec 4294967295u eq
+    (pack-limit: UINT_MAX + 0) rt-ok clear
+
+{ $( 0u + 4294967295u ) } exec 4294967295u eq
+    (pack-limit: 0 + UINT_MAX) rt-ok clear
+
+{ $( 4294967295u * 1u ) } exec 4294967295u eq
+    (pack-limit: UINT_MAX * 1) rt-ok clear
+
+{ $( 4294967295u ) } exec 4294967295u eq
+    (pack-limit: UINT_MAX standalone) rt-ok clear
+
+% UINT zero
+{ $( 0u + 0u ) } exec 0u eq
+    (pack-limit: uint zero) rt-ok clear
+
+% Mid-range: high bit set (0x80000000 = 2147483648u)
+{ $( 2147483648u + 0u ) } exec 2147483648u eq
+    (pack-limit: uint high-bit) rt-ok clear
+
+% --- Packed round-trip verification ---
+% Ensure the packed proc deep-equals itself after unpack/repack
+
+{ $( 2147483647 + 0 ) } pk-proc-rt
+    (pack-limit: INT_MAX pack roundtrip) rt-ok clear
+
+{ $( 4294967295u + 0u ) } pk-proc-rt
+    (pack-limit: UINT_MAX pack roundtrip) rt-ok clear
+
+{ $( -2147483647 + 0 ) } pk-proc-rt
+    (pack-limit: -INT_MAX pack roundtrip) rt-ok clear
+
+{ $( 2147483648u + 0u ) } pk-proc-rt
+    (pack-limit: uint high-bit pack roundtrip) rt-ok clear
+
+% ====================================================================
+% SECTION 27: IF-C2 -- $() error mid-parse must not leak ExtValues
+% ====================================================================
+% Regression for the InfixScratchGuard fix.  Before that guard,
+% Long / ULong / Double / Int128 / UInt128 literals parsed into
+% m_infix_scratch_objs before a later trx->error() throw would
+% leak their ExtValue allocations -- the ExtValue cell stayed
+% claimed but unreachable, slowly draining the free list under
+% fuzz or repeated-failure workloads.
+%
+% Trigger: parse a partial expression with at least one ExtValue
+% literal, then provoke a SyntaxError ("missing closing ')'") by
+% omitting the right operand.  Repeat many times at BASE save
+% level (where rollback CANNOT mask the leak) and assert that
+% extvalue-active does not accumulate.
+
+% Snapshot baseline at BASE.
+/before-active //:status:extvalue-active def
+
+% Each iteration parses one Long literal, allocates its ExtValue,
+% then hits the SyntaxError when scan_infix_expression sees `)`
+% instead of a right operand for `+`.  Without the guard, the
+% Long's ExtValue would be stranded; with the guard, the scratch
+% destructor calls maybe_free_extvalue to return it to the freelist.
+%
+% Defer parsing to runtime via #x (executable string).  `try` catches
+% the scanner's SyntaxError; `clear` resets the operand stack so the
+% loop iterates cleanly.
+1000 {
+    { ( $( 100L + ) )#x exec } try clear
+} repeat
+
+/after-active //:status:extvalue-active def
+
+% Active count must not have grown by ~1000 (one ExtValue per leak).
+% A small constant drift is fine (other ops may have shifted the count);
+% > 10 indicates a real leak.
+after-active before-active sub 10 lt
+    (IF-C2: 1000 failing $() parses do not strand ExtValues) rt-ok clear
+
+% Same with Double (different ExtValue path).
+/before-active //:status:extvalue-active def
+1000 {
+    { ( $( 1.5 * ) )#x exec } try clear
+} repeat
+/after-active //:status:extvalue-active def
+after-active before-active sub 10 lt
+    (IF-C2: 1000 failing $() Double parses do not strand ExtValues) rt-ok clear
+
+% Final full validation
+:status:vm-validate true eq
+    (final: vm-validate after all ExtValue tests) rt-ok
+
+% ====================================================================
+% SECTION 33: $[...] promoted infix
+% ====================================================================
+% Auto-promote semantics: $[...] inserts `promote` before each binary
+% operator; widening propagates through chained ops.
+
+% Integer + Real promotes to Real
+$[ 3 + 4.0 ] 7.0 eq                       (s33: $[ 3 + 4.0 ] = 7.0) rt-ok clear
+
+% Type widening propagates through chained ops
+$[ 1 + 2 + 3.0 ] 6.0 eq                   (s33: $[ 1+2+3.0 ] widens to real) rt-ok clear
+
+% Inner parenthesised grouping (still () inside infix body)
+$[ 1 + (2 + 3.0) ] 6.0 eq                 (s33: ( ) grouping inside $[ ]) rt-ok clear
+
+% ====================================================================
+% SECTION 34: $[ adversarial -- depth, EOF, whitespace
+% ====================================================================
+
+% Deeply nested $[ -- precedence climbing must hold
+$[ 1 + 2 * (3 + 4) - 5 / (6 - 1) ] 14 eq  (s34: deep nesting precedence) rt-ok clear
+
+% EOF inside $[ -- token call returns syntax-error
+{ ( $[ 1 + )#x exec } try /syntax-error eq (s34: $[ unterminated EOF) rt-ok clear
+
+% $[ with leading/trailing whitespace
+$[  3 + 4  ] 7 eq                         (s34: $[ leading/trailing ws) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_infix: ALL TESTS PASSED) =
+(__test_ok__) =

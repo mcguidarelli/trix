@@ -1,0 +1,3 @@
+% set-remove-persist: removal that survives restore.  No alloc, no value-check.
+8 set /s exch def s /alpha set-add pop save /sv exch def s /alpha set-remove-persist sv restore s /alpha set-member?
+mark { 8 set /missing set-remove-persist } try

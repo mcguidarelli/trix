@@ -1,0 +1,72 @@
+% ====================================================================
+% test_supervisor_cross_restore.trx -- VM Redux Phase 5 follow-up
+% ====================================================================
+% Phase 5 (commit fbf86f2) made CoroutineContext + stacks live in
+% global VM, so a coroutine spawned at sl>0 survives an outer restore.
+% SupervisorState was deferred from Phase 4 with rationale "natural-
+% owner stays local"; once Phase 5 shipped that rationale evaporated.
+%
+% This test would fail pre-2026-05-08 with /invalid-restore from the
+% cross-coroutine validator (the supervisor's exec stack held an above-
+% barrier offset to its SupervisorState, allocated at sl>0 in local VM).
+% Post-fix: SupervisorState routes through gvm_alloc<...>(...,
+% ChunkKind::Supervisor); the supervisor's start-proc array also moves
+% to global VM so the survival is end-to-end clean.
+%
+% Caller pattern: pre-intern Names at BASE (or use $/foo) and ${ } the
+% start proc, mirroring every other Phase 5+ cross-restore guidance.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: spawn supervisor at sl>0, restore back, no /invalid-restore.
+% ====================================================================
+% Pre-intern every Name we use as a key or value so they're below the
+% sl=1 barrier and not rejected by R6 / above-barrier rules.
+/sup-handle /strategy /one-for-one /intensity /period /children
+/id /cross-worker /start /restart /permanent
+[ ] pop pop pop pop pop pop pop pop pop pop pop
+
+save /sv exch def
+
+<<
+  /strategy /one-for-one
+  /intensity 5
+  /period 30000
+  /children [ << /id /cross-worker
+                  /start ${ { { actor-recv pop } loop } }
+                  /restart /permanent >>#$ ]#$
+>>#$ supervisor /sup-handle exch def
+
+% Supervisor spawned at sl=1; its CoroutineContext + stacks are global
+% (Phase 5), its SupervisorState + start-proc array are global (this).
+sv restore                                  % no /invalid-restore
+true                                        (s1: restore through supervisor) rt-ok
+
+% Yield once so the scheduler walks the live coroutine list.  If any
+% offset on the surviving supervisor's stacks were dangling the walker
+% would fault here.
+0 100 coroutine-sleep
+true                                        (s1: scheduler tick after restore) rt-ok
+
+% ====================================================================
+% SECTION 2: vm-global-info shows /supervisor in /by-kind.
+% ====================================================================
+vm-global-info /by-kind get /bk2 exch def
+bk2 /supervisor known?
+true eq                                     (s2: /supervisor in by-kind) rt-ok
+bk2 /supervisor get /count get 0 gt
+true eq                                     (s2: at least one supervisor block) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_supervisor_cross_restore: ALL TESTS PASSED) =
+(__test_ok__) =

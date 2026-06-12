@@ -1,0 +1,13 @@
+% pty/read_key_block.trx -- @read-key-retry coverage: read-key-byte with
+% no pending input blocks the coroutine on stdin (raw-mode O_NONBLOCK ->
+% EAGAIN -> coroutine_block_on_stdin); the PTY feeder sends a byte after
+% the block is established and the poll wake retries the read.
+% Driven by tests/run_pty_tests.sh.
+(lib/keys.trx) require
+{
+    read-key-byte
+    { (got-byte: ) print = }
+    { (got-eof) = }
+    if-else
+} with-raw-mode
+(S1-done) =

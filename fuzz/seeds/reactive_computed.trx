@@ -1,0 +1,3 @@
+10 cell /base exch def
+{ base cell-get 2 mul } cell-computed /der exch def
+der cell-get

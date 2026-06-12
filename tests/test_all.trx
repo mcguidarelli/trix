@@ -1,0 +1,552 @@
+% ====================================================================
+% Master Test Runner
+% ====================================================================
+% Runs all test_*.trx files via the `run` operator, exercising the
+% stream open/execute/close infrastructure in the process.
+
+/test-count 0 def
+/fail-count 0 def
+
+/run-test-save null def
+/run-test {
+    % str run-test :- --
+    % Opens and executes a test file, reports success or failure.
+    % Wraps run in save/restore so each test's VM allocations are reclaimed.
+    dup (  running: ) print =
+    /run-test-save save def
+    { run } try
+    run-test-save restore
+    dup /no-error eq {
+        pop
+        /test-count test-count 1 add def
+    } {
+        (  FAILED: ) print =
+        /fail-count fail-count 1 add def
+        /test-count test-count 1 add def
+    } if-else
+    clear
+} def
+
+(====================================) =
+(  Trix Master Test Runner) =
+(====================================) =
+
+% --------------------------------------------------------------------
+% Standalone-only tests -- NOT run here; tests/run_all.sh covers them
+% with the per-test flags they require (see its SPECIAL_ARGS table):
+%   test_screen.trx              needs --vm-size=2M
+%   test_lazy.trx                needs --vm-size=2M
+%   test_name_torture.trx        needs --vm-size=2M
+%   test_find_all_persist.trx    needs --scratch-depth=2048
+%   test_int128_actor_mirror.trx sl=0 only: run-test's save wrapper makes
+%       its Int128 messages restore-fragile, so actor-try-send refuses and
+%       actor-send raises by design (R6 guard, actor_send_complete).
+% --------------------------------------------------------------------
+
+(tests/test_file.trx) run-test
+(tests/test_math.trx) run-test
+(tests/test_ieee754.trx) run-test
+(tests/test_sysvars.trx) run-test
+(tests/test_streams.trx) run-test
+(tests/test_string_stream.trx) run-test
+(tests/test_screen_render.trx) run-test
+(tests/test_extvalue.trx) run-test
+(tests/test_dict.trx) run-test
+(tests/test_arithmetic.trx) run-test
+(tests/test_scanner.trx) run-test
+(tests/test_eqref_regression.trx) run-test
+(tests/test_eqref_save_restore.trx) run-test
+(tests/test_eqref_behavior.trx) run-test
+(tests/test_eqref_stress.trx) run-test
+(tests/test_eqref_in_packed.trx) run-test
+(tests/test_errors.trx) run-test
+(tests/test_interrupts.trx) run-test
+(tests/test_regex.trx) run-test
+(tests/test_snapshot.trx) run-test
+(tests/test_sysops.trx) run-test
+(tests/test_command_line_args.trx) run-test
+(tests/test_finally.trx) run-test
+(tests/test_with_stream.trx) run-test
+(tests/test_hyperbolic.trx) run-test
+(tests/test_bitops.trx) run-test
+(tests/test_fpops.trx) run-test
+(tests/test_userapi.trx) run-test
+(tests/test_special_functions.trx) run-test
+(tests/test_collections.trx) run-test
+(tests/test_boundary_chains.trx) run-test
+(tests/test_regex_stress.trx) run-test
+(tests/test_deep_nesting.trx) run-test
+(tests/test_type_fuzz.trx) run-test
+(tests/test_tco.trx) run-test
+(tests/test_stress_limits.trx) run-test
+(tests/test_binary_tokens.trx) run-test
+(tests/test_packed_roundtrip.trx) run-test
+(tests/test_extvalue_torture.trx) run-test
+(tests/test_int128_scaffold.trx) run-test
+(tests/test_int128_literal.trx) run-test
+(tests/test_int128_arith.trx) run-test
+(tests/test_int128_bitops.trx) run-test
+(tests/test_int128_convert.trx) run-test
+(tests/test_int128_save_restore.trx) run-test
+(tests/test_int128_extras.trx) run-test
+(tests/test_int128_containers.trx) run-test
+(tests/test_int128_packed.trx) run-test
+(tests/test_int128_ub_regressions.trx) run-test
+(tests/test_int128_arith_mirror.trx) run-test
+(tests/test_int128_collections_mirror.trx) run-test
+(tests/test_int128_lazy_mirror.trx) run-test
+(tests/test_int128_set_mirror.trx) run-test
+(tests/test_int128_widevalue_mirror.trx) run-test
+(tests/test_int128_curry_mirror.trx) run-test
+(tests/test_int128_type_fuzz_mirror.trx) run-test
+(tests/test_int128_tagged_mirror.trx) run-test
+(tests/test_int128_record_mirror.trx) run-test
+(tests/test_int128_infix_mirror.trx) run-test
+(tests/test_int128_tco_mirror.trx) run-test
+(tests/test_int128_binary_tokens_mirror.trx) run-test
+(tests/test_int128_find_all_mirror.trx) run-test
+(tests/test_int128_tier1_mirror.trx) run-test
+(tests/test_int128_misc_mirror.trx) run-test
+(tests/test_int128_widevalue_torture.trx) run-test
+(tests/test_int128_misc2_mirror.trx) run-test
+(tests/test_status.trx) run-test
+(tests/test_raw_string.trx) run-test
+(tests/test_shebang.trx) run-test
+(tests/test_inf_nan.trx) run-test
+(tests/test_underscore_num.trx) run-test
+(tests/test_temp_alloc.trx) run-test
+(tests/test_block_comment.trx) run-test
+(tests/test_curry.trx) run-test
+(tests/test_thunk.trx) run-test
+(tests/test_unicode_escape.trx) run-test
+(tests/test_high_water.trx) run-test
+(tests/test_require.trx) run-test
+(tests/test_tier1_gaps.trx) run-test
+(tests/test_tier2_gaps.trx) run-test
+(tests/test_modules.trx) run-test
+(tests/test_char_predicates.trx) run-test
+(tests/test_interpolation.trx) run-test
+(tests/test_pack.trx) run-test
+(tests/test_bit_ops.trx) run-test
+(tests/test_shim_matrix.trx) run-test
+(tests/test_untested_ops.trx) run-test
+(tests/test_format_errors.trx) run-test
+(tests/test_scan_errors.trx) run-test
+(tests/test_memory_errors.trx) run-test
+(tests/test_math_errors.trx) run-test
+(tests/test_stream_errors.trx) run-test
+(tests/test_dict_errors.trx) run-test
+(tests/test_screen_errors.trx) run-test
+(tests/test_binary_token_errors.trx) run-test
+(tests/test_stress_errors.trx) run-test
+(tests/test_snapshot_errors.trx) run-test
+(tests/test_match_all.trx) run-test
+(tests/test_collection_ergonomics.trx) run-test
+(tests/test_set.trx) run-test
+(tests/test_tagged.trx) run-test
+(tests/test_record.trx) run-test
+(tests/test_infix.trx) run-test
+(tests/test_field_access.trx) run-test
+(tests/test_convenience_dicts.trx) run-test
+(tests/test_protocoldict.trx) run-test
+(tests/test_print_recursive.trx) run-test
+(tests/test_coerce.trx) run-test
+(tests/test_host_ops.trx) run-test
+(tests/test_raw_mode.trx) run-test
+(tests/test_read_key.trx) run-test
+(tests/test_keys_trx.trx) run-test
+(tests/test_ansi_trx.trx) run-test
+(tests/test_user_ops.trx) run-test
+(tests/test_vm_size.trx) run-test
+(tests/test_count_overflow.trx) run-test
+% Logic tests MUST run save-wrapped: a successful raw `choice` holds its
+% save level open by design (bindings live above the barrier), so unwrapped
+% they leave sl > 0 for every later test -- at which point actor message
+% delivery of local values correctly raises /invalid-access (restore-fragile
+% guard).  run-test's restore reclaims the open choice levels.  Neither file
+% spawns coroutines, so the save wrapper is safe for them.
+(tests/test_logic.trx) run-test
+(tests/test_logic_aggregate_between.trx) run-test
+
+% Kill any zombie coroutines left by a previous test.  With the O(1) ready-queue
+% scheduler, live coroutines that weren't explicitly killed stay in the ready queue
+% and corrupt subsequent tests.
+/kill-zombies { coroutine-kill-all clear } def
+
+% coroutine test runs without save/restore wrapper (coroutine allocations
+% cannot survive restore; all coroutines clean up before the test returns)
+(  running: tests/test_coroutine.trx) =
+{ (tests/test_coroutine.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+% eqref coroutine test runs without save/restore wrapper (same reason)
+(  running: tests/test_eqref_coroutine.trx) =
+{ (tests/test_eqref_coroutine.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+% per-coroutine binding cache regression suite: uses actors + save/restore
+% inside actor bodies, so runs without the outer save/restore wrapper
+(  running: tests/test_eqref_concurrent.trx) =
+{ (tests/test_eqref_concurrent.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+% pipeline test runs without save/restore wrapper (uses coroutines internally)
+(  running: tests/test_pipeline.trx) =
+{ (tests/test_pipeline.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+% actor test runs without save/restore wrapper (uses coroutines internally)
+(  running: tests/test_actor.trx) =
+{ (tests/test_actor.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+% scheduler seam matrix (park states x disruptive events) -- no wrapper
+(  running: tests/test_sched_interactions.trx) =
+{ (tests/test_sched_interactions.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+% scheduler stressor (seeded random topologies; default ladder) -- no wrapper
+(  running: tests/test_sched_stress.trx) =
+{ (tests/test_sched_stress.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+% Int128 actor mailbox test runs without save/restore wrapper
+(  running: tests/test_int128_actor.trx) =
+{ (tests/test_int128_actor.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+(  running: tests/test_blocked_senders.trx) =
+{ (tests/test_blocked_senders.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+(  running: tests/test_supervision.trx) =
+{ (tests/test_supervision.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+(  running: tests/test_supervisor.trx) =
+{ (tests/test_supervisor.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+(  running: tests/test_suspend.trx) =
+{ (tests/test_suspend.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+(  running: tests/test_quantum.trx) =
+{ (tests/test_quantum.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+(  running: tests/test_priority.trx) =
+{ (tests/test_priority.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+(  running: tests/test_scheduler_stats.trx) =
+{ (tests/test_scheduler_stats.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+(  running: tests/test_starvation.trx) =
+{ (tests/test_starvation.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+(  running: tests/test_byte_array_suffix.trx) =
+{ (tests/test_byte_array_suffix.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear
+
+(  running: tests/test_save_level.trx) =
+{ (tests/test_save_level.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear
+
+(  running: tests/test_frame_dict_coroutine.trx) =
+{ (tests/test_frame_dict_coroutine.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+(  running: tests/test_reactive.trx) =
+{ (tests/test_reactive.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+(  running: tests/test_contract.trx) =
+{ (tests/test_contract.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear
+
+(  running: tests/test_closure.trx) =
+{ (tests/test_closure.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear
+
+(  running: tests/test_genserver.trx) =
+{ (tests/test_genserver.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear kill-zombies
+
+(  running: tests/test_transducer.trx) =
+{ (tests/test_transducer.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear
+
+(  running: tests/test_match.trx) =
+{ (tests/test_match.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear
+
+(  running: tests/test_protocol.trx) =
+{ (tests/test_protocol.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear
+
+(  running: tests/test_introspection.trx) =
+{ (tests/test_introspection.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear
+
+(  running: tests/test_continuation.trx) =
+{ (tests/test_continuation.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear
+
+(  running: tests/test_effects.trx) =
+{ (tests/test_effects.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear
+
+(  running: tests/test_short_circuit.trx) =
+{ (tests/test_short_circuit.trx) run } try
+dup /no-error eq {
+    pop
+    /test-count test-count 1 add def
+} {
+    (  FAILED: ) print =
+    /fail-count fail-count 1 add def
+    /test-count test-count 1 add def
+} if-else
+clear
+
+(====================================) =
+(  Results:) =
+(  {} tests, {} failures) mark test-count fail-count print-fmt pop pop nl
+(====================================) =
+
+fail-count 0 eq { (  ALL TESTS PASSED) = } { (  SOME TESTS FAILED) = } if-else
+(__test_ok__) =

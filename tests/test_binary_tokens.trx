@@ -1,0 +1,608 @@
+% ====================================================================
+% test_binary_tokens.trx -- Binary token round-trip tests
+% ====================================================================
+% Systematic round-trip coverage of all encodable BinaryToken opcodes.
+% Pattern: value dup to-binary-token make-executable exec deep-eq
+% This exercises both the encoder (make_binary_token_string) and the
+% decoder (scan_binary_token) for every reachable opcode.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% Round-trip helper: value -- bool
+% Duplicates the value, encodes to binary token, decodes by executing
+% the string, then compares with deep-eq.
+/bt-rt { dup to-binary-token make-executable exec deep-eq } def
+
+% NaN round-trip helper: value -- bool
+% NaN != NaN by IEEE 754, so deep-eq always returns false for NaN.
+% Instead verify: original nan? AND decoded nan? AND same type.
+/bt-rt-nan {
+  dup type exch
+  to-binary-token make-executable exec
+  dup type exch nan?
+  % stack: orig-type decoded-type decoded-nan?
+  rot rot eq and
+} def
+
+% ====================================================================
+% SECTION 1: Header-only tokens (single byte, no payload)
+% ====================================================================
+
+null bt-rt            (bt: null) rt-ok clear
+true bt-rt            (bt: true) rt-ok clear
+false bt-rt           (bt: false) rt-ok clear
+
+% Mark: deep-eq compares types for mark objects
+mark bt-rt            (bt: mark) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Byte -- 5 constants + general encoding
+% ====================================================================
+
+% Header-only constants (Byte_0, Byte_1, Byte_2, Byte_127, Byte_128, Byte_255)
+  0b bt-rt            (bt: byte 0) rt-ok clear
+  1b bt-rt            (bt: byte 1) rt-ok clear
+  2b bt-rt            (bt: byte 2) rt-ok clear
+127b bt-rt            (bt: byte 127) rt-ok clear
+128b bt-rt            (bt: byte 128) rt-ok clear
+255b bt-rt            (bt: byte 255) rt-ok clear
+
+% General byte encoding (Byte + 1-byte payload)
+ 42b bt-rt            (bt: byte 42) rt-ok clear
+ 64b bt-rt            (bt: byte 64) rt-ok clear
+126b bt-rt            (bt: byte 126) rt-ok clear
+129b bt-rt            (bt: byte 129) rt-ok clear
+200b bt-rt            (bt: byte 200) rt-ok clear
+254b bt-rt            (bt: byte 254) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Integer -- 5 constants + 8/16/32-bit encoding
+% ====================================================================
+
+% Header-only constants
+//:systemdict:numbers:integer-type:min bt-rt  (bt: integer min) rt-ok clear
+//:systemdict:numbers:integer-type:max bt-rt  (bt: integer max) rt-ok clear
+-2 bt-rt              (bt: integer -2) rt-ok clear
+-1 bt-rt              (bt: integer -1) rt-ok clear
+ 0 bt-rt              (bt: integer 0) rt-ok clear
+ 1 bt-rt              (bt: integer 1) rt-ok clear
+ 2 bt-rt              (bt: integer 2) rt-ok clear
+10 bt-rt              (bt: integer 10) rt-ok clear
+100 bt-rt             (bt: integer 100) rt-ok clear
+
+% Integer_8 (INT8_MIN..INT8_MAX, excluding constants)
+-128 bt-rt            (bt: integer -128 [8-bit min]) rt-ok clear
+-127 bt-rt            (bt: integer -127) rt-ok clear
+ -2 bt-rt             (bt: integer -2) rt-ok clear
+  2 bt-rt             (bt: integer 2) rt-ok clear
+ 42 bt-rt             (bt: integer 42) rt-ok clear
+127 bt-rt             (bt: integer 127 [8-bit max]) rt-ok clear
+
+% Integer_16 boundary: first values outside 8-bit range
+-129 bt-rt            (bt: integer -129 [first 16-bit]) rt-ok clear
+ 128 bt-rt            (bt: integer 128 [first 16-bit]) rt-ok clear
+-32768 bt-rt          (bt: integer -32768 [16-bit min]) rt-ok clear
+ 32767 bt-rt          (bt: integer 32767 [16-bit max]) rt-ok clear
+ 1000 bt-rt           (bt: integer 1000) rt-ok clear
+-1000 bt-rt           (bt: integer -1000) rt-ok clear
+
+% Integer_32 boundary: first values outside 16-bit range
+-32769 bt-rt          (bt: integer -32769 [first 32-bit]) rt-ok clear
+ 32768 bt-rt          (bt: integer 32768 [first 32-bit]) rt-ok clear
+ 65536 bt-rt          (bt: integer 65536) rt-ok clear
+-65537 bt-rt          (bt: integer -65537) rt-ok clear
+1000000 bt-rt         (bt: integer 1000000) rt-ok clear
+-1000000 bt-rt        (bt: integer -1000000) rt-ok clear
+
+% ====================================================================
+% SECTION 4: UInteger -- 3 constants + 8/16/32-bit encoding
+% ====================================================================
+
+% Header-only constants (UInteger_Min = 0, UInteger_Max, UInteger_1)
+0u bt-rt              (bt: uinteger 0 [min]) rt-ok clear
+1u bt-rt              (bt: uinteger 1) rt-ok clear
+//:systemdict:numbers:uinteger-type:max bt-rt  (bt: uinteger max) rt-ok clear
+
+% UInteger_8 (2..255)
+  2u bt-rt            (bt: uinteger 2) rt-ok clear
+100u bt-rt            (bt: uinteger 100) rt-ok clear
+255u bt-rt            (bt: uinteger 255 [8-bit max]) rt-ok clear
+
+% UInteger_16 boundary
+256u bt-rt            (bt: uinteger 256 [first 16-bit]) rt-ok clear
+1000u bt-rt           (bt: uinteger 1000) rt-ok clear
+65535u bt-rt          (bt: uinteger 65535 [16-bit max]) rt-ok clear
+
+% UInteger_32 boundary
+65536u bt-rt          (bt: uinteger 65536 [first 32-bit]) rt-ok clear
+1000000u bt-rt        (bt: uinteger 1000000) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Long -- 5 constants + 8/16/32/64-bit encoding
+% ====================================================================
+
+% Header-only constants
+//:systemdict:numbers:long-type:min bt-rt  (bt: long min) rt-ok clear
+//:systemdict:numbers:long-type:max bt-rt  (bt: long max) rt-ok clear
+-1l bt-rt             (bt: long -1) rt-ok clear
+ 0l bt-rt             (bt: long 0) rt-ok clear
+ 1l bt-rt             (bt: long 1) rt-ok clear
+
+% Long_8 (INT8_MIN..INT8_MAX, excluding constants)
+-128l bt-rt           (bt: long -128 [8-bit min]) rt-ok clear
+-100l bt-rt           (bt: long -100) rt-ok clear
+  2l bt-rt            (bt: long 2) rt-ok clear
+100l bt-rt            (bt: long 100) rt-ok clear
+127l bt-rt            (bt: long 127 [8-bit max]) rt-ok clear
+
+% Long_16 boundary
+-129l bt-rt           (bt: long -129 [first 16-bit]) rt-ok clear
+ 128l bt-rt           (bt: long 128 [first 16-bit]) rt-ok clear
+-32768l bt-rt         (bt: long -32768 [16-bit min]) rt-ok clear
+ 32767l bt-rt         (bt: long 32767 [16-bit max]) rt-ok clear
+
+% Long_32 boundary
+-32769l bt-rt         (bt: long -32769 [first 32-bit]) rt-ok clear
+ 32768l bt-rt         (bt: long 32768 [first 32-bit]) rt-ok clear
+-100000l bt-rt        (bt: long -100000) rt-ok clear
+ 100000l bt-rt        (bt: long 100000) rt-ok clear
+-2147483648l bt-rt    (bt: long -2147483648 [32-bit min]) rt-ok clear
+ 2147483647l bt-rt    (bt: long 2147483647 [32-bit max]) rt-ok clear
+
+% Long_64 boundary
+-2147483649l bt-rt    (bt: long -2147483649 [first 64-bit]) rt-ok clear
+ 2147483648l bt-rt    (bt: long 2147483648 [first 64-bit]) rt-ok clear
+ 3000000000l bt-rt    (bt: long 3e9) rt-ok clear
+-3000000000l bt-rt    (bt: long -3e9) rt-ok clear
+1000000000000l bt-rt  (bt: long 1e12) rt-ok clear
+
+% ====================================================================
+% SECTION 6: ULong -- 3 constants + 8/16/32/64-bit encoding
+% ====================================================================
+
+% Header-only constants
+0ul bt-rt             (bt: ulong 0 [min]) rt-ok clear
+1ul bt-rt             (bt: ulong 1) rt-ok clear
+//:systemdict:numbers:ulong-type:max bt-rt  (bt: ulong max) rt-ok clear
+
+% ULong_8
+  2ul bt-rt           (bt: ulong 2) rt-ok clear
+200ul bt-rt           (bt: ulong 200) rt-ok clear
+255ul bt-rt           (bt: ulong 255 [8-bit max]) rt-ok clear
+
+% ULong_16 boundary
+ 256ul bt-rt          (bt: ulong 256 [first 16-bit]) rt-ok clear
+1000ul bt-rt          (bt: ulong 1000) rt-ok clear
+65535ul bt-rt         (bt: ulong 65535 [16-bit max]) rt-ok clear
+
+% ULong_32 boundary
+65536ul bt-rt         (bt: ulong 65536 [first 32-bit]) rt-ok clear
+100000ul bt-rt        (bt: ulong 100000) rt-ok clear
+4294967295ul bt-rt    (bt: ulong 4294967295 [32-bit max]) rt-ok clear
+
+% ULong_64 boundary
+4294967296ul bt-rt    (bt: ulong 4294967296 [first 64-bit]) rt-ok clear
+10000000000ul bt-rt   (bt: ulong 1e10) rt-ok clear
+1000000000000ul bt-rt (bt: ulong 1e12) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Real -- 8 constants + general encoding
+% ====================================================================
+
+% Header-only constants (Real_Neg1, Real_0, Real_1, Real_2, Real_e, Real_pi, Real_INF, Real_qNAN)
+-1. bt-rt             (bt: real -1) rt-ok clear
+ 0. bt-rt             (bt: real 0) rt-ok clear
+ 1. bt-rt             (bt: real 1) rt-ok clear
+ 2. bt-rt             (bt: real 2) rt-ok clear
+//:systemdict:numbers:real-type:e bt-rt    (bt: real e) rt-ok clear
+//:systemdict:numbers:real-type:pi bt-rt   (bt: real pi) rt-ok clear
+//:systemdict:numbers:real-type:infinity bt-rt  (bt: real +inf) rt-ok clear
+
+% Real NaN (special: NaN != NaN, so use bt-rt-nan)
+//:systemdict:numbers:real-type:quiet-NaN bt-rt-nan      (bt: real qNaN) rt-ok clear
+//:systemdict:numbers:real-type:signaling-NaN bt-rt-nan  (bt: real sNaN) rt-ok clear
+
+% General real encoding (Real + 4-byte payload)
+ 3.14 bt-rt           (bt: real 3.14) rt-ok clear
+-2.5 bt-rt            (bt: real -2.5) rt-ok clear
+ 0.001 bt-rt          (bt: real 0.001) rt-ok clear
+ 1000000. bt-rt       (bt: real 1e6) rt-ok clear
+
+% Negative zero (encoder must NOT use Real_0 constant for -0.0)
+% Verify round-trip AND that sign bit is preserved (general encoding, not constant)
+-0. dup to-binary-token dup length 5 eq rot rot
+make-executable exec deep-eq and
+                      (bt: real -0.0 preserved [5 bytes]) rt-ok clear
+
+% Negative infinity
+//:systemdict:numbers:real-type:infinity neg bt-rt  (bt: real -inf) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Double -- 8 constants + general encoding
+% ====================================================================
+
+% Header-only constants
+-1.d bt-rt            (bt: double -1) rt-ok clear
+ 0.d bt-rt            (bt: double 0) rt-ok clear
+ 1.d bt-rt            (bt: double 1) rt-ok clear
+ 2.d bt-rt            (bt: double 2) rt-ok clear
+//:systemdict:numbers:double-type:e bt-rt    (bt: double e) rt-ok clear
+//:systemdict:numbers:double-type:pi bt-rt   (bt: double pi) rt-ok clear
+//:systemdict:numbers:double-type:infinity bt-rt  (bt: double +inf) rt-ok clear
+
+% Double NaN
+//:systemdict:numbers:double-type:quiet-NaN bt-rt-nan      (bt: double qNaN) rt-ok clear
+//:systemdict:numbers:double-type:signaling-NaN bt-rt-nan  (bt: double sNaN) rt-ok clear
+
+% General double encoding (Double + 8-byte payload)
+3.141592653589793d bt-rt    (bt: double pi-precise) rt-ok clear
+-2.718281828459045d bt-rt   (bt: double -e-precise) rt-ok clear
+0.000000001d bt-rt          (bt: double 1e-9) rt-ok clear
+1.7976931348623157e+308d bt-rt  (bt: double near-max) rt-ok clear
+
+% Negative zero (general encoding, not constant)
+-0.d dup to-binary-token dup length 9 eq rot rot
+make-executable exec deep-eq and
+                      (bt: double -0.0d preserved [9 bytes]) rt-ok clear
+
+% Negative infinity
+//:systemdict:numbers:double-type:infinity neg bt-rt  (bt: double -inf) rt-ok clear
+
+% ====================================================================
+% SECTION 9: System names -- literal (8-bit and 16-bit indices)
+% ====================================================================
+% System names with index < 256 use SystemLitName_8 (2 bytes).
+% System names with index >= 256 use SystemLitName_16 (3 bytes).
+
+% Low-index system names (SystemLitName_8)
+/null bt-rt           (bt: sysname /null) rt-ok clear
+/true bt-rt           (bt: sysname /true) rt-ok clear
+/false bt-rt          (bt: sysname /false) rt-ok clear
+/add bt-rt            (bt: sysname /add) rt-ok clear
+/sub bt-rt            (bt: sysname /sub) rt-ok clear
+/mul bt-rt            (bt: sysname /mul) rt-ok clear
+/div bt-rt            (bt: sysname /div) rt-ok clear
+/pop bt-rt            (bt: sysname /pop) rt-ok clear
+/dup bt-rt            (bt: sysname /dup) rt-ok clear
+/exch bt-rt           (bt: sysname /exch) rt-ok clear
+/def bt-rt            (bt: sysname /def) rt-ok clear
+/if bt-rt             (bt: sysname /if) rt-ok clear
+/if-else bt-rt        (bt: sysname /if-else) rt-ok clear
+
+% High-index system names (SystemLitName_16, index >= 256)
+% These are near the end of the SystemName enum
+/to-binary-token bt-rt     (bt: sysname /to-binary-token) rt-ok clear
+/snap-shot bt-rt           (bt: sysname /snap-shot) rt-ok clear
+/thaw bt-rt                (bt: sysname /thaw) rt-ok clear
+/peek bt-rt                (bt: sysname /peek) rt-ok clear
+/poke bt-rt                (bt: sysname /poke) rt-ok clear
+
+% ====================================================================
+% SECTION 10: System names -- executable (8-bit and 16-bit indices)
+% ====================================================================
+% Executable system names, when decoded, execute immediately.
+% Test by setting up operands and verifying the result.
+
+% \add -> SystemExecName_8: decodes and executes add
+2 3 \add to-binary-token make-executable exec 5 eq
+                      (bt: sysname \\add executes) rt-ok clear
+
+% \pop -> SystemExecName_8: decodes and executes pop
+(keep) 42 \pop to-binary-token make-executable exec (keep) eq
+                      (bt: sysname \\pop executes) rt-ok clear
+
+% \dup -> SystemExecName_8: decodes and executes dup
+7 \dup to-binary-token make-executable exec 7 eq exch 7 eq and
+                      (bt: sysname \\dup executes) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Strings
+% ====================================================================
+
+% Empty string (String_8, length = 0)
+() bt-rt              (bt: string empty) rt-ok clear
+
+% Short strings (String_8, length 1..255)
+(a) bt-rt             (bt: string single char) rt-ok clear
+(hello) bt-rt         (bt: string hello) rt-ok clear
+(Trix binary token round-trip test!) bt-rt  (bt: string medium) rt-ok clear
+
+% String with binary bytes (data preserved verbatim)
+(\x00\x81\xFF\xAD) bt-rt   (bt: string binary bytes) rt-ok clear
+
+% String with all zero bytes
+(\x00\x00\x00\x00\x00) bt-rt  (bt: string all zeros) rt-ok clear
+
+% 255-byte string (max for String_8 encoding)
+% Build a 255-byte string by repeating a pattern
+(ABCDEFGHIJ) dup concat dup concat dup concat    % 10 -> 80
+dup concat                                        % 160
+(ABCDEFGHIJ) dup concat dup concat               % 40
+concat                                            % 200
+(ABCDEFGHIJ) dup concat dup concat               % 40
+concat                                            % 240
+(ABCDEFGHIJKLMNO) concat                          % 255
+dup length 255 eq (bt: 255-byte string built ok) rt-ok
+bt-rt                 (bt: string 255 bytes [String_8 max]) rt-ok clear
+
+% 256-byte string (first String_16 encoding)
+(ABCDEFGHIJ) dup concat dup concat dup concat    % 80
+dup concat                                        % 160
+(ABCDEFGHIJ) dup concat dup concat               % 40
+concat                                            % 200
+(ABCDEFGHIJ) dup concat                           % 20
+concat                                            % 220
+(ABCDEFGHIJ) dup concat                           % 20
+concat                                            % 240
+(ABCDEFGHIJKLMNOP) concat                         % 256
+dup length 256 eq (bt: 256-byte string built ok) rt-ok
+bt-rt                 (bt: string 256 bytes [first String_16]) rt-ok clear
+
+% 1000-byte string (well into String_16 territory)
+(ABCDEFGHIJ) dup concat dup concat dup concat    % 80
+dup concat                                        % 160
+dup concat                                        % 320
+dup concat                                        % 640
+(ABCDEFGHIJ) dup concat dup concat               % 40
+dup concat concat                                 % 720
+(ABCDEFGHIJ) dup concat dup concat               % 40
+dup concat concat                                 % 800
+(ABCDEFGHIJ) dup concat dup concat               % 40
+dup concat concat                                 % 880
+(ABCDEFGHIJ) dup concat dup concat               % 40
+dup concat concat                                 % 960
+(ABCDEFGHIJ) dup concat dup concat               % 40
+concat                                            % 1000
+dup length 1000 eq (bt: 1000-byte string built ok) rt-ok
+bt-rt                 (bt: string 1000 bytes) rt-ok clear
+
+% ====================================================================
+% SECTION 12: Encoding size verification
+% ====================================================================
+% Verify that the encoder picks the most compact representation.
+
+% Header-only tokens should be exactly 1 byte
+null to-binary-token length 1 eq   (bt: null token = 1 byte) rt-ok clear
+true to-binary-token length 1 eq   (bt: true token = 1 byte) rt-ok clear
+false to-binary-token length 1 eq  (bt: false token = 1 byte) rt-ok clear
+0b to-binary-token length 1 eq     (bt: byte 0 token = 1 byte) rt-ok clear
+0 to-binary-token length 1 eq      (bt: integer 0 token = 1 byte) rt-ok clear
+0l to-binary-token length 1 eq     (bt: long 0 token = 1 byte) rt-ok clear
+0. to-binary-token length 1 eq     (bt: real 0 token = 1 byte) rt-ok clear
+0.d to-binary-token length 1 eq    (bt: double 0 token = 1 byte) rt-ok clear
+
+% Byte with payload: header + 1 byte = 2
+42b to-binary-token length 2 eq    (bt: byte 42 token = 2 bytes) rt-ok clear
+
+% Integer_8: header + 1 = 2 bytes
+42 to-binary-token length 2 eq     (bt: integer 42 token = 2 bytes) rt-ok clear
+
+% Integer_16: header + 2 = 3 bytes
+1000 to-binary-token length 3 eq   (bt: integer 1000 token = 3 bytes) rt-ok clear
+
+% Integer_32: header + 4 = 5 bytes
+65536 to-binary-token length 5 eq  (bt: integer 65536 token = 5 bytes) rt-ok clear
+
+% Long_8: header + 1 = 2
+42l to-binary-token length 2 eq    (bt: long 42 token = 2 bytes) rt-ok clear
+
+% Long_16: header + 2 = 3
+1000l to-binary-token length 3 eq  (bt: long 1000 token = 3 bytes) rt-ok clear
+
+% Long_32: header + 4 = 5
+100000l to-binary-token length 5 eq  (bt: long 100000 token = 5 bytes) rt-ok clear
+
+% Long_64: header + 8 = 9
+3000000000l to-binary-token length 9 eq  (bt: long 3e9 token = 9 bytes) rt-ok clear
+
+% Real general: header + 4 = 5
+3.14 to-binary-token length 5 eq   (bt: real 3.14 token = 5 bytes) rt-ok clear
+
+% Double general: header + 8 = 9
+3.14d to-binary-token length 9 eq  (bt: double 3.14 token = 9 bytes) rt-ok clear
+
+% System name 8-bit: header + 1 = 2
+/null to-binary-token length 2 eq  (bt: sysname /null token = 2 bytes) rt-ok clear
+
+% String_8: header + 1-byte-len + content
+(hi) to-binary-token length 4 eq   (bt: string 'hi' token = 4 bytes) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Error cases
+% ====================================================================
+
+% Unsupported types raise TypeCheck
+{ 0a to-binary-token } try /type-check eq       (bt: err address -> type-check) rt-ok clear
+{ [1 2 3] to-binary-token } try /type-check eq  (bt: err array -> type-check) rt-ok clear
+{ << /a 1 >> to-binary-token } try /type-check eq  (bt: err dict -> type-check) rt-ok clear
+{ {1 2 add} to-binary-token } try /type-check eq   (bt: err packed -> type-check) rt-ok clear
+
+% Operator must be placed outside {} (immediate lookup)
+//add { to-binary-token } try /type-check eq     (bt: err operator -> type-check) rt-ok clear
+
+% Underflow
+{ to-binary-token } try /opstack-underflow eq    (bt: err underflow) rt-ok clear
+
+% Undefined name (not in system name table)
+{ /this-name-is-not-registered to-binary-token } try /undefined eq
+                      (bt: err unregistered name -> undefined) rt-ok clear
+
+% ====================================================================
+% SECTION 14: Stress -- batch encode/decode
+% ====================================================================
+
+% Encode and decode 100 consecutive integers
+/bt-stress-ok true def
+0 1 99 {
+  dup to-binary-token make-executable exec
+  deep-eq not { /bt-stress-ok false def } if
+} for
+bt-stress-ok          (bt: stress 100 consecutive integers) rt-ok clear
+
+% Encode and decode 50 consecutive longs
+/bt-stress-ok true def
+1000000000l 1l 1000000049l {
+  dup to-binary-token make-executable exec
+  deep-eq not { /bt-stress-ok false def } if
+} for
+bt-stress-ok          (bt: stress 50 consecutive longs) rt-ok clear
+
+% Encode the same value 100 times (verify no VM corruption)
+/bt-stress-ok true def
+100 {
+  12345 dup to-binary-token make-executable exec
+  deep-eq not { /bt-stress-ok false def } if
+} repeat
+bt-stress-ok          (bt: stress 100x same integer) rt-ok clear
+
+% Encode many different types in sequence
+/bt-stress-ok true def
+null bt-rt not { /bt-stress-ok false def } if
+true bt-rt not { /bt-stress-ok false def } if
+false bt-rt not { /bt-stress-ok false def } if
+42b bt-rt not { /bt-stress-ok false def } if
+-12345 bt-rt not { /bt-stress-ok false def } if
+65536u bt-rt not { /bt-stress-ok false def } if
+-999999999l bt-rt not { /bt-stress-ok false def } if
+7777777ul bt-rt not { /bt-stress-ok false def } if
+2.71828 bt-rt not { /bt-stress-ok false def } if
+1.61803398875d bt-rt not { /bt-stress-ok false def } if
+/add bt-rt not { /bt-stress-ok false def } if
+(stress test) bt-rt not { /bt-stress-ok false def } if
+bt-stress-ok          (bt: stress mixed type sequence) rt-ok clear
+
+% ====================================================================
+% SECTION 15: Boundary fuzz -- values at encoding transitions
+% ====================================================================
+
+% Integer encoding transitions: constants | 8-bit | 16-bit | 32-bit
+% Test every boundary value and one past each boundary
+-2 bt-rt              (bt: fuzz int -2 [8-bit]) rt-ok clear
+-128 bt-rt            (bt: fuzz int -128 [8-bit edge]) rt-ok clear
+-129 bt-rt            (bt: fuzz int -129 [16-bit start]) rt-ok clear
+ 127 bt-rt            (bt: fuzz int 127 [8-bit edge]) rt-ok clear
+ 128 bt-rt            (bt: fuzz int 128 [16-bit start]) rt-ok clear
+-32768 bt-rt          (bt: fuzz int -32768 [16-bit edge]) rt-ok clear
+-32769 bt-rt          (bt: fuzz int -32769 [32-bit start]) rt-ok clear
+ 32767 bt-rt          (bt: fuzz int 32767 [16-bit edge]) rt-ok clear
+ 32768 bt-rt          (bt: fuzz int 32768 [32-bit start]) rt-ok clear
+
+% UInteger encoding transitions
+ 255u bt-rt           (bt: fuzz uint 255 [8-bit edge]) rt-ok clear
+ 256u bt-rt           (bt: fuzz uint 256 [16-bit start]) rt-ok clear
+65535u bt-rt          (bt: fuzz uint 65535 [16-bit edge]) rt-ok clear
+65536u bt-rt          (bt: fuzz uint 65536 [32-bit start]) rt-ok clear
+
+% Long encoding transitions
+-128l bt-rt           (bt: fuzz long -128 [8-bit edge]) rt-ok clear
+-129l bt-rt           (bt: fuzz long -129 [16-bit start]) rt-ok clear
+ 127l bt-rt           (bt: fuzz long 127 [8-bit edge]) rt-ok clear
+ 128l bt-rt           (bt: fuzz long 128 [16-bit start]) rt-ok clear
+-32768l bt-rt         (bt: fuzz long -32768 [16-bit edge]) rt-ok clear
+-32769l bt-rt         (bt: fuzz long -32769 [32-bit start]) rt-ok clear
+ 32767l bt-rt         (bt: fuzz long 32767 [16-bit edge]) rt-ok clear
+ 32768l bt-rt         (bt: fuzz long 32768 [32-bit start]) rt-ok clear
+-2147483648l bt-rt    (bt: fuzz long -2147483648 [32-bit edge]) rt-ok clear
+-2147483649l bt-rt    (bt: fuzz long -2147483649 [64-bit start]) rt-ok clear
+ 2147483647l bt-rt    (bt: fuzz long 2147483647 [32-bit edge]) rt-ok clear
+ 2147483648l bt-rt    (bt: fuzz long 2147483648 [64-bit start]) rt-ok clear
+
+% ULong encoding transitions
+ 255ul bt-rt          (bt: fuzz ulong 255 [8-bit edge]) rt-ok clear
+ 256ul bt-rt          (bt: fuzz ulong 256 [16-bit start]) rt-ok clear
+65535ul bt-rt         (bt: fuzz ulong 65535 [16-bit edge]) rt-ok clear
+65536ul bt-rt         (bt: fuzz ulong 65536 [32-bit start]) rt-ok clear
+4294967295ul bt-rt    (bt: fuzz ulong 4294967295 [32-bit edge]) rt-ok clear
+4294967296ul bt-rt    (bt: fuzz ulong 4294967296 [64-bit start]) rt-ok clear
+
+% ====================================================================
+% SECTION 16: Multiple round-trips (encode -> decode -> encode -> decode)
+% ====================================================================
+% Verify that a double round-trip produces the same value.
+
+/bt-double-rt {
+  dup
+  to-binary-token make-executable exec
+  to-binary-token make-executable exec
+  deep-eq
+} def
+
+42 bt-double-rt       (bt: double-rt integer 42) rt-ok clear
+-1000l bt-double-rt   (bt: double-rt long -1000) rt-ok clear
+3.14 bt-double-rt     (bt: double-rt real 3.14) rt-ok clear
+(hello) bt-double-rt  (bt: double-rt string hello) rt-ok clear
+/add bt-double-rt     (bt: double-rt sysname /add) rt-ok clear
+true bt-double-rt     (bt: double-rt true) rt-ok clear
+null bt-double-rt     (bt: double-rt null) rt-ok clear
+
+% ====================================================================
+% SECTION 17: Token string content verification
+% ====================================================================
+% Verify specific opcode bytes in the encoded string.
+
+% String get returns a Byte; cast hex literals to byte for comparison.
+% Null should encode as 0xAD
+null to-binary-token 0 get 16#AD#b eq   (bt: null opcode = 0xAD) rt-ok clear
+
+% True should encode as 0xAB
+true to-binary-token 0 get 16#AB#b eq   (bt: true opcode = 0xAB) rt-ok clear
+
+% False should encode as 0xAA
+false to-binary-token 0 get 16#AA#b eq  (bt: false opcode = 0xAA) rt-ok clear
+
+% Mark should encode as 0xAC
+mark to-binary-token 0 get 16#AC#b eq   (bt: mark opcode = 0xAC) rt-ok clear
+
+% Byte_0 should encode as 0xC7
+0b to-binary-token 0 get 16#C7#b eq     (bt: byte 0 opcode = 0xC7) rt-ok clear
+
+% Byte_255 should encode as 0xCB
+255b to-binary-token 0 get 16#CB#b eq   (bt: byte 255 opcode = 0xCB) rt-ok clear
+
+% Integer_0 should encode as 0xCF
+0 to-binary-token 0 get 16#CF#b eq      (bt: integer 0 opcode = 0xCF) rt-ok clear
+
+% Integer_1 should encode as 0xD0
+1 to-binary-token 0 get 16#D0#b eq      (bt: integer 1 opcode = 0xD0) rt-ok clear
+
+% New constants: verify single-byte opcode encoding
+2b to-binary-token 0 get 16#C5#b eq    (bt: byte 2 opcode = 0xC5) rt-ok clear
+2 to-binary-token 0 get 16#C2#b eq     (bt: integer 2 opcode = 0xC2) rt-ok clear
+10 to-binary-token 0 get 16#C3#b eq    (bt: integer 10 opcode = 0xC3) rt-ok clear
+100 to-binary-token 0 get 16#C4#b eq   (bt: integer 100 opcode = 0xC4) rt-ok clear
+-2 to-binary-token 0 get 16#EB#b eq    (bt: integer -2 opcode = 0xEB) rt-ok clear
+2. to-binary-token 0 get 16#EC#b eq    (bt: real 2 opcode = 0xEC) rt-ok clear
+2.d to-binary-token 0 get 16#ED#b eq   (bt: double 2 opcode = 0xED) rt-ok clear
+
+% Verify new constants encode as single byte (length = 1)
+2b to-binary-token length 1 eq         (bt: byte 2 token = 1 byte) rt-ok clear
+2 to-binary-token length 1 eq          (bt: integer 2 token = 1 byte) rt-ok clear
+10 to-binary-token length 1 eq         (bt: integer 10 token = 1 byte) rt-ok clear
+100 to-binary-token length 1 eq        (bt: integer 100 token = 1 byte) rt-ok clear
+-2 to-binary-token length 1 eq         (bt: integer -2 token = 1 byte) rt-ok clear
+2. to-binary-token length 1 eq         (bt: real 2 token = 1 byte) rt-ok clear
+2.d to-binary-token length 1 eq        (bt: double 2 token = 1 byte) rt-ok clear
+
+% Integer_8 header should be 0x81
+42 to-binary-token 0 get 16#81#b eq     (bt: integer 42 opcode = 0x81) rt-ok clear
+
+% Integer_16 header should be 0x82
+1000 to-binary-token 0 get 16#82#b eq   (bt: integer 1000 opcode = 0x82) rt-ok clear
+
+% Integer_32 header should be 0x85
+65536 to-binary-token 0 get 16#85#b eq  (bt: integer 65536 opcode = 0x85) rt-ok clear
+
+% String_8 header should be 0xAE
+(hi) to-binary-token 0 get 16#AE#b eq   (bt: string 'hi' opcode = 0xAE) rt-ok clear
+
+(Binary token round-trip tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

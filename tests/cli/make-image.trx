@@ -1,0 +1,4 @@
+% make-image.trx -- write a snap-shot image to the filename passed as
+% the first script argument; run_cli_tests.sh loads it back with -l.
+/img-marker 42 def
+command-line-args 0 get snap-shot

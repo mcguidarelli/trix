@@ -1,0 +1,311 @@
+% ====================================================================
+% test_special_functions.trx -- tests for special math function operators
+% ====================================================================
+% Bessel, Legendre, Hermite, Laguerre, elliptic integrals, zeta, etc.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+/approx-eq {
+  3 1 roll sub abs ge
+} def
+
+% ====================================================================
+% SECTION 1: Cylindrical Bessel functions (two-arg: nu x)
+% ====================================================================
+
+% cyl-bessel-j: J_nu(x) -- Bessel function of the first kind
+% J_0(0) = 1
+0.0 0.0 cyl-bessel-j 1.0 0.001 approx-eq  (cyl-bessel-j: J_0(0) = 1) rt-ok clear
+% J_0(1) ~ 0.7652
+0.0 1.0 cyl-bessel-j 0.7652 0.001 approx-eq  (cyl-bessel-j: J_0(1) ~ 0.7652) rt-ok clear
+% J_1(1) ~ 0.4401
+1.0 1.0 cyl-bessel-j 0.4401 0.001 approx-eq  (cyl-bessel-j: J_1(1) ~ 0.4401) rt-ok clear
+
+% double variants
+0.0d 0.0d cyl-bessel-j 1.0d 0.001d approx-eq  (cyl-bessel-j: dbl J_0(0) = 1) rt-ok clear
+0.0d 1.0d cyl-bessel-j 0.7652d 0.001d approx-eq  (cyl-bessel-j: dbl J_0(1)) rt-ok clear
+
+% type check
+{ 1 1.0 cyl-bessel-j } try /type-check eq  (cyl-bessel-j: int type-check) rt-ok clear
+
+% cyl-bessel-i: I_nu(x) -- modified Bessel first kind
+% I_0(0) = 1
+0.0 0.0 cyl-bessel-i 1.0 0.001 approx-eq  (cyl-bessel-i: I_0(0) = 1) rt-ok clear
+% I_0(1) ~ 1.2661
+0.0 1.0 cyl-bessel-i 1.2661 0.001 approx-eq  (cyl-bessel-i: I_0(1) ~ 1.2661) rt-ok clear
+
+% cyl-bessel-k: K_nu(x) -- modified Bessel second kind
+% K_0(1) ~ 0.4210
+0.0 1.0 cyl-bessel-k 0.4210 0.001 approx-eq  (cyl-bessel-k: K_0(1) ~ 0.4210) rt-ok clear
+
+% cyl-neumann: Y_nu(x) -- Bessel second kind (Neumann)
+% Y_0(1) ~ 0.0883
+0.0 1.0 cyl-neumann 0.0883 0.001 approx-eq  (cyl-neumann: Y_0(1) ~ 0.0883) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Spherical Bessel functions (uint n, real x)
+% ====================================================================
+
+% sph-bessel: j_n(x) -- spherical Bessel first kind
+% j_0(x) = sin(x)/x, so j_0(pi) = 0
+0u 1.0 sph-bessel 0.8415 0.001 approx-eq  (sph-bessel: j_0(1) ~ sin(1)/1) rt-ok clear
+1u 1.0 sph-bessel 0.3012 0.01 approx-eq   (sph-bessel: j_1(1) ~ 0.3012) rt-ok clear
+
+% sph-neumann: y_n(x) -- spherical Bessel second kind
+% y_0(x) = -cos(x)/x, so y_0(1) ~ -0.5403
+0u 1.0 sph-neumann -0.5403 0.001 approx-eq  (sph-neumann: y_0(1) ~ -cos(1)/1) rt-ok clear
+
+% double variants
+0u 1.0d sph-bessel 0.8415d 0.001d approx-eq  (sph-bessel: dbl j_0(1)) rt-ok clear
+
+% type check: first arg must be uint
+{ 1 1.0 sph-bessel } try /type-check eq  (sph-bessel: signed int type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Legendre polynomials
+% ====================================================================
+
+% legendre: P_n(x)
+% P_0(x) = 1 for all x
+0u 0.5 legendre 1.0 0.001 approx-eq  (legendre: P_0(0.5) = 1) rt-ok clear
+% P_1(x) = x
+1u 0.5 legendre 0.5 0.001 approx-eq  (legendre: P_1(0.5) = 0.5) rt-ok clear
+% P_2(x) = (3x^2 - 1)/2 => P_2(0.5) = (0.75-1)/2 = -0.125
+2u 0.5 legendre -0.125 0.001 approx-eq  (legendre: P_2(0.5) = -0.125) rt-ok clear
+
+% double variants
+0u 0.5d legendre 1.0d 0.001d approx-eq  (legendre: dbl P_0(0.5) = 1) rt-ok clear
+
+% assoc-legendre: P_n^m(x) -- associated Legendre
+% P_0^0(x) = 1
+0u 0u 0.5 assoc-legendre 1.0 0.001 approx-eq  (assoc-legendre: P_0^0 = 1) rt-ok clear
+% P_1^0(x) = x
+1u 0u 0.5 assoc-legendre 0.5 0.001 approx-eq  (assoc-legendre: P_1^0 = x) rt-ok clear
+% P_1^1(x) = sqrt(1-x^2) => P_1^1(0) = 1 (C++ omits Condon-Shortley phase)
+1u 1u 0.0 assoc-legendre 1.0 0.001 approx-eq  (assoc-legendre: P_1^1(0) = 1) rt-ok clear
+
+% sph-legendre: Y_l^m(theta) -- spherical harmonic
+% Y_0^0(theta) = 1/(2*sqrt(pi)) ~ 0.2821
+0u 0u 0.0 sph-legendre 0.2821 0.001 approx-eq  (sph-legendre: Y_0^0 ~ 0.2821) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Hermite polynomials
+% ====================================================================
+
+% hermite: H_n(x) (physicist's convention)
+% H_0(x) = 1
+0u 1.0 hermite 1.0 0.001 approx-eq  (hermite: H_0(1) = 1) rt-ok clear
+% H_1(x) = 2x
+1u 1.0 hermite 2.0 0.001 approx-eq  (hermite: H_1(1) = 2) rt-ok clear
+% H_2(x) = 4x^2 - 2 => H_2(1) = 2
+2u 1.0 hermite 2.0 0.001 approx-eq  (hermite: H_2(1) = 2) rt-ok clear
+% H_3(x) = 8x^3 - 12x => H_3(1) = -4
+3u 1.0 hermite -4.0 0.001 approx-eq  (hermite: H_3(1) = -4) rt-ok clear
+% H_0(0) = 1
+0u 0.0 hermite 1.0 0.001 approx-eq  (hermite: H_0(0) = 1) rt-ok clear
+
+% double variants
+2u 1.0d hermite 2.0d 0.001d approx-eq  (hermite: dbl H_2(1) = 2) rt-ok clear
+
+% type check
+{ 1 1.0 hermite } try /type-check eq  (hermite: signed int type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Laguerre polynomials
+% ====================================================================
+
+% laguerre: L_n(x)
+% L_0(x) = 1
+0u 1.0 laguerre 1.0 0.001 approx-eq  (laguerre: L_0(1) = 1) rt-ok clear
+% L_1(x) = 1 - x => L_1(1) = 0
+1u 1.0 laguerre 0.0 0.001 approx-eq  (laguerre: L_1(1) = 0) rt-ok clear
+% L_2(x) = (x^2 - 4x + 2)/2 => L_2(1) = -0.5
+2u 1.0 laguerre -0.5 0.001 approx-eq  (laguerre: L_2(1) = -0.5) rt-ok clear
+% L_0(0) = 1
+0u 0.0 laguerre 1.0 0.001 approx-eq  (laguerre: L_0(0) = 1) rt-ok clear
+
+% assoc-laguerre: L_n^m(x)
+% L_0^0(x) = 1
+0u 0u 1.0 assoc-laguerre 1.0 0.001 approx-eq  (assoc-laguerre: L_0^0 = 1) rt-ok clear
+% L_1^0(x) = L_1(x) = 1-x => L_1^0(1) = 0
+1u 0u 1.0 assoc-laguerre 0.0 0.001 approx-eq  (assoc-laguerre: L_1^0 = 0) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Elliptic integrals (complete)
+% ====================================================================
+
+% comp-ellint-1: K(k) -- complete elliptic integral first kind
+% K(0) = pi/2
+0.0 comp-ellint-1 1.5708 0.001 approx-eq  (comp-ellint-1: K(0) = pi/2) rt-ok clear
+
+% comp-ellint-2: E(k) -- complete elliptic integral second kind
+% E(0) = pi/2
+0.0 comp-ellint-2 1.5708 0.001 approx-eq  (comp-ellint-2: E(0) = pi/2) rt-ok clear
+
+% comp-ellint-3: Pi(k, nu) -- complete elliptic integral third kind
+% Pi(0, 0) = pi/2
+0.0 0.0 comp-ellint-3 1.5708 0.001 approx-eq  (comp-ellint-3: Pi(0,0) = pi/2) rt-ok clear
+
+% double variants
+0.0d comp-ellint-1 1.5708d 0.001d approx-eq  (comp-ellint-1: dbl K(0)) rt-ok clear
+0.0d comp-ellint-2 1.5708d 0.001d approx-eq  (comp-ellint-2: dbl E(0)) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Elliptic integrals (incomplete)
+% ====================================================================
+
+% ellint-1: F(k, phi) -- incomplete first kind
+% F(0, phi) = phi for any phi
+0.0 1.0 ellint-1 1.0 0.001 approx-eq  (ellint-1: F(0,1) = 1) rt-ok clear
+
+% ellint-2: E(k, phi) -- incomplete second kind
+% E(0, phi) = phi
+0.0 1.0 ellint-2 1.0 0.001 approx-eq  (ellint-2: E(0,1) = 1) rt-ok clear
+
+% ellint-3: Pi(k, nu, phi) -- incomplete third kind
+% Pi(0, 0, phi) = phi
+0.0 0.0 1.0 ellint-3 1.0 0.001 approx-eq  (ellint-3: Pi(0,0,1) = 1) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Riemann zeta and exponential integral
+% ====================================================================
+
+% riemann-zeta: zeta(s)
+% zeta(2) = pi^2/6 ~ 1.6449
+2.0 riemann-zeta 1.6449 0.001 approx-eq  (riemann-zeta: zeta(2) ~ pi^2/6) rt-ok clear
+% zeta(4) = pi^4/90 ~ 1.0823
+4.0 riemann-zeta 1.0823 0.001 approx-eq  (riemann-zeta: zeta(4) ~ pi^4/90) rt-ok clear
+% zeta(0) = -0.5
+0.0 riemann-zeta -0.5 0.001 approx-eq  (riemann-zeta: zeta(0) = -0.5) rt-ok clear
+
+% double variants
+2.0d riemann-zeta 1.6449d 0.001d approx-eq  (riemann-zeta: dbl zeta(2)) rt-ok clear
+
+% expint: Ei(x) -- exponential integral
+% Ei(1) ~ 1.8951
+1.0 expint 1.8951 0.001 approx-eq  (expint: Ei(1) ~ 1.8951) rt-ok clear
+
+% double
+1.0d expint 1.8951d 0.001d approx-eq  (expint: dbl Ei(1)) rt-ok clear
+
+% type check
+{ 1 riemann-zeta } try /type-check eq  (riemann-zeta: int type-check) rt-ok clear
+{ 1 expint } try /type-check eq  (expint: int type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Beta function
+% ====================================================================
+
+% beta(1,1) = 1
+1.0 1.0 beta 1.0 0.001 approx-eq  (beta: B(1,1) = 1) rt-ok clear
+% beta(2,1) = 0.5
+2.0 1.0 beta 0.5 0.001 approx-eq  (beta: B(2,1) = 0.5) rt-ok clear
+% beta(2,2) = 1/6 ~ 0.1667
+2.0 2.0 beta 0.1667 0.001 approx-eq  (beta: B(2,2) ~ 1/6) rt-ok clear
+% beta(0.5, 0.5) = pi ~ 3.1416
+0.5 0.5 beta 3.1416 0.01 approx-eq  (beta: B(0.5,0.5) ~ pi) rt-ok clear
+
+% double
+1.0d 1.0d beta 1.0d 0.001d approx-eq  (beta: dbl B(1,1) = 1) rt-ok clear
+
+% ====================================================================
+% SECTION 10: FP manipulation ops (ilogb, logb, fdim, fma, modf, scalbn)
+% ====================================================================
+
+% ilogb: integer exponent of a float
+% ilogb(1.0) = 0, ilogb(2.0) = 1, ilogb(8.0) = 3
+1.0 ilogb 0 eq  (ilogb: ilogb(1) = 0) rt-ok clear
+2.0 ilogb 1 eq  (ilogb: ilogb(2) = 1) rt-ok clear
+8.0 ilogb 3 eq  (ilogb: ilogb(8) = 3) rt-ok clear
+0.5 ilogb -1 eq  (ilogb: ilogb(0.5) = -1) rt-ok clear
+
+% return type is integer
+8.0 ilogb type /integer-type eq  (ilogb: returns integer) rt-ok clear
+
+% logb: FP exponent (returns float)
+1.0 logb 0.0 eq  (logb: logb(1) = 0) rt-ok clear
+8.0 logb 3.0 0.001 approx-eq  (logb: logb(8) = 3) rt-ok clear
+
+% double
+8.0d logb 3.0d 0.001d approx-eq  (logb: dbl logb(8) = 3) rt-ok clear
+
+% fdim: positive difference max(x-y, 0)
+5.0 3.0 fdim 2.0 eq  (fdim: 5-3 = 2) rt-ok clear
+3.0 5.0 fdim 0.0 eq  (fdim: 3-5 = 0 clamped) rt-ok clear
+0.0 0.0 fdim 0.0 eq  (fdim: 0-0 = 0) rt-ok clear
+
+% double
+5.0d 3.0d fdim 2.0d eq  (fdim: dbl 5-3 = 2) rt-ok clear
+
+% fma: fused multiply-add fma(x, y, z) = x*y + z
+2.0 3.0 4.0 fma 10.0 eq  (fma: 2*3+4 = 10) rt-ok clear
+0.0 5.0 3.0 fma 3.0 eq  (fma: 0*5+3 = 3) rt-ok clear
+
+% double
+2.0d 3.0d 4.0d fma 10.0d eq  (fma: dbl 2*3+4 = 10) rt-ok clear
+
+% modf: split into integer and fractional parts
+% modf(3.75) -> 0.75 3.0 (fractional on top... let me check)
+3.75 modf 3.0 eq  (modf: 3.75 integral = 3.0) rt-ok
+0.75 0.001 approx-eq  (modf: 3.75 fractional = 0.75) rt-ok clear
+-2.5 modf -2.0 eq  (modf: -2.5 integral = -2.0) rt-ok
+-0.5 0.001 approx-eq  (modf: -2.5 fractional = -0.5) rt-ok clear
+
+% scalbn: scalbn(x, n) = x * FLT_RADIX^n
+1.0 3 scalbn 8.0 eq  (scalbn: 1.0 * 2^3 = 8) rt-ok clear
+0.5 1 scalbn 1.0 eq  (scalbn: 0.5 * 2^1 = 1) rt-ok clear
+
+% double
+1.0d 3 scalbn 8.0d eq  (scalbn: dbl 1.0 * 2^3 = 8) rt-ok clear
+
+% type check
+{ 1 ilogb } try /type-check eq  (ilogb: int type-check) rt-ok clear
+{ 1 logb } try /type-check eq  (logb: int type-check) rt-ok clear
+{ 1 1.0 fdim } try /type-check eq  (fdim: int type-check) rt-ok clear
+
+% ====================================================================
+% SECTION: domain + order validation (Phase-1 follow-on #4)
+% Reject out-of-domain x (|x|<=1, x>=0, x>0) and orders >= 128 BEFORE the
+% libc++ call -- previously these were silently implementation-defined.
+% ====================================================================
+
+% valid computations still work (order is a UInteger -- `u` suffix)
+2u 0.5 legendre -0.125 1e-9 approx-eq  (legendre P_2(0.5) = -0.125) rt-ok clear
+3u 1.0 hermite -4.0 1e-9 approx-eq  (hermite H_3(1) = -4) rt-ok clear
+2u 0.0 laguerre 1.0 1e-9 approx-eq  (laguerre L_2(0) = 1) rt-ok clear
+0u 1.0 sph-bessel 0.8414709848 1e-6 approx-eq  (sph-bessel j_0(1) ~= 0.84147) rt-ok clear
+2u 0u 0.5 assoc-legendre -0.125 1e-9 approx-eq  (assoc-legendre P_2^0(0.5) = P_2(0.5)) rt-ok clear
+127u 0.5 legendre type /real-type eq  (legendre order 127 (max) still computes) rt-ok clear
+
+% float-domain rejections -> range-check
+{ 2u 1.5 legendre } try /range-check eq  (legendre |x|>1 -> range-check) rt-ok clear
+{ 2u -1.5 legendre } try /range-check eq  (legendre x<-1 -> range-check) rt-ok clear
+{ 2u -0.5 laguerre } try /range-check eq  (laguerre x<0 -> range-check) rt-ok clear
+{ 1u -0.5 sph-bessel } try /range-check eq  (sph-bessel x<0 -> range-check) rt-ok clear
+{ 1u 0.0 sph-neumann } try /range-check eq  (sph-neumann x=0 (pole) -> range-check) rt-ok clear
+{ 2u 1u 1.5 assoc-legendre } try /range-check eq  (assoc-legendre |x|>1 -> range-check) rt-ok clear
+{ 2u 1u -0.5 assoc-laguerre } try /range-check eq  (assoc-laguerre x<0 -> range-check) rt-ok clear
+
+% NaN operand -> numerical-nan
+/nan //:systemdict:numbers:real-type:quiet-NaN def
+{ 2u nan legendre } try /numerical-nan eq  (legendre NaN -> numerical-nan) rt-ok clear
+{ 3u nan hermite } try /numerical-nan eq  (hermite NaN -> numerical-nan) rt-ok clear
+
+% order >= 128 -> range-check (C++ [sf.cmath] supports only n < 128)
+{ 128u 0.5 legendre } try /range-check eq  (legendre order 128 -> range-check) rt-ok clear
+{ 200u 1.0 hermite } try /range-check eq  (hermite order 200 -> range-check) rt-ok clear
+{ 130u 0.5 laguerre } try /range-check eq  (laguerre order 130 -> range-check) rt-ok clear
+{ 200u 1u 0.5 assoc-legendre } try /range-check eq  (assoc-legendre order n>=128 -> range-check) rt-ok clear
+{ 2u 200u 0.5 assoc-laguerre } try /range-check eq  (assoc-laguerre order m>=128 -> range-check) rt-ok clear
+
+(Special function tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

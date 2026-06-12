@@ -1,0 +1,216 @@
+% ====================================================================
+% test_gc_stress_container_extvalue.trx -- deterministic GC-UAF guard:
+% every container exercised under vm-gc-stress + vm-gc-poison in GLOBAL
+% mode (${...}) with ExtValue (Long) and WideValue (Int128) payloads.
+% ====================================================================
+% Debug-only (needs vm-gc-stress / vm-gc-poison, TRIX_DEBUGGER).  Run via
+% tests/run_gc_stress_tests.sh; run_all.sh skips test_gc_stress_*.
+%
+% `vm-gc-stress` fires a full vm_global_gc before EVERY global allocation;
+% `vm-gc-poison` scribbles 0xBE over freed global blocks.  Together they turn
+% any in-flight unrooted global block -- or any block freed while still
+% referenced -- into a deterministic corrupted read.  ExtValue/WideValue
+% payloads (Nl / Nq) make per-key/value/element make_clone actually allocate,
+% ARMING the clone/free windows; immediate payloads (Name/Integer) leave them
+% inert, which is exactly why these bugs hid from the Name-keyed suites.
+%
+% ASSERTION DISCIPLINE: exact-value / exact-SUM equality only.  Poison's 0xBE..
+% is a huge value that sails through `gt`/`ge`/`le`, so an inequality assert is
+% poison-blind; an exact sum over a container's elements can only hold if every
+% element survived intact.  SOURCE-intact checks (sum + membership of the input
+% after a derived op) are the @set-filter-class regression: an op that frees a
+% BORROWED source key/value/element corrupts the source, which a post-op exact
+% sum over the source catches.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+true vm-gc-stress
+true vm-gc-poison
+
+% ====================================================================
+% ARRAY -- Long + Int128 under stress+poison
+% ====================================================================
+${ [ 10l 20l 30l 40l ] { 1l add } map } /am exch def
+am 0 get 11l eq                  (arr-L: map[0]=11l)              rt-ok
+am 3 get 41l eq                  (arr-L: map[3]=41l canary-tail)  rt-ok
+am 0l { add } reduce 104l eq     (arr-L: map sum exact 104l)      rt-ok clear
+
+${ [ 10l 20l 30l 40l ] 0l { add } reduce } 100l eq (arr-L: reduce sum exact 100l) rt-ok clear
+${ [ 10l 20l 30l 40l ] { 25l gt } filter } /af exch def
+af 0l { add } reduce 70l eq      (arr-L: filter>25 sum exact 70l) rt-ok
+af length 2 eq                   (arr-L: filter len 2)            rt-ok clear
+${ [ 10l 20l 30l 40l ] reverse } /ar exch def
+ar 0 get 40l eq                  (arr-L: reverse[0]=40l)          rt-ok
+ar 0l { add } reduce 100l eq     (arr-L: reverse sum exact 100l)  rt-ok clear
+${ [ 40l 10l 30l 20l ] sort } /as exch def
+as 0 get 10l eq                  (arr-L: sort[0]=10l)             rt-ok
+as 3 get 40l eq                  (arr-L: sort[3]=40l)             rt-ok clear
+${ [ 10l 20l 20l 30l 10l ] unique } 0l { add } reduce 60l eq (arr-L: unique sum exact 60l) rt-ok clear
+${ [ 10l 20l 30l 40l ] 0l { add } scan } /asc exch def
+asc 4 get 100l eq                (arr-L: scan[4]=100l)            rt-ok
+asc 0 get 0l eq                  (arr-L: scan[0]=init 0l)         rt-ok clear
+${ [ 10l 20l 30l 40l ] { 25l lt } take-while } 0l { add } reduce 30l eq (arr-L: take-while sum 30l) rt-ok clear
+${ [ 10l 20l 30l 40l ] { 25l lt } drop-while } 0l { add } reduce 70l eq (arr-L: drop-while sum 70l) rt-ok clear
+
+${ [ 10q 20q 30q 40q ] { 1q add } map } /amq exch def
+amq 0 get 11q eq                 (arr-Q: map[0]=11q)              rt-ok
+amq 0q { add } reduce 104q eq    (arr-Q: map sum exact 104q)      rt-ok clear
+${ [ 10q 20q 30q 40q ] 0q { add } reduce } 100q eq (arr-Q: reduce sum exact 100q) rt-ok clear
+${ [ 10q 20q 30q 40q ] { 25q gt } filter } 0q { add } reduce 70q eq (arr-Q: filter sum exact 70q) rt-ok clear
+${ [ 40q 10q 30q 20q ] sort } 0 get 10q eq (arr-Q: sort[0]=10q) rt-ok clear
+
+% ====================================================================
+% DICT -- Long + Int128 keys/values under stress+poison
+% ====================================================================
+${ << 100l 11l 200l 22l 300l 33l >> } /dm exch def
+dm 100l get 11l eq               (dict-L: get[100l]=11l)          rt-ok
+dm values 0l { add } reduce 66l eq (dict-L: values sum exact 66l) rt-ok
+dm keys 0l { add } reduce 600l eq  (dict-L: keys sum exact 600l)  rt-ok clear
+${ << 100l 11l 200l 22l 300l 33l >> { 1l add } map-dict } /dmm exch def
+dmm 100l get 12l eq              (dict-L: map-dict[100l]=12l)      rt-ok
+dmm keys 0l { add } reduce 600l eq  (dict-L: map-dict KEYS sum 600l -- @dict-map key clone) rt-ok
+dmm values 0l { add } reduce 69l eq (dict-L: map-dict values sum 69l) rt-ok clear
+${ << 100l 11l 200l 22l 300l 33l >> { exch pop 20l gt } filter-dict } /dmf exch def
+dmf keys 0l { add } reduce 500l eq (dict-L: filter-dict KEYS sum 500l -- @dict-filter key clone) rt-ok
+dmf values 0l { add } reduce 55l eq (dict-L: filter-dict values sum 55l) rt-ok
+dmf length 2 eq                  (dict-L: filter-dict len 2)      rt-ok clear
+${ << 100l 11l 200l 22l >> << 300l 33l >> merge } /dmg exch def
+dmg keys 0l { add } reduce 600l eq (dict-L: merge keys sum 600l)  rt-ok
+dmg values 0l { add } reduce 66l eq (dict-L: merge values sum 66l) rt-ok clear
+${ << 100l 11 200l 22 300l 33 >> /long-type coerce } /dmc exch def
+dmc values 0l { add } reduce 66l eq (dict-L: coerce values sum 66l) rt-ok clear
+% SOURCE-intact: map-dict / for-all must not corrupt the source dict's keys/values
+${ << 100l 11l 200l 22l 300l 33l >> } /dsrc exch def
+dsrc { 1l add } map-dict pop
+dsrc keys 0l { add } reduce 600l eq   (dict-L: SOURCE keys intact after map-dict) rt-ok
+dsrc values 0l { add } reduce 66l eq  (dict-L: SOURCE values intact after map-dict) rt-ok
+dsrc { pop pop } for-all dsrc values 0l { add } reduce 66l eq (dict-L: SOURCE intact after for-all) rt-ok clear
+${ << 100q 11q 200q 22q >> { 1q add } map-dict } /dmq exch def
+dmq 100q get 12q eq              (dict-Q: map-dict[100q]=12q)      rt-ok
+dmq values 0q { add } reduce 35q eq (dict-Q: map-dict values sum 35q) rt-ok clear
+
+% ====================================================================
+% SET -- Long + Int128 members under stress+poison
+% (the @set-filter source-key-free UAF regression lives here)
+% ====================================================================
+${ [ 10l 20l 30l 40l ] set-from-array } /ss exch def
+ss members 0l { add } reduce 100l eq (set-L: members sum exact 100l) rt-ok
+ss 10l set-member?               (set-L: has 10l)                 rt-ok
+ss 40l set-member?               (set-L: has 40l)                 rt-ok clear
+% set-filter: result correct AND source untouched (borrowed-key-free regression)
+ss { 25l gt } set-filter /ssf exch def
+ssf members 0l { add } reduce 70l eq (set-L: set-filter result sum exact 70l) rt-ok
+ssf length 2 eq                  (set-L: set-filter len 2)        rt-ok
+ss members 0l { add } reduce 100l eq (set-L: SOURCE intact after set-filter) rt-ok
+ss 10l set-member?               (set-L: SOURCE still has 10l after filter) rt-ok
+ss 20l set-member?               (set-L: SOURCE still has 20l after filter) rt-ok clear
+% for-all over an ExtValue set must not corrupt the source either
+ss { pop } for-all ss members 0l { add } reduce 100l eq (set-L: SOURCE intact after for-all) rt-ok clear
+% set-add / set-remove mutate; verify exact membership survives GC
+${ [ 10l 20l 30l ] set-from-array } 40l set-add members 0l { add } reduce 100l eq (set-L: set-add sum 100l) rt-ok clear
+${ [ 10l 20l 30l ] set-from-array } 20l set-remove members 0l { add } reduce 40l eq (set-L: set-remove sum 40l) rt-ok clear
+% set-algebra (Cat-3: result LOCAL under ${}, but keys cloned GLOBAL) -- in-block
+% correctness under stress (no restore; result consumed inside the block)
+${ [ 10l 20l 30l ] set-from-array [ 20l 30l 40l ] set-from-array set-union members 0l { add } reduce } 100l eq (set-L: union sum 100l) rt-ok clear
+${ [ 10l 20l 30l ] set-from-array [ 20l 30l 40l ] set-from-array set-intersection members 0l { add } reduce } 50l eq (set-L: intersection sum 50l) rt-ok clear
+${ [ 10l 20l 30l ] set-from-array [ 20l 30l 40l ] set-from-array set-difference members 0l { add } reduce } 10l eq (set-L: difference sum 10l) rt-ok clear
+% Int128 set
+${ [ 10q 20q 30q 40q ] set-from-array } /ssq exch def
+ssq members 0q { add } reduce 100q eq (set-Q: members sum exact 100q) rt-ok
+ssq { 25q gt } set-filter members 0q { add } reduce 70q eq (set-Q: set-filter sum exact 70q) rt-ok
+ssq members 0q { add } reduce 100q eq (set-Q: SOURCE intact after set-filter) rt-ok clear
+
+% ====================================================================
+% RECORD -- Long + Int128 fields under stress+poison
+% ====================================================================
+${ 10l 20l 30l [ /a /b /c ] record } /rm exch def
+rm /a get 10l eq                 (rec-L: get /a=10l)              rt-ok
+rm /c get 30l eq                 (rec-L: get /c=30l canary)       rt-ok
+rm record-values 0l { add } reduce 60l eq (rec-L: values sum exact 60l) rt-ok clear
+${ 10l 20l 30l [ /a /b /c ] record { 1l add } record-map } record-values 0l { add } reduce 63l eq (rec-L: record-map sum 63l) rt-ok clear
+${ 10l 20l 30l [ /a /b /c ] record /b 99l record-update } /b get 99l eq (rec-L: record-update /b=99l) rt-ok clear
+${ 10l 20l 30l [ /a /b /c ] record /a { 5l add } record-map-field } /a get 15l eq (rec-L: record-map-field /a=15l) rt-ok clear
+${ 10l 20l 30l [ /a /b /c ] record record-to-dict } values 0l { add } reduce 60l eq (rec-L: record-to-dict values sum 60l) rt-ok clear
+${ 10q 20q 30q [ /a /b /c ] record } /rmq exch def
+rmq /b get 20q eq                (rec-Q: get /b=20q)              rt-ok
+rmq record-values 0q { add } reduce 60q eq (rec-Q: values sum exact 60q) rt-ok clear
+
+% ====================================================================
+% TAGGED -- Long + Int128 payload under stress+poison
+% ====================================================================
+${ 42l /lbl tag } /tg exch def
+tg tag-value 42l eq              (tag-L: tag-value 42l)           rt-ok
+tg /lbl tag?                     (tag-L: tag? /lbl)               rt-ok clear
+${ 42l /lbl tag { 1l add } tag-update } tag-value 43l eq (tag-L: tag-update +1=43l) rt-ok clear
+${ 42q /lbl tag } tag-value 42q eq (tag-Q: tag-value 42q) rt-ok clear
+${ 42q /lbl tag { 1q add } tag-update } tag-value 43q eq (tag-Q: tag-update +1=43q) rt-ok clear
+
+% ====================================================================
+% CAT-3 array/dict-result ops under stress+poison (deep promote-at-end)
+% ====================================================================
+% These build a LOCAL result + temp membership dict, then deep-promote the result
+% to global VM after the temp is released.  The deep promote allocates global and
+% make_clones every (possibly nested) element -- exact sums over the result catch a
+% swept clone; nested gets catch a shallow-promoted sub-array left dangling local.
+${ [ 10l 20l 30l ] [ 20l 30l 40l ] union 0l { add } reduce } 100l eq (cat3 union sum 100l) rt-ok clear
+${ [ 10l 20l 30l ] [ 20l 30l 40l ] intersect 0l { add } reduce } 50l eq (cat3 intersect sum 50l) rt-ok clear
+${ [ 10l 20l 30l ] [ 20l 30l 40l ] difference 0l { add } reduce } 10l eq (cat3 difference sum 10l) rt-ok clear
+${ [ 10l 20l 30l ] [ 40l 50l 60l ] zip } /z3 exch def
+z3 0 get 1 get 40l eq             (cat3 zip[0][1]=40l NESTED)     rt-ok
+z3 2 get 0 get 30l eq             (cat3 zip[2][0]=30l NESTED)     rt-ok clear
+${ [ 1l 2l 3l 4l ] 2 chunk } /ck3 exch def
+ck3 0 get 0l { add } reduce 3l eq (cat3 chunk[0] sum 3l NESTED)   rt-ok
+ck3 1 get 0l { add } reduce 7l eq (cat3 chunk[1] sum 7l NESTED)   rt-ok clear
+${ [ 5l 6l 7l ] enumerate 2 get 1 get } 7l eq (cat3 enumerate[2][1]=7l NESTED) rt-ok clear
+${ [ 30l 10l 20l ] { } sort-by 0 get } 10l eq (cat3 sort-by[0]=10l)  rt-ok clear
+${ [ 1l 2l 3l 4l ] { 2l mod } group-by 0l get 0l { add } reduce } 6l eq (cat3 group-by[even] sum 6l NESTED) rt-ok clear
+${ [ 1l 2l 3l 4l ] { 2l mod 0l eq } partition pop 0l { add } reduce } 6l eq (cat3 partition pass sum 6l) rt-ok clear
+${ [ 10l 10l 20l 30l ] frequencies 10l get } 2 eq (cat3 frequencies[10l]=2) rt-ok clear
+% Int128 variants
+${ [ 10q 20q 30q ] [ 20q 30q 40q ] union 0q { add } reduce } 100q eq (cat3 union Int128 sum 100q) rt-ok clear
+${ [ 10q 20q 30q 40q ] 2 chunk 1 get 0q { add } reduce } 70q eq (cat3 chunk Int128[1] sum 70q NESTED) rt-ok clear
+
+% ====================================================================
+% HIGHER-ORDER / DEFERRED / REACTIVE families under stress+poison
+% ====================================================================
+% curry / thunk / closure / lazy-seq / cell capture ExtValue/WideValue payloads
+% into region-aware structures; the constructors clone the capture (or build a
+% thunk chain) under ${...}, firing GC mid-build.  These were GC-defended in
+% earlier work (lazy builders root on the gc-root stack; curry/thunk allocate
+% before popping; closure roots its dict on the op stack across the clone loop);
+% this verifies the defenses hold with heap-backed payloads.  Exact-value asserts.
+${ 5l { 2l mul } curry exec } 10l eq          (curry exec Long 10l)        rt-ok clear
+${ 5q { 2q mul } curry exec } 10q eq          (curry exec Int128 10q)      rt-ok clear
+${ { 21l 2l mul } thunk force } 42l eq        (thunk force Long 42l)       rt-ok clear
+${ { 21q 2q mul } thunk force } 42q eq        (thunk force Int128 42q)     rt-ok clear
+${ { 21l 2l mul } thunk dup force pop force } 42l eq (thunk RE-force cached Long 42l -- Evaluated path) rt-ok clear
+${ /cz 7l def { /cz load 2l mul } [ /cz ] closure-capture exec } 14l eq (closure capture Long 14l) rt-ok clear
+${ /czq 7q def { /czq load 2q mul } [ /czq ] closure-capture exec } 14q eq (closure capture Int128 14q) rt-ok clear
+${ [ 10l 20l 30l ] lazy-seq { 1l add } lazy-map 3 lazy-take lazy-to-array 0l { add } reduce } 63l eq (lazy-map sum 63l) rt-ok clear
+${ [ 10l 20l 30l 40l ] lazy-seq { 25l gt } lazy-filter lazy-to-array 0l { add } reduce } 70l eq (lazy-filter sum 70l) rt-ok clear
+${ 5l lazy-repeat 4 lazy-take lazy-to-array 0l { add } reduce } 20l eq (lazy-repeat sum 20l) rt-ok clear
+${ [ 10q 20q 30q ] lazy-seq { 1q add } lazy-map 3 lazy-take lazy-to-array 0q { add } reduce } 63q eq (lazy-map Int128 sum 63q) rt-ok clear
+${ 5l cell cell-get } 5l eq                   (cell-get Long 5l)           rt-ok clear
+${ 5l cell dup 10l exch cell-set cell-get } 10l eq (cell-set Long 10l)    rt-ok clear
+${ 5q cell cell-get } 5q eq                   (cell-get Int128 5q)         rt-ok clear
+% string ops produce region-aware string/array results (Cat 1); exact results
+${ (a,b,c) (,) split length } 3 eq            (split len 3)                rt-ok clear
+${ [ (x) (y) (z) ] (-) join } (x-y-z) eq      (join = x-y-z)               rt-ok clear
+${ (abc) reverse } (cba) eq                   (reverse = cba)              rt-ok clear
+${ (ab) 3i repeat-string } (ababab) eq        (repeat-string = ababab)     rt-ok clear
+${ (hello world) (world) (trix) replace } (hello trix) eq (replace = hello trix) rt-ok clear
+
+false vm-gc-poison
+false vm-gc-stress
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_gc_stress_container_extvalue: ALL TESTS PASSED) =
+(__test_ok__) =

@@ -1,0 +1,9 @@
+% resident.trx -- pin the --resident serve cycle.  The script schedules a
+% Level-0 interrupt (delivered ~1ms later by a my-raise-interrupt worker
+% thread) and ends.  Without a Quit floor the drained exec stack parks the
+% interpreter on the IRQ wait; the delivered interrupt runs l0-interrupt,
+% which prints and schedules ExitIRQ (level 3) -- the host-side stop
+% signal -- so the parked instance wakes again and exits 0.
+/l0-interrupt { (irq-served) = 3 my-raise-interrupt } def
+0 my-raise-interrupt
+(script-done) =

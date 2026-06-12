@@ -1,0 +1,4 @@
+% echo-args.trx -- print the script argv tail so run_cli_tests.sh can
+% pin that tokens after the filename (even flag-shaped ones) reach the
+% script via command-line-args instead of being parsed by trix.
+command-line-args ==

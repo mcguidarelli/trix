@@ -1,0 +1,2 @@
+(line one\nline two\n) make-memory-stream /s exch def
+s 80 string read-line pop pop

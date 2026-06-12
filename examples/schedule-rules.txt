@@ -1,0 +1,14 @@
+# Sample rules for examples/schedule.trx --rules-file
+#
+# One rule per line:  name: --flag VAL --flag VAL ...
+# Lines beginning with '#' are comments.  Blank lines are ignored.
+# Range and output flags (--start, --after, --csv, --calendar) on the
+# command line override anything set here.
+
+paydays:       --kind monthly --day 15 --every-n-months 1
+last-friday:   --kind monthly --ordinal last --day-type fri --every-n-months 1
+first-of-q:    --kind monthly --day 1 --every-n-months 3
+friday-13th:   --kind monthly --weekday fri --day 13
+thanksgiving:  --kind yearly --ordinal fourth --day-type thu --month nov
+christmas:     --kind yearly --month dec --day 25
+memorial-day:  --kind yearly --ordinal last --day-type mon --month may

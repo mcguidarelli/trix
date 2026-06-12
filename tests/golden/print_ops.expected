@@ -1,0 +1,56 @@
+== scalars:
+42i
+42ui
+42l
+42ul
+42q
+42uq
+42b
+16#5#a
+3.5r
+3.5d
+--true--
+--false--
+--/null--
+(hello)#lw
+/name
+--mark--
+== global-region scalars:
+42l
+42uq
+3.5d
+= scalars:
+42
+3.5
+hello
+name
+true
+== containers:
+[1i 2i 3i]
+[1i (two)#lw /three]
+<</a 1i>>
+{{2i 1i}}
+[[1i] [2i 3i]]
+{1i \add}
+== composites:
+/ok 42i
+/some [1i 2i]
+--record {/x: 1i /y: 2i}--
+--curry 5i {\add}--
+--thunk(unevaluated)--
+== operator:
+--\add--
+== depth limit:
+[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]
+== cycle:
+[--cycle--]
+stack 3 values:
+three
+two
+1
+print-stack 3 values:
+/three
+(two)#lw
+1i
+stack empty:
+done

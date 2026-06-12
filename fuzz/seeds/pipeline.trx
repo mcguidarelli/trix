@@ -1,0 +1,1 @@
+[ 1 2 ] { 1 add } pipe-map 4 pipe-collect ==

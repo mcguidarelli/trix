@@ -1,0 +1,88 @@
+% ====================================================================
+% golden/print_ops.trx -- exact-stdout coverage for the print family:
+% = (simple form), == (recursive syntactic form), stack, print-stack.
+%
+% Run by tests/run_golden_tests.sh, which diffs stdout against
+% golden/print_ops.expected byte-for-byte.  rt-ok asserts are useless
+% here (the OUTPUT is the assertion), so every line printed by this
+% file must be deterministic: no offsets, no live handles, no clock.
+% ====================================================================
+
+% --- scalars in == (syntactic) form, every numeric width -------------
+(== scalars:) =
+42 ==
+42u ==
+42l ==
+42ul ==
+42q ==
+42uq ==
+42b ==
+5a ==
+3.5 ==
+3.5d ==
+true ==
+false ==
+null ==
+(hello) ==
+/name ==
+mark ==
+
+% --- ExtValue / WideValue operands built in the GLOBAL region --------
+% (printing is region-independent; this pins that the syntactic form
+% does not leak region or storage detail)
+(== global-region scalars:) =
+true set-global
+42l ==
+42uq ==
+3.5d ==
+false set-global
+
+% --- = (simple) form for contrast ------------------------------------
+(= scalars:) =
+42 =
+3.5 =
+(hello) =
+/name =
+true =
+
+% --- containers in == form -------------------------------------------
+(== containers:) =
+[1 2 3] ==
+[1 (two) /three] ==
+<< /a 1 >> ==
+{{ 1 2 }} ==
+[ [1] [2 3] ] ==
+{ 1 add } ==
+
+% --- tagged / record / curry / thunk ----------------------------------
+(== composites:) =
+42 /ok tag ==
+[1 2] /some tag ==
+1 2 [ /x /y ] record ==
+5 { add } curry ==
+{ 1 2 add } thunk ==
+
+% --- operator object ---------------------------------------------------
+(== operator:) =
+//add ==
+
+% --- depth limit: 17 nested arrays print ... at depth 16 ---------------
+(== depth limit:) =
+[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]] ==
+
+% --- cycle detection ----------------------------------------------------
+(== cycle:) =
+[ null ] dup dup 0 exch put ==
+
+% --- stack / print-stack ------------------------------------------------
+(stack 3 values:) =
+1 (two) /three
+stack
+() =
+(print-stack 3 values:) =
+print-stack
+clear
+(stack empty:) =
+stack
+print-stack
+(done) =

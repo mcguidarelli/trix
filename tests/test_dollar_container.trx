@@ -1,0 +1,393 @@
+% ====================================================================
+% test_dollar_container.trx -- <lit>#$ container suffixes
+% ====================================================================
+% (str)#$    string bytes allocate in global VM
+% [arr]#$    array storage in global VM
+% <<dict>>#$ dict struct in global VM
+% {{set}}#$  set struct in global VM
+% {proc}#$   procedure storage (packed bytes or Array) in global VM
+%
+% Container-only semantics: the container's own storage goes to global,
+% body items keep whatever VM they had at scan time.  For full body
+% globalisation, write `${ <lit> }`.
+%
+% #$ and #= are mutually exclusive (different storage classes); both
+% present is /syntax-error.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% scan-all: str -- ; runs `token` in a loop until end-of-string.  Any
+% scanner-time error during a token call propagates out of the loop.
+% On success, token leaves `substring value true` -- drop value, loop
+% with substring.  On end-of-stream, token leaves `false` -- exit.
+/scan-all {
+    {
+        token { pop } { exit } if-else
+    } loop
+} def
+
+% ====================================================================
+% SECTION 1: <<dict>>#$ survives restore
+% ====================================================================
+% Build a dict via <<>>#$.  Its struct lives in global VM, so the dict
+% Object value remains valid past a restore that would have reclaimed
+% a normal <<>> dict.
+
+save /sv1 exch def
+$/dc-key1 pop                                   % global Name to key by
+<< $/dc-key1 100 >>#$ /dc-d1 exch def           % global dict (key is global, struct global)
+dc-d1 $/dc-key1 get 100 eq                  (dc1: pre-restore $/dc-key1=100) rt-ok
+sv1 restore
+
+% After restore, dc-d1 (interned at sl=1) is gone, but the GLOBAL dict
+% it pointed to still exists.  Re-bind via a fresh dict variable.
+$/dc-key1 pop
+<< $/dc-key1 200 >>#$ /dc-d1b exch def
+dc-d1b $/dc-key1 get 200 eq                 (dc1: post-restore fresh dict works) rt-ok
+
+% ====================================================================
+% SECTION 2: contrast -- same body without #$ vanishes (struct-local)
+% ====================================================================
+
+save /sv2 exch def
+$/dc-key2 pop
+<< $/dc-key2 999 >> /dc-d2 exch def             % no #$ -- dict struct local
+dc-d2 $/dc-key2 get 999 eq                  (dc2: pre-restore plain dict) rt-ok
+sv2 restore
+
+% The plain dict's STRUCT was at sl=1; restore reclaimed it.  /dc-d2
+% became invalid.  We can't safely deref it post-restore -- but we can
+% verify that a fresh #$ equivalent persists where the plain one didn't.
+$/dc-key2 pop
+<< $/dc-key2 999 >>#$ /dc-d2g exch def
+save /sv2b exch def
+sv2b restore
+dc-d2g $/dc-key2 get 999 eq                 (dc2: #$ dict survives restore) rt-ok
+
+% ====================================================================
+% SECTION 3: [arr]#$
+% ====================================================================
+
+save /sv3 exch def
+[ 10 20 30 ]#$ /dc-a3 exch def
+dc-a3 length 3 eq                           (dc3: arr length 3) rt-ok
+dc-a3 0 get 10 eq                           (dc3: arr[0]=10) rt-ok
+dc-a3 2 get 30 eq                           (dc3: arr[2]=30) rt-ok
+sv3 restore
+
+% Storage was global -- a fresh global array post-restore should work
+% identically (and the elements aren't ExtValues, so no reclaim issues).
+[ 11 22 33 ]#$ /dc-a3b exch def
+dc-a3b 1 get 22 eq                          (dc3: post-restore #$ arr works) rt-ok
+
+% ====================================================================
+% SECTION 4: {{set}}#$
+% ====================================================================
+
+save /sv4 exch def
+{{ $/dc-red $/dc-green $/dc-blue }}#$ /dc-s4 exch def
+dc-s4 length 3 eq                           (dc4: set length 3) rt-ok
+dc-s4 $/dc-red set-member? true eq             (dc4: red in set) rt-ok
+dc-s4 $/dc-green set-member? true eq           (dc4: green in set) rt-ok
+dc-s4 $/dc-blue set-member? true eq            (dc4: blue in set) rt-ok
+sv4 restore
+
+{{ $/dc-red $/dc-green }}#$ /dc-s4b exch def
+dc-s4b $/dc-red set-member? true eq            (dc4: post-restore #$ set works) rt-ok
+
+% ====================================================================
+% SECTION 5: (str)#$
+% ====================================================================
+
+save /sv5 exch def
+(hello, world)#$ /dc-str5 exch def
+dc-str5 length 12 eq                        (dc5: str length 12) rt-ok
+dc-str5 (hello, world) eq true eq           (dc5: str equals literal) rt-ok
+sv5 restore
+
+(persistent string)#$ /dc-str5b exch def
+dc-str5b length 17 eq                       (dc5: post-restore #$ str works) rt-ok
+dc-str5b (persistent string) eq true eq     (dc5: post-restore str equals) rt-ok
+
+% Empty string with #$: edge case
+save /sv5e exch def
+()#$ /dc-empty exch def
+dc-empty length 0 eq                        (dc5: empty #$ str length 0) rt-ok
+sv5e restore
+
+% ====================================================================
+% SECTION 6: #r and #w combine with #$
+% ====================================================================
+
+[ 1 2 3 ]#$r /dc-ro-arr exch def
+dc-ro-arr length 3 eq                       (dc6: #$r array length) rt-ok
+% Read-only access: writing should fail
+mark { dc-ro-arr 0 99 put } try /read-only eq (dc6: #$r is read-only) rt-ok clear
+
+[ 1 2 3 ]#$w /dc-rw-arr exch def
+dc-rw-arr 0 99 put
+dc-rw-arr 0 get 99 eq                       (dc6: #$w arr writable) rt-ok
+
+% ====================================================================
+% SECTION 7: #$ x #= mutual exclusion -- /syntax-error
+% ====================================================================
+
+{ <([ 1 2 3 ]#$=)> scan-all } try /syntax-error eq <(dc7: [arr]#$= raises syntax-error)> rt-ok clear
+{ <([ 1 2 3 ]#=$)> scan-all } try /syntax-error eq <(dc7: [arr]#=$ raises syntax-error)> rt-ok clear
+{ <(<< /a 1 >>#$=)> scan-all } try /syntax-error eq <(dc7: <<dict>>#$= raises syntax-error)> rt-ok clear
+{ <(<< /a 1 >>#=$)> scan-all } try /syntax-error eq <(dc7: <<dict>>#=$ raises syntax-error)> rt-ok clear
+{ <({{ /a /b }}#$=)> scan-all } try /syntax-error eq <(dc7: {{set}}#$= raises syntax-error)> rt-ok clear
+{ <({{ /a /b }}#=$)> scan-all } try /syntax-error eq <(dc7: {{set}}#=$ raises syntax-error)> rt-ok clear
+{ <((hi)#$=)> scan-all } try /syntax-error eq <(dc7: (str)#$= raises syntax-error)> rt-ok clear
+{ <((hi)#=$)> scan-all } try /syntax-error eq <(dc7: (str)#=$ raises syntax-error)> rt-ok clear
+
+% ====================================================================
+% SECTION 8: #$ inside ${...} -- nesting works
+% ====================================================================
+% Inside ${...} the flag is true, but #$ is a per-literal directive
+% that allocates THIS literal's storage in global -- already the
+% effect inside ${...}, so #$ is a redundant-but-harmless explicit.
+
+${
+    [ 1 2 3 ]#$ /dc-nested-arr exch def
+}
+dc-nested-arr 1 get 2 eq                    (dc8: #$ inside ${...} works) rt-ok
+
+% ====================================================================
+% SECTION 9: runtime fallback (executable names in body) rejects #$
+% ====================================================================
+% When a literal inside a proc body contains executable names, the
+% scanner emits a *-from-mark op so the collection is built at runtime
+% with names resolved.  #$ on that path needs parallel global-* ops
+% we haven't built yet -- the scanner raises /syntax-error suggesting
+% ${...} as the workaround.
+%
+% The error fires inside the interpreter's main scanner catch (resets
+% context), so it isn't catchable by `try` here -- verify manually:
+%   $ echo '/foo { [ foo ]#$ } def' | ./trix /dev/stdin
+%   Trix syntax-error 'scanner': ... [#$ not supported when body
+%       contains executable names; wrap in ${...} instead
+
+% ====================================================================
+% SECTION 10: {proc}#$
+% ====================================================================
+% The proc suffix grammar gets a #$ first-slot alongside #=:
+%
+%   #[=|g][a|p][e|l][r|w]
+%
+% Packed procs (default) route through make_packed_data's existing
+% m_curr_alloc_global branch.  Array procs (#a) route through
+% vm_alloc_dispatch_n.  Either form, when tagged #$, allocates in
+% global VM and survives save/restore.
+
+% Functional: a packed #$ proc executes correctly.
+{ 3 4 add }#$ exec 7 eq                      <(dc10: {packed}#$ executes)> rt-ok clear
+
+% Functional: an array #$a proc executes correctly.
+{ 5 6 add }#$a exec 11 eq                    <(dc10: {array}#$a executes)> rt-ok clear
+
+% Combined: #$ + early-binding + read-only.  Bare-name dispatch
+% executes the proc automatically; type query needs `load` to grab
+% the value without running it.
+/dc10-gerproc { 1 add }#$er def
+/dc10-gerproc load type /packed-type eq      (dc10: #$er is packed by default) rt-ok
+10 dc10-gerproc 11 eq                        (dc10: #$er executes) rt-ok clear
+
+% Combined: #$ + array + early-binding + read-only.
+/dc10-gaerproc { 1 add }#$aer def
+/dc10-gaerproc load type /array-type eq      (dc10: #$aer is Array form) rt-ok
+20 dc10-gaerproc 21 eq                       (dc10: #$aer executes) rt-ok clear
+
+% Survival via a global dict.
+${ 4 dict } /dc10-reg exch def
+dc10-reg /helper { 100 200 add }#$ put
+save /dc10-sv exch def
+dc10-sv restore
+dc10-reg /helper get exec 300 eq             <(dc10: {proc}#$ survives via global dict)> rt-ok clear
+
+% Global-VM growth signature: #$ packed proc bumps vm-global-used.
+% (A plain { } proc at SL=0 goes to local VM and doesn't move global.)
+//:status:vm-global-used /dc10-vg0 exch def
+{ 1 2 add }#$ pop
+//:status:vm-global-used /dc10-vg1 exch def
+dc10-vg1 dc10-vg0 sub 0 gt                   <(dc10: {...}#$ grew global VM)> rt-ok clear
+
+% Mutex with #=.
+{ <({ 1 }#$=)>#x exec } try /syntax-error eq <(dc10: {...}#$= rejected)> rt-ok clear
+{ <({ 1 }#=$)>#x exec } try /syntax-error eq <(dc10: {...}#=$ rejected)> rt-ok clear
+
+% ====================================================================
+% SECTION 11: (str)#$$ -- force-local string
+% ====================================================================
+% Inside ${...} the enclosing flag is global, but #$$ routes the
+% literal's bytes back to local VM.  Outside any global scope, #$$
+% is a no-op (strings always commit locally via scratch).
+
+% Happy: outside any global scope, the string is usable.
+(hi-local)#$$ length 8 eq                      <(dc11: (str)#$$ usable outside global)> rt-ok clear
+
+% Happy: inside ${...}, #$$ string is usable; growth is less than #$.
+//:status:vm-global-used /dc11-a exch def
+${ (some-long-string-for-comparison)#$$ pop }
+//:status:vm-global-used /dc11-b exch def
+${ (some-long-string-for-comparison)#$  pop }
+//:status:vm-global-used /dc11-c exch def
+dc11-b dc11-a sub /dc11-cost-local exch def
+dc11-c dc11-b sub /dc11-cost-global exch def
+dc11-cost-global dc11-cost-local gt             <(dc11: (str)#$$ in ${...} costs less global than (str)#$)> rt-ok clear
+
+% Sad: mutex errors.
+{ <((x)#$$=)>#x exec } try /syntax-error eq    <(dc11: (str)#$$= rejected)> rt-ok clear
+{ <((x)#=$$)>#x exec } try /syntax-error eq    <(dc11: (str)#=$$ rejected)> rt-ok clear
+{ <((x)#$$$)>#x exec } try /syntax-error eq    <(dc11: (str)#$$$ rejected)> rt-ok clear
+
+% Stress: 100-iter repeat allocating #$$ strings inside ${...}; budget bounded.
+//:status:vm-global-used /dc11-sx0 exch def
+${ 100 { (x)#$$ pop } repeat }
+//:status:vm-global-used /dc11-sx1 exch def
+dc11-sx1 dc11-sx0 sub 4096 lt                   <(dc11: (str)#$$ x100 in ${...} -- global <4KiB)> rt-ok clear
+
+% ====================================================================
+% SECTION 12: [arr]#$$ -- force-local array
+% ====================================================================
+
+% Happy: outside global scope, plain usable array.
+[ 1 2 3 ]#$$ length 3 eq                        <(dc12: [arr]#$$ usable outside global)> rt-ok clear
+
+% Happy: inside ${...}, #$$ array is usable; growth less than #$.
+//:status:vm-global-used /dc12-a exch def
+${ [ 10 20 30 40 ]#$$ pop }
+//:status:vm-global-used /dc12-b exch def
+${ [ 10 20 30 40 ]#$  pop }
+//:status:vm-global-used /dc12-c exch def
+dc12-c dc12-b sub  dc12-b dc12-a sub  gt        <(dc12: [arr]#$$ in ${...} costs less global than [arr]#$)> rt-ok clear
+
+% Happy: #$$r -- force-local + read-only.
+[ 1 2 3 ]#$$r /dc12-ro exch def
+{ dc12-ro 0 42 put } try /read-only eq          <(dc12: [arr]#$$r is read-only)> rt-ok clear
+
+% Sad: mutex errors.
+{ <([ 1 ]#$$=)>#x exec } try /syntax-error eq  <(dc12: [arr]#$$= rejected)> rt-ok clear
+{ <([ 1 ]#=$$)>#x exec } try /syntax-error eq  <(dc12: [arr]#=$$ rejected)> rt-ok clear
+{ <([ 1 ]#$$$)>#x exec } try /syntax-error eq  <(dc12: [arr]#$$$ rejected)> rt-ok clear
+
+% Stress: 100-iter loop -- bounded growth.
+//:status:vm-global-used /dc12-sx0 exch def
+${ 100 { [ 1 2 3 ]#$$ pop } repeat }
+//:status:vm-global-used /dc12-sx1 exch def
+dc12-sx1 dc12-sx0 sub 4096 lt                   <(dc12: [arr]#$$ x100 -- global <4KiB)> rt-ok clear
+
+% ====================================================================
+% SECTION 13: <<dict>>#$$ -- force-local dict
+% ====================================================================
+
+% Happy: outside global scope, plain usable dict.
+<< /a 1 /b 2 >>#$$ /b get 2 eq                  <(dc13: <<dict>>#$$ usable outside global)> rt-ok clear
+
+% Happy: inside ${...}, #$$ dict growth less than #$.
+//:status:vm-global-used /dc13-a exch def
+${ << /k 99 /q 33 >>#$$ pop }
+//:status:vm-global-used /dc13-b exch def
+${ << /k 99 /q 33 >>#$  pop }
+//:status:vm-global-used /dc13-c exch def
+dc13-c dc13-b sub  dc13-b dc13-a sub  gt        <(dc13: <<dict>>#$$ in ${...} costs less global than #$)> rt-ok clear
+
+% Sad: mutex errors.
+{ <(<< /a 1 >>#$$=)>#x exec } try /syntax-error eq <(dc13: <<dict>>#$$= rejected)> rt-ok clear
+{ <(<< /a 1 >>#=$$)>#x exec } try /syntax-error eq <(dc13: <<dict>>#=$$ rejected)> rt-ok clear
+{ <(<< /a 1 >>#$$$)>#x exec } try /syntax-error eq <(dc13: <<dict>>#$$$ rejected)> rt-ok clear
+
+% Stress: 100-iter loop -- bounded growth.
+//:status:vm-global-used /dc13-sx0 exch def
+${ 100 { << /a 1 >>#$$ pop } repeat }
+//:status:vm-global-used /dc13-sx1 exch def
+dc13-sx1 dc13-sx0 sub 4096 lt                   <(dc13: <<dict>>#$$ x100 -- global <4KiB)> rt-ok clear
+
+% ====================================================================
+% SECTION 14: {{set}}#$$ -- force-local set
+% ====================================================================
+
+% Happy: outside global scope, plain usable set.
+{{ /a /b /c }}#$$ /b set-member? true eq        <(dc14: {{set}}#$$ usable outside global)> rt-ok clear
+
+% Happy: inside ${...}, #$$ set growth less than #$.
+% Use integer members so name-interning overhead doesn't skew the measurement.
+//:status:vm-global-used /dc14-a exch def
+${ {{ 11 22 33 }}#$$ pop }
+//:status:vm-global-used /dc14-b exch def
+${ {{ 11 22 33 }}#$  pop }
+//:status:vm-global-used /dc14-c exch def
+dc14-c dc14-b sub  dc14-b dc14-a sub  gt        <(dc14: {{set}}#$$ in ${...} costs less global than #$)> rt-ok clear
+
+% Sad: mutex errors.
+{ <({{ /a }}#$$=)>#x exec } try /syntax-error eq <(dc14: {{set}}#$$= rejected)> rt-ok clear
+{ <({{ /a }}#=$$)>#x exec } try /syntax-error eq <(dc14: {{set}}#=$$ rejected)> rt-ok clear
+{ <({{ /a }}#$$$)>#x exec } try /syntax-error eq <(dc14: {{set}}#$$$ rejected)> rt-ok clear
+
+% Stress: 100-iter loop -- bounded growth.
+//:status:vm-global-used /dc14-sx0 exch def
+${ 100 { {{ /a /b }}#$$ pop } repeat }
+//:status:vm-global-used /dc14-sx1 exch def
+dc14-sx1 dc14-sx0 sub 4096 lt                   <(dc14: {{set}}#$$ x100 -- global <4KiB)> rt-ok clear
+
+% ====================================================================
+% SECTION 15: {proc}#$$ -- force-local proc
+% ====================================================================
+
+% Happy: outside global scope, packed proc executes.
+{ 3 4 add }#$$ exec 7 eq                        <(dc15: {packed}#$$ executes)> rt-ok clear
+
+% Happy: array form #$$a executes.
+{ 5 6 add }#$$a exec 11 eq                      <(dc15: {array}#$$a executes)> rt-ok clear
+
+% Happy: inside ${...}, #$$ proc growth less than #$.
+//:status:vm-global-used /dc15-a exch def
+${ { 1 2 3 add add }#$$ pop }
+//:status:vm-global-used /dc15-b exch def
+${ { 1 2 3 add add }#$  pop }
+//:status:vm-global-used /dc15-c exch def
+dc15-c dc15-b sub  dc15-b dc15-a sub  gt        <(dc15: {proc}#$$ in ${...} costs less global than #$)> rt-ok clear
+
+% Sad: mutex errors.
+{ <({ 1 }#$$=)>#x exec } try /syntax-error eq  <(dc15: {proc}#$$= rejected)> rt-ok clear
+{ <({ 1 }#=$$)>#x exec } try /syntax-error eq  <(dc15: {proc}#=$$ rejected)> rt-ok clear
+{ <({ 1 }#$$$)>#x exec } try /syntax-error eq  <(dc15: {proc}#$$$ rejected)> rt-ok clear
+
+% Stress: 100-iter loop -- bounded growth.
+//:status:vm-global-used /dc15-sx0 exch def
+${ 100 { { 1 2 add }#$$ pop } repeat }
+//:status:vm-global-used /dc15-sx1 exch def
+dc15-sx1 dc15-sx0 sub 4096 lt                   <(dc15: {proc}#$$ x100 -- global <4KiB)> rt-ok clear
+
+% ====================================================================
+% SECTION 16: combined #$ and #$$ in nested scopes
+% ====================================================================
+% Inside ${...} -- default is global; #$$ opts back to local; #$ is
+% redundant-but-harmless explicit.
+
+% A #$ literal inside ${...} grows global more than the equivalent #$$.
+//:status:vm-global-used /dc16-a exch def
+${ [ 1 2 3 4 5 ]#$$ pop }
+//:status:vm-global-used /dc16-b exch def
+${ [ 1 2 3 4 5 ]#$ pop }
+//:status:vm-global-used /dc16-c exch def
+dc16-c dc16-b sub  dc16-b dc16-a sub  gt        <(dc16: #$$ saves global vs #$ in ${...})> rt-ok clear
+
+% $${...} forces local; an #$ inside it still forces global.
+//:status:vm-global-used /dc16-d exch def
+$${ [ 1 2 3 4 5 ]#$ pop }
+//:status:vm-global-used /dc16-e exch def
+dc16-e dc16-d gt                                <(dc16: [arr]#$ in $${...} forces global)> rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_dollar_container: ALL TESTS PASSED) =
+(__test_ok__) =

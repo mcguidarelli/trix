@@ -1,0 +1,102 @@
+% test_interactive.trx — self-validating interactive stdedit exercise
+% Run: ./ps test_interactive.trx
+%
+% Exercises the readline-based stdedit stream by prompting the user
+% to type specific commands.  Each command self-validates its result.
+% Type each line exactly as shown (copy-paste is fine).
+
+% --- test infrastructure (defined before entering interactive mode) ---
+/test-count 0 def
+/test-pass 0 def
+/expect {
+    /test-msg exch def
+    eq
+    { (  PASS: ) print /test-pass test-pass 1 add def }
+    { (  FAIL: ) print }
+    if-else
+    test-msg =
+    /test-count test-count 1 add def
+} def
+/done {
+    () =
+    (===========================) =
+    test-pass test-count eq
+    { (  ALL TESTS PASSED) = (  Total:) print }
+    { (  *** SOME TESTS FAILED ***) = (  Passed:) print test-pass = (  Total:) print }
+    if-else
+    test-count =
+    (===========================) =
+    quit
+} def
+
+% --- print instructions ---
+() =
+(================================================================) =
+(  Interactive stdedit Test                                     ) =
+(  Type each line exactly as shown, then press Enter.           ) =
+(  Copy-paste is fine.                                          ) =
+(================================================================) =
+() =
+(--- Arithmetic ---) =
+(  1 2 add 3 \(add\) expect) =
+(  10 3 sub 7 \(sub\) expect) =
+(  6 7 mul 42 \(mul\) expect) =
+(  100 4 div 25 \(div\) expect) =
+(  17 5 mod 2 \(mod\) expect) =
+(  -5 abs 5 \(abs\) expect) =
+() =
+(--- Stack manipulation ---) =
+(  1 2 3 count 3 \(count\) expect clear) =
+(  5 dup add 10 \(dup+add\) expect clear) =
+(  1 2 exch 1 \(exch top\) expect clear) =
+(  1 2 3 pop add 3 \(pop\) expect clear) =
+() =
+(--- Strings ---) =
+(  \(hello\) length 5 \(string length\) expect clear) =
+(  \(abc\) \(def\) concat \(abcdef\) eq true \(concat\) expect clear) =
+(  \(HELLO\) lowercase \(hello\) eq true \(lowercase\) expect clear) =
+(  \(hello\) uppercase \(HELLO\) eq true \(uppercase\) expect clear) =
+(  \(  hi  \) trim \(hi\) eq true \(trim\) expect clear) =
+() =
+(--- Booleans and comparison ---) =
+(  3 5 lt true \(less-than\) expect clear) =
+(  5 3 gt true \(greater-than\) expect clear) =
+(  7 7 eq true \(equal\) expect clear) =
+(  true not false \(not\) expect clear) =
+(  true false and false \(and\) expect clear) =
+(  true false or true \(or\) expect clear) =
+() =
+(--- Types ---) =
+(  42 type /integer-type \(integer type\) expect clear) =
+(  3.14 type /real-type \(real type\) expect clear) =
+(  \(hi\) type /string-type \(string type\) expect clear) =
+(  true type /boolean-type \(boolean type\) expect clear) =
+(  [1] type /array-type \(array type\) expect clear) =
+() =
+(--- Arrays and procedures ---) =
+(  [10 20 30] length 3 \(array length\) expect clear) =
+(  [10 20 30] 0 get 10 \(array get\) expect clear) =
+(  [10 20 30] sum 60 \(sum\) expect clear) =
+(  { 2 3 mul } exec 6 \(proc exec\) expect clear) =
+() =
+(--- Variables \(inside save/restore\) ---) =
+(  save /sv exch def /x 99 def x 99 \(def+lookup\) expect sv restore clear) =
+() =
+(--- Floating point ---) =
+(  1.5d 2.0d mul 3.0d \(double mul\) expect clear) =
+(  2.0 sqrt 1.0 sub abs 0.415 lt true \(sqrt\) expect clear) =
+() =
+(--- Error handling ---) =
+(  { 1 0 div } try /div-by-zero \(div-by-zero\) expect clear) =
+(  { [1 2 3] 10 get } try /index-check \(bounds\) expect clear) =
+(  { \(bad\) 42 add } try /type-check \(type-check\) expect clear) =
+() =
+(--- Multi-line input \(tests readline across lines\) ---) =
+(  { 10 20 add } exec 30 \(multi-line proc\) expect clear) =
+() =
+(--- When finished, type: ---) =
+(  done) =
+() =
+
+% enter interactive mode via stdedit
+stdedit make-executable exec

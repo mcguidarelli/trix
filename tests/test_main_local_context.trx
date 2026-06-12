@@ -1,0 +1,84 @@
+% ====================================================================
+% test_main_local_context.trx -- main coroutine context in local VM
+% ====================================================================
+% Post 2026-05-09 main-context-local optimisation.  The very first
+% coroutine_alloc_context call (init.inl, when m_main_context ==
+% nulloffset) routes to vm_alloc instead of gvm_alloc.  Subsequent
+% coroutine spawns still allocate globally.
+%
+% Two invariants:
+%   1. Programs that never do a user gvm_alloc (no ${...}, no #$) have
+%      vm-global-used == 0 throughout -- the lazy GC scratch is also
+%      never allocated.
+%   2. Main coroutine's bindings / mailbox / monitor / supervisor refs
+%      are still walked correctly by vm-global-gc, even though main's
+%      context block is in local VM.  Tested by giving main a global
+%      Tagged message via def-persist + GC + retrieval.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --------------------------------------------------------------------
+% SECTION 1: no-globals program -- vm-global-used stays 0
+% --------------------------------------------------------------------
+% Plain arithmetic, plain dict ops, plain proc calls -- nothing routes
+% through gvm_alloc.  Main is local, scratch is unallocated.
+
+1 2 add 3 eq                                 (1: arithmetic works) rt-ok
+//:status:vm-global-used 0 eq                (1: vm-global-used = 0 -- no globals used) rt-ok
+vm-global-info /total-blocks get 0 eq        (1: total global blocks = 0) rt-ok
+vm-global-info /by-kind get /coroutinecontext get /count get 0 eq
+                                             (1: coroutinecontext count = 0 -- main is local) rt-ok
+vm-global-info /by-kind get /gcscratch get /count get 0 eq
+                                             (1: gcscratch count = 0 -- never triggered) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 2: vm-global-gc on a never-used global region is a no-op
+% --------------------------------------------------------------------
+% Without the lazy scratch, vm-global-gc has no scratch to work with.
+% It must short-circuit cleanly when total_live == 0.
+
+vm-global-gc 0 eq                            (2: gc on empty global heap reclaims 0) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 3: main's bindings stay walked across GC
+% --------------------------------------------------------------------
+% Even with main local, main's binding cache + mailbox + etc. must be
+% reachable by the GC walker.  Test: define a global Tagged value on
+% userdict (which lives in main's dict stack), run GC, retrieve it.
+% The Tagged + its payload Name + contents must survive.
+%
+% Pre-intern the tag name at BASE so it doesn't get globally-interned
+% during the ${...}-Tagged construction path.
+
+/sample null def
+/payload null def
+
+${ 42 /sample tag } /tagged-val exch def
+
+vm-global-gc pop                             % full sweep + scratch reclaim cycle
+
+tagged-val tag-name /sample eq               (3: tag-name survives GC) rt-ok
+tagged-val tag-value 42 eq                   (3: tag-value survives GC) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 4: scratch lifecycle when section 3's globals get cleaned up
+% --------------------------------------------------------------------
+
+userdict /tagged-val undef
+vm-global-gc pop
+vm-global-info /by-kind get /gcscratch get /count get 0 eq
+                                             (4: scratch freed when last user block released) rt-ok
+//:status:vm-global-used 0 eq                (4: vm-global-used back to 0) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_main_local_context: ALL TESTS PASSED) =
+(__test_ok__) =

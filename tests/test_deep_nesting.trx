@@ -1,0 +1,248 @@
+% ====================================================================
+% test_deep_nesting.trx -- deep nesting, recursion limits, stack depth
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Deep dictionary nesting (begin/end)
+% ====================================================================
+
+% Nest 20 dicts deep, define in innermost, verify after unwinding
+0
+20 {
+  1 dict begin
+  1 add
+} repeat
+
+/depth exch def
+//depth 20 eq  (deep-dict: 20 levels deep) rt-ok clear
+
+% Now end all 20
+20 { end } repeat
+
+% ====================================================================
+% SECTION 2: Deep for loop nesting
+% ====================================================================
+
+% 10 nested for loops, each 1..2 -> 2^10 = 1024 iterations
+/counter 0 def
+1 1 2 { pop
+  1 1 2 { pop
+    1 1 2 { pop
+      1 1 2 { pop
+        1 1 2 { pop
+          1 1 2 { pop
+            1 1 2 { pop
+              1 1 2 { pop
+                1 1 2 { pop
+                  1 1 2 { pop
+                    /counter counter 1 add def
+                  } for
+                } for
+              } for
+            } for
+          } for
+        } for
+      } for
+    } for
+  } for
+} for
+counter 1024 eq  (deep-for: 10 nested loops = 1024) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Deep if-else nesting
+% ====================================================================
+
+% 20 nested if-else, each taking the true branch
+true {
+  true {
+    true {
+      true {
+        true {
+          true {
+            true {
+              true {
+                true {
+                  true {
+                    true {
+                      true {
+                        true {
+                          true {
+                            true {
+                              true {
+                                true {
+                                  true {
+                                    true {
+                                      true {
+                                        42
+                                      } { 0 } if-else
+                                    } { 0 } if-else
+                                  } { 0 } if-else
+                                } { 0 } if-else
+                              } { 0 } if-else
+                            } { 0 } if-else
+                          } { 0 } if-else
+                        } { 0 } if-else
+                      } { 0 } if-else
+                    } { 0 } if-else
+                  } { 0 } if-else
+                } { 0 } if-else
+              } { 0 } if-else
+            } { 0 } if-else
+          } { 0 } if-else
+        } { 0 } if-else
+      } { 0 } if-else
+    } { 0 } if-else
+  } { 0 } if-else
+} { 0 } if-else
+42 eq  (deep-if: 20 nested if-else = 42) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Deep try-catch nesting
+% ====================================================================
+
+% Nested try: innermost try catches the error
+{ /range-check throw } try
+/range-check eq  (deep-try: innermost catch) rt-ok clear
+
+% Two-level: inner try catches, outer sees no-error
+{ { /range-check throw } try } try
+/no-error eq  (deep-try: outer sees no-error) rt-ok clear
+
+% rethrow propagates error from inner to outer
+{ { /range-check throw } try rethrow } try
+/range-check eq  (deep-try: rethrow propagates) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Deep save/restore nesting
+% ====================================================================
+
+% 5 nested save/restore pairs (use relative level check)
+//:status:save-level /base-level exch def
+/s1 save def /s2 save def /s3 save def /s4 save def /s5 save def
+//:status:save-level base-level 5 add eq  (deep-save: +5 after saves) rt-ok clear
+s5 restore s4 restore s3 restore s2 restore s1 restore
+//:status:save-level base-level eq  (deep-save: back to base) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Deep array nesting access
+% ====================================================================
+
+% Build array nested 200 deep
+42
+200 { 1 array dup 0 4 -1 roll put } repeat
+/deep-arr exch def
+
+% Verify we can unwrap all 200 levels
+//deep-arr
+200 { 0 get } repeat
+42 eq  (deep-array: 200 levels = 42) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Recursive factorial with tail depth
+% ====================================================================
+
+/factorial {
+  dup 1 le {
+    pop 1
+  } {
+    dup 1 sub factorial mul
+  } if-else
+} def
+
+10 factorial 3628800 eq  (recursive: 10! = 3628800) rt-ok clear
+0 factorial 1 eq         (recursive: 0! = 1) rt-ok clear
+1 factorial 1 eq         (recursive: 1! = 1) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Recursive fibonacci (moderate depth)
+% ====================================================================
+
+/fib {
+  dup 2 lt {
+    % base case: fib(0) = 0, fib(1) = 1
+  } {
+    dup 1 sub fib
+    exch 2 sub fib
+    add
+  } if-else
+} def
+
+0 fib 0 eq    (fib: fib(0) = 0) rt-ok clear
+1 fib 1 eq    (fib: fib(1) = 1) rt-ok clear
+10 fib 55 eq  (fib: fib(10) = 55) rt-ok clear
+15 fib 610 eq (fib: fib(15) = 610) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Deep procedure chain (non-recursive)
+% ====================================================================
+
+% Create 100 procedures that each call the next
+% proc_0 calls proc_1, proc_1 calls proc_2, ..., proc_99 returns 42
+% We simulate this with a single deep call chain via loop
+
+% Build a counter-based chain (tail-recursive, benefits from TCO)
+/chain {
+  dup 0 le {
+    pop 42
+  } {
+    1 sub chain
+  } if-else
+} def
+
+30 chain 42 eq    (deep-chain: 30-deep call chain = 42) rt-ok clear
+1000 chain 42 eq  (deep-chain: 1000-deep via TCO = 42) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Mutual recursion
+% ====================================================================
+
+% is-even and is-odd via mutual recursion
+/is-even-r {
+  dup 0 eq {
+    pop true
+  } {
+    1 sub is-odd-r
+  } if-else
+} def
+
+/is-odd-r {
+  dup 0 eq {
+    pop false
+  } {
+    1 sub is-even-r
+  } if-else
+} def
+
+0 is-even-r true eq   (mutual-rec: 0 is even) rt-ok clear
+1 is-even-r false eq  (mutual-rec: 1 is not even) rt-ok clear
+10 is-even-r true eq  (mutual-rec: 10 is even) rt-ok clear
+15 is-odd-r true eq   (mutual-rec: 15 is odd) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Stack depth measurement
+% ====================================================================
+
+% Push N items, verify count using mark fence
+mark
+100 { 42 } repeat
+count-to-mark 100 eq  (stack-depth: 100 items) rt-ok
+clear-to-mark clear
+
+mark
+500 { 99 } repeat
+count-to-mark 500 eq  (stack-depth: 500 items) rt-ok
+clear-to-mark clear
+
+(Deep nesting tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

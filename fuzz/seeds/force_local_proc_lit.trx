@@ -1,0 +1,8 @@
+{ 1 2 add }#$$ exec pop
+{ 3 4 mul }#$$a exec pop
+{ 5 6 add }#$$er exec pop
+${ { 7 8 add }#$$ exec pop }
+${ { 9 10 add }#$ exec pop }
+{ 11 12 add }#$a exec pop
+{ 13 14 mul }#$er exec pop
+{ 15 16 sub }#$aer exec pop

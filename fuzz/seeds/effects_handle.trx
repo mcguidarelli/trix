@@ -1,0 +1,2 @@
+<< /ask { pop 42 } >> { /ask perform } handle-effect
+<< >> { 42 } handle-effect

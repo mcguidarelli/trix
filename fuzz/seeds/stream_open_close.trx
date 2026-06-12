@@ -1,0 +1,2 @@
+(/tmp/s.bin) (w) stream /s exch def
+s (hello) write-string s close-stream

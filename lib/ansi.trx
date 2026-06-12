@@ -1,0 +1,197 @@
+% lib/ansi.trx -- ANSI/CSI terminal output helpers for Trix.
+%
+% Companion to lib/keys.trx.  Where keys.trx decodes input,
+% ansi.trx emits the standard CSI / SGR / DEC-private control sequences
+% that the cookbook in docs/terminal-io.md section 4 documents as raw
+% byte strings.
+%
+% All output is routed through a single rebindable stream variable
+% `ansi-out` (default: stdout).  Tests redefine ansi-out to a string-
+% based write stream and assert on captured bytes; production callers
+% leave it pointed at stdout.  Direct stream writes also avoid the
+% extra wrap that `print` performs around stdout.
+%
+% Surface (all helpers consume args as listed and produce no values):
+%
+%   Cursor:
+%     col row move-to                 % move to 1-based row,col
+%     n move-up   / n move-down
+%     n move-left / n move-right
+%     cursor-save / cursor-restore    % DEC ESC 7 / ESC 8
+%     cursor-hide / cursor-show
+%
+%   Erase:
+%     clear-screen / clear-line
+%     clear-to-eol / clear-to-bol
+%
+%   Screen:
+%     alt-screen-enter / alt-screen-leave
+%
+%   SGR attributes:
+%     bold / dim / italic / underline / blink / reverse / strike
+%     reset-attrs
+%
+%   Color (16-palette, N = 0..15):
+%     N fg-16 / N bg-16
+%
+%   Color (256-palette, N = 0..255):
+%     N fg-256 / N bg-256
+%
+%   Color (truecolor):
+%     R G B fg-rgb / R G B bg-rgb
+%     default-fg / default-bg
+%
+%   Composites:
+%     col row str print-at
+%     attr-list proc with-attrs       % attr-list = [ /bold /reverse ] etc.
+%     N proc with-fg                  % 256-color
+%     N proc with-bg                  % 256-color
+%
+% Coordinate convention: rows and columns are 1-based, matching ANSI.
+% Out-of-range color/attr values are not validated; callers feed valid
+% palette indices (0..15 for fg-16/bg-16, 0..255 elsewhere).
+
+% --- Output sink (rebindable for testing / file redirection) ------------------
+
+/ansi-out stdout def
+
+% --- Internals ----------------------------------------------------------------
+
+% str -- ; write a literal CSI string to ansi-out.
+/_emit {
+    ansi-out exch write-string
+} def
+
+% n ch -- ; emit "ESC [ <n> <ch>" -- used by directional cursor moves.
+/_emit-csi-letter {
+    ansi-out (\e[{0}{1:c}) mark 5 -2 roll fprint-fmt pop pop
+} def
+
+% n -- ; emit "ESC [ <n> m" -- used by SGR codes that take one parameter.
+/_emit-sgr1 {
+    ansi-out (\e[{0}m) mark 4 -1 roll fprint-fmt pop pop
+} def
+
+% --- SGR attribute name -> escape sequence (used by with-attrs) ---------------
+
+/_attr-bytes <<
+    /bold       (\e[1m)
+    /dim        (\e[2m)
+    /italic     (\e[3m)
+    /underline  (\e[4m)
+    /blink      (\e[5m)
+    /reverse    (\e[7m)
+    /strike     (\e[9m)
+>> def
+/_attr-bytes _attr-bytes make-readonly def
+
+% --- Cursor positioning -------------------------------------------------------
+
+% col row move-to -- ; ESC [ <row> ; <col> H (1-based both).
+/move-to {
+    exch
+    ansi-out (\e[{0};{1}H) mark 5 -2 roll fprint-fmt pop pop
+} def
+
+/move-up    { 65 _emit-csi-letter } def    % 'A'
+/move-down  { 66 _emit-csi-letter } def    % 'B'
+/move-right { 67 _emit-csi-letter } def    % 'C'
+/move-left  { 68 _emit-csi-letter } def    % 'D'
+
+/cursor-save    { (\e7) _emit } def        % DEC SCP
+/cursor-restore { (\e8) _emit } def        % DEC RCP
+/cursor-hide    { (\e[?25l) _emit } def
+/cursor-show    { (\e[?25h) _emit } def
+
+% --- Erase --------------------------------------------------------------------
+
+/clear-screen   { (\e[2J\e[H) _emit } def  % erase + home
+/clear-line     { (\e[2K) _emit } def      % entire line
+/clear-to-eol   { (\e[K)  _emit } def      % cursor -> end of line
+/clear-to-bol   { (\e[1K) _emit } def      % start of line -> cursor
+
+% --- Alt-screen buffer --------------------------------------------------------
+
+/alt-screen-enter { (\e[?1049h) _emit } def
+/alt-screen-leave { (\e[?1049l) _emit } def
+
+% --- SGR attributes -----------------------------------------------------------
+
+/bold        { (\e[1m) _emit } def
+/dim         { (\e[2m) _emit } def
+/italic      { (\e[3m) _emit } def
+/underline   { (\e[4m) _emit } def
+/blink       { (\e[5m) _emit } def
+/reverse     { (\e[7m) _emit } def
+/strike      { (\e[9m) _emit } def
+/reset-attrs { (\e[0m) _emit } def
+
+% --- Color (16-palette) -------------------------------------------------------
+
+% 0..7 -> 30..37 (normal); 8..15 -> 90..97 (bright).
+/fg-16 {
+    dup 8 lt { 30 add } { 82 add } if-else
+    _emit-sgr1
+} def
+
+% 0..7 -> 40..47 (normal); 8..15 -> 100..107 (bright).
+/bg-16 {
+    dup 8 lt { 40 add } { 92 add } if-else
+    _emit-sgr1
+} def
+
+% --- Color (256-palette) ------------------------------------------------------
+
+/fg-256 {
+    ansi-out (\e[38;5;{0}m) mark 4 -1 roll fprint-fmt pop pop
+} def
+
+/bg-256 {
+    ansi-out (\e[48;5;{0}m) mark 4 -1 roll fprint-fmt pop pop
+} def
+
+% --- Color (truecolor) --------------------------------------------------------
+
+/fg-rgb {
+    ansi-out (\e[38;2;{0};{1};{2}m) mark 6 -3 roll fprint-fmt pop pop
+} def
+
+/bg-rgb {
+    ansi-out (\e[48;2;{0};{1};{2}m) mark 6 -3 roll fprint-fmt pop pop
+} def
+
+/default-fg { (\e[39m) _emit } def
+/default-bg { (\e[49m) _emit } def
+
+% --- Composite helpers --------------------------------------------------------
+
+% col row str print-at -- ; move-to then write str.
+/print-at {
+    3 1 roll                                    % str col row
+    move-to                                     % str
+    _emit
+} def
+
+% attr-list proc with-attrs --
+% attr-list is an array of attr names (e.g. [ /bold /reverse ]).
+% Apply each attr, run proc, then reset all attrs.
+/with-attrs {
+    exch                                        % proc attrs
+    { _attr-bytes exch get _emit } for-all      % proc
+    exec
+    reset-attrs
+} def
+
+% N proc with-fg -- ; 256-color foreground for the duration of proc.
+/with-fg {
+    exch fg-256
+    exec
+    default-fg
+} def
+
+% N proc with-bg -- ; 256-color background for the duration of proc.
+/with-bg {
+    exch bg-256
+    exec
+    default-bg
+} def

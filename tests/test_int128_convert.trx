@@ -1,0 +1,245 @@
+% ====================================================================
+% Phase 5 conversion and format tests for Int128 / UInt128.
+%
+% Covers cast (silent truncation on narrowing), coerce (widening only),
+% promote (common-type widening), reinterpret (excluded), PrintFmt
+% (:d / :O / :x / :X / :b / :o), ScanFmt (:d / :x), and to-string /
+% to-number round-trips.  Int128 is excluded from reinterpret per Q14b.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ---------- cast: widening to int128 ----------
+0b /int128-type cast     0q deep-eq  (cast byte 0 -> int128)          rt-ok
+42 /int128-type cast     42q deep-eq (cast integer 42 -> int128)      rt-ok
+-42 /int128-type cast    -42q deep-eq (cast integer -42 -> int128)    rt-ok
+42u /int128-type cast    42q deep-eq (cast uinteger 42 -> int128)     rt-ok
+42l /int128-type cast    42q deep-eq (cast long 42 -> int128)         rt-ok
+42ul /int128-type cast   42q deep-eq (cast ulong 42 -> int128)        rt-ok
+42.5 /int128-type cast   42q deep-eq (cast real 42.5 -> int128 42)    rt-ok
+42.5d /int128-type cast  42q deep-eq (cast double 42.5 -> int128 42)  rt-ok
+
+% ---------- cast: widening to uint128 ----------
+0b /uint128-type cast    0uq deep-eq  (cast byte 0 -> uint128)         rt-ok
+42 /uint128-type cast    42uq deep-eq (cast integer 42 -> uint128)     rt-ok
+42u /uint128-type cast   42uq deep-eq (cast uinteger 42 -> uint128)    rt-ok
+42l /uint128-type cast   42uq deep-eq (cast long 42 -> uint128)        rt-ok
+42ul /uint128-type cast  42uq deep-eq (cast ulong 42 -> uint128)       rt-ok
+42.5 /uint128-type cast  42uq deep-eq (cast real 42.5 -> uint128 42)   rt-ok
+
+% ---------- cast: narrowing from int128 ----------
+42q /byte-type cast      42b deep-eq  (cast int128 42 -> byte)         rt-ok
+256q /byte-type cast     0b deep-eq   (cast int128 256 -> byte 0)      rt-ok
+42q /integer-type cast   42 deep-eq   (cast int128 42 -> integer)      rt-ok
+-42q /integer-type cast  -42 deep-eq  (cast int128 -42 -> integer)     rt-ok
+42q /uinteger-type cast  42u deep-eq  (cast int128 42 -> uinteger)     rt-ok
+42q /long-type cast      42l deep-eq  (cast int128 42 -> long)         rt-ok
+-42q /long-type cast     -42l deep-eq (cast int128 -42 -> long)        rt-ok
+42q /ulong-type cast     42ul deep-eq (cast int128 42 -> ulong)        rt-ok
+42q /real-type cast      42.0 deep-eq (cast int128 42 -> real)         rt-ok
+42q /double-type cast    42.0d deep-eq (cast int128 42 -> double)      rt-ok
+42q /uint128-type cast   42uq deep-eq (cast int128 -> uint128)         rt-ok
+
+% ---------- cast: narrowing from uint128 ----------
+42uq /byte-type cast     42b deep-eq  (cast uint128 42 -> byte)        rt-ok
+300uq /byte-type cast    44b deep-eq  (cast uint128 300 -> byte 44)    rt-ok
+42uq /integer-type cast  42 deep-eq   (cast uint128 42 -> integer)     rt-ok
+42uq /uinteger-type cast 42u deep-eq  (cast uint128 42 -> uinteger)    rt-ok
+42uq /long-type cast     42l deep-eq  (cast uint128 42 -> long)        rt-ok
+42uq /ulong-type cast    42ul deep-eq (cast uint128 42 -> ulong)       rt-ok
+42uq /real-type cast     42.0 deep-eq (cast uint128 42 -> real)        rt-ok
+42uq /double-type cast   42.0d deep-eq (cast uint128 42 -> double)     rt-ok
+42uq /int128-type cast   42q deep-eq  (cast uint128 -> int128)         rt-ok
+
+% ---------- cast: boolean both ways ----------
+0q /boolean-type cast      false eq (cast 0q -> false)                 rt-ok
+1q /boolean-type cast      true eq  (cast 1q -> true)                  rt-ok
+-1q /boolean-type cast     true eq  (cast -1q -> true nonzero)         rt-ok
+0uq /boolean-type cast     false eq (cast 0uq -> false)                rt-ok
+42uq /boolean-type cast    true eq  (cast 42uq -> true)                rt-ok
+true /int128-type cast     1q deep-eq (cast true -> 1q)                rt-ok
+false /uint128-type cast   0uq deep-eq (cast false -> 0uq)             rt-ok
+
+% ---------- coerce: valid widening paths ----------
+[1 2 3] /int128-type coerce  [1q 2q 3q] deep-eq  (coerce int -> int128)      rt-ok
+[1u 2u 3u] /uint128-type coerce [1uq 2uq 3uq] deep-eq (coerce uint -> uint128) rt-ok
+[1l 2l 3l] /int128-type coerce [1q 2q 3q] deep-eq (coerce long -> int128)    rt-ok
+[1ul 2ul] /uint128-type coerce [1uq 2uq] deep-eq (coerce ulong -> uint128)   rt-ok
+[1b 2b] /int128-type coerce  [1q 2q] deep-eq     (coerce byte -> int128)      rt-ok
+[1b 2b] /uint128-type coerce [1uq 2uq] deep-eq   (coerce byte -> uint128)     rt-ok
+
+% int128 -> double is the only allowed widening from 128-bit
+[1q 2q] /double-type coerce  [1.0d 2.0d] deep-eq (coerce int128 -> double)   rt-ok
+[1uq 2uq] /double-type coerce [1.0d 2.0d] deep-eq (coerce uint128 -> double) rt-ok
+
+% ---------- coerce: rejected narrowings (128-bit sourced) ----------
+[1q 2q] /integer-type { /integer-type coerce } try /type-check eq
+(coerce int128 -> integer rejected) rt-ok clear
+[1q 2q] /long-type { /long-type coerce } try /type-check eq
+(coerce int128 -> long rejected) rt-ok clear
+[1uq 2uq] /ulong-type { /ulong-type coerce } try /type-check eq
+(coerce uint128 -> ulong rejected) rt-ok clear
+[1q] /uint128-type { /uint128-type coerce } try /type-check eq
+(coerce int128 -> uint128 rejected: signed-to-unsigned) rt-ok clear
+[1uq] /int128-type { /int128-type coerce } try /type-check eq
+(coerce uint128 -> int128 rejected: unsigned-to-signed) rt-ok clear
+
+% Integer -> UInt128 rejected (sign mismatch per Q14a)
+[1 2] /uint128-type { /uint128-type coerce } try /type-check eq
+(coerce integer -> uint128 rejected: sign mismatch) rt-ok clear
+
+% Long -> UInt128 rejected (sign mismatch per Q14a)
+[1l 2l] /uint128-type { /uint128-type coerce } try /type-check eq
+(coerce long -> uint128 rejected: sign mismatch) rt-ok clear
+
+% ---------- promote: dominance rules ----------
+% Int128 dominates all 64-bit-and-smaller integer types
+42 42q promote type /int128-type eq (promote int + int128 -> int128) rt-ok
+42l 42q promote type /int128-type eq (promote long + int128 -> int128) rt-ok
+42b 42q promote type /int128-type eq (promote byte + int128 -> int128) rt-ok
+
+% UInt128 dominates matching-sign smaller types
+42u 42uq promote type /uint128-type eq (promote uint + uint128 -> uint128) rt-ok
+42ul 42uq promote type /uint128-type eq (promote ulong + uint128 -> uint128) rt-ok
+
+% Int128 + UInt128 -> UInt128 (sign-loss, matches ULong+Long rule)
+42q 42uq promote type /uint128-type eq (promote int128 + uint128 -> uint128) rt-ok
+
+% UInt128 + Integer -> Int128 (pick type representing both; mirrors UInteger+Integer)
+42 42uq promote type /int128-type eq (promote integer + uint128 -> int128) rt-ok
+
+% 128-bit + Real -> Double (Real can't represent 128-bit; matches Long+Real rule)
+42.0 42q promote type /double-type eq (promote real + int128 -> double) rt-ok
+42.0 42uq promote type /double-type eq (promote real + uint128 -> double) rt-ok
+
+% Double dominates always
+42.0d 42q promote type /double-type eq (promote double + int128 -> double) rt-ok
+
+% ---------- reinterpret: rejected across width boundaries (Q14b) ----------
+42q { /long-type reinterpret } try /type-check eq
+(reinterpret int128 -> long rejected) rt-ok clear
+42l { /int128-type reinterpret } try /type-check eq
+(reinterpret long -> int128 rejected) rt-ok clear
+42uq { /ulong-type reinterpret } try /type-check eq
+(reinterpret uint128 -> ulong rejected) rt-ok clear
+
+% ---------- reinterpret: Int128 <-> UInt128 works (same 16-byte layout) ----------
+% Both are WideValues; reinterpret is just a type-tag flip, preserving the bits.
+42q /uint128-type reinterpret 42uq eq
+(reinterpret int128 -> uint128 ok) rt-ok clear
+42uq /int128-type reinterpret 42q eq
+(reinterpret uint128 -> int128 ok) rt-ok clear
+
+% ---------- PrintFmt :d decimal ----------
+% sprint-fmt signature: dst-str fmt-str mark arg1 ... :- str bool
+=string ({:d}) mark 42q sprint-fmt pop (42) deep-eq      (printfmt int128 42 :d)    rt-ok
+=string ({:d}) mark -42q sprint-fmt pop (-42) deep-eq    (printfmt int128 -42 :d)   rt-ok
+=string ({:d}) mark 42uq sprint-fmt pop (42) deep-eq     (printfmt uint128 42 :d)   rt-ok
+% INT128_MAX = 2^127 - 1
+=string ({:d}) mark 16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q sprint-fmt pop
+(170141183460469231731687303715884105727) deep-eq (printfmt int128 max :d) rt-ok
+% UINT128_MAX = 2^128 - 1
+=string ({:d}) mark 16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq sprint-fmt pop
+(340282366920938463463374607431768211455) deep-eq (printfmt uint128 max :d) rt-ok
+
+% ---------- PrintFmt :O suffixed form ----------
+=string ({:O}) mark 42q sprint-fmt pop (42q) deep-eq   (printfmt int128 :O suffix)    rt-ok
+=string ({:O}) mark 42uq sprint-fmt pop (42uq) deep-eq (printfmt uint128 :O suffix)   rt-ok
+
+% ---------- PrintFmt :d with radix precision ----------
+=string ({:.16d}) mark 255q sprint-fmt pop (16#ff) deep-eq  (printfmt int128 radix 16) rt-ok
+=string ({:.2d}) mark 10q sprint-fmt pop (2#1010) deep-eq   (printfmt int128 radix 2)  rt-ok
+=string ({:.16O}) mark 255q sprint-fmt pop (16#ff#q) deep-eq (printfmt int128 radix+suffix) rt-ok
+=string ({:.16O}) mark 255uq sprint-fmt pop (16#ff#uq) deep-eq (printfmt uint128 radix+suffix) rt-ok
+
+% ---------- PrintFmt :x / :X / :b / :o bare ----------
+=string ({:x}) mark 255q sprint-fmt pop (ff) deep-eq     (printfmt int128 :x)   rt-ok
+=string ({:X}) mark 255q sprint-fmt pop (FF) deep-eq     (printfmt int128 :X)   rt-ok
+=string ({:b}) mark 10q sprint-fmt pop (1010) deep-eq    (printfmt int128 :b)   rt-ok
+=string ({:o}) mark 83q sprint-fmt pop (123) deep-eq     (printfmt int128 :o)   rt-ok
+=string ({:#x}) mark 255uq sprint-fmt pop (0xff) deep-eq (printfmt uint128 #-x) rt-ok
+=string ({:#b}) mark 10uq sprint-fmt pop (0b1010) deep-eq (printfmt uint128 #-b) rt-ok
+
+% negative bare-hex: sign floats outside the digits (scanner-compatible)
+=string ({:x}) mark -255q sprint-fmt pop (-ff) deep-eq   (printfmt int128 -255 :x)   rt-ok
+=string ({:#x}) mark -255q sprint-fmt pop (0x-ff) deep-eq (printfmt int128 -255 #-x) rt-ok
+
+% ---------- PrintFmt :c rejected (not meaningful for 128-bit) ----------
+% (Int128 literal placed outside the try-block because {} procedure packing
+% raises TypeCheck for 128-bit values.)
+/val128 42q def
+{ =string ({:c}) mark val128 sprint-fmt } try /invalid-format-string eq
+(printfmt int128 :c rejected) rt-ok clear
+
+% ---------- ScanFmt :d decimal ----------
+(42) ({:d}) mark 0q sscan-fmt pop 42q deep-eq    (scanfmt int128 42 :d)       rt-ok
+(-42) ({:d}) mark 0q sscan-fmt pop -42q deep-eq  (scanfmt int128 -42 :d)      rt-ok
+(42) ({:d}) mark 0uq sscan-fmt pop 42uq deep-eq  (scanfmt uint128 42 :d)      rt-ok
+(170141183460469231731687303715884105727) ({:d}) mark 0q sscan-fmt pop
+16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q deep-eq (scanfmt int128 max :d) rt-ok
+(340282366920938463463374607431768211455) ({:d}) mark 0uq sscan-fmt pop
+16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq deep-eq (scanfmt uint128 max :d) rt-ok
+
+% ---------- ScanFmt :x hexadecimal ----------
+(ff) ({:x}) mark 0q sscan-fmt pop 255q deep-eq   (scanfmt int128 ff :x)       rt-ok
+(FF) ({:x}) mark 0uq sscan-fmt pop 255uq deep-eq (scanfmt uint128 FF :x)      rt-ok
+(0xff) ({:x}) mark 0uq sscan-fmt pop 255uq deep-eq (scanfmt uint128 0xff :x)  rt-ok
+
+% ---------- Round-trip: print :O -> to-number preserves type ----------
+% Default to-string emits bare decimal without suffix (matches Long/ULong
+% behavior); :O emits the suffix so to-number recovers the exact type.
+=string ({:O}) mark 42q sprint-fmt pop to-number 42q deep-eq
+(int128 :O -> to-number round-trip) rt-ok
+=string ({:O}) mark 42uq sprint-fmt pop to-number 42uq deep-eq
+(uint128 :O -> to-number round-trip) rt-ok
+=string ({:O}) mark -42q sprint-fmt pop to-number -42q deep-eq
+(int128 -42 :O -> to-number round-trip) rt-ok
+=string ({:.16O}) mark 16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q sprint-fmt pop to-number
+16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q deep-eq
+(int128 max :.16O -> to-number round-trip) rt-ok
+=string ({:.16O}) mark 16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq sprint-fmt pop to-number
+16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq deep-eq
+(uint128 max :.16O -> to-number round-trip) rt-ok
+
+% ---------- WideValue heap accounting across conversion churn ----------
+/before //:status:widevalue-active def
+/s save def
+
+42 /int128-type cast pop
+//:status:widevalue-active before eq
+(cast int -> int128 reclaims widevalue on pop) rt-ok
+
+42q 42l promote pop pop
+//:status:widevalue-active before eq
+(promote int128 + long reclaims all widevalues) rt-ok
+
+% Array elements (Int128 objects) live in VM memory, so `pop` of the array
+% does not free the widevalues -- only `restore` does.  Verify they're still
+% live (count greater than baseline).
+[1 2 3] /int128-type coerce pop
+//:status:widevalue-active before gt
+(coerce int128-array elements persist after pop) rt-ok
+
+s restore
+//:status:widevalue-active before eq
+(restore returns to baseline)                   rt-ok
+
+% ---------- free-list integrity ----------
+//:status:widevalue-validate
+(widevalue free-list integrity OK)          rt-ok
+//:status:vm-validate
+(vm heap integrity OK)                      rt-ok
+//:status:extvalue-validate
+(extvalue free-list integrity OK)           rt-ok
+
+(test_int128_convert.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

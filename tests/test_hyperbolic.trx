@@ -1,0 +1,181 @@
+% ====================================================================
+% test_hyperbolic.trx -- tests for hyperbolic, gamma, and erfc ops
+% ====================================================================
+% sinh, cosh, tanh, asinh, acosh, atanh, tgamma, erfc, erf
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% helper: approximate equality for floats
+% usage: val expected tolerance approx-eq -> bool
+/approx-eq {
+  3 1 roll   % tol val expected
+  sub abs    % tol |val - expected|
+  ge         % tol >= |val - expected|
+} def
+
+% ====================================================================
+% SECTION 1: sinh
+% ====================================================================
+
+0.0 sinh 0.0 eq                    (sinh: 0.0 -> 0.0) rt-ok clear
+1.0 sinh 1.1752 0.001 approx-eq   (sinh: 1.0 ~ 1.1752) rt-ok clear
+-1.0 sinh -1.1752 0.001 approx-eq (sinh: -1.0 ~ -1.1752) rt-ok clear
+
+% double variants
+0.0d sinh 0.0d eq                  (sinh: 0.0d -> 0.0d) rt-ok clear
+1.0d sinh 1.1752d 0.001d approx-eq (sinh: 1.0d ~ 1.1752d) rt-ok clear
+
+% type check
+{ 1 sinh } try /type-check eq     (sinh: int type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 2: cosh
+% ====================================================================
+
+0.0 cosh 1.0 eq                    (cosh: 0.0 -> 1.0) rt-ok clear
+1.0 cosh 1.5431 0.001 approx-eq   (cosh: 1.0 ~ 1.5431) rt-ok clear
+-1.0 cosh 1.5431 0.001 approx-eq  (cosh: -1.0 ~ 1.5431) rt-ok clear
+
+% double variants
+0.0d cosh 1.0d eq                  (cosh: 0.0d -> 1.0d) rt-ok clear
+1.0d cosh 1.5431d 0.001d approx-eq (cosh: 1.0d ~ 1.5431d) rt-ok clear
+
+% type check
+{ 1 cosh } try /type-check eq     (cosh: int type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 3: tanh
+% ====================================================================
+
+0.0 tanh 0.0 eq                    (tanh: 0.0 -> 0.0) rt-ok clear
+1.0 tanh 0.7616 0.001 approx-eq   (tanh: 1.0 ~ 0.7616) rt-ok clear
+-1.0 tanh -0.7616 0.001 approx-eq (tanh: -1.0 ~ -0.7616) rt-ok clear
+
+% double variants
+0.0d tanh 0.0d eq                  (tanh: 0.0d -> 0.0d) rt-ok clear
+1.0d tanh 0.7616d 0.001d approx-eq (tanh: 1.0d ~ 0.7616d) rt-ok clear
+
+% type check
+{ 1 tanh } try /type-check eq     (tanh: int type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 4: asinh
+% ====================================================================
+
+0.0 asinh 0.0 eq                   (asinh: 0.0 -> 0.0) rt-ok clear
+1.0 asinh 0.8814 0.001 approx-eq  (asinh: 1.0 ~ 0.8814) rt-ok clear
+
+% round-trip: asinh(sinh(1.0)) ~ 1.0
+1.0 sinh asinh 1.0 0.001 approx-eq (asinh: round-trip sinh) rt-ok clear
+
+% double variants
+0.0d asinh 0.0d eq                 (asinh: 0.0d -> 0.0d) rt-ok clear
+1.0d asinh 0.8814d 0.001d approx-eq (asinh: 1.0d ~ 0.8814d) rt-ok clear
+
+% ====================================================================
+% SECTION 5: acosh
+% ====================================================================
+
+1.0 acosh 0.0 eq                   (acosh: 1.0 -> 0.0) rt-ok clear
+2.0 acosh 1.3170 0.001 approx-eq  (acosh: 2.0 ~ 1.3170) rt-ok clear
+
+% round-trip: acosh(cosh(1.0)) ~ 1.0
+1.0 cosh acosh 1.0 0.001 approx-eq (acosh: round-trip cosh) rt-ok clear
+
+% double variants
+1.0d acosh 0.0d eq                 (acosh: 1.0d -> 0.0d) rt-ok clear
+2.0d acosh 1.3170d 0.001d approx-eq (acosh: 2.0d ~ 1.3170d) rt-ok clear
+
+% type check
+{ 1 acosh } try /type-check eq    (acosh: int type-check) rt-ok clear
+
+% domain: x < 1 is rejected (libc++ would silently return NaN)
+{ 0.5 acosh } try /range-check eq  (acosh: 0.5 domain reject) rt-ok clear
+{ 0.5d acosh } try /range-check eq (acosh: 0.5d domain reject) rt-ok clear
+
+% ====================================================================
+% SECTION 6: atanh
+% ====================================================================
+
+0.0 atanh 0.0 eq                   (atanh: 0.0 -> 0.0) rt-ok clear
+0.5 atanh 0.5493 0.001 approx-eq  (atanh: 0.5 ~ 0.5493) rt-ok clear
+-0.5 atanh -0.5493 0.001 approx-eq (atanh: -0.5 ~ -0.5493) rt-ok clear
+
+% double variants
+0.0d atanh 0.0d eq                 (atanh: 0.0d -> 0.0d) rt-ok clear
+0.5d atanh 0.5493d 0.001d approx-eq (atanh: 0.5d ~ 0.5493d) rt-ok clear
+
+% domain: |x| >= 1 is rejected (poles at +-1, NaN beyond)
+{ 1.0 atanh } try /range-check eq  (atanh: 1.0 pole reject) rt-ok clear
+{ -1.0 atanh } try /range-check eq (atanh: -1.0 pole reject) rt-ok clear
+{ 2.0 atanh } try /range-check eq  (atanh: 2.0 domain reject) rt-ok clear
+{ 1.0d atanh } try /range-check eq (atanh: 1.0d pole reject) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Hyperbolic identities
+% ====================================================================
+
+% sinh(-x) = -sinh(x)
+2.0 sinh neg  -2.0 sinh 0.001 approx-eq  (identity: sinh(-x) = -sinh(x)) rt-ok clear
+
+% cosh(-x) = cosh(x)
+2.0 cosh  -2.0 cosh 0.001 approx-eq      (identity: cosh(-x) = cosh(x)) rt-ok clear
+
+% cosh^2(x) - sinh^2(x) = 1
+1.5 cosh dup mul  1.5 sinh dup mul  sub  1.0 0.001 approx-eq  (identity: cosh^2 - sinh^2 = 1) rt-ok clear
+
+% tanh(x) = sinh(x) / cosh(x)
+1.0 tanh   1.0 sinh 1.0 cosh div  0.001 approx-eq  (identity: tanh = sinh/cosh) rt-ok clear
+
+% ====================================================================
+% SECTION 8: tgamma
+% ====================================================================
+
+1.0 tgamma 1.0 eq                 (tgamma: 1.0 -> 1.0) rt-ok clear
+2.0 tgamma 1.0 0.001 approx-eq   (tgamma: 2.0 -> 1.0) rt-ok clear
+5.0 tgamma 24.0 0.001 approx-eq  (tgamma: 5.0 -> 24 factorial) rt-ok clear
+0.5 tgamma 1.7725 0.001 approx-eq (tgamma: 0.5 ~ sqrt pi) rt-ok clear
+
+% double variants
+1.0d tgamma 1.0d eq               (tgamma: 1.0d -> 1.0d) rt-ok clear
+5.0d tgamma 24.0d 0.001d approx-eq (tgamma: 5.0d -> 24.0d) rt-ok clear
+
+% type check
+{ 1 tgamma } try /type-check eq   (tgamma: int type-check) rt-ok clear
+
+% domain: 0 and negative integers are poles (rejected); negative non-integers are valid
+{ 0.0 tgamma } try /range-check eq  (tgamma: 0 pole reject) rt-ok clear
+{ -3.0 tgamma } try /range-check eq (tgamma: -3 pole reject) rt-ok clear
+-0.5 tgamma -3.5449 0.001 approx-eq (tgamma: -0.5 valid non-integer) rt-ok clear
+{ 0.0d tgamma } try /range-check eq (tgamma: 0d pole reject) rt-ok clear
+
+% ====================================================================
+% SECTION 9: erfc and erf
+% ====================================================================
+
+0.0 erfc 1.0 eq                    (erfc: 0.0 -> 1.0) rt-ok clear
+
+% erfc(x) + erf(x) = 1 identity
+1.0 erfc  1.0 erf  add  1.0 0.001 approx-eq  (identity: erfc + erf = 1 at 1.0) rt-ok clear
+0.5 erfc  0.5 erf  add  1.0 0.001 approx-eq  (identity: erfc + erf = 1 at 0.5) rt-ok clear
+2.0 erfc  2.0 erf  add  1.0 0.001 approx-eq  (identity: erfc + erf = 1 at 2.0) rt-ok clear
+
+% double variants
+0.0d erfc 1.0d eq                  (erfc: 0.0d -> 1.0d) rt-ok clear
+1.0d erfc 1.0d erf add 1.0d 0.001d approx-eq (identity: erfc + erf = 1 double) rt-ok clear
+
+% type check
+{ 1 erfc } try /type-check eq     (erfc: int type-check) rt-ok clear
+{ 1 erf } try /type-check eq      (erf: int type-check) rt-ok clear
+
+(Hyperbolic and special function tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

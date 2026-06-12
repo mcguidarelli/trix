@@ -1,0 +1,22 @@
+% ====================================================================
+% test_bestagon_proto_capture.trx -- run examples/bestagon-proto/
+% proto-capture.trx via the tests/ harness.
+% ====================================================================
+%
+% Thin wrapper: loads proto-capture.trx (Phase 0.6H: capture state
+% machine per GDD section 10).
+%
+% 22 assertions across 7 fixture sections:
+%   A: single Inf captures neutral city in 2 turns (HP10 + 10 = 20)
+%   B: Inf moves off mid-capture -> progress + capturer reset
+%   C: Inf wounded to HP 4 mid-capture -> 4 ticks total (slowed)
+%   D: HQ capture -> previous owner faction.state = /defeated
+%   E: Boots /capture-speed-pct = 50 (floor[hp*1.5]) -- HP5 caps in 3 ticks
+%   F: Boots Super /auto-start-captures -- Inf on enemy city auto-begins
+%   G: save/restore atomicity -- mutation visible inside bracket, reverted
+%
+% Throws on any assertion mismatch.  Runs on default 1 MB VM in << 1 s.
+% ====================================================================
+
+(examples/bestagon-proto/proto-capture.trx) run
+(__test_ok__) =

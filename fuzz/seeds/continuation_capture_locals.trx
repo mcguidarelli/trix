@@ -1,0 +1,13 @@
+% capture crossing |locals| boundaries: matching locals dicts are
+% pulled into the ContinuationContext on capture and restored on
+% resume.  Shapes mix single and nested |locals|, capacity-suffix
+% forms, and K invocation after handler-return (when captured locals
+% dict was stored in K rather than popped).  try-wrapped so one
+% shape's runtime failure doesn't truncate the rest.
+{ 5 { |x|#4 { x 10 add } capture } delimit /k exch def 99 /k load exec } try clear
+{ 3 4 { |a b| { a b add } capture } delimit /k exch def 7 /k load exec } try clear
+{ 10 { { |outer-k| 42 { |inner| 99 /outer-k load abort-exec } exec } capture 5 add } delimit add } try clear
+{ userdict /k null put
+  { |x| /r x def { userdict exch /k exch put 42 } capture pop } delimit pop
+  5 userdict /k get exec } try clear
+{ 5 { |x|#1024 { x } capture } delimit pop } try clear

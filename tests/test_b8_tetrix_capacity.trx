@@ -1,0 +1,34 @@
+% ============================================================================
+% test_b8_tetrix_capacity.trx -- standalone expected-FAILURE probe for the
+% tetrix:1-0 operand-stack capacity guard.  This is NOT a __test_ok__ test: it
+% deliberately fills the operand stack and calls field-clear-rows-fast, which
+% must raise a CLEAN /opstack-overflow (the new require_op_capacity guard
+% fired) rather than writing its net +1 result past m_op_limit.
+%
+% Run:    ./tetrix --operand-depth 128 tests/test_b8_tetrix_capacity.trx
+% Expect (post-fix): exit 28, stderr contains
+%         "opstack-overflow 'field-clear-rows-fast'".
+% Pre-fix (require_op_capacity guard absent): ASan heap-buffer-overflow abort
+%         (debug) or silent corruption (opt) -- NOT the clean opstack-overflow.
+% An opstack-overflow cannot be caught by `try` (catching needs operand-stack
+% room), which is why this lives in its own expected-failure file rather than
+% in test_b8_tetrix_safety.trx's __test_ok__ flow.
+%
+% Under ./trix (no tetrix ops) it prints a skip line and exits 0.
+% ============================================================================
+
+userdict /field-clear-rows-fast known? not {
+    (test_b8_tetrix_capacity: skipped (./trix has no tetrix user ops)) =
+    quit
+} if
+
+/make-row { 10 array /row exch def 0 1 9 { /j exch def row j 0 put } for row } def
+/make-field { 20 array /fld exch def 0 1 19 { /j exch def fld j make-row put } for fld } def
+
+% 127 filler integers + the field == 128 objects fill the operand stack
+% exactly (--operand-depth 128), leaving field-clear-rows-fast's +1 push no
+% room.  Pre-fix this wrote one Object past m_op_limit; post-fix it raises
+% /opstack-overflow first.
+make-field /full-fld exch def
+0 1 126 {} for
+full-fld field-clear-rows-fast

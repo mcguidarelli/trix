@@ -1,0 +1,3 @@
+% example-village.trx -- golden gate over examples/village.trx: the example's
+% byte-exact output IS the contract (see run_golden_tests.sh header).
+(examples/village.trx) run

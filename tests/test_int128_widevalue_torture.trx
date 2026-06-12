@@ -1,0 +1,305 @@
+% ====================================================================
+% Mirror of test_extvalue_torture.trx for Int128/UInt128 (WideValue).
+%
+% Stress tests for the WideValue 16-byte heap cell. Validates:
+%   * Free-list recycling stability (repeated alloc/free)
+%   * Callback-operator leak detection (vm-used delta bounded)
+%   * Error-path cleanup
+%   * Save/restore interactions with WideValue
+%   * Deep nesting chains
+%   * Large-scale stress (500-element arrays)
+%   * Source-array integrity under save/restore
+%
+% This file is the WideValue counterpart of test_extvalue_torture.trx.
+% Before the execute_proc double-clone fix (commit a4a125e), the
+% callback-op and TCO tests here would have leaked ~2 WideValues per
+% iteration; they now return VM to baseline across each save/restore.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Free-list recycling stability
+% ====================================================================
+% Overwrite a variable N times with Int128 -- the widevalue-active
+% count should stay bounded (recycling freed cells for new allocations).
+
+save
+/x 0q def
+//:status:widevalue-active
+1 1 200 { /int128-type cast /x exch def } for
+//:status:widevalue-active
+exch sub abs 2 lt
+(wv: 200 int128 def cycles -- active count stable) rt-ok
+restore clear
+
+% Save/restore reclaims all WideValues from arrays
+save
+//:status:vm-used
+save [1 1 100 { /int128-type cast } for] pop restore
+//:status:vm-used
+exch sub 0 eq
+(wv: save/restore reclaims 100 int128 array with zero net growth) rt-ok
+restore clear
+
+% Same for UInt128
+save
+/y 0uq def
+//:status:widevalue-active
+1 1 200 { /uint128-type cast /y exch def } for
+//:status:widevalue-active
+exch sub abs 2 lt
+(wv: 200 uint128 def cycles -- active count stable) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 2: Callback operators -- vm-used delta with Int128 inputs
+% ====================================================================
+% Each operator should produce zero unexpected WideValue waste.
+% Delta is measured inside save/restore to detect leaks.
+
+% map: Int128 -> Int128
+save
+[100q 200q 300q] { 1q add } map pop
+[100q 200q 300q] { 1q add } map pop
+//:status:vm-used
+[100q 200q 300q] { 1q add } map pop
+//:status:vm-used
+exch sub
+exch restore
+dup 0 gt exch 400 lt and
+(wv: map int128 delta < 400 bytes) rt-ok
+
+% filter: Int128 -> subset
+save
+[100q 200q 300q 400q] { 250q gt } filter pop
+[100q 200q 300q 400q] { 250q gt } filter pop
+//:status:vm-used
+[100q 200q 300q 400q] { 250q gt } filter pop
+//:status:vm-used
+exch sub
+exch restore
+dup 0 gt exch 400 lt and
+(wv: filter int128 delta < 400 bytes) rt-ok
+
+% for-all: Int128 consumer
+save
+/sum 0q def
+[100q 200q 300q] { sum add /sum exch def } for-all
+sum 600q deep-eq
+(wv: for-all int128 sum correct) rt-ok
+restore clear
+
+% reduce: Int128 accumulator
+save
+[1q 2q 3q 4q 5q] 0q { add } reduce
+15q deep-eq
+(wv: reduce int128 sum 1..5) rt-ok
+restore clear
+
+% sort on Int128 array (value correctness)
+save
+[3q 1q 4q 1q 5q 9q 2q 6q] sort
+dup 0 get 1q deep-eq                         (wv: sort int128 first) rt-ok
+dup 7 get 9q deep-eq                         (wv: sort int128 last) rt-ok
+pop
+restore clear
+
+% ====================================================================
+% SECTION 3: Error-path cleanup
+% ====================================================================
+% When an error occurs mid-callback, in-flight WideValues must not
+% corrupt the VM (verified by save/restore reclaiming cleanly).
+
+/err-save save def
+{ [1q 2q 3q 4q] { dup 3q deep-eq { /undefined-name-xyzzy } if } map } try
+pop clear
+err-save restore
+(wv: map error with int128 no crash) =
+
+/err-save save def
+{ [1q 2q 3q] { dup 2q deep-eq { /undefined-name-xyzzy } if 0q gt } filter } try
+pop clear
+err-save restore
+(wv: filter error with int128 no crash) =
+
+/err-save save def
+{ [3q 1q 2q] { dup 1q deep-eq { /undefined-name-xyzzy } if } sort-by } try
+pop clear
+err-save restore
+(wv: sort-by error with int128 no crash) =
+
+% ====================================================================
+% SECTION 4: Save/restore interactions with WideValue
+% ====================================================================
+
+% WideValues created before save, modified after restore
+save
+/a 42q def
+/b 99.9d def
+save
+/a 100q def
+/b 200.0d def
+a 100q deep-eq (wv: save inner int128 correct) rt-ok
+restore
+a 42q deep-eq (wv: restore outer int128 correct) rt-ok
+b 99.9d eq (wv: restore outer double correct) rt-ok
+restore clear
+
+% Nested saves with Int128 arrays
+save
+[1q 2q 3q] /arr exch def
+save
+arr { 10q mul } map /arr2 exch def
+arr2 0 get 10q deep-eq (wv: nested save map int128 elem) rt-ok
+restore
+arr 0 get 1q deep-eq (wv: nested restore original int128 intact) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 5: Deep nesting chains with WideValue
+% ====================================================================
+
+save
+/chain-sum 0q def
+[1q 2q 3q]
+    { 2q mul } map
+    { 3q add } map
+    { chain-sum add /chain-sum exch def } for-all
+chain-sum 21q deep-eq    % (1*2+3)+(2*2+3)+(3*2+3) = 5+7+9 = 21
+    (wv: deep chain map+map+for-all int128) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 6: Packed inputs with WideValue
+% ====================================================================
+
+{ 10q 20q 30q } sum 60q deep-eq             (wv: packed int128 sum) rt-ok clear
+{ 30q 10q 20q } min-of 10q deep-eq          (wv: packed int128 min-of) rt-ok clear
+{ 10q 30q 20q } max-of 30q deep-eq          (wv: packed int128 max-of) rt-ok clear
+{ 10q 20q 30q } { 15q gt } any              (wv: packed int128 any) rt-ok clear
+{ 10q 20q 30q } { 5q gt } all               (wv: packed int128 all) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Set operations with Int128
+% ====================================================================
+
+{{ 1q 2q 3q }} {{ 3q 4q 5q }} set-union length 5 eq
+    (wv: int128 set-union length) rt-ok clear
+
+{{ 1q 2q 3q }} {{ 2q 3q 4q }} set-intersection length 2 eq
+    (wv: int128 set-intersection length) rt-ok clear
+
+save
+{{ 1q 2q 3q 4q 5q }} dup length 5 eq        (wv: int128 5-element set length) rt-ok
+dup 3q set-member?                           (wv: int128 set has 3q) rt-ok
+pop
+restore clear
+
+% ====================================================================
+% SECTION 8: Large-scale WideValue stress
+% ====================================================================
+
+save
+% 500-element Int128 array through map
+[1 1 500 { /int128-type cast } for] { 1q add } map
+dup length 500 eq                            (wv: 500 int128 map length) rt-ok
+dup 0 get 2q deep-eq                         (wv: 500 int128 map first) rt-ok
+dup 499 get 501q deep-eq                     (wv: 500 int128 map last) rt-ok
+pop
+restore clear
+
+save
+% 500-element Int128 filter (keep ~half)
+[1 1 500 { /int128-type cast } for] { 250q gt } filter
+dup length 250 eq                            (wv: 500 int128 filter length) rt-ok
+dup 0 get 251q deep-eq                       (wv: 500 int128 filter first) rt-ok
+pop
+restore clear
+
+save
+% 200-element Int128 sort (descending via neg-key... use sort then reverse)
+[1 1 200 { /int128-type cast } for] sort
+dup 0 get 1q deep-eq                         (wv: 200 int128 sort first) rt-ok
+dup 199 get 200q deep-eq                     (wv: 200 int128 sort last) rt-ok
+pop
+restore clear
+
+save
+% 100-element Int128 reduce
+[1 1 100 { /int128-type cast } for] 0q { add } reduce
+5050q deep-eq                                (wv: 100 int128 reduce sum) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 9: Source-array integrity under save/restore with WideValue
+% ====================================================================
+
+% map + save/restore with Int128 arithmetic
+save
+[100q 200q 300q] /src exch def
+save
+src { 2q mul } map pop
+src 0 get 100q deep-eq (wv: srcguard map int128[0] inside inner save) rt-ok
+restore
+src 0 get 100q deep-eq (wv: srcguard map int128[0] after inner restore) rt-ok
+restore clear
+
+% chained map+filter with Int128 -- source survives both
+save
+[10q 20q 30q 40q 50q] /src exch def
+src { 2q mul } map { 50q gt } filter pop
+src 0 get 10q deep-eq  (wv: srcguard chain int128[0] after map+filter) rt-ok
+src 4 get 50q deep-eq  (wv: srcguard chain int128[4] after map+filter) rt-ok
+restore clear
+
+% reduce with Int128 accumulation -- source intact
+save
+[1q 2q 3q 4q 5q] /src exch def
+src 0q { add } reduce pop
+src 0 get 1q deep-eq   (wv: srcguard reduce int128[0] intact) rt-ok
+src 4 get 5q deep-eq   (wv: srcguard reduce int128[4] intact) rt-ok
+restore clear
+
+% Result independence: modifying map result must not affect source
+save
+[1q 2q 3q] /src exch def
+src { 0q add } map /result exch def
+result 0 999q put
+src 0 get 1q deep-eq   (wv: srcguard result put does not affect source) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 10: TCO stress (post-fix verification)
+% ====================================================================
+% After the execute_proc double-clone fix (commit a4a125e), TCO loops
+% at 10000 iterations must return widevalue-active to baseline.
+
+/cd-stress { dup 0q deep-eq { } { 1q sub cd-stress } if-else } def
+
+save
+/tco-base //:status:widevalue-active def
+10000q cd-stress pop
+//:status:widevalue-active tco-base eq
+    (wv: 10000-iter TCO returns to baseline) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 11: status invariant check
+% ====================================================================
+
+//:status:widevalue-validate (wv: widevalue free-list integrity OK) rt-ok
+//:status:vm-validate (wv: vm heap integrity OK) rt-ok
+//:status:extvalue-validate (wv: extvalue free-list integrity OK) rt-ok
+
+(test_int128_widevalue_torture.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

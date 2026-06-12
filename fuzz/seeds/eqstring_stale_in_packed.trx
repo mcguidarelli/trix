@@ -1,0 +1,1 @@
+{ (a)#= 1 packed (b)#= pop 0 get 0 get } try

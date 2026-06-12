@@ -1,0 +1,744 @@
+% ====================================================================
+% test_ieee754.trx -- IEEE 754 advanced operators test suite
+% ====================================================================
+% Tests: ulp, round-even, total-order?, kahan-sum, fe-get-env/fe-set-env,
+%        fe-hold-except/fe-update-env, nan-payload, nan-with-payload
+%
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% FP exception flag constants (UInteger values from numbers:environment dict)
+/fe-all     //:systemdict:numbers:environment:fe-all-except def
+/fe-inval   //:systemdict:numbers:environment:fe-invalid def
+/fe-divz    //:systemdict:numbers:environment:fe-div-by-zero def
+/fe-oflow   //:systemdict:numbers:environment:fe-overflow def
+/fe-uflow   //:systemdict:numbers:environment:fe-underflow def
+/fe-inex    //:systemdict:numbers:environment:fe-inexact def
+
+% ====================================================================
+% SECTION 1: ulp -- unit in last place
+% ====================================================================
+
+% 1.1 Basic Real ulp
+1.0 ulp type /real-type eq                     (ulp: 1.0 returns real) rt-ok clear
+1.0 ulp 0.0 gt                                (ulp: 1.0 > 0) rt-ok clear
+
+% 1.2 Basic Double ulp
+1.0d ulp type /double-type eq                  (ulp: 1.0d returns double) rt-ok clear
+1.0d ulp 0.0d gt                               (ulp: 1.0d > 0) rt-ok clear
+
+% 1.3 ULP of zero is denorm-min (smallest positive subnormal)
+0.0 ulp 0.0 gt                                (ulp: 0.0 > 0) rt-ok clear
+0.0 ulp fp-classify /fp-subnormal eq           (ulp: 0.0 is subnormal) rt-ok clear
+0.0d ulp 0.0d gt                               (ulp: 0.0d > 0) rt-ok clear
+0.0d ulp fp-classify /fp-subnormal eq          (ulp: 0.0d is subnormal) rt-ok clear
+
+% 1.4 ULP of negative is same as positive
+-1.0 ulp 1.0 ulp eq                           (ulp: ulp(-1) = ulp(1)) rt-ok clear
+-1.0d ulp 1.0d ulp eq                         (ulp: ulp(-1d) = ulp(1d)) rt-ok clear
+
+% 1.5 ULP increases with magnitude
+1.0 ulp 1000000.0 ulp lt                      (ulp: ulp(1) < ulp(1e6)) rt-ok clear
+1.0d ulp 1000000.0d ulp lt                    (ulp: ulp(1d) < ulp(1e6d)) rt-ok clear
+
+% 1.6 ULP of 1.0 equals machine epsilon
+% epsilon = next-after(1, inf) - 1, which is exactly ulp(1)
+1.0 ulp 1.0 inf next-after 1.0 sub eq         (ulp: ulp(1.0) = epsilon) rt-ok clear
+1.0d ulp 1.0d inf#d next-after 1.0d sub eq     (ulp: ulp(1.0d) = epsilon) rt-ok clear
+
+% 1.7 ULP of infinity is NaN
+inf ulp nan?                                  (ulp: ulp(inf) = NaN) rt-ok clear
+inf#d ulp nan?                                 (ulp: ulp(inf#d) = NaN) rt-ok clear
+
+% 1.8 ULP of NaN is NaN
+nan ulp nan?                                  (ulp: ulp(nan) = NaN) rt-ok clear
+nan#d ulp nan?                                 (ulp: ulp(nan#d) = NaN) rt-ok clear
+
+% 1.9 ULP of negative infinity is NaN
+inf neg ulp nan?                              (ulp: ulp(-inf) = NaN) rt-ok clear
+
+% 1.10 ULP of max value is finite (not infinity)
+% Use the largest finite value: 3.4028235e38 for float, 1.7976931348623157e308 for double
+3.4028235e38 ulp finite?                     (ulp: ulp(float-max) is finite) rt-ok clear
+1.7976931348623157e308d ulp finite?           (ulp: ulp(double-max) is finite) rt-ok clear
+
+% 1.11 ULP of subnormal values (ulp of denorm-min equals denorm-min)
+0.0 ulp dup ulp eq                             (ulp: ulp(denorm-min) = denorm-min) rt-ok clear
+
+% 1.12 Property: x + ulp(x) == next-after x inf (for normal positive x)
+1.0 dup ulp add 1.0 inf next-after eq          (ulp: 1.0+ulp(1.0) = next-after 1.0 inf) rt-ok clear
+1.0d dup ulp add 1.0d inf#d next-after eq       (ulp: 1.0d+ulp(1.0d) = next-after 1.0d inf#d) rt-ok clear
+
+% ====================================================================
+% SECTION 2: round-even -- IEEE 754 roundTiesToEven
+% ====================================================================
+
+% 2.1 Basic rounding
+2.3 round-even 2.0 eq                         (round-even: 2.3 -> 2.0) rt-ok clear
+2.7 round-even 3.0 eq                         (round-even: 2.7 -> 3.0) rt-ok clear
+-2.3 round-even -2.0 eq                       (round-even: -2.3 -> -2.0) rt-ok clear
+-2.7 round-even -3.0 eq                       (round-even: -2.7 -> -3.0) rt-ok clear
+
+% 2.2 Ties go to even
+0.5 round-even 0.0 eq                         (round-even: 0.5 -> 0 even) rt-ok clear
+1.5 round-even 2.0 eq                         (round-even: 1.5 -> 2 even) rt-ok clear
+2.5 round-even 2.0 eq                         (round-even: 2.5 -> 2 even) rt-ok clear
+3.5 round-even 4.0 eq                         (round-even: 3.5 -> 4 even) rt-ok clear
+-0.5 round-even 0.0 neg eq                    (round-even: -0.5 -> -0 even) rt-ok clear
+-1.5 round-even -2.0 eq                       (round-even: -1.5 -> -2 even) rt-ok clear
+
+% 2.3 Double precision
+2.5d round-even 2.0d eq                       (round-even: 2.5d -> 2d even) rt-ok clear
+3.5d round-even 4.0d eq                       (round-even: 3.5d -> 4d even) rt-ok clear
+
+% 2.4 Type preservation
+2.3 round-even type /real-type eq              (round-even: Real -> Real) rt-ok clear
+2.3d round-even type /double-type eq           (round-even: Double -> Double) rt-ok clear
+
+% 2.5 Integers and zero
+0.0 round-even 0.0 eq                         (round-even: 0.0 -> 0.0) rt-ok clear
+5.0 round-even 5.0 eq                         (round-even: 5.0 -> 5.0) rt-ok clear
+
+% 2.6 Special values pass through
+inf round-even inf?                           (round-even: inf -> inf) rt-ok clear
+nan round-even nan?                           (round-even: NaN -> NaN) rt-ok clear
+
+% 2.7 Does not disturb current rounding mode
+/fe-upward fe-set-round pop
+4.1 round-even 4.0 eq                         (round-even: 4.1 still -> 4 under fe-upward) rt-ok clear
+/fe-to-nearest fe-set-round pop                  % restore default
+
+% ====================================================================
+% SECTION 3: total-order? -- IEEE 754-2019 totalOrder
+% ====================================================================
+
+% 3.1 Normal ordering
+1.0 2.0 total-order?                            (total-order?: 1 <= 2) rt-ok clear
+2.0 1.0 total-order? not                        (total-order?: not 2 <= 1) rt-ok clear
+1.0 1.0 total-order?                            (total-order?: 1 <= 1 reflexive) rt-ok clear
+
+% 3.2 Double precision
+1.0d 2.0d total-order?                          (total-order?: 1d <= 2d) rt-ok clear
+2.0d 1.0d total-order? not                      (total-order?: not 2d <= 1d) rt-ok clear
+
+% 3.3 Negative zero < positive zero
+-0.0 0.0 total-order?                           (total-order?: -0 <= +0) rt-ok clear
+0.0 -0.0 total-order? not                       (total-order?: not +0 <= -0) rt-ok clear
+-0.0d 0.0d total-order?                         (total-order?: -0d <= +0d) rt-ok clear
+
+% 3.4 Infinities in correct position
+inf neg inf total-order?                        (total-order?: -inf <= +inf) rt-ok clear
+inf inf neg total-order? not                    (total-order?: not +inf <= -inf) rt-ok clear
+inf neg -1.0 total-order?                       (total-order?: -inf <= -1) rt-ok clear
+1.0 inf total-order?                            (total-order?: 1 <= inf) rt-ok clear
+
+% 3.5 NaN ordering: NaN comes after infinity
+inf nan total-order?                            (total-order?: +inf <= +NaN) rt-ok clear
+nan inf total-order? not                        (total-order?: not +NaN <= +inf) rt-ok clear
+
+% 3.6 -NaN comes before -infinity
+nan neg inf neg total-order?                    (total-order?: -NaN <= -inf) rt-ok clear
+inf neg nan neg total-order? not                (total-order?: not -inf <= -NaN) rt-ok clear
+
+% 3.7 NaN reflexive
+nan nan total-order?                            (total-order?: NaN <= NaN reflexive) rt-ok clear
+nan#d nan#d total-order?                          (total-order?: NaNd <= NaNd reflexive) rt-ok clear
+
+% 3.8 Mixed sign NaN
+nan neg nan total-order?                        (total-order?: -NaN <= +NaN) rt-ok clear
+
+% ====================================================================
+% SECTION 4: kahan-sum -- compensated summation
+% ====================================================================
+
+% 4.1 Basic sum of empty array
+[ ] kahan-sum 0.0d eq                          (kahan-sum: empty -> 0.0d) rt-ok clear
+[ ] kahan-sum type /double-type eq             (kahan-sum: empty -> double type) rt-ok clear
+
+% 4.2 Basic integer array
+[ 1 2 3 4 5 ] kahan-sum 15.0d eq              (kahan-sum: [1..5] = 15) rt-ok clear
+
+% 4.3 Float array
+[ 1.0 2.0 3.0 ] kahan-sum 6.0d eq             (kahan-sum: [1.0 2.0 3.0] = 6.0d) rt-ok clear
+
+% 4.4 Double array
+[ 1.0d 2.0d 3.0d ] kahan-sum 6.0d eq          (kahan-sum: [1d 2d 3d] = 6d) rt-ok clear
+
+% 4.5 Mixed numeric types
+[ 1 2.0 3l 4.0d ] kahan-sum 10.0d eq          (kahan-sum: mixed types = 10d) rt-ok clear
+
+% 4.6 Kahan accuracy: classic pathological case
+% Sum of 1e7 + 10 x 0.0001 = 10000000.001
+[ 10000000.0d 0.0001d 0.0001d 0.0001d 0.0001d 0.0001d
+  0.0001d 0.0001d 0.0001d 0.0001d 0.0001d ] kahan-sum
+10000000.001d sub abs 1e-10d lt                (kahan-sum: pathological accuracy) rt-ok clear
+
+% 4.7 Large array Kahan accuracy test
+% Build array of 10000 copies of 0.1d, sum should be close to 1000.0d
+save /sv exch def
+/n 10000 def
+/arr n array def
+0 1 n 1 sub { arr exch 0.1d put } for
+arr kahan-sum
+1000.0d sub abs 1e-10d lt                      (kahan-sum: 10000 x 0.1d accuracy) rt-ok clear
+sv restore
+
+% 4.8 Single element
+[ 42.0d ] kahan-sum 42.0d eq                  (kahan-sum: single element) rt-ok clear
+
+% 4.9 Negative values
+[ 1.0d -2.0d 3.0d -4.0d ] kahan-sum -2.0d eq  (kahan-sum: negative values) rt-ok clear
+
+% 4.10 Packed array support
+save /sv exch def
+1 2 3 4 5 5 packed kahan-sum 15.0d eq          (kahan-sum: packed [1..5] = 15) rt-ok clear
+sv restore
+
+% 4.11 Kahan vs naive: demonstrate the difference
+% big + small - big should be exactly small; naive sum may lose it
+save /sv exch def
+/big 1e15d def
+/small 1.0d def
+/neg-big -1e15d def
+[ big small neg-big ] kahan-sum
+small eq                                       (kahan-sum: big+small-big = small) rt-ok clear
+sv restore
+
+% 4.12 All-zero array
+[ 0.0d 0.0d 0.0d ] kahan-sum 0.0d eq          (kahan-sum: all zeros) rt-ok clear
+
+% 4.13 ULong elements
+[ 1ul 2ul 3ul ] kahan-sum 6.0d eq             (kahan-sum: ulong elements) rt-ok clear
+
+% 4.14 Byte elements
+[ 1b 2b 3b ] kahan-sum 6.0d eq                (kahan-sum: byte elements) rt-ok clear
+
+% ====================================================================
+% SECTION 5: fe-get-env / fe-set-env -- FP environment save/restore
+% ====================================================================
+
+% 5.1 fe-get-env returns ULong (packed: rounding mode in upper 32, exceptions in lower 32)
+fe-get-env type /ulong-type eq                   (fe-get-env: returns ulong) rt-ok clear
+
+% 5.2 Round-trip: save, change, restore rounding mode
+fe-get-env                                       % save env
+/fe-downward fe-set-round pop                    % change rounding mode
+fe-set-env                                       % restore
+fe-get-round /fe-to-nearest eq                   (fe-set-env: restores rounding mode) rt-ok clear
+
+% 5.3 Round-trip: save, raise exception, restore clears it
+fe-all fe-clear-except pop               % start clean
+fe-get-env                                       % save clean env
+fe-oflow fe-raise-except pop                 % raise overflow
+fe-set-env                                       % restore clean env
+fe-all fe-test-except 0u eq              (fe-set-env: restores exception flags) rt-ok clear
+
+% 5.4 fe-set-env preserves saved exceptions
+fe-all fe-clear-except pop
+fe-inex fe-raise-except pop                  % set inexact
+fe-get-env                                       % save with inexact set
+fe-all fe-clear-except pop               % clear all
+fe-set-env                                       % restore
+fe-inex fe-test-except fe-inex eq        (fe-set-env: preserves exception flags) rt-ok clear
+fe-all fe-clear-except pop               % cleanup
+
+% ====================================================================
+% SECTION 6: fe-hold-except / fe-update-env -- atomic save+clear / merge
+% ====================================================================
+
+% 6.1 fe-hold-except returns UInteger and clears exceptions
+fe-all fe-clear-except pop
+fe-oflow fe-raise-except pop                 % set overflow
+fe-hold-except                                   % save env (with overflow), clear exceptions
+/held-env exch def
+fe-all fe-test-except 0u eq              (fe-hold-except: clears all exceptions) rt-ok clear
+
+% 6.2 fe-update-env restores env and merges current exceptions
+fe-inex fe-raise-except pop                  % raise inexact during held period
+held-env fe-update-env                          % restore: original overflow + current inexact
+fe-oflow fe-inex or fe-test-except
+fe-oflow fe-inex or eq                 (fe-update-env: merges exceptions) rt-ok clear
+fe-all fe-clear-except pop               % cleanup
+
+% 6.3 fe-hold-except preserves rounding mode in saved env
+/fe-downward fe-set-round pop
+fe-hold-except
+/fe-to-nearest fe-set-round pop                  % change rounding mode during held period
+fe-update-env                                    % should restore fe-downward
+fe-get-round /fe-downward eq                     (fe-update-env: restores rounding mode) rt-ok clear
+/fe-to-nearest fe-set-round pop                  % cleanup
+
+% 6.4 Nested fe-hold-except
+fe-all fe-clear-except pop
+fe-oflow fe-raise-except pop
+fe-hold-except                                   % outer hold (saves overflow, clears)
+fe-inex fe-raise-except pop
+fe-hold-except                                   % inner hold (saves inexact, clears)
+fe-uflow fe-raise-except pop                % raise underflow
+fe-update-env                                    % inner restore: inexact + underflow
+fe-update-env                                    % outer restore: overflow + inexact + underflow
+fe-oflow fe-inex or fe-uflow or fe-test-except
+fe-oflow fe-inex or fe-uflow or eq  (fe-hold-except: nested merges all 3) rt-ok clear
+fe-all fe-clear-except pop
+
+% ====================================================================
+% SECTION 7: nan-payload / nan-with-payload
+% ====================================================================
+
+% 7.1 Extract payload from quiet NaN (default payload)
+nan nan-payload type /uinteger-type eq         (nan-payload: Real NaN -> uinteger) rt-ok clear
+nan#d nan-payload type /ulong-type eq           (nan-payload: Double NaN -> ulong) rt-ok clear
+
+% 7.2 Create NaN with specific payload
+42u nan-with-payload nan?                     (nan-with-payload: 42u creates NaN) rt-ok clear
+42u nan-with-payload type /real-type eq         (nan-with-payload: uint -> Real NaN) rt-ok clear
+42ul nan-with-payload nan?                    (nan-with-payload: 42ul creates NaN) rt-ok clear
+42ul nan-with-payload type /double-type eq      (nan-with-payload: ulong -> Double NaN) rt-ok clear
+
+% 7.3 Round-trip: create with payload, extract payload
+42u nan-with-payload nan-payload 42u eq         (nan-payload: round-trip uint 42) rt-ok clear
+123u nan-with-payload nan-payload 123u eq       (nan-payload: round-trip uint 123) rt-ok clear
+42ul nan-with-payload nan-payload 42ul eq       (nan-payload: round-trip ulong 42) rt-ok clear
+99999ul nan-with-payload nan-payload 99999ul eq (nan-payload: round-trip ulong 99999) rt-ok clear
+
+% 7.4 Zero payload
+0u nan-with-payload nan-payload 0u eq          (nan-payload: round-trip zero payload) rt-ok clear
+0ul nan-with-payload nan-payload 0ul eq        (nan-payload: round-trip zero ulong payload) rt-ok clear
+
+% 7.5 Maximum payload values
+% Float: 22-bit payload (max 0x3FFFFF = 4194303)
+4194303u nan-with-payload nan-payload 4194303u eq (nan-payload: max float payload) rt-ok clear
+% Double: 51-bit payload (max 0x7FFFFFFFFFFFF = 2251799813685247)
+2251799813685247ul nan-with-payload nan-payload 2251799813685247ul eq
+                                               (nan-payload: max double payload) rt-ok clear
+
+% 7.6 Payload overflow errors
+<< /range-check { clear true } >> { 4194304u nan-with-payload } try-catch
+                                               (nan-with-payload: float overflow error) rt-ok clear
+<< /range-check { clear true } >> { 2251799813685248ul nan-with-payload } try-catch
+                                               (nan-with-payload: double overflow error) rt-ok clear
+
+% 7.7 Non-NaN input error
+<< /undefined-result { clear true } >> { 1.0 nan-payload } try-catch
+                                               (nan-payload: non-NaN Real error) rt-ok clear
+<< /undefined-result { clear true } >> { 1.0d nan-payload } try-catch
+                                               (nan-payload: non-NaN Double error) rt-ok clear
+
+% 7.8 Type error for wrong input types
+<< /type-check { clear true } >> { 42 nan-with-payload } try-catch
+                                               (nan-with-payload: int type error) rt-ok clear
+<< /type-check { clear true } >> { (hello) nan-payload } try-catch
+                                               (nan-payload: string type error) rt-ok clear
+
+% 7.9 Different payloads produce different NaN bit patterns
+1u nan-with-payload nan-payload
+2u nan-with-payload nan-payload
+ne                                             (nan-payload: different payloads differ) rt-ok clear
+
+% 7.10 NaN with payload is still quiet NaN (not signaling)
+42u nan-with-payload dup nan? exch
+nan-payload 4194303u le and                    (nan-with-payload: creates quiet NaN) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Integration / stress tests
+% ====================================================================
+
+% 8.1 ULP stress: verify property across range of values
+% W07: use `all` (predicate fold) rather than for-all + flag update --
+% the original body had inconsistent stack effect (leaked v on the OK
+% branch, consumed it on the failure branch), which W07 rejects.
+save /sv exch def
+[ 0.5 1.0 2.0 100.0 1e10 1e-10 1e30 1e-30 ]
+{ dup ulp dup 0.0 gt exch finite? and } all
+                                              (ulp: stress range all finite positive) rt-ok clear
+sv restore
+
+% 8.2 Total-order is transitive (spot check)
+-1.0 0.0 total-order?
+0.0 1.0 total-order? and
+-1.0 1.0 total-order? and                      (total-order?: transitive -1 <= 0 <= 1) rt-ok clear
+
+% 8.3 Total-order antisymmetric (a <= b and b <= a implies a = b)
+1.0 1.0 total-order?
+1.0 1.0 total-order? and                       (total-order?: antisymmetric 1 <= 1 and 1 <= 1) rt-ok clear
+
+% 8.4 kahan-sum accuracy compared to naive sum
+% 1000 copies of 0.1d -- kahan should be closer to 100.0d
+save /sv exch def
+/n 1000 def
+/arr n array def
+0 1 n 1 sub { arr exch 0.1d put } for
+arr dup kahan-sum 100.0d sub abs
+exch 0.0d { add } reduce 100.0d sub abs
+le                                             (kahan-sum: more accurate than naive reduce) rt-ok clear
+sv restore
+
+% 8.5 round-even with very large values
+1e30 round-even 1e30 eq                        (round-even: large value passes through) rt-ok clear
+
+% 8.6 Total-order double precision full range chain
+inf#d neg -1.0d total-order?
+-1.0d -0.0d total-order? and
+-0.0d 0.0d total-order? and
+0.0d 1.0d total-order? and
+1.0d inf#d total-order? and                      (total-order?: full double range chain) rt-ok clear
+
+% 8.7 NaN payload diagnostic tagging use case
+save /sv exch def
+/ERR_OVERFLOW 1u nan-with-payload def
+/ERR_UNDERFLOW 2u nan-with-payload def
+ERR_OVERFLOW nan-payload 1u eq                 (nan-payload: diagnostic tag 1) rt-ok clear
+ERR_UNDERFLOW nan-payload 2u eq                (nan-payload: diagnostic tag 2) rt-ok clear
+sv restore
+
+% ====================================================================
+% SECTION 9: fmax-mag / fmin-mag -- min/max by magnitude
+% ====================================================================
+
+% 9.1 Basic fmax-mag
+3.0 -5.0 fmax-mag -5.0 eq                      (fmax-mag: |-5| > |3| -> -5) rt-ok clear
+-3.0 5.0 fmax-mag 5.0 eq                       (fmax-mag: |5| > |-3| -> 5) rt-ok clear
+3.0 5.0 fmax-mag 5.0 eq                        (fmax-mag: |5| > |3| -> 5) rt-ok clear
+
+% 9.2 Equal magnitudes: fmax-mag returns fmax
+-3.0 3.0 fmax-mag 3.0 eq                       (fmax-mag: |-3|=|3| -> fmax=3) rt-ok clear
+3.0 -3.0 fmax-mag 3.0 eq                       (fmax-mag: |3|=|-3| -> fmax=3) rt-ok clear
+
+% 9.3 Basic fmin-mag
+3.0 -5.0 fmin-mag 3.0 eq                       (fmin-mag: |3| < |-5| -> 3) rt-ok clear
+-3.0 5.0 fmin-mag -3.0 eq                      (fmin-mag: |-3| < |5| -> -3) rt-ok clear
+
+% 9.4 Equal magnitudes: fmin-mag returns fmin
+-3.0 3.0 fmin-mag -3.0 eq                      (fmin-mag: |-3|=|3| -> fmin=-3) rt-ok clear
+
+% 9.5 Double precision
+3.0d -5.0d fmax-mag -5.0d eq                   (fmax-mag: double -5d) rt-ok clear
+3.0d -5.0d fmin-mag 3.0d eq                    (fmin-mag: double 3d) rt-ok clear
+
+% 9.6 NaN propagation (same as fmax/fmin)
+nan 1.0 fmax-mag 1.0 eq                        (fmax-mag: NaN vs 1 -> 1) rt-ok clear
+1.0 nan fmin-mag 1.0 eq                        (fmin-mag: 1 vs NaN -> 1) rt-ok clear
+nan nan fmax-mag nan?                         (fmax-mag: NaN vs NaN -> NaN) rt-ok clear
+nan nan fmin-mag nan?                         (fmin-mag: NaN vs NaN -> NaN) rt-ok clear
+
+% 9.7 Zero handling
+0.0 -0.0 fmax-mag 0.0 eq                       (fmax-mag: 0 vs -0 -> 0) rt-ok clear
+0.0 -0.0 fmin-mag -0.0 eq                      (fmin-mag: 0 vs -0 -> -0) rt-ok clear
+
+% 9.8 Infinity
+inf -1.0 fmax-mag inf eq                        (fmax-mag: inf vs -1 -> inf) rt-ok clear
+-1.0 inf fmin-mag -1.0 eq                       (fmin-mag: -1 vs inf -> -1) rt-ok clear
+inf neg 1.0 fmax-mag inf neg eq                 (fmax-mag: -inf vs 1 -> -inf) rt-ok clear
+
+% ====================================================================
+% SECTION 10: total-order-mag? -- totalOrder on magnitudes
+% ====================================================================
+
+% 10.1 Basic ordering by magnitude
+1.0 2.0 total-order-mag?                        (total-order-mag?: |1| <= |2|) rt-ok clear
+2.0 1.0 total-order-mag? not                    (total-order-mag?: not |2| <= |1|) rt-ok clear
+-1.0 2.0 total-order-mag?                       (total-order-mag?: |-1| <= |2|) rt-ok clear
+-2.0 1.0 total-order-mag? not                   (total-order-mag?: not |-2| <= |1|) rt-ok clear
+
+% 10.2 Reflexive
+1.0 1.0 total-order-mag?                        (total-order-mag?: |1| <= |1| reflexive) rt-ok clear
+-1.0 -1.0 total-order-mag?                      (total-order-mag?: |-1| <= |-1| reflexive) rt-ok clear
+
+% 10.3 Same magnitude, different sign
+-1.0 1.0 total-order-mag?                       (total-order-mag?: |-1| <= |1|) rt-ok clear
+1.0 -1.0 total-order-mag?                       (total-order-mag?: |1| <= |-1|) rt-ok clear
+
+% 10.4 Double precision
+-3.0d 5.0d total-order-mag?                     (total-order-mag?: |-3d| <= |5d|) rt-ok clear
+
+% 10.5 Zero is smallest magnitude
+0.0 1.0 total-order-mag?                        (total-order-mag?: |0| <= |1|) rt-ok clear
+0.0d 0.0d total-order-mag?                      (total-order-mag?: |0d| <= |0d|) rt-ok clear
+
+% ====================================================================
+% SECTION 11: ulp-equal? -- compare within N ULPs
+% ====================================================================
+
+% 11.1 Exact equality is 0-ULP equal
+1.0 1.0 0 ulp-equal?                            (ulp-equal?: 1.0 = 1.0 within 0 ULP) rt-ok clear
+1.0d 1.0d 0 ulp-equal?                          (ulp-equal?: 1.0d = 1.0d within 0 ULP) rt-ok clear
+
+% 11.2 Adjacent floats are 1-ULP equal
+1.0 1.0 inf next-after 1 ulp-equal?             (ulp-equal?: 1.0 and next within 1 ULP) rt-ok clear
+1.0 1.0 inf next-after 0 ulp-equal? not         (ulp-equal?: 1.0 and next not within 0 ULP) rt-ok clear
+
+% 11.3 Adjacent doubles
+1.0d 1.0d inf#d next-after 1 ulp-equal?          (ulp-equal?: 1.0d and next within 1 ULP) rt-ok clear
+1.0d 1.0d inf#d next-after 0 ulp-equal? not      (ulp-equal?: 1.0d and next not 0 ULP) rt-ok clear
+
+% 11.4 Two ULPs apart
+1.0 1.0 inf next-after inf next-after 2 ulp-equal?  (ulp-equal?: 2 apart within 2 ULP) rt-ok clear
+1.0 1.0 inf next-after inf next-after 1 ulp-equal? not (ulp-equal?: 2 apart not within 1 ULP) rt-ok clear
+
+% 11.5 Zero comparison
+0.0 0.0 0 ulp-equal?                            (ulp-equal?: 0.0 = 0.0) rt-ok clear
+-0.0 0.0 0 ulp-equal?                           (ulp-equal?: -0.0 = +0.0 within 0) rt-ok clear
+-0.0d 0.0d 0 ulp-equal?                         (ulp-equal?: -0.0d = +0.0d within 0) rt-ok clear
+
+% 11.6 NaN is never equal
+nan nan 1000 ulp-equal? not                     (ulp-equal?: NaN != NaN) rt-ok clear
+nan 1.0 1000 ulp-equal? not                     (ulp-equal?: NaN != 1.0) rt-ok clear
+nan#d nan#d 1000 ulp-equal? not                   (ulp-equal?: NaNd != NaNd) rt-ok clear
+
+% 11.7 Infinity
+inf inf 0 ulp-equal?                            (ulp-equal?: inf = inf) rt-ok clear
+inf neg inf neg 0 ulp-equal?                    (ulp-equal?: -inf = -inf) rt-ok clear
+inf inf neg 1000 ulp-equal? not                 (ulp-equal?: inf != -inf) rt-ok clear
+
+% 11.8 Large tolerance
+1.0 2.0 1000000000 ulp-equal?                   (ulp-equal?: 1 and 2 within huge tolerance) rt-ok clear
+
+% 11.9 Practical use: computed result vs expected
+% sin(pi/6) should be 0.5 within a few ULP
+//:systemdict:numbers:real-type:pi 6.0 div sin 0.5 4 ulp-equal?
+                                               (ulp-equal?: sin(pi/6) ~ 0.5 within 4 ULP) rt-ok clear
+
+% 11.10 Type mismatch error
+<< /type-check { clear true } >> { 1.0 1.0d 0 ulp-equal? } try-catch
+                                               (ulp-equal?: type mismatch Real vs Double) rt-ok clear
+
+% 11.11 Subnormal values near zero
+save /sv exch def
+/tiny 0.0 ulp def     % denorm-min
+tiny 0.0 1 ulp-equal?                           (ulp-equal?: denorm-min and 0 within 1 ULP) rt-ok clear
+tiny neg 0.0 2 ulp-equal?                       (ulp-equal?: -denorm-min and +0 within 2 ULP) rt-ok clear
+tiny neg -0.0 1 ulp-equal?                      (ulp-equal?: -denorm-min and -0 within 1 ULP) rt-ok clear
+sv restore
+
+% ====================================================================
+% SECTION 12: dot-product -- compensated dot product
+% ====================================================================
+
+% 12.1 Basic dot product
+[ 1 2 3 ] [ 4 5 6 ] dot-product 32.0d eq      (dot-product: [1,2,3].[4,5,6] = 32) rt-ok clear
+
+% 12.2 Empty arrays
+[ ] [ ] dot-product 0.0d eq                    (dot-product: empty = 0) rt-ok clear
+
+% 12.3 Single element
+[ 3.0d ] [ 4.0d ] dot-product 12.0d eq        (dot-product: [3].[4] = 12) rt-ok clear
+
+% 12.4 Orthogonal vectors
+[ 1.0 0.0 ] [ 0.0 1.0 ] dot-product 0.0d eq   (dot-product: orthogonal = 0) rt-ok clear
+
+% 12.5 Mixed types
+[ 1 2.0 3l ] [ 4.0d 5u 6 ] dot-product 32.0d eq (dot-product: mixed types = 32) rt-ok clear
+
+% 12.6 Negative values
+[ 1.0d -2.0d 3.0d ] [ -4.0d 5.0d -6.0d ] dot-product -32.0d eq
+                                               (dot-product: negatives = -32) rt-ok clear
+
+% 12.7 Length mismatch error
+<< /range-check { clear true } >> { [ 1 2 ] [ 1 2 3 ] dot-product } try-catch
+                                               (dot-product: length mismatch error) rt-ok clear
+
+% 12.8 Kahan accuracy: pathological case
+% Large and small values that would lose precision without compensation
+[ 1e15d 1.0d -1e15d ] [ 1.0d 1.0d 1.0d ] dot-product 1.0d eq
+                                               (dot-product: compensated accuracy) rt-ok clear
+
+% 12.9 Unit vector dot product (magnitude = 1)
+//:systemdict:numbers:double-type:pi 4.0d div
+dup cos exch sin
+2 array dup 0 4 index put dup 1 3 index put
+exch pop exch pop                              % stack: [cos, sin]
+dup dot-product 1.0d 4 ulp-equal?              (dot-product: unit vector magnitude ~ 1) rt-ok clear
+clear
+
+% 12.10 Packed array support
+save /sv exch def
+1 2 3 3 packed 4 5 6 3 packed dot-product 32.0d eq
+                                               (dot-product: packed arrays = 32) rt-ok clear
+sv restore
+
+% 12.11 Large array accuracy
+save /sv exch def
+/n 1000 def
+/arr-a n array def
+/arr-b n array def
+0 1 n 1 sub { dup arr-a exch 1.0d put arr-b exch 1.0d put } for
+arr-a arr-b dot-product
+1000.0d sub abs 1e-10d lt                      (dot-product: 1000-element accuracy) rt-ok clear
+sv restore
+
+% ====================================================================
+% SECTION 13: product -- array product
+% ====================================================================
+
+% 13.1 Basic product
+[ 1 2 3 4 5 ] product 120 eq                  (product: [1..5] = 120) rt-ok clear
+
+% 13.2 Empty array returns 1
+[ ] product 1 eq                               (product: empty = 1) rt-ok clear
+
+% 13.3 Single element
+[ 42 ] product 42 eq                           (product: single = 42) rt-ok clear
+
+% 13.4 Type preservation
+[ 1.0 2.0 3.0 ] product type /real-type eq     (product: Real type preserved) rt-ok clear
+[ 1.0 2.0 3.0 ] product 6.0 eq                (product: Real [1,2,3] = 6.0) rt-ok clear
+
+% 13.5 Double precision
+[ 1.0d 2.0d 3.0d 4.0d ] product 24.0d eq      (product: Double = 24.0d) rt-ok clear
+
+% 13.6 UInteger
+[ 2u 3u 4u ] product 24u eq                   (product: UInteger = 24u) rt-ok clear
+
+% 13.7 Contains zero
+[ 1 2 0 4 5 ] product 0 eq                    (product: contains zero = 0) rt-ok clear
+
+% 13.8 Negative values
+[ -1 2 -3 ] product 6 eq                      (product: negatives = 6) rt-ok clear
+[ -1 -2 -3 ] product -6 eq                    (product: all neg = -6) rt-ok clear
+
+% 13.9 Packed array
+save /sv exch def
+1 2 3 4 4 packed product 24 eq                 (product: packed = 24) rt-ok clear
+sv restore
+
+% 13.10 Factorial via product
+save /sv exch def
+[ 1 2 3 4 5 6 7 8 9 10 ] product 3628800 eq   (product: 10! = 3628800) rt-ok clear
+sv restore
+
+% ====================================================================
+% SECTION 14: Stress / fuzz / boundary tests
+% ====================================================================
+
+% 14.1 fmax-mag/fmin-mag stress across range
+3.0 -3.0 fmax-mag 3.0 eq
+-100.0 50.0 fmax-mag -100.0 eq and
+0.001 -0.002 fmax-mag -0.002 eq and            (fmax-mag: stress range) rt-ok clear
+
+3.0 -3.0 fmin-mag -3.0 eq
+-100.0 50.0 fmin-mag 50.0 eq and
+0.001 -0.002 fmin-mag 0.001 eq and             (fmin-mag: stress range) rt-ok clear
+
+% 14.2 total-order-mag? transitivity
+0.0 1.0 total-order-mag?
+1.0 2.0 total-order-mag? and
+0.0 2.0 total-order-mag? and                   (total-order-mag?: transitive) rt-ok clear
+
+% 14.3 ulp-equal? symmetry
+1.0 1.0 inf next-after 1 ulp-equal?
+1.0 inf next-after 1.0 1 ulp-equal?
+eq                                             (ulp-equal?: symmetric) rt-ok clear
+
+% 14.4 ulp-equal? boundary: exactly N ULPs apart
+save /sv exch def
+/x 1.0 def
+/x1 x inf next-after def
+/x2 x1 inf next-after def
+/x3 x2 inf next-after def
+x x3 3 ulp-equal?                              (ulp-equal?: exactly 3 apart within 3) rt-ok clear
+x x3 2 ulp-equal? not                          (ulp-equal?: exactly 3 apart not within 2) rt-ok clear
+sv restore
+
+% 14.5 dot-product commutativity
+[ 1.0d 2.0d 3.0d ] [ 4.0d 5.0d 6.0d ] dot-product
+[ 4.0d 5.0d 6.0d ] [ 1.0d 2.0d 3.0d ] dot-product
+eq                                             (dot-product: commutative) rt-ok clear
+
+% 14.6 product with Long values
+save /sv exch def
+[ 1l 2l 3l 4l 5l ] product 120l eq                (product: Long = 120l) rt-ok clear
+sv restore
+
+% 14.7 dot-product self = sum of squares
+[ 3.0d 4.0d ] dup dot-product 25.0d eq        (dot-product: self = sum of squares) rt-ok clear
+
+% 14.8 fmax-mag/fmin-mag with subnormals
+0.0 ulp dup neg fmax-mag 0.0 ulp eq            (fmax-mag: subnormal magnitudes equal -> fmax) rt-ok clear
+0.0 ulp dup neg fmin-mag 0.0 ulp neg eq        (fmin-mag: subnormal magnitudes equal -> fmin) rt-ok clear
+
+% 14.9 ulp-equal? double precision practical: e^0 ~ 1
+0.0d exp 1.0d 2 ulp-equal?                     (ulp-equal?: exp(0d) ~ 1d within 2 ULP) rt-ok clear
+
+% 14.10 product overflow detection
+<< /numerical-overflow { clear true } >> { [ 2147483647 2 ] product } try-catch
+                                               (product: integer overflow detected) rt-ok clear
+
+% ====================================================================
+% SECTION 15: fe-clear-except / fe-raise-except direct return values
+% ====================================================================
+
+% fe-clear-except returns true (success) on valid flags
+fe-all fe-clear-except true eq           (fe-clear: returns true on valid flags) rt-ok clear
+
+% fe-raise-except returns true (success) on valid flags
+fe-all fe-clear-except pop
+fe-inval fe-raise-except true eq         (fe-raise: returns true on valid flags) rt-ok clear
+fe-all fe-clear-except pop
+
+% fe-clear-except actually clears the raised flag
+fe-inval fe-raise-except pop
+fe-inval fe-test-except 0u gt            (fe-raise: flag is set) rt-ok clear
+fe-inval fe-clear-except pop
+fe-inval fe-test-except 0u eq            (fe-clear: flag is cleared) rt-ok clear
+
+% fe-raise-except with zero flags (no-op, should succeed)
+0u fe-raise-except true eq               (fe-raise: zero flags = success) rt-ok clear
+
+% fe-clear-except with zero flags (no-op, should succeed)
+0u fe-clear-except true eq               (fe-clear: zero flags = success) rt-ok clear
+
+% fe-clear-except error on invalid flags
+{ 16#FFFF#u fe-clear-except } try /range-check eq
+                                         (fe-clear: invalid flags error) rt-ok clear
+
+% fe-raise-except error on invalid flags
+{ 16#FFFF#u fe-raise-except } try /range-check eq
+                                         (fe-raise: invalid flags error) rt-ok clear
+
+% Selective clear: raise two flags, clear one, verify other remains
+fe-all fe-clear-except pop
+fe-inval fe-raise-except pop
+fe-oflow fe-raise-except pop
+fe-inval fe-clear-except pop
+fe-inval fe-test-except 0u eq            (fe-selective: invalid cleared) rt-ok clear
+fe-oflow fe-test-except 0u gt            (fe-selective: overflow remains) rt-ok clear
+fe-all fe-clear-except pop
+
+% ====================================================================
+% SECTION 16: asin/acos domain guard (is_abs_lesseq_one predicate)
+% ====================================================================
+
+% asin in-domain
+0.0d asin 0.0d eq                        (asin: 0.0d = 0) rt-ok clear
+1.0 asin 1.0 asin eq                    (asin: 1.0 real) rt-ok clear
+
+% asin out-of-domain
+{ 2.0d asin } try /range-check eq        (asin: 2.0d out of domain) rt-ok clear
+{ -2.0d asin } try /range-check eq       (asin: -2.0d out of domain) rt-ok clear
+{ 2.0 asin } try /range-check eq         (asin: 2.0 real out of domain) rt-ok clear
+
+% acos in-domain
+1.0d acos 0.0d eq                        (acos: 1.0d = 0) rt-ok clear
+
+% acos out-of-domain
+{ 1.5d acos } try /range-check eq        (acos: 1.5d out of domain) rt-ok clear
+{ -1.1 acos } try /range-check eq        (acos: -1.1 real out of domain) rt-ok clear
+
+% boundary: exactly +1 and -1 should work
+1.0d asin type /double-type eq           (asin: +1.0d in domain) rt-ok clear
+-1.0d asin type /double-type eq          (asin: -1.0d in domain) rt-ok clear
+1.0 acos type /real-type eq              (acos: +1.0 in domain) rt-ok clear
+-1.0 acos type /real-type eq             (acos: -1.0 in domain) rt-ok clear
+
+% cleanup: ensure default FP environment
+/fe-to-nearest fe-set-round pop
+fe-all fe-clear-except pop
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

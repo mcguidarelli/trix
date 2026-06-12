@@ -1,0 +1,3 @@
+<< /init { 0 } /handle-call { pop pop 1 add dup } >> gen-server /s exch def
+mark s { /inc exch gen-call pop } actor-spawn coroutine-join pop pop
+s /normal gen-stop

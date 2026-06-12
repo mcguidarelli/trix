@@ -1,0 +1,2 @@
+% set-add-persist: insert that survives restore (member must be pre-interned at sl=0).
+8 set /s exch def s /alpha set-add pop save /sv exch def s /alpha set-add-persist sv restore s /alpha set-member?

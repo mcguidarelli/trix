@@ -1,0 +1,2 @@
+{ false guard } naf
+{ 1 2 eq guard } naf

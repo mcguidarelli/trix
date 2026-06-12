@@ -1,0 +1,2 @@
+/point [ /x /y ] record-type def
+1 2 point /p exch def p /x get

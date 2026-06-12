@@ -1,0 +1,2 @@
+{ 42q 1q add } exec
+{ dup 0q eq { pop } if } exec

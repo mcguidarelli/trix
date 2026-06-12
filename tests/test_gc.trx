@@ -1,0 +1,303 @@
+% ====================================================================
+% test_gc.trx -- Phase 10 mark-sweep GC for the global VM
+% ====================================================================
+% Verifies the three-phase mark-sweep pipeline (clear -> mark -> sweep)
+% added in Phase 10.  GC reclaims composite blocks unreachable from any
+% root.  Cycles reclaim correctly via "set mark BEFORE pushing work
+% queue" invariant.  Defensive gc_mark_object tolerates slack-byte noise
+% from gvm_alloc whole-block reuse.
+%
+% Surface used:
+%   * vm-global-gc        (-- int)   : run a pass; returns reclaimed bytes
+%   * vm-global-gc-probe  (-- dict)  : mark-only diagnostic, no sweep
+%                                      dict has /live /dead /live-bytes /dead-bytes
+%   * //:status:gc-runs              : total passes since boot
+%   * //:status:gc-last-reclaimed    : bytes reclaimed by most recent pass
+%   * //:status:gc-in-progress       : true while a pass is in flight
+%   * //:status:vm-global-used       : bytes currently in [m_vm_global, m_vm_limit)
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: baseline -- gc on empty global heap is a no-op
+% ====================================================================
+% Fresh program has only the main coroutine context block in global VM
+% (the running coroutine is allocated globally so it survives restore).
+% gc must leave it alone -- no garbage to reclaim.
+
+/runs0 //:status:gc-runs def
+vm-global-gc 0 eq                            (1: fresh program reclaims 0 bytes) rt-ok
+//:status:gc-runs runs0 1l add eq            (1: gc-runs counter incremented) rt-ok
+//:status:gc-last-reclaimed 0 eq             (1: gc-last-reclaimed = 0) rt-ok
+//:status:gc-in-progress not                 (1: gc-in-progress = false at rest) rt-ok
+
+% probe also reports 0 dead and 0 live (post 2026-05-09: main is
+% local-VM, the global region is empty until the first user gvm_alloc).
+vm-global-gc-probe /probe exch def
+probe /dead get 0 eq                         (1: probe.dead = 0 on fresh program) rt-ok
+probe /live get 0 eq                         (1: probe.live = 0 (main is local now)) rt-ok
+
+% ====================================================================
+% SECTION 2: orphan reclamation
+% ====================================================================
+% Build a global Array, drop the only reference, GC must reclaim it.
+
+/used0 //:status:vm-global-used def
+
+% Allocate a 50-element global Array, retain via /a-keep.
+${ 50 array } /a-keep exch def
+//:status:vm-global-used used0 gt            (2: alloc grew global usage) rt-ok
+
+% Build a SECOND global Array, immediately drop it (no top-level def).
+${ 80 array pop }
+
+/used1 //:status:vm-global-used def
+used1 used0 gt                               (2: second alloc grew usage further) rt-ok
+
+% Run GC.  The orphaned 80-element Array should be reclaimed.
+% The retained /a-keep Array (and main coroutine ctx etc.) survives.
+/reclaimed1 vm-global-gc def
+reclaimed1 0 gt                              (2: gc reclaimed > 0 bytes) rt-ok
+//:status:vm-global-used used1 lt            (2: vm-global-used dropped after gc) rt-ok
+
+% Drop the retained Array now and GC again -- additional reclamation.
+/a-keep null def
+/used2 //:status:vm-global-used def
+/reclaimed2 vm-global-gc def
+reclaimed2 0 gt                              (2: gc reclaimed orphaned a-keep) rt-ok
+//:status:vm-global-used used2 lt            (2: usage dropped further) rt-ok
+
+% ====================================================================
+% SECTION 3: reachable preservation
+% ====================================================================
+% Build a global Dict, retain it, GC should NOT free it.
+
+${ 16 dict } /d-keep exch def
+d-keep 0 (zero) put-persist
+d-keep 1 (one)  put-persist
+d-keep 2 (two)  put-persist
+
+/used3 //:status:vm-global-used def
+vm-global-gc                                 % return value ignored
+/used4 //:status:vm-global-used def
+
+% After GC, the Dict and its String values must still exist.  Use
+% probe to verify nothing got marked dead.
+vm-global-gc-probe /probe3 exch def
+probe3 /dead get 0 eq                        (3: probe sees no garbage with retained Dict) rt-ok
+
+d-keep 0 get (zero) eq                       (3: Dict entry 0 survived) rt-ok
+d-keep 2 get (two)  eq                       (3: Dict entry 2 survived) rt-ok
+
+/d-keep null def
+
+% ====================================================================
+% SECTION 4: cycle reclamation
+% ====================================================================
+% Two global Dicts referencing each other.  Drop both top-level
+% references.  GC must reclaim both via the cycle-break invariant.
+
+% Build two Dicts, each pointing at the other.
+${ 4 dict } /a4 exch def
+${ 4 dict } /b4 exch def
+a4 /peer b4 put-persist
+b4 /peer a4 put-persist
+
+/used5 //:status:vm-global-used def
+
+% Drop both handles -- the cycle is now unreachable from any root.
+/a4 null def
+/b4 null def
+
+% Probe should see two dead blocks (the Dict bodies), plus their
+% string-table entries if any.  Without cycle break, GC would loop
+% forever.
+vm-global-gc-probe /probe4 exch def
+probe4 /dead get 2 ge                        (4: probe sees >= 2 dead blocks) rt-ok
+
+vm-global-gc /reclaimed4 exch def
+reclaimed4 0 gt                              (4: cycle reclaimed > 0 bytes) rt-ok
+//:status:vm-global-used used5 lt            (4: usage dropped after cycle gc) rt-ok
+
+% ====================================================================
+% SECTION 5: cycle preservation when one handle survives
+% ====================================================================
+% Same shape as §4 but one Dict stays rooted.  Both must survive.
+
+${ 4 dict } /a5 exch def
+${ 4 dict } /b5 exch def
+a5 /peer b5 put-persist
+b5 /peer a5 put-persist
+
+% Drop ONLY b5 -- a5 still rooted, and a5 -> b5 -> a5 cycle keeps both alive.
+/b5 null def
+
+% Run GC first to drain the orphaned ${...} body Packed procs that the
+% scanner emitted for the global blocks above; otherwise probe5.dead
+% would include those alongside any cycle-related dead.
+vm-global-gc pop
+
+vm-global-gc-probe /probe5 exch def
+probe5 /dead get 0 eq                        (5: cycle reachable through a5: 0 dead) rt-ok
+
+% Confirm round-trip lookup works through the cycle.
+a5 /peer get /peer get a5 eq                 (5: a5 -> b5 -> a5 round-trip) rt-ok
+
+/a5 null def
+
+% ====================================================================
+% SECTION 6: deep linked-list reclamation (work queue depth)
+% ====================================================================
+% Build a 50-deep chain of global Dicts, each pointing to the next via
+% a /next field.  Drop the head; GC must reclaim all 50.
+
+${ 4 dict } /head6 exch def
+/curr head6 def
+1 1 49 {
+    /i exch def
+    ${ 4 dict } /n exch def
+    n /index i put-persist
+    curr /next n put-persist
+    /curr n def
+} for
+
+/used7 //:status:vm-global-used def
+
+% Drop the head.  All 50 Dicts are now unreachable.
+/head6 null def
+/curr null def
+
+vm-global-gc-probe /probe6 exch def
+probe6 /dead get 50 ge                       (6: probe sees >= 50 dead blocks) rt-ok
+
+vm-global-gc /reclaimed6 exch def
+reclaimed6 0 gt                              (6: deep chain reclaimed bytes) rt-ok
+% After-GC probe: every chain Dict swept; only main coroutine + name
+% table remnants survive.  Count of dead blocks must be 0 (reclaim
+% complete in this pass).
+vm-global-gc-probe /probe6b exch def
+probe6b /dead get 0 eq                       (6: post-gc probe shows no remaining garbage) rt-ok
+
+% ====================================================================
+% SECTION 7: mark-bit cleanup across consecutive runs
+% ====================================================================
+% Two GC passes in succession.  The second must observe a clean
+% mark state -- no stale marks from pass 1 should false-preserve
+% blocks in pass 2.
+
+${ 8 array pop }   % allocate then drop
+${ 8 array pop }
+${ 8 array pop }
+
+vm-global-gc /pass1_reclaimed exch def
+pass1_reclaimed 0 gt                         (7: pass 1 reclaims) rt-ok
+
+% Allocate-and-drop one more, then second pass.
+${ 8 array pop }
+vm-global-gc /pass2_reclaimed exch def
+pass2_reclaimed 0 gt                         (7: pass 2 reclaims fresh garbage) rt-ok
+
+% ====================================================================
+% SECTION 8: probe gc-in-progress visibility
+% ====================================================================
+% gc-in-progress flips false outside of an active GC.  Inside the GC
+% body itself we can't observe it from Trix-level code (GC is
+% non-yielding).  Verify the resting value.
+
+//:status:gc-in-progress not                 (8: gc-in-progress is false at rest) rt-ok
+
+% ====================================================================
+% SECTION 9: probe + gc agreement on dead-bytes count
+% ====================================================================
+% probe.dead-bytes should match the bytes the next vm-global-gc
+% reclaims (when the heap is otherwise quiescent between calls).
+
+${ 16 array pop }
+${ 16 array pop }
+
+vm-global-gc-probe /probe9 exch def
+/probed_dead probe9 /dead-bytes get def
+
+vm-global-gc /reclaimed9 exch def
+reclaimed9 probed_dead eq                    (9: probe.dead-bytes matches gc reclaimed) rt-ok
+
+% ====================================================================
+% SECTION 10: early-exit paths -- baseline (no garbage post-gc)
+% ====================================================================
+% Right after a fresh GC, a second GC has nothing to reclaim:
+% marked_count == total_live triggers the skip-sweep early-exit.
+
+vm-global-gc                                  % drain any garbage
+pop
+vm-global-gc /immediate_reclaimed exch def
+immediate_reclaimed 0 eq                     (10: back-to-back gc reclaims 0) rt-ok
+
+% probe: live > 0, dead == 0
+vm-global-gc-probe /probe10 exch def
+probe10 /live get 0 gt                       (10: probe sees rooted blocks alive) rt-ok
+probe10 /dead get 0 eq                       (10: probe sees no garbage) rt-ok
+
+% ====================================================================
+% SECTION 11: counters accumulate
+% ====================================================================
+% gc-runs increments by 1 per vm-global-gc call.  Probe does NOT
+% bump the counter (it's not a real GC pass).
+
+/runs_a //:status:gc-runs def
+vm-global-gc pop
+//:status:gc-runs runs_a 1l add eq            (11: gc-runs +1 after vm-global-gc) rt-ok
+
+vm-global-gc-probe pop
+//:status:gc-runs runs_a 1l add eq            (11: gc-runs unchanged after probe) rt-ok
+
+% ====================================================================
+% SECTION 12: mark-generation bit across many passes
+% ====================================================================
+% Trix::m_gc_current_gen is a 1-bit flip-flop: gc_advance_generation
+% XORs it between 0 and 1 each pass, with no clear walk.  Run 260 passes
+% (130 round-trips of the bit) to confirm the mark assignment + compare
+% stay correct across many flips.
+
+/runs_pre //:status:gc-runs def
+1 1 260 { pop vm-global-gc pop } for
+/runs_post //:status:gc-runs def
+runs_post runs_pre 260l add eq               (12: gc-runs advanced by exactly 260) rt-ok
+
+% Mark/sweep still works after many flips: allocate + orphan a global
+% Array, confirm the next pass reclaims it (verifies the mark assignment
+% + comparison still treat the flipped generation correctly).
+${ 32 array pop }
+vm-global-gc /post_wrap_reclaimed exch def
+post_wrap_reclaimed 0 gt                     (12: post-flip reclamation works) rt-ok
+
+% Probe agrees with reality: 0 dead after a fresh GC.
+vm-global-gc-probe /post_wrap_probe exch def
+post_wrap_probe /dead get 0 eq               (12: post-flip probe sees no garbage) rt-ok
+post_wrap_probe /live get 0 gt               (12: post-flip probe sees rooted blocks) rt-ok
+
+% ====================================================================
+% SECTION 13: tail of session
+% ====================================================================
+% Final integrity check: confirm no errors mid-test, gc-in-progress
+% rests at false, gc-runs is positive.
+%
+% NOTE: heap-exhaustion / VMFull scenarios live in tests/
+% test_gc_vmfull.trx as a separate file -- the Trix scanner reads
+% tokens incrementally, so a test that exhausts the heap mid-file
+% would leave the remaining lines unscannable.
+
+//:status:gc-in-progress not                 (13: gc-in-progress at false at end) rt-ok
+//:status:gc-runs 0l gt                      (13: gc-runs > 0 at end) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_gc: ALL TESTS PASSED) =
+(__test_ok__) =

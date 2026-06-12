@@ -1,0 +1,227 @@
+% ====================================================================
+% test_contract.trx -- precondition, postcondition
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% =================================================================
+% SECTION 1: HAPPY PATH -- precondition passes
+% =================================================================
+
+42 dup 0 ge precondition
+42 eq                                       (pre: positive passes) rt-ok  clear
+
+(hello) dup length 0 gt precondition
+(hello) eq                                  (pre: non-empty string) rt-ok  clear
+
+true precondition
+true                                        (pre: true passes) rt-ok  clear
+
+% =================================================================
+% SECTION 2: HAPPY PATH -- postcondition passes
+% =================================================================
+
+{ 0 ge } { 42 } postcondition
+42 eq                                       (post: result >= 0) rt-ok  clear
+
+{ is-string } { (hello) } postcondition
+(hello) eq                                  (post: result is string) rt-ok  clear
+
+{ length 3 eq } { [1 2 3] } postcondition
+[1 2 3] deep-eq                             (post: array length 3) rt-ok  clear
+
+% =================================================================
+% SECTION 3: HAPPY PATH -- postcondition with computation
+% =================================================================
+
+{ 0 gt } { 3 4 mul } postcondition
+12 eq                                       (post: 3*4 > 0) rt-ok  clear
+
+% =================================================================
+% SECTION 4: HAPPY PATH -- precondition in a procedure
+% =================================================================
+
+/safe-sqrt { dup 0.0 ge precondition sqrt } def
+25.0 safe-sqrt 5.0 eq                       (pre-proc: sqrt 25) rt-ok  clear
+
+% =================================================================
+% SECTION 5: SAD PATH -- precondition fails
+% =================================================================
+
+{ -1 dup 0 ge precondition } try /require eq
+                                            (sad: pre negative fails) rt-ok  clear
+
+{ false precondition } try /require eq      (sad: pre false fails) rt-ok  clear
+
+% =================================================================
+% SECTION 6: SAD PATH -- postcondition fails
+% =================================================================
+
+{ { 0 gt } { -5 } postcondition } try /ensure eq
+                                            (sad: post negative fails) rt-ok  clear
+
+{ { is-string } { 42 } postcondition } try /ensure eq
+                                            (sad: post wrong type fails) rt-ok  clear
+
+% =================================================================
+% SECTION 7: SAD PATH -- precondition wrong type
+% =================================================================
+
+{ 42 precondition } try /type-check eq      (sad: pre non-bool) rt-ok  clear
+
+% =================================================================
+% SECTION 8: BOUNDARY -- postcondition preserves result
+% =================================================================
+
+{ dup 0 ge } { 100 } postcondition
+100 eq                                      (boundary: post preserves value) rt-ok  clear
+
+% =================================================================
+% SECTION 9: BOUNDARY -- chained preconditions
+% =================================================================
+
+42 dup 0 ge precondition dup 100 lt precondition
+42 eq                                       (boundary: chained pre) rt-ok  clear
+
+% =================================================================
+% SECTION 10: BOUNDARY -- postcondition with multiple results
+% =================================================================
+
+{ dup 0 ge } { 10 20 add } postcondition
+30 eq                                       (boundary: post on add result) rt-ok  clear
+
+% =================================================================
+% SECTION 11: HAPPY PATH -- postcondition with ExtValue types
+% =================================================================
+
+{ 0l gt } { 42l } postcondition
+42l eq                                      (post: long result) rt-ok  clear
+
+{ 0.0d gt } { 3.14d } postcondition
+3.14d eq                                    (post: double result) rt-ok  clear
+
+% =================================================================
+% SECTION 12: HAPPY PATH -- postcondition-verify directly
+% =================================================================
+
+true postcondition-verify
+true                                        (post-verify: true passes) rt-ok  clear
+
+% =================================================================
+% SECTION 13: HAPPY PATH -- precondition after computation
+% =================================================================
+
+10 20 add dup 0 gt precondition
+30 eq                                       (pre: computed value) rt-ok  clear
+
+5 3 mul dup 10 gt precondition
+15 eq                                       (pre: mul computed) rt-ok  clear
+
+% =================================================================
+% SECTION 14: HAPPY PATH -- postcondition with complex check
+% =================================================================
+
+{ length 3 eq } { [3 7 1] sort } postcondition
+dup 0 get 1 eq                              (post-complex: sorted first) rt-ok
+length 3 eq                                 (post-complex: sorted length) rt-ok  clear
+
+% =================================================================
+% SECTION 15: SAD PATH -- postcondition wrong argument types
+% =================================================================
+
+{ 42 { 1 } postcondition } try /type-check eq
+                                            (sad: post non-proc check) rt-ok  clear
+
+{ { true } 42 postcondition } try /type-check eq
+                                            (sad: post non-proc body) rt-ok  clear
+
+% =================================================================
+% SECTION 16: SAD PATH -- postcondition-verify false
+% =================================================================
+
+{ false postcondition-verify } try /ensure eq
+                                            (sad: post-verify false) rt-ok  clear
+
+% =================================================================
+% SECTION 17: SAD PATH -- postcondition check returns non-bool
+% =================================================================
+
+{ { 42 } { 1 } postcondition } try /type-check eq
+                                            (sad: post check non-bool) rt-ok  clear
+
+% =================================================================
+% SECTION 18: BOUNDARY -- nested postconditions
+% =================================================================
+
+{ 0 gt } { { 0 ge } { 42 } postcondition } postcondition
+42 eq                                       (boundary: nested post) rt-ok  clear
+
+% =================================================================
+% SECTION 19: BOUNDARY -- postcondition inside try (failure caught)
+% =================================================================
+
+{ { 0 gt } { -1 } postcondition } try
+/ensure eq                                  (boundary: post fail in try) rt-ok  clear
+
+% =================================================================
+% SECTION 20: BOUNDARY -- precondition inside try (failure caught)
+% =================================================================
+
+{ false precondition } try
+/require eq                                 (boundary: pre fail in try) rt-ok  clear
+
+% =================================================================
+% SECTION 21: BOUNDARY -- postcondition body returns boolean
+% =================================================================
+
+{ true eq } { true } postcondition
+true eq                                     (boundary: post bool result) rt-ok  clear
+
+{ false eq } { false } postcondition
+false eq                                    (boundary: post false result) rt-ok  clear
+
+% =================================================================
+% SECTION 22: STRESS -- many preconditions in sequence
+% =================================================================
+
+42
+dup 0 ge precondition
+dup 100 lt precondition
+dup is-integer precondition
+dup 2 mod 0 eq precondition
+42 eq                                       (stress: 4 chained pre) rt-ok  clear
+
+% =================================================================
+% SECTION 23: STRESS -- precondition in loop
+% =================================================================
+
+/pre-loop-ok true def
+42 10 { dup 0 ge precondition } repeat pop
+pre-loop-ok                                 (stress: pre in loop) rt-ok  clear
+
+% =================================================================
+% SECTION 24: BOUNDARY -- postcondition preserves stack below
+% =================================================================
+
+99 { 0 gt } { 42 } postcondition
+42 eq                                       (boundary: post top correct) rt-ok
+99 eq                                       (boundary: post below intact) rt-ok  clear
+
+% =================================================================
+% INTEGRITY
+% =================================================================
+
+/vm-validate query-status                    (integrity: vm-validate) rt-ok  clear
+/extvalue-validate query-status              (integrity: extvalue-validate) rt-ok  clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_contract: ALL TESTS PASSED) =
+(__test_ok__) =

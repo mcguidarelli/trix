@@ -1,0 +1,330 @@
+% ====================================================================
+% test_protocoldict.trx -- protocol dict isolation tests
+% ====================================================================
+% Tests that def-protocol binds dispatch procs in protocoldict (not
+% userdict), and that the 3-permanent-dict stack is correctly maintained.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: DICT STACK STRUCTURE -- 3 permanent dicts
+% ====================================================================
+
+count-dictstack 3 eq                         (stack: 3 permanent dicts) rt-ok  clear
+
+% dict-stack 0 is userdict (top)
+/dict-stack 0 stack-probe //userdict eq      (stack: top is userdict) rt-ok  clear
+
+% dict-stack 2 is systemdict (bottom)
+/dict-stack 2 stack-probe //systemdict eq    (stack: bottom is systemdict) rt-ok  clear
+
+% protocoldict exists in systemdict
+//:systemdict:protocoldict is-dict           (stack: protocoldict in systemdict) rt-ok  clear
+
+% protocoldict is on dict stack at position 1
+/dict-stack 1 stack-probe //:systemdict:protocoldict eq  (stack: protocoldict at index 1) rt-ok  clear
+
+% ====================================================================
+% SECTION 2: PROTOCOL BINDING -- dispatch procs go to protocoldict
+% ====================================================================
+
+% Define a test protocol
+[ /test-to-str ] /TestPrint def-protocol
+
+% Dispatch proc is in protocoldict (found via where)
+/test-to-str where
+exch //:systemdict:protocoldict eq           (bind: test-to-str in protocoldict) rt-ok  clear
+
+% Dispatch proc is NOT in userdict
+//userdict /test-to-str known? not           (bind: test-to-str not in userdict) rt-ok  clear
+
+% ====================================================================
+% SECTION 3: PROTOCOL DISPATCH WORKS -- methods resolve through dict stack
+% ====================================================================
+
+% Extend the protocol for integers
+{ pop (integer-result) } /test-to-str /integer-type def-method
+
+% Calling the method works
+42 test-to-str (integer-result) eq           (dispatch: integer to-str works) rt-ok  clear
+
+% ====================================================================
+% SECTION 4: NAMESPACE ISOLATION -- user def does NOT clobber dispatch
+% ====================================================================
+
+% User def shadows but doesn't destroy
+/test-to-str (clobbered) def
+
+% test-to-str now resolves to user string (userdict is on top)
+test-to-str (clobbered) eq                   (isolate: user def shadows) rt-ok  clear
+
+% But the dispatch proc is still in protocoldict
+//:protocoldict:test-to-str is-array        (isolate: dispatch proc still exists) rt-ok  clear
+
+% Remove the shadowing user def, dispatch works again
+//userdict /test-to-str undef
+42 test-to-str (integer-result) eq           (isolate: dispatch restored after undef) rt-ok  clear
+
+% ====================================================================
+% SECTION 5: MULTIPLE PROTOCOLS -- all bind to protocoldict
+% ====================================================================
+
+[ /test-serialize /test-deserialize ] /TestSerialize def-protocol
+[ /test-less-than ] /TestCompare def-protocol
+
+% All three methods in protocoldict
+/test-serialize where exch //:systemdict:protocoldict eq exch pop     (multi: serialize in protocoldict) rt-ok  clear
+/test-deserialize where exch //:systemdict:protocoldict eq exch pop   (multi: deserialize in protocoldict) rt-ok  clear
+/test-less-than where exch //:systemdict:protocoldict eq exch pop     (multi: less-than in protocoldict) rt-ok  clear
+
+% protocoldict grew (at least 4 entries: test-to-str + test-serialize + test-deserialize + test-less-than)
+//:systemdict:protocoldict length 4 ge       (multi: protocoldict has >= 4 entries) rt-ok  clear
+
+% ====================================================================
+% SECTION 6: END PROTECTION -- cannot pop permanent dicts
+% ====================================================================
+
+% Attempting to end past 3 permanent dicts raises error
+{ end } try
+/dictstack-underflow eq                      (protect: end raises underflow) rt-ok  clear
+
+% Dict stack still has exactly 3 after failed end
+count-dictstack 3 eq                         (protect: still 3 after failed end) rt-ok  clear
+
+% ====================================================================
+% SECTION 7: CLEAR-DICTSTACK -- resets to 3 permanent dicts
+% ====================================================================
+
+3 dict begin
+3 dict begin
+count-dictstack 5 eq                         (clear: 5 before clear) rt-ok  clear
+clear-dictstack
+count-dictstack 3 eq                         (clear: 3 after clear) rt-ok  clear
+
+% ====================================================================
+% SECTION 8: BEGIN/END SCOPING -- user dicts above permanent 3
+% ====================================================================
+
+<< /x 42 >> begin
+count-dictstack 4 eq                         (scope: begin pushes to 4) rt-ok
+x 42 eq                                      (scope: x found in user dict) rt-ok
+end clear
+count-dictstack 3 eq                         (scope: end pops back to 3) rt-ok  clear
+
+% ====================================================================
+% SECTION 9: PROTOCOL PATH LOOKUP -- //:protocoldict:method works
+% ====================================================================
+
+//:protocoldict:test-to-str is-array        (path: test-to-str via path) rt-ok  clear
+//:protocoldict:test-serialize is-array     (path: test-serialize via path) rt-ok  clear
+
+% ====================================================================
+% SECTION 10: COROUTINE DICT STACK -- new coroutines get 3 permanent dicts
+% ====================================================================
+
+% Launch a coroutine that checks its dict stack depth
+/coro-depth 0 def
+mark { /coro-depth count-dictstack def } coroutine-launch
+coroutine-wait-all
+coro-depth 3 eq                              (coro: 3 permanent dicts in coroutine) rt-ok  clear
+
+% ====================================================================
+% SECTION 11: PROTOCOL IN COROUTINE -- dispatch works across coroutines
+% ====================================================================
+
+/coro-result null def
+mark {
+    42 test-to-str
+    /coro-result exch def
+} coroutine-launch
+coroutine-wait-all
+coro-result (integer-result) eq              (coro: protocol dispatch in coroutine) rt-ok  clear
+
+% ====================================================================
+% SECTION 12: STRESS -- many protocol methods
+% ====================================================================
+
+[ /sp-a /sp-b /sp-c /sp-d /sp-e /sp-f /sp-g /sp-h ] /StressProto def-protocol
+
+% All 8 methods in protocoldict
+/sp-a where exch //:systemdict:protocoldict eq exch pop    (stress: sp-a in protocoldict) rt-ok  clear
+/sp-h where exch //:systemdict:protocoldict eq exch pop    (stress: sp-h in protocoldict) rt-ok  clear
+
+% None in userdict
+//userdict /sp-a known? not                  (stress: sp-a not in userdict) rt-ok  clear
+//userdict /sp-h known? not                  (stress: sp-h not in userdict) rt-ok  clear
+
+% ====================================================================
+% SECTION 13: PROTOCOLDICT IS READ-WRITE-DYNAMIC -- grows as needed
+% ====================================================================
+
+//:systemdict:protocoldict is-dict           (dynamic: protocoldict is dict) rt-ok  clear
+
+% After defining multiple protocols, dict has grown
+//:systemdict:protocoldict length 12 ge      (dynamic: protocoldict >= 12 entries) rt-ok  clear
+
+% ====================================================================
+% SECTION 14: SAVE/RESTORE -- protocol survives save/restore
+% ====================================================================
+
+/sv14 save def
+
+% Define a protocol inside a save scope
+[ /sr-method ] /SaveRestoreProto def-protocol
+{ pop (sr-ok) } /sr-method /integer-type def-method
+
+% Verify it works before restore
+10 sr-method (sr-ok) eq                      (save: dispatch before restore) rt-ok  clear
+
+sv14 restore
+
+% Protocol dispatch procs are in protocoldict which is journaled —
+% the def-protocol put should be rolled back by restore.
+% After restore, sr-method should NOT be found.
+{ 10 sr-method } try
+/undefined eq                                (save: dispatch rolled back after restore) rt-ok  clear
+
+% Protocols defined BEFORE save still work
+42 test-to-str (integer-result) eq           (save: pre-save protocol survives) rt-ok  clear
+
+% ====================================================================
+% SECTION 15: ERROR RECOVERY -- dict stack resets to 3 on error
+% ====================================================================
+
+% Error during protocol dispatch — protocol still works after
+{ 1 0 div } try
+/div-by-zero eq                              (error: caught div-by-zero) rt-ok  clear
+
+% Protocol dispatch still works after error recovery
+42 test-to-str (integer-result) eq           (error: protocol works after recovery) rt-ok  clear
+
+% Dict stack is still 3 (try doesn't push extra dicts)
+count-dictstack 3 eq                         (error: dict stack still 3) rt-ok  clear
+
+% ====================================================================
+% SECTION 16: MULTIPLE TYPES PER METHOD -- polymorphic dispatch
+% ====================================================================
+
+[ /poly-method ] /PolyProto def-protocol
+{ pop (from-int) } /poly-method /integer-type def-method
+{ pop (from-real) } /poly-method /real-type def-method
+{ pop (from-str) } /poly-method /string-type def-method
+
+42 poly-method (from-int) eq                 (poly: integer dispatch) rt-ok  clear
+3.14 poly-method (from-real) eq              (poly: real dispatch) rt-ok  clear
+(hello) poly-method (from-str) eq            (poly: string dispatch) rt-ok  clear
+
+% ====================================================================
+% SECTION 17: PROTOCOL-SATISFIES? -- works with protocoldict binding
+% ====================================================================
+
+42 /PolyProto protocol-satisfies?             (satisfies: integer satisfies PolyProto) rt-ok  clear
+3.14 /PolyProto protocol-satisfies?           (satisfies: real satisfies PolyProto) rt-ok  clear
+true /PolyProto protocol-satisfies? not       (satisfies: boolean does not satisfy) rt-ok  clear
+
+% ====================================================================
+% SECTION 18: EXTEND-PROTOCOL -- adds methods to existing protocol
+% ====================================================================
+
+% extend-protocol: batch-register boolean-type for PolyProto
+<< /poly-method { pop (from-bool) } >> /boolean-type /PolyProto extend-protocol
+
+true poly-method (from-bool) eq              (extend: boolean dispatch after extend) rt-ok  clear
+
+% Original integer dispatch still works
+42 poly-method (from-int) eq                 (extend: integer still works) rt-ok  clear
+
+% ====================================================================
+% SECTION 19: DEF-DEFAULT-METHOD -- fallback dispatch
+% ====================================================================
+
+[ /dflt-method ] /DfltProto def-protocol
+{ pop (default) } /dflt-method def-default-method
+{ pop (int-specific) } /dflt-method /integer-type def-method
+
+42 dflt-method (int-specific) eq             (default: integer uses specific) rt-ok  clear
+3.14 dflt-method (default) eq                (default: real uses fallback) rt-ok  clear
+true dflt-method (default) eq                (default: boolean uses fallback) rt-ok  clear
+
+% ====================================================================
+% SECTION 20: NESTED BEGIN/END -- protocols resolve through stacked dicts
+% ====================================================================
+
+<< /x 1 >> begin
+<< /y 2 >> begin
+
+% Protocol method still resolves through 5-deep dict stack
+42 test-to-str (integer-result) eq           (nested: protocol through 5-deep stack) rt-ok  clear
+
+% protocoldict still at the right level
+/test-to-str where exch //:systemdict:protocoldict eq exch pop  (nested: where finds protocoldict) rt-ok  clear
+
+end end clear
+
+% ====================================================================
+% SECTION 21: CLOSURE CAPTURING PROTOCOL METHOD -- late binding works
+% ====================================================================
+
+/make-converter { { test-to-str } } def
+/converter make-converter def
+42 converter (integer-result) eq             (closure: protocol method in closure) rt-ok  clear
+
+% ====================================================================
+% SECTION 22: PROTOCOL METHODS -- protocol-methods introspection
+% ====================================================================
+
+/TestPrint protocol-methods length 1 eq      (methods: TestPrint has 1 method) rt-ok  clear
+/PolyProto protocol-methods length 1 eq      (methods: PolyProto has 1 method) rt-ok  clear
+
+% ====================================================================
+% SECTION 23: STRESS -- rapid define + dispatch cycle
+% ====================================================================
+
+% Define 5 protocols with 1 method each, all dispatch correctly
+[ /cyc-a ] /CycA def-protocol  { pop (a) } /cyc-a /integer-type def-method
+[ /cyc-b ] /CycB def-protocol  { pop (b) } /cyc-b /integer-type def-method
+[ /cyc-c ] /CycC def-protocol  { pop (c) } /cyc-c /integer-type def-method
+[ /cyc-d ] /CycD def-protocol  { pop (d) } /cyc-d /integer-type def-method
+[ /cyc-e ] /CycE def-protocol  { pop (e) } /cyc-e /integer-type def-method
+
+1 cyc-a (a) eq                               (rapid: cyc-a dispatches) rt-ok  clear
+1 cyc-b (b) eq                               (rapid: cyc-b dispatches) rt-ok  clear
+1 cyc-c (c) eq                               (rapid: cyc-c dispatches) rt-ok  clear
+1 cyc-d (d) eq                               (rapid: cyc-d dispatches) rt-ok  clear
+1 cyc-e (e) eq                               (rapid: cyc-e dispatches) rt-ok  clear
+
+% All in protocoldict, none in userdict
+//userdict /cyc-a known? not                 (rapid: cyc-a not in userdict) rt-ok  clear
+//userdict /cyc-e known? not                 (rapid: cyc-e not in userdict) rt-ok  clear
+
+% ====================================================================
+% SECTION 24: SHADOW + DISPATCH INTERACTION -- shadow one, others work
+% ====================================================================
+
+% Shadow cyc-a in userdict
+/cyc-a (shadowed) def
+
+% cyc-a is shadowed
+cyc-a (shadowed) eq                          (shadow-interact: cyc-a shadowed) rt-ok  clear
+
+% Other protocol methods still work
+1 cyc-b (b) eq                               (shadow-interact: cyc-b still works) rt-ok  clear
+1 cyc-c (c) eq                               (shadow-interact: cyc-c still works) rt-ok  clear
+
+% Remove shadow, dispatch restored
+//userdict /cyc-a undef
+1 cyc-a (a) eq                               (shadow-interact: cyc-a restored) rt-ok  clear
+
+(====================================) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(  test_protocoldict: ALL TESTS PASSED) =
+(====================================) =
+(__test_ok__) =

@@ -1,0 +1,6 @@
+% sleep-huge.trx -- ~28-hour coroutine-sleep for the --sleep-budget cases.
+% With --sleep-budget=100 the grant is capped and the script finishes in
+% ~0.1s (prints sleep-ok); without the budget mechanism it would park until
+% the runner's CASE_TIMEOUT kills it.
+99999999 coroutine-sleep
+(sleep-ok) =

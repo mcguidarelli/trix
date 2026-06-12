@@ -1,0 +1,13 @@
+% and? / or? fuzz seed: truth tables, short-circuit proof, chaining,
+% guarded access, type-error paths.
+true  { true  } and?
+true  { false } and?
+false { /unused-name 1 def true } and?
+true  { 1 0 div } or?
+false { false } or?
+true  { false } or? { false } or? { true } and?
+/a [ 1 2 3 ] def
+5 a length lt { a 5 get 99 eq } and?
+0 a length lt { a 0 get 1 eq } and?
+{ 42 { true } and? } try pop
+{ true 42 or? } try pop

@@ -1,0 +1,79 @@
+% ====================================================================
+% vm-heap-tracking Phase 1: alloc-stats / clear-alloc-stats / status keys
+%
+% Granularity note: m_last_scan_location updates AFTER each token
+% completes scanning, so allocations triggered DURING a token's scan
+% (e.g. a string literal's body) are attributed to the previous
+% token's line.  Tests therefore assert presence and growth, not
+% exact line numbers.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- 1. clear-alloc-stats baseline.
+clear-alloc-stats
+//:status:alloc-sites 0 eq                 (clear: alloc-sites resets to 0)            rt-ok
+//:status:alloc-saturated false eq         (clear: alloc-saturated resets to false)    rt-ok
+//:status:alloc-tracking true eq           (tracking is on by default after init)      rt-ok
+
+% --- 2. allocations grow alloc-sites past 0.
+clear-alloc-stats
+[1 2 3 4 5] pop
+//:status:alloc-sites 0 gt                 (one alloc -> alloc-sites > 0)              rt-ok
+
+% --- 3. alloc-stats returns an array; entries have /file /line /count /bytes.
+clear-alloc-stats
+[10 20] pop
+/first alloc-stats def
+first length 0 gt                          (alloc-stats: at least 1 entry)             rt-ok
+first 0 get /file get type /string-type eq (entry: /file is a string)                  rt-ok
+first 0 get /line get type /integer-type eq (entry: /line is an integer)               rt-ok
+first 0 get /count get 1 ge                (entry: /count is at least 1)               rt-ok
+first 0 get /bytes get 1 ge                (entry: /bytes is at least 1)               rt-ok
+
+% --- 4. /count and /bytes accumulate when more allocations land at the same site.
+clear-alloc-stats
+[1] pop /one alloc-stats def
+[1] pop [1] pop /two alloc-stats def
+% sum bytes across all entries; the second snapshot should have strictly
+% more total bytes (more allocations) than the first.
+/sum-bytes { 0 exch { /bytes get add } for-all } def
+two sum-bytes one sum-bytes gt             (more allocs -> more total bytes)            rt-ok
+
+% --- 5. clear-alloc-stats fully resets state.
+clear-alloc-stats
+//:status:alloc-sites 0 eq                 (after second clear: 0 sites)               rt-ok
+
+% --- 6. alloc-stats does NOT pollute its own count
+%     (the op pauses tracking around its result-array build).
+clear-alloc-stats
+alloc-stats pop
+//:status:alloc-sites 0 eq                 (alloc-stats does not pollute its own count) rt-ok
+
+% --- 7. alloc-stats result entries point at THIS test file by name.
+clear-alloc-stats
+[42] pop
+/snap alloc-stats def
+snap 0 get /file get
+(test_alloc_stats.trx) string-index-of 0 ge   (entry /file mentions the test filename) rt-ok
+
+% --- 8. distinct source lines produce distinct entries (eventually).
+clear-alloc-stats
+[1] pop
+[2] pop
+[3] pop
+[4] pop
+[5] pop
+//:status:alloc-sites 1 gt                 (5 lines of allocs -> > 1 site)             rt-ok
+
+(test_alloc_stats: all OK) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

@@ -1,0 +1,154 @@
+% ====================================================================
+% test_byte_array_suffix.trx -- #a suffix for string-to-byte-array
+% ====================================================================
+% Tests (...)#a, <...>#a, <(...)>#a — scanner-level Byte array creation.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+(VM free at start: ) print /vm-free query-status =
+
+% Shared result variables
+/R null def  /R2 null def
+
+% =================================================================
+% SECTION 1: basic text string — correct type and content
+/R (Hello)#a def
+R is-array                        (text: is array) rt-ok
+R length 5 eq                     (text: length 5) rt-ok
+R 0 get 72b eq                    (text: H = 72b) rt-ok
+R 1 get 101b eq                   (text: e = 101b) rt-ok
+R 4 get 111b eq                   (text: o = 111b) rt-ok
+R 0 get is-byte                   (text: element is Byte) rt-ok  clear
+
+% =================================================================
+% SECTION 2: hex string
+/R <48 65 6C 6C 6F>#a def
+R is-array                        (hex: is array) rt-ok
+R length 5 eq                     (hex: length 5) rt-ok
+R 0 get 72b eq                    (hex: first byte 0x48 = 72) rt-ok
+R 4 get 111b eq                   (hex: last byte 0x6F = 111) rt-ok  clear
+
+% =================================================================
+% SECTION 3: raw string
+/R <(Hello)>#a def
+R is-array                        (raw: is array) rt-ok
+R length 5 eq                     (raw: length 5) rt-ok
+R 0 get 72b eq                    (raw: H = 72b) rt-ok  clear
+
+% =================================================================
+% SECTION 4: escape sequences
+/R (\n\t\x41)#a def
+R length 3 eq                     (esc: length 3) rt-ok
+R 0 get 10b eq                    (esc: newline = 10b) rt-ok
+R 1 get 9b eq                     (esc: tab = 9b) rt-ok
+R 2 get 65b eq                    (esc: \\x41 = 65b) rt-ok  clear
+
+% =================================================================
+% SECTION 5: boundary bytes
+/R (\x00\xFF)#a def
+R length 2 eq                     (boundary: length 2) rt-ok
+R 0 get 0b eq                     (boundary: 0x00) rt-ok
+R 1 get 255b eq                   (boundary: 0xFF) rt-ok  clear
+
+% =================================================================
+% SECTION 6: empty string produces empty array
+/R ()#a def
+R is-array                        (empty: is array) rt-ok
+R length 0 eq                     (empty: length 0) rt-ok  clear
+
+% =================================================================
+% SECTION 7: single byte (differs from #b)
+/R (A)#a def
+R is-array                        (single-a: is array) rt-ok
+R length 1 eq                     (single-a: length 1) rt-ok
+R 0 get 65b eq                    (single-a: A = 65b) rt-ok
+(A)#b is-byte                     (single-b: #b is Byte scalar) rt-ok  clear
+
+% =================================================================
+% SECTION 8: read-only #ar
+/R (AB)#ar def
+R is-array                        (readonly: is array) rt-ok
+R 0 get 65b eq                    (readonly: content correct) rt-ok
+{ R 0 99b put } try /no-error ne  (readonly: put rejected) rt-ok  clear
+
+% =================================================================
+% SECTION 9: explicit read-write #aw
+/R (AB)#aw def
+R is-array                        (readwrite: is array) rt-ok
+R 0 99b put
+R 0 get 99b eq                    (readwrite: put accepted) rt-ok  clear
+
+% =================================================================
+% SECTION 10: save/restore journaling (the primary use case)
+/R (Hello)#a def
+save
+R 0 65b put
+R 0 get 65b eq                    (journal: put wrote 65b) rt-ok
+restore
+R 0 get 72b eq                    (journal: restore reverted to 72b) rt-ok  clear
+
+% =================================================================
+% SECTION 11: save/restore journaling — multiple puts
+/R (ABCD)#a def
+save
+R 0 0b put  R 1 0b put  R 2 0b put  R 3 0b put
+R 0 get 0b eq                     (journal-multi: all zeroed) rt-ok
+restore
+R 0 get 65b eq                    (journal-multi: A restored) rt-ok
+R 1 get 66b eq                    (journal-multi: B restored) rt-ok
+R 3 get 68b eq                    (journal-multi: D restored) rt-ok  clear
+
+% =================================================================
+% SECTION 12: uppercase suffix #A #AR #AW
+/R (Hi)#A def
+R is-array                        (upper-A: is array) rt-ok
+/R (Hi)#AR def
+{ R 0 0b put } try /no-error ne   (upper-AR: read-only) rt-ok
+/R (Hi)#AW def
+R 0 0b put
+R 0 get 0b eq                     (upper-AW: read-write) rt-ok  clear
+
+% =================================================================
+% SECTION 13: error — invalid suffix letter after #a
+% Suffix errors are scanner-level; use executable string to trigger at runtime.
+{ ((Hi)#az) cvx exec } try /no-error ne   (err: #az invalid) rt-ok  clear
+{ ((Hi)#ax) cvx exec } try /no-error ne   (err: #ax invalid) rt-ok  clear
+{ ((Hi)#al) cvx exec } try /no-error ne   (err: #al invalid) rt-ok  clear
+
+% =================================================================
+% SECTION 14: all three forms produce identical content
+/R  (ABC)#a def
+/R2 <41 42 43>#a def
+R length R2 length eq              (forms: same length) rt-ok
+R 0 get R2 0 get eq               (forms: same byte 0) rt-ok
+R 2 get R2 2 get eq               (forms: same byte 2) rt-ok  clear
+
+% =================================================================
+% SECTION 15: array operations work (get, put, length)
+/R (Test)#a def
+R length 4 eq                     (ops: length) rt-ok
+R 0 get 84b eq                    (ops: get T=84b) rt-ok
+R 0 0b put  R 0 get 0b eq         (ops: put works) rt-ok
+R 1 get 101b eq                   (ops: other elements intact) rt-ok  clear
+
+% =================================================================
+% SECTION 16: longer string
+/R (The quick brown fox jumps over the lazy dog)#a def
+R length 43 eq                    (long: length 43) rt-ok
+R 0 get 84b eq                    (long: T = 84b) rt-ok
+R 42 get 103b eq                  (long: g = 103b) rt-ok  clear
+
+% =================================================================
+% SECTION 17: vm-validate
+/vm-validate query-status true eq (vm-validate: heap integrity) rt-ok  clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_byte_array_suffix: ALL TESTS PASSED) =
+(__test_ok__) =

@@ -1,0 +1,2060 @@
+% ====================================================================
+% test_logic.trx -- logic-var, unify, deref, fail, choice, guard, cut,
+%                   is-logic-var, bound?
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+/==s { /==s-v exch def =string ({0:O}) [ ==s-v ] asprint-fmt pop } def
+
+% =================================================================
+% SECTION 1: HAPPY PATH -- logic-var, is-logic-var, bound?
+% =================================================================
+
+logic-var is-logic-var                   (lvar: is-logic-var) rt-ok  clear
+logic-var dup bound? not               (lvar: initially unbound) rt-ok  clear
+42 is-logic-var not                      (lvar: integer is not lvar) rt-ok  clear
+(hello) is-logic-var not                 (lvar: string is not lvar) rt-ok  clear
+true is-logic-var not                    (lvar: bool is not lvar) rt-ok  clear
+null is-logic-var not                    (lvar: null is not lvar) rt-ok  clear
+
+% =================================================================
+% SECTION 2: HAPPY PATH -- unify and deref basics
+% =================================================================
+
+logic-var /x exch def
+x 42 unify                               (unify: bind to int returns true) rt-ok  clear
+x deref 42 eq                            (deref: bound to 42) rt-ok  clear
+x bound?                               (unify: x now bound) rt-ok  clear
+
+logic-var /y exch def
+y (hello) unify                          (unify: bind to string returns true) rt-ok  clear
+y deref (hello) eq                       (deref: bound to hello) rt-ok  clear
+
+% =================================================================
+% SECTION 3: HAPPY PATH -- unify identical values (no variables)
+% =================================================================
+
+42 42 unify                              (unify: identical ints) rt-ok  clear
+(abc) (abc) unify                        (unify: identical strings) rt-ok  clear
+true true unify                          (unify: identical bools) rt-ok  clear
+null null unify                          (unify: identical nulls) rt-ok  clear
+
+% =================================================================
+% SECTION 4: HAPPY PATH -- deref unbound returns self
+% =================================================================
+
+logic-var /z exch def
+z deref is-logic-var                     (deref: unbound returns lvar) rt-ok  clear
+
+% =================================================================
+% SECTION 5: HAPPY PATH -- deref chain (lvar bound to lvar bound to value)
+% =================================================================
+
+logic-var /a exch def
+logic-var /b exch def
+a b unify pop
+b 99 unify pop
+a deref 99 eq                            (chain: a -> b -> 99) rt-ok  clear
+
+% =================================================================
+% SECTION 6: HAPPY PATH -- unify two unbound lvars
+% =================================================================
+
+logic-var /p exch def
+logic-var /q exch def
+p q unify                                (unify: two unbound lvars) rt-ok
+p 77 unify pop
+q deref 77 eq                            (chain: q -> p -> 77) rt-ok  clear
+
+% =================================================================
+% SECTION 7: HAPPY PATH -- unify arrays pairwise
+% =================================================================
+
+logic-var /v exch def
+[ 1 v 3 ] [ 1 2 3 ] unify               (unify: array pairwise) rt-ok
+v deref 2 eq                             (unify: v bound to 2) rt-ok  clear
+
+% =================================================================
+% SECTION 8: HAPPY PATH -- unify tagged values
+% =================================================================
+
+logic-var /t exch def
+t /:some tag 99 /:some tag unify         (unify: tagged same tag) rt-ok
+t deref 99 eq                            (unify: t bound to 99) rt-ok  clear
+
+% Save scope: reclaim save levels from successful choice/cut tests (sections 9-81).
+save /choice-scope exch def
+
+% =================================================================
+% SECTION 9: HAPPY PATH -- choice returns first succeeding
+% =================================================================
+
+logic-var /c exch def
+[
+    { c 1 unify guard }
+    { c 2 unify guard }
+    { c 3 unify guard }
+] choice
+c deref 1 eq                             (choice: first succeeds) rt-ok  clear
+
+% =================================================================
+% SECTION 10: HAPPY PATH -- choice skips failing alternatives
+% =================================================================
+
+logic-var /c exch def
+[
+    { c 1 unify guard  c deref 10 gt guard }
+    { c 5 unify guard  c deref 2 gt guard }
+    { c 99 unify guard }
+] choice
+c deref 5 eq                             (choice: skips first, picks second) rt-ok  clear
+
+% =================================================================
+% SECTION 11: HAPPY PATH -- nested choice
+% =================================================================
+
+logic-var /x exch def
+logic-var /y exch def
+[
+    { x 1 unify guard
+      [ { y 10 unify guard } { y 20 unify guard } ] choice }
+    { x 2 unify guard  y 30 unify guard }
+] choice
+x deref 1 eq                             (nested: x = 1) rt-ok
+y deref 10 eq                            (nested: y = 10) rt-ok  clear
+
+% =================================================================
+% SECTION 12: HAPPY PATH -- guard as filter inside choice
+% =================================================================
+
+logic-var /g exch def
+[
+    { g 1 unify guard  g deref 2 mod 0 eq guard }
+    { g 2 unify guard  g deref 2 mod 0 eq guard }
+    { g 3 unify guard  g deref 2 mod 0 eq guard }
+] choice
+g deref 2 eq                              (guard: picks first even) rt-ok  clear
+
+% =================================================================
+% SECTION 13: HAPPY PATH -- unify records pairwise
+% =================================================================
+
+logic-var /rv exch def
+1 rv [ /x /y ] record
+1 42 [ /x /y ] record
+unify                                     (unify: record pairwise) rt-ok
+rv deref 42 eq                            (unify: rv bound to 42) rt-ok  clear
+
+% =================================================================
+% SECTION 14: SAD PATH -- unify mismatched types
+% =================================================================
+
+42 (hello) unify not                      (sad: int vs string) rt-ok  clear
+42 true unify not                         (sad: int vs bool) rt-ok  clear
+[ 1 2 ] 42 unify not                     (sad: array vs int) rt-ok  clear
+
+% =================================================================
+% SECTION 15: SAD PATH -- unify mismatched values
+% =================================================================
+
+42 43 unify not                           (sad: 42 vs 43) rt-ok  clear
+(abc) (def) unify not                    (sad: abc vs def) rt-ok  clear
+
+% =================================================================
+% SECTION 16: SAD PATH -- unify arrays different length
+% =================================================================
+
+[ 1 2 ] [ 1 2 3 ] unify not             (sad: array len 2 vs 3) rt-ok  clear
+
+% =================================================================
+% SECTION 17: SAD PATH -- unify records different schema
+% =================================================================
+
+1 2 [ /x /y ] record
+1 2 3 [ /r /g /b ] record
+unify not                                (sad: different record schema) rt-ok  clear
+
+% =================================================================
+% SECTION 18: SAD PATH -- unify tagged different tag
+% =================================================================
+
+1 /:some tag 1 /:none tag unify not       (sad: different tag names) rt-ok  clear
+
+% =================================================================
+% SECTION 19: SAD PATH -- choice all alternatives fail
+% =================================================================
+
+{ [ { false guard } { false guard } ] choice } try
+/fail eq                                  (sad: all-fail propagates /fail) rt-ok  clear
+
+% =================================================================
+% SECTION 20: SAD PATH -- choice empty array
+% =================================================================
+
+{ [ ] choice } try
+/fail eq                                  (sad: empty choice is fail) rt-ok  clear
+
+% =================================================================
+% SECTION 21: SAD PATH -- guard with false
+% =================================================================
+
+{ false guard } try
+/fail eq                                  (sad: guard false is fail) rt-ok  clear
+
+% =================================================================
+% SECTION 22: SAD PATH -- fail outside choice
+% =================================================================
+
+{ fail } try
+/fail eq                                  (sad: fail caught by try) rt-ok  clear
+
+% =================================================================
+% SECTION 23: SAD PATH -- bound? on non-lvar
+% =================================================================
+
+{ 42 bound? } try
+/type-check eq                            (sad: bound? on int) rt-ok  clear
+
+% =================================================================
+% SECTION 24: SAD PATH -- non-fail error propagates through choice
+% =================================================================
+
+{ [ { 1 0 div } ] choice } try
+/div-by-zero eq                           (sad: div-by-zero propagates) rt-ok  clear
+
+% =================================================================
+% SECTION 25: STRESS -- deep choice nesting (10 levels)
+% =================================================================
+
+/R true def
+{
+    logic-var /v1 exch def
+    [{ v1 1 unify guard
+       logic-var /v2 exch def
+       [{ v2 2 unify guard
+          logic-var /v3 exch def
+          [{ v3 3 unify guard
+             logic-var /v4 exch def
+             [{ v4 4 unify guard
+                logic-var /v5 exch def
+                [{ v5 5 unify guard
+                   logic-var /v6 exch def
+                   [{ v6 6 unify guard
+                      logic-var /v7 exch def
+                      [{ v7 7 unify guard
+                         logic-var /v8 exch def
+                         [{ v8 8 unify guard
+                            logic-var /v9 exch def
+                            [{ v9 9 unify guard
+                               logic-var /v10 exch def
+                               [{ v10 10 unify guard }] choice
+                            }] choice
+                         }] choice
+                      }] choice
+                   }] choice
+                }] choice
+             }] choice
+          }] choice
+       }] choice
+    }] choice
+    v1 deref 1 eq
+    v10 deref 10 eq and
+    { } { /R false def } if-else
+} try pop
+R                                         (stress: 10-deep nesting) rt-ok  clear
+
+% =================================================================
+% SECTION 26: STRESS -- long alternatives (20+ alternatives)
+% =================================================================
+
+logic-var /s exch def
+[
+    { s 1 unify guard  s deref 100 gt guard }
+    { s 2 unify guard  s deref 100 gt guard }
+    { s 3 unify guard  s deref 100 gt guard }
+    { s 4 unify guard  s deref 100 gt guard }
+    { s 5 unify guard  s deref 100 gt guard }
+    { s 6 unify guard  s deref 100 gt guard }
+    { s 7 unify guard  s deref 100 gt guard }
+    { s 8 unify guard  s deref 100 gt guard }
+    { s 9 unify guard  s deref 100 gt guard }
+    { s 10 unify guard  s deref 100 gt guard }
+    { s 11 unify guard  s deref 100 gt guard }
+    { s 12 unify guard  s deref 100 gt guard }
+    { s 13 unify guard  s deref 100 gt guard }
+    { s 14 unify guard  s deref 100 gt guard }
+    { s 15 unify guard  s deref 100 gt guard }
+    { s 16 unify guard  s deref 100 gt guard }
+    { s 17 unify guard  s deref 100 gt guard }
+    { s 18 unify guard  s deref 100 gt guard }
+    { s 19 unify guard  s deref 100 gt guard }
+    { s 20 unify guard  s deref 100 gt guard }
+    { s 42 unify guard  s deref 40 gt guard }
+] choice
+s deref 42 eq                             (stress: 20+ alternatives) rt-ok  clear
+
+% =================================================================
+% SECTION 27: STRESS -- many logic variables
+% =================================================================
+
+/R true def
+logic-var /a1 exch def  logic-var /a2 exch def  logic-var /a3 exch def
+logic-var /a4 exch def  logic-var /a5 exch def  logic-var /a6 exch def
+logic-var /a7 exch def  logic-var /a8 exch def  logic-var /a9 exch def
+logic-var /a10 exch def
+
+[{
+    a1 10 unify guard  a2 20 unify guard  a3 30 unify guard
+    a4 40 unify guard  a5 50 unify guard  a6 60 unify guard
+    a7 70 unify guard  a8 80 unify guard  a9 90 unify guard
+    a10 100 unify guard
+}] choice
+
+a1 deref 10 eq a2 deref 20 eq and a3 deref 30 eq and
+a4 deref 40 eq and a5 deref 50 eq and a6 deref 60 eq and
+a7 deref 70 eq and a8 deref 80 eq and a9 deref 90 eq and
+a10 deref 100 eq and
+                                          (stress: 10 vars unified) rt-ok  clear
+
+% =================================================================
+% SECTION 28: STRESS -- deref chain depth (5+ chained lvars)
+% =================================================================
+
+logic-var /c1 exch def
+logic-var /c2 exch def
+logic-var /c3 exch def
+logic-var /c4 exch def
+logic-var /c5 exch def
+
+c1 c2 unify pop
+c2 c3 unify pop
+c3 c4 unify pop
+c4 c5 unify pop
+c5 42 unify pop
+c1 deref 42 eq                           (stress: 5-deep deref chain) rt-ok  clear
+
+% =================================================================
+% SECTION 29: FUZZ -- unify int vs real
+% =================================================================
+
+42 3.14 unify not                        (fuzz: int vs real) rt-ok  clear
+
+% =================================================================
+% SECTION 30: FUZZ -- unify string vs name
+% =================================================================
+
+(hello) /hello unify                      (fuzz: string eq name in Trix) rt-ok  clear
+
+% =================================================================
+% SECTION 31: FUZZ -- unify array vs tagged
+% =================================================================
+
+[ 1 2 ] 1 /:some tag unify not           (fuzz: array vs tagged) rt-ok  clear
+
+% =================================================================
+% SECTION 32: FUZZ -- unify lvar with complex value
+% =================================================================
+
+logic-var /cv exch def
+cv [ 1 2 3 ] unify                       (fuzz: lvar with array) rt-ok
+cv deref length 3 eq                     (fuzz: deref array length) rt-ok  clear
+
+% =================================================================
+% SECTION 33: FUZZ -- nested choice: inner fails, outer succeeds
+% =================================================================
+
+logic-var /x exch def
+[
+    { [ { false guard } ] choice }
+    { x 7 unify guard }
+] choice
+x deref 7 eq                             (fuzz: inner fail, outer ok) rt-ok  clear
+
+% =================================================================
+% SECTION 34: FUZZ -- choice alternatives that modify dict (rolled back)
+% =================================================================
+
+/test-var null def
+logic-var /dv exch def
+[
+    { /test-var 999 def  dv 1 unify guard  dv deref 10 gt guard }
+    { dv 2 unify guard }
+] choice
+dv deref 2 eq                             (fuzz: second alt after rollback) rt-ok
+test-var null eq                          (fuzz: dict def rolled back) rt-ok  clear
+
+% =================================================================
+% SECTION 35: BOUNDARY -- single alternative (success)
+% =================================================================
+
+logic-var /sv exch def
+[ { sv 42 unify guard } ] choice
+sv deref 42 eq                            (boundary: single-alt success) rt-ok  clear
+
+% =================================================================
+% SECTION 36: BOUNDARY -- single alternative (failure)
+% =================================================================
+
+{ [ { false guard } ] choice } try
+/fail eq                                  (boundary: single-alt failure) rt-ok  clear
+
+% =================================================================
+% SECTION 37: BOUNDARY -- unify two identical unbound lvars (same object)
+% =================================================================
+
+logic-var /id exch def
+id id unify                               (boundary: lvar unify with self) rt-ok  clear
+
+% =================================================================
+% SECTION 38: BOUNDARY -- choice result on operand stack
+% =================================================================
+
+[ { 42 } { 99 } ] choice
+42 eq                                     (boundary: choice pushes result) rt-ok  clear
+
+% =================================================================
+% SECTION 39: BOUNDARY -- deref on non-lvar returns self
+% =================================================================
+
+42 deref 42 eq                            (boundary: deref int is self) rt-ok  clear
+(hello) deref (hello) eq                 (boundary: deref string is self) rt-ok  clear
+null deref null eq                        (boundary: deref null is self) rt-ok  clear
+
+% =================================================================
+% SECTION 40: BOUNDARY -- choice with save/restore interaction
+% =================================================================
+
+save
+logic-var /sv2 exch def
+[ { sv2 88 unify guard } ] choice
+sv2 deref 88 eq                           (boundary: choice inside save) rt-ok
+restore  clear
+
+% =================================================================
+% SECTION 41: ERROR PROPAGATION -- div-by-zero not caught by choice
+% =================================================================
+
+{ [ { 1 0 div } { 42 } ] choice } try
+/div-by-zero eq                           (errprop: div-by-zero not caught) rt-ok  clear
+
+% =================================================================
+% SECTION 42: ERROR PROPAGATION -- fail caught by outer try
+% =================================================================
+
+{ fail } try
+/fail eq                                  (errprop: fail caught by try) rt-ok  clear
+
+% =================================================================
+% SECTION 43: ERROR PROPAGATION -- nested choice cascading fail
+% =================================================================
+
+{
+    [
+        { [ { false guard } { false guard } ] choice }
+        { [ { false guard } ] choice }
+    ] choice
+} try
+/fail eq                                  (errprop: nested cascade fail) rt-ok  clear
+
+% =================================================================
+% SECTION 44: FUZZ -- repeated choice/fail cycles
+% =================================================================
+
+/R 0 def
+1 1 5 {
+    pop
+    logic-var /rv exch def
+    [
+        { rv 1 unify guard  rv deref 10 gt guard }
+        { rv 2 unify guard }
+    ] choice
+    rv deref 2 eq { /R R 1 add def } if
+} for
+R 5 eq                                   (fuzz: 5 repeated choice cycles) rt-ok  clear
+
+% =================================================================
+% SECTION 45: STRESS -- unify large arrays (50 elements)
+% =================================================================
+
+logic-var /la exch def
+[ 1 2 3 4 5 6 7 8 9 10
+  11 12 13 14 15 16 17 18 19 20
+  21 22 23 24 la 26 27 28 29 30
+  31 32 33 34 35 36 37 38 39 40
+  41 42 43 44 45 46 47 48 49 50 ]
+[ 1 2 3 4 5 6 7 8 9 10
+  11 12 13 14 15 16 17 18 19 20
+  21 22 23 24 25 26 27 28 29 30
+  31 32 33 34 35 36 37 38 39 40
+  41 42 43 44 45 46 47 48 49 50 ]
+unify                                     (stress: 50-elem array unify) rt-ok
+la deref 25 eq                            (stress: la bound to 25) rt-ok  clear
+
+% =================================================================
+% SECTION 46: SAD -- unify already-bound lvar to different value
+% =================================================================
+
+logic-var /rb exch def
+rb 10 unify pop
+rb 20 unify not                           (sad: rebind to different fails) rt-ok  clear
+
+% =================================================================
+% SECTION 47: HAPPY -- unify already-bound lvar to same value
+% =================================================================
+
+logic-var /sb exch def
+sb 10 unify pop
+sb 10 unify                               (happy: rebind to same succeeds) rt-ok  clear
+
+% =================================================================
+% SECTION 48: BOUNDARY -- choice with nested save/restore in alternative
+% =================================================================
+
+logic-var /ns exch def
+[
+    {
+        save
+        /tmp 999 def
+        restore
+        ns 42 unify guard
+    }
+] choice
+ns deref 42 eq                            (boundary: nested save in alt) rt-ok  clear
+
+% =================================================================
+% SECTION 49: STRESS -- multiple sequential choices (not nested)
+% =================================================================
+
+logic-var /s1 exch def
+logic-var /s2 exch def
+logic-var /s3 exch def
+[ { s1 10 unify guard } ] choice
+[ { s2 20 unify guard } ] choice
+[ { s3 30 unify guard } ] choice
+s1 deref 10 eq s2 deref 20 eq and s3 deref 30 eq and
+                                          (stress: 3 sequential choices) rt-ok  clear
+
+% =================================================================
+% SECTION 50: HAPPY -- deref on bound lvar returns concrete type
+% =================================================================
+
+logic-var /dt exch def
+dt 42 unify pop
+dt deref is-integer                       (happy: deref returns integer) rt-ok
+dt deref is-logic-var not                 (happy: deref not lvar) rt-ok  clear
+
+% =================================================================
+% SECTION 51: SAD -- rebind via choice backtrack then new bind
+% =================================================================
+
+logic-var /ch exch def
+[
+    { ch 1 unify guard  ch deref 5 gt guard }
+    { ch 10 unify guard }
+] choice
+ch deref 10 eq                            (sad: first bind undone, second sticks) rt-ok  clear
+
+% =================================================================
+% SECTION 52: FUZZ -- unify bound lvar with another bound lvar
+% =================================================================
+
+logic-var /f1 exch def
+logic-var /f2 exch def
+f1 42 unify pop
+f2 42 unify pop
+f1 f2 unify                               (fuzz: two bound lvars same value) rt-ok  clear
+
+logic-var /f3 exch def
+logic-var /f4 exch def
+f3 42 unify pop
+f4 99 unify pop
+f3 f4 unify not                           (fuzz: two bound lvars diff value) rt-ok  clear
+
+% =================================================================
+% SECTION 53: HAPPY -- cut commits to current choice
+% =================================================================
+
+% cut prevents backtracking: first alternative succeeds and cut,
+% so even though a later fail would normally try the second alt, it can't.
+[ { 42 cut } { 99 } ] choice
+42 eq                                     (happy: cut commits first alt) rt-ok  clear
+
+% =================================================================
+% SECTION 54: HAPPY -- cut with bindings persist
+% =================================================================
+
+logic-var /cv exch def
+[ { cv 7 unify guard  cut } { cv 99 unify guard } ] choice
+cv deref 7 eq                             (happy: cut bindings persist) rt-ok  clear
+
+% =================================================================
+% SECTION 55: HAPPY -- cut inside try within choice
+% =================================================================
+
+[
+    { { cut } try pop  42 }
+    { 99 }
+] choice
+42 eq                                     (happy: cut inside try) rt-ok  clear
+
+% =================================================================
+% SECTION 56: SAD -- cut outside choice raises error
+% =================================================================
+
+{ cut } try
+/invalid-exit eq                          (sad: cut outside choice) rt-ok  clear
+
+% =================================================================
+% SECTION 57: HAPPY -- cut then fail propagates to outer
+% =================================================================
+
+% Inner choice: cut then fail should NOT try second inner alt.
+% Instead fail propagates to outer choice which succeeds.
+[
+    { [ { cut  false guard } { 11 } ] choice }
+    { 22 }
+] choice
+22 eq                                     (happy: cut+fail goes outer) rt-ok  clear
+
+% =================================================================
+% SECTION 58: HAPPY -- nested choice, cut only affects innermost
+% =================================================================
+
+[
+    {
+        [ { cut  42 } { 99 } ] choice
+    }
+    { 0 }
+] choice
+42 eq                                     (happy: cut affects innermost) rt-ok  clear
+
+% =================================================================
+% SECTION 59: STRESS -- multiple cuts in sequence
+% =================================================================
+
+/r1 [ { 10 cut } { 20 } ] choice def
+/r2 [ { 30 cut } { 40 } ] choice def
+r1 10 eq r2 30 eq and                    (stress: sequential cuts) rt-ok  clear
+
+% =================================================================
+% SECTION 60: BOUNDARY -- cut in single-alternative choice
+% =================================================================
+
+[ { cut  42 } ] choice
+42 eq                                     (boundary: cut single alt) rt-ok  clear
+
+% =================================================================
+% SECTION 61: STRESS -- cut inside deeply nested choices (5 levels)
+% =================================================================
+
+[{ [{ [{ [{ [{ cut 42 }{ 0 }] choice }{ 0 }] choice }{ 0 }] choice }{ 0 }] choice }{ 0 }] choice
+42 eq                                     (stress: cut 5-deep nesting) rt-ok  clear
+
+% =================================================================
+% SECTION 62: STRESS -- cut after many failed alternatives
+% =================================================================
+
+logic-var /mf exch def
+[
+    { mf 1 unify guard  mf deref 100 gt guard }
+    { mf 2 unify guard  mf deref 100 gt guard }
+    { mf 3 unify guard  mf deref 100 gt guard }
+    { mf 4 unify guard  mf deref 100 gt guard }
+    { mf 5 unify guard  mf deref 100 gt guard }
+    { mf 6 unify guard  mf deref 100 gt guard }
+    { mf 7 unify guard  mf deref 100 gt guard }
+    { mf 8 unify guard  mf deref 100 gt guard }
+    { mf 9 unify guard  mf deref 100 gt guard }
+    { mf 10 unify guard  mf deref 100 gt guard }
+    { mf 11 unify guard  mf deref 100 gt guard }
+    { mf 12 unify guard  mf deref 100 gt guard }
+    { mf 13 unify guard  mf deref 100 gt guard }
+    { mf 14 unify guard  mf deref 100 gt guard }
+    { mf 15 unify guard  cut }
+    { mf 99 unify guard }
+] choice
+mf deref 15 eq                            (stress: cut at alt 15 of 16) rt-ok  clear
+
+% =================================================================
+% SECTION 63: SAD -- cut across stopped boundary
+% =================================================================
+
+{
+    [
+        { { cut } stopped pop }
+        { 42 }
+    ] choice
+} try
+/invalid-exit eq                          (sad: cut across stopped) rt-ok  clear
+
+% =================================================================
+% SECTION 64: BOUNDARY -- cut followed by more computation
+% =================================================================
+
+[
+    { cut  1 2 add 3 mul 2 add }
+    { 99 }
+] choice
+11 eq                                     (boundary: cut then compute) rt-ok  clear
+
+% =================================================================
+% SECTION 65: BOUNDARY -- cut with ExtValue types on stack
+% =================================================================
+
+[
+    { 9999999999l cut }
+    { 0l }
+] choice
+9999999999l eq                            (boundary: cut with long) rt-ok  clear
+
+[
+    { 3.14d cut }
+    { 0.0d }
+] choice
+3.14d eq                                  (boundary: cut with double) rt-ok  clear
+
+% =================================================================
+% SECTION 66: FUZZ -- cut + unify + deref interaction
+% =================================================================
+
+% Bindings from BEFORE the choice persist; bindings INSIDE the
+% chosen branch also persist after cut.
+logic-var /pre exch def
+pre 100 unify pop
+logic-var /inner exch def
+[
+    { inner 200 unify guard  cut }
+    { inner 999 unify guard }
+] choice
+pre deref 100 eq inner deref 200 eq and  (fuzz: pre+inner bindings) rt-ok  clear
+
+% =================================================================
+% SECTION 67: FUZZ -- cut inside loop inside choice
+% =================================================================
+
+/loop-result 0 def
+[
+    {
+        1 1 3 { pop /loop-result loop-result 1 add def } for
+        cut
+    }
+    { /loop-result 999 def }
+] choice
+loop-result 3 eq                          (fuzz: cut inside loop) rt-ok  clear
+
+% =================================================================
+% SECTION 68: FUZZ -- two cuts: inner then outer
+% =================================================================
+
+/outer-val null def
+[
+    {
+        /outer-val [ { cut 10 } { 20 } ] choice def
+        cut
+    }
+    { /outer-val 999 def }
+] choice
+outer-val 10 eq                           (fuzz: two cuts inner+outer) rt-ok  clear
+
+% =================================================================
+% SECTION 69: HAPPY -- copy-term scalar passthrough
+% =================================================================
+
+42 copy-term 42 eq                        (copy-term: integer passthrough) rt-ok  clear
+(hello) copy-term (hello) eq              (copy-term: string passthrough) rt-ok  clear
+true copy-term true eq                    (copy-term: bool passthrough) rt-ok  clear
+null copy-term null eq                    (copy-term: null passthrough) rt-ok  clear
+3.14 copy-term 3.14 eq                    (copy-term: real passthrough) rt-ok  clear
+/foo copy-term /foo eq                    (copy-term: name passthrough) rt-ok  clear
+9999999999l copy-term 9999999999l eq      (copy-term: long passthrough) rt-ok  clear
+
+% =================================================================
+% SECTION 70: HAPPY -- copy-term unbound lvar produces fresh lvar
+% =================================================================
+
+logic-var /x exch def
+x copy-term /y exch def
+y is-logic-var                            (copy-term: fresh is lvar) rt-ok
+y bound? not                            (copy-term: fresh is unbound) rt-ok
+y 99 unify pop
+x bound? not                            (copy-term: fresh is independent) rt-ok  clear
+
+% =================================================================
+% SECTION 71: HAPPY -- copy-term bound lvar is dereferenced
+% =================================================================
+
+logic-var /x exch def
+x 42 unify pop
+x copy-term 42 eq                         (copy-term: bound lvar derefed) rt-ok  clear
+
+% =================================================================
+% SECTION 72: HAPPY -- copy-term array with lvars
+% =================================================================
+
+logic-var /x exch def
+[ 1 x 3 ] copy-term /r exch def
+r length 3 eq                             (copy-term: array length) rt-ok
+r 0 get 1 eq                              (copy-term: array elem 0) rt-ok
+r 1 get is-logic-var                      (copy-term: array elem 1 is lvar) rt-ok
+r 1 get bound? not                      (copy-term: array elem 1 unbound) rt-ok
+r 2 get 3 eq                              (copy-term: array elem 2) rt-ok  clear
+
+% =================================================================
+% SECTION 73: HAPPY -- copy-term shared variable preservation
+% =================================================================
+
+logic-var /x exch def
+[ x 1 x ] copy-term /r exch def
+r 0 get is-logic-var                      (copy-term: shared elem 0 is lvar) rt-ok
+r 2 get is-logic-var                      (copy-term: shared elem 2 is lvar) rt-ok
+r 0 get r 2 get eq                        (copy-term: shared same lvar) rt-ok
+r 0 get 77 unify pop
+r 2 get deref 77 eq                       (copy-term: shared binding) rt-ok  clear
+
+% =================================================================
+% SECTION 74: HAPPY -- copy-term tagged value
+% =================================================================
+
+logic-var /x exch def
+x /:some tag copy-term /r exch def
+r tag-name /:some eq                      (copy-term: tagged name) rt-ok
+r tag-value is-logic-var                  (copy-term: tagged payload is lvar) rt-ok
+r tag-value bound? not                  (copy-term: tagged payload unbound) rt-ok  clear
+
+% =================================================================
+% SECTION 75: HAPPY -- copy-term record
+% =================================================================
+
+logic-var /x exch def
+x 20 [ /a /b ] record copy-term /r exch def
+r /a get is-logic-var                     (copy-term: record field a is lvar) rt-ok
+r /b get 20 eq                            (copy-term: record field b is 20) rt-ok  clear
+
+% =================================================================
+% SECTION 76: HAPPY -- copy-term nested structures
+% =================================================================
+
+logic-var /x exch def
+[ [ x ] ] copy-term /r exch def
+r 0 get 0 get is-logic-var               (copy-term: nested array lvar) rt-ok
+r 0 get 0 get bound? not               (copy-term: nested lvar unbound) rt-ok  clear
+
+% =================================================================
+% SECTION 77: BOUNDARY -- copy-term empty array
+% =================================================================
+
+[ ] copy-term length 0 eq                 (copy-term: empty array) rt-ok  clear
+
+% =================================================================
+% SECTION 78: BOUNDARY -- copy-term no lvars (plain deep copy)
+% =================================================================
+
+[ 1 2 [ 3 4 ] ] copy-term /r exch def
+r 0 get 1 eq                              (copy-term: plain elem 0) rt-ok
+r 2 get 0 get 3 eq                        (copy-term: plain nested) rt-ok  clear
+
+% =================================================================
+% SECTION 79: STRESS -- copy-term many distinct lvars
+% =================================================================
+
+10 array /r exch def
+0 1 9 { /i exch def  r i logic-var put } for
+r copy-term /r exch def
+r 0 get is-logic-var
+r 9 get is-logic-var and
+r 0 get r 1 get eq not and                (stress: 10 distinct lvars) rt-ok  clear
+
+% =================================================================
+% SECTION 80: FUZZ -- copy-term + unify on copy
+% =================================================================
+
+logic-var /x exch def
+[ x x ] copy-term /r exch def
+r 0 get 42 unify pop
+x bound? not                            (fuzz: copy unify independent) rt-ok
+r 0 get deref 42 eq                       (fuzz: copy unified value) rt-ok
+r 1 get deref 42 eq                       (fuzz: copy shared unified) rt-ok  clear
+
+% =================================================================
+% SECTION 81: FUZZ -- copy-term inside choice with backtrack
+% =================================================================
+
+logic-var /x exch def
+1 array dup 0 x put /r exch def
+[
+    { r copy-term 0 get 99 unify guard  false guard }
+    { r copy-term 0 get 77 unify guard }
+] choice
+x bound? not                            (fuzz: copy in choice, orig unbound) rt-ok  clear
+
+% End save scope: reclaim save levels from choice/cut tests above.
+choice-scope restore
+
+% =================================================================
+% SECTION 82: HAPPY -- find-all basic
+% =================================================================
+
+[ { 1 } { 2 } { 3 } ] find-all
+dup length 3 eq                           (find-all: 3 results) rt-ok
+dup 0 get 1 eq                            (find-all: first is 1) rt-ok
+dup 1 get 2 eq                            (find-all: second is 2) rt-ok
+2 get 3 eq                                (find-all: third is 3) rt-ok  clear
+
+% =================================================================
+% SECTION 83: HAPPY -- find-all some fail
+% =================================================================
+
+[ { 10 } { false guard } { 30 } { false guard } { 50 } ] find-all
+dup length 3 eq                           (find-all: 3 of 5 succeed) rt-ok
+dup 0 get 10 eq                           (find-all: first is 10) rt-ok
+dup 1 get 30 eq                           (find-all: second is 30) rt-ok
+2 get 50 eq                               (find-all: third is 50) rt-ok  clear
+
+% =================================================================
+% SECTION 84: HAPPY -- find-all all fail
+% =================================================================
+
+[ { false guard } { false guard } ] find-all
+length 0 eq                               (find-all: all fail -> empty) rt-ok  clear
+
+% =================================================================
+% SECTION 85: HAPPY -- find-all empty alternatives
+% =================================================================
+
+[ ] find-all
+length 0 eq                               (find-all: empty input -> empty) rt-ok  clear
+
+% =================================================================
+% SECTION 86: HAPPY -- find-all with logic variables
+% =================================================================
+
+logic-var /x exch def
+[
+    { x 1 unify guard  x deref }
+    { x 2 unify guard  x deref 10 gt guard }
+    { x 3 unify guard  x deref }
+] find-all
+dup length 2 eq                           (find-all: 2 of 3 match) rt-ok
+dup 0 get 1 eq                            (find-all: first match 1) rt-ok
+1 get 3 eq                                (find-all: second match 3) rt-ok
+x bound? not                            (find-all: x unbound after) rt-ok  clear
+
+% =================================================================
+% SECTION 87: HAPPY -- find-all with ExtValue types (Long, Double)
+% =================================================================
+
+[ { 9999999999l } { 1111111111l } ] find-all
+dup 0 get 9999999999l eq                  (find-all: long result 0) rt-ok
+1 get 1111111111l eq                      (find-all: long result 1) rt-ok  clear
+
+[ { 3.14d } { 2.71d } ] find-all
+dup 0 get 3.14d eq                        (find-all: double result 0) rt-ok
+1 get 2.71d eq                            (find-all: double result 1) rt-ok  clear
+
+% =================================================================
+% SECTION 88: SAD -- find-all heap result raises error
+% =================================================================
+
+{ [ { [ 1 2 3 ] } ] find-all } try
+/type-check eq                            (find-all: array result errors) rt-ok  clear
+
+% =================================================================
+% SECTION 89: SAD -- find-all non-fail error propagates
+% =================================================================
+
+{ [ { 1 } { 1 0 div } { 3 } ] find-all } try
+/div-by-zero eq                           (find-all: non-fail propagates) rt-ok  clear
+
+% =================================================================
+% SECTION 90: HAPPY -- find-all single alternative
+% =================================================================
+
+[ { 42 } ] find-all
+dup length 1 eq                           (find-all: single alt length) rt-ok
+0 get 42 eq                               (find-all: single alt value) rt-ok  clear
+
+% =================================================================
+% SECTION 91: STRESS -- find-all 20 alternatives
+% =================================================================
+
+[
+    { 1 } { 2 } { 3 } { 4 } { 5 }
+    { 6 } { 7 } { 8 } { 9 } { 10 }
+    { 11 } { 12 } { 13 } { 14 } { 15 }
+    { 16 } { 17 } { 18 } { 19 } { 20 }
+] find-all
+dup length 20 eq                          (find-all: 20 results) rt-ok
+dup 0 get 1 eq                            (find-all: first is 1) rt-ok
+19 get 20 eq                              (find-all: last is 20) rt-ok  clear
+
+% =================================================================
+% SECTION 92: FUZZ -- find-all bindings reset between alts
+% =================================================================
+
+logic-var /x exch def
+[
+    { x 10 unify guard  x deref }
+    { x 20 unify guard  x deref }
+    { x 30 unify guard  x deref }
+] find-all
+dup length 3 eq                           (find-all: all 3 bind) rt-ok
+dup 0 get 10 eq                           (find-all: first bind 10) rt-ok
+dup 1 get 20 eq                           (find-all: second bind 20) rt-ok
+2 get 30 eq                               (find-all: third bind 30) rt-ok
+x bound? not                            (find-all: x still unbound) rt-ok  clear
+
+% =================================================================
+% SECTION 93: FUZZ -- find-all with Name results
+% =================================================================
+
+[ { /alpha } { false guard } { /gamma } ] find-all
+dup length 2 eq                           (find-all: name results count) rt-ok
+dup 0 get /alpha eq                       (find-all: name result 0) rt-ok
+1 get /gamma eq                           (find-all: name result 1) rt-ok  clear
+
+% =================================================================
+% SECTION 94: BOUNDARY -- find-all with Real results
+% =================================================================
+
+[ { 3.14 } { 2.71 } ] find-all
+dup 0 get 3.14 eq                         (find-all: real result 0) rt-ok
+1 get 2.71 eq                             (find-all: real result 1) rt-ok  clear
+
+% =================================================================
+% SECTION 95: SAD -- copy-term depth limit
+% =================================================================
+
+% Build a 65-deep nested array: [[[...[ lvar ]...]]]
+logic-var /x exch def
+/r x def
+1 1 65 { pop  1 array dup 0 r put /r exch def } for
+{ r copy-term } try
+/limit-check eq                           (copy-term: depth limit) rt-ok  clear
+
+% =================================================================
+% SECTION 96: FUZZ -- copy-term with ExtValue inside array
+% =================================================================
+
+[ 9999999999l 3.14d ] copy-term /r exch def
+r 0 get 9999999999l eq                    (copy-term: long in array) rt-ok
+r 1 get 3.14d eq                          (copy-term: double in array) rt-ok  clear
+
+% =================================================================
+% SECTION 97: FUZZ -- find-all + cut inside alternative
+% =================================================================
+
+% cut inside a find-all alternative should not interfere with find-all's
+% own save/restore cycle (find-all uses @find-all-barrier, not @choice-barrier)
+[
+    { [ { 10 cut } { 99 } ] choice }
+    { 20 }
+] find-all
+dup length 2 eq                           (find-all+cut: 2 results) rt-ok
+dup 0 get 10 eq                           (find-all+cut: cut result) rt-ok
+1 get 20 eq                               (find-all+cut: normal result) rt-ok  clear
+
+% =================================================================
+% SECTION 98: BOUNDARY -- find-all with Byte result
+% =================================================================
+
+[ { 42b } { 0b } ] find-all
+dup 0 get 42b eq                          (find-all: byte result 0) rt-ok
+1 get 0b eq                               (find-all: byte result 1) rt-ok  clear
+
+% Save/restore scope: reclaim save levels consumed by successful once calls.
+save /once-save exch def
+
+% =================================================================
+% SECTION 99: once — basic success
+% =================================================================
+
+logic-var /x exch def
+{ x 42 unify guard  x deref } once
+42 eq                                     (once: success returns 42) rt-ok  clear
+
+% =================================================================
+% SECTION 100: once — failure propagates
+% =================================================================
+
+{ { false guard } once } try
+/fail eq                                  (once: fail propagates) rt-ok  clear
+
+% =================================================================
+% SECTION 101: once — bindings persist on success
+% =================================================================
+
+logic-var /x exch def
+{ x 99 unify guard } once
+x deref 99 eq                             (once: bindings persist) rt-ok  clear
+
+% =================================================================
+% SECTION 102: once — bindings rolled back on failure
+% =================================================================
+
+logic-var /x exch def
+{ { x 77 unify guard  false guard } once } try pop
+x bound? not                            (once: bindings rolled back on fail) rt-ok  clear
+
+% =================================================================
+% SECTION 103: once — non-fail errors propagate
+% =================================================================
+
+{ { 1 0 div } once } try
+/div-by-zero eq                           (once: div-by-zero propagates) rt-ok  clear
+
+% =================================================================
+% SECTION 104: once — type error
+% =================================================================
+
+{ 42 once } try
+/type-check eq                            (once: non-proc error) rt-ok  clear
+
+% End save scope: reclaim save levels from successful once calls above.
+once-save restore
+
+% =================================================================
+% SECTION 105: naf — goal fails → true
+% =================================================================
+
+{ false guard } naf
+                                          (naf: failing goal returns true) rt-ok  clear
+
+% =================================================================
+% SECTION 106: naf — goal succeeds → false
+% =================================================================
+
+{ true guard } naf not
+                                          (naf: succeeding goal returns false) rt-ok  clear
+
+% =================================================================
+% SECTION 107: naf — bindings rolled back on success
+% =================================================================
+
+logic-var /x exch def
+{ x 42 unify guard } naf pop
+x bound? not                            (naf: bindings rolled back when goal succeeds) rt-ok  clear
+
+% =================================================================
+% SECTION 108: naf — bindings rolled back on failure
+% =================================================================
+
+logic-var /x exch def
+{ x 42 unify guard  false guard } naf pop
+x bound? not                            (naf: bindings rolled back when goal fails) rt-ok  clear
+
+% =================================================================
+% SECTION 109: naf — non-fail error propagates
+% =================================================================
+
+{ { 1 0 div } naf } try
+/div-by-zero eq                           (naf: div-by-zero propagates) rt-ok  clear
+
+% =================================================================
+% SECTION 110: naf — composable with guard
+% =================================================================
+
+logic-var /x exch def
+x 10 unify guard
+{ x deref 20 eq guard } naf              (naf: x=10 not= 20 is true) rt-ok  clear
+
+% =================================================================
+% SECTION 111: naf — inside choice
+% =================================================================
+
+logic-var /x exch def
+[
+    { x 1 unify guard  { x deref 2 eq guard } naf  x deref }
+    { x 2 unify guard  x deref }
+] choice
+1 eq                                      (naf-choice: first alt succeeds with naf) rt-ok  clear
+
+% =================================================================
+% SECTION 112: find-n — basic (collect first 2 of 4)
+% =================================================================
+
+2 [ { 10 } { 20 } { 30 } { 40 } ] find-n
+dup length 2 eq                           (find-n: length = 2) rt-ok
+dup 0 get 10 eq                           (find-n: first = 10) rt-ok
+1 get 20 eq                               (find-n: second = 20) rt-ok  clear
+
+% =================================================================
+% SECTION 113: find-n — n exceeds alternatives (returns all)
+% =================================================================
+
+10 [ { 1 } { 2 } ] find-n
+dup length 2 eq                           (find-n: all = 2) rt-ok
+dup 0 get 1 eq                            (find-n: first = 1) rt-ok
+1 get 2 eq                                (find-n: second = 2) rt-ok  clear
+
+% =================================================================
+% SECTION 114: find-n — n=0 returns empty
+% =================================================================
+
+0 [ { 1 } { 2 } ] find-n
+length 0 eq                               (find-n: zero returns empty) rt-ok  clear
+
+% =================================================================
+% SECTION 115: find-n — with failures (skip failing alts)
+% =================================================================
+
+3 [ { 10 } { fail } { 20 } { fail } { 30 } { 40 } ] find-n
+dup length 3 eq                           (find-n-fail: length = 3) rt-ok
+dup 0 get 10 eq                           (find-n-fail: first = 10) rt-ok
+dup 1 get 20 eq                           (find-n-fail: second = 20) rt-ok
+2 get 30 eq                               (find-n-fail: third = 30) rt-ok  clear
+
+% =================================================================
+% SECTION 116: find-n — all fail returns empty
+% =================================================================
+
+5 [ { fail } { fail } { fail } ] find-n
+length 0 eq                               (find-n: all-fail returns empty) rt-ok  clear
+
+% =================================================================
+% SECTION 117: find-n — non-fail error propagates
+% =================================================================
+
+{ 2 [ { 1 } { 1 0 div } { 3 } ] find-n } try
+/div-by-zero eq                           (find-n: div-by-zero propagates) rt-ok  clear
+
+% =================================================================
+% SECTION 118: find-n — with unification
+% =================================================================
+
+2 [
+    { logic-var /x exch def  x 10 unify guard  x deref }
+    { logic-var /x exch def  x 20 unify guard  x deref }
+    { logic-var /x exch def  x 30 unify guard  x deref }
+] find-n
+dup length 2 eq                           (find-n-unify: length = 2) rt-ok
+dup 0 get 10 eq                           (find-n-unify: first = 10) rt-ok
+1 get 20 eq                               (find-n-unify: second = 20) rt-ok  clear
+
+% =================================================================
+% SECTION 119: find-n — type errors
+% =================================================================
+
+{ (hello) [ { 1 } ] find-n } try
+/type-check eq                            (find-n: string count error) rt-ok  clear
+{ -1 [ { 1 } ] find-n } try
+/range-check eq                           (find-n: negative count error) rt-ok  clear
+
+% =================================================================
+% SECTION 120: find-n — n=1 (like once but collects)
+% =================================================================
+
+1 [ { 10 } { 20 } { 30 } ] find-n
+dup length 1 eq                           (find-n-one: length = 1) rt-ok
+0 get 10 eq                               (find-n-one: first = 10) rt-ok  clear
+
+% =================================================================
+% SECTION 121: find-n — ExtValue result (Long)
+% =================================================================
+
+2 [ { 1000000000l } { 2000000000l } { 3000000000l } ] find-n
+dup length 2 eq                           (find-n-long: length = 2) rt-ok
+dup 0 get 1000000000l eq                  (find-n-long: first) rt-ok
+1 get 2000000000l eq                      (find-n-long: second) rt-ok  clear
+
+% =================================================================
+% SECTION 122: unify-match — first pattern matches
+% =================================================================
+
+% Each successful unify-match leaves a save level active (bindings persist).
+% Wrap groups in save/restore scopes to reclaim levels.
+save /um-s1 exch def
+
+42 [
+    [ 42 { (first) } ]
+    [ 99 { (second) } ]
+] unify-match
+(first) eq                                (um-first: matched first) rt-ok  clear
+
+% =================================================================
+% SECTION 123: unify-match — second pattern matches
+% =================================================================
+
+99 [
+    [ 42 { (first) } ]
+    [ 99 { (second) } ]
+] unify-match
+(second) eq                               (um-second: matched second) rt-ok  clear
+
+um-s1 restore
+
+% =================================================================
+% SECTION 124: unify-match — no match raises Fail
+% =================================================================
+
+{ 5 [
+    [ 42 { (first) } ]
+    [ 99 { (second) } ]
+] unify-match } try
+/fail eq                                  (um-nomatch: raises fail) rt-ok  clear
+
+% =================================================================
+% SECTION 125: unify-match — logic variable binding
+% =================================================================
+
+save /um-s2 exch def
+
+/x logic-var def
+42 /ok tag [
+    [ x /ok tag  { x deref } ]
+    [ x /error tag  { x deref } ]
+] unify-match
+42 eq                                     (um-lvar: x bound to 42) rt-ok  clear
+
+um-s2 restore
+
+% =================================================================
+% SECTION 126: unify-match — multiple logic variables
+% =================================================================
+
+save /um-s3 exch def
+
+/a logic-var def
+/b logic-var def
+[1 2 3] [
+    [ [a 2 b] { a deref b deref add } ]
+] unify-match
+4 eq                                      (um-multi: a=1 b=3 sum=4) rt-ok  clear
+
+um-s3 restore
+
+% =================================================================
+% SECTION 127: unify-match — nested structure (tagged in array)
+% =================================================================
+
+save /um-s4 exch def
+
+/v logic-var def
+[10 20] /point tag [
+    [ [v 20] /point tag  { v deref } ]
+] unify-match
+10 eq                                     (um-nested: extracted nested value) rt-ok  clear
+
+um-s4 restore
+
+% =================================================================
+% SECTION 128: unify-match — failed pattern bindings rolled back
+% =================================================================
+
+save /um-s5 exch def
+
+/p logic-var def
+/q logic-var def
+99 /b tag [
+    [ p /a tag  { p deref } ]
+    [ q /b tag  { q deref } ]
+] unify-match
+99 eq                                     (um-rollback: matched second arm) rt-ok
+p bound? not                            (um-rollback: p not bound) rt-ok  clear
+
+um-s5 restore
+
+% =================================================================
+% SECTION 129: unify-match — bindings from match persist
+% =================================================================
+
+save /um-s6 exch def
+
+/r logic-var def
+77 /val tag [
+    [ r /val tag  { (matched) } ]
+] unify-match
+(matched) eq                              (um-persist: body ran) rt-ok
+r deref 77 eq                             (um-persist: binding persists) rt-ok  clear
+
+um-s6 restore
+
+% =================================================================
+% SECTION 130: unify-match — empty pairs raises Fail
+% =================================================================
+
+{ 42 [ ] unify-match } try
+/fail eq                                  (um-empty: empty pairs fail) rt-ok  clear
+
+% =================================================================
+% SECTION 131: unify-match — pattern with no lvars (exact equality)
+% =================================================================
+
+save /um-s7 exch def
+
+(hello) [
+    [ (world) { 1 } ]
+    [ (hello) { 2 } ]
+] unify-match
+2 eq                                      (um-exact: string match) rt-ok  clear
+
+% =================================================================
+% SECTION 132: unify-match — inside choice (outer backtracking)
+% =================================================================
+
+/c logic-var def
+[
+    { 10 /a tag [
+        [ c /b tag  { c deref } ]
+    ] unify-match }
+    { 10 /a tag [
+        [ c /a tag  { c deref } ]
+    ] unify-match }
+] choice
+10 eq                                     (um-choice: fallthrough to second) rt-ok  clear
+
+um-s7 restore
+
+% =================================================================
+% SECTION 133: unify-match — body failure propagates (no next-arm backtrack)
+% =================================================================
+
+{ 42 [
+    [ 42 { fail } ]
+    [ 42 { (never) } ]
+] unify-match } try
+/fail eq                                  (um-bodyfail: fail propagates) rt-ok  clear
+
+% =================================================================
+% SECTION 134: unify-match — type error (pairs not array)
+% =================================================================
+
+{ 42 (bad) unify-match } try
+/type-check eq                            (um-err: pairs not array) rt-ok  clear
+
+% =================================================================
+% SECTION 135: unify-match — type error (pair not 2-element)
+% =================================================================
+
+{ 42 [ [1] ] unify-match } try
+/range-check eq                           (um-err: pair wrong length) rt-ok  clear
+
+% =================================================================
+% SECTION 136: unify-match — type error (body not executable)
+% =================================================================
+
+{ 42 [ [1 2] ] unify-match } try
+/type-check eq                            (um-err: body not executable) rt-ok  clear
+
+% =================================================================
+% SECTION 137: unify-match — record patterns
+% =================================================================
+
+save /um-s8 exch def
+
+/Point [/x /y] record-type def
+10 20 Point /Pt exch def
+Pt [
+    [ 10 20 Point  { (exact-match) } ]
+] unify-match
+(exact-match) eq                          (um-record: exact record match) rt-ok  clear
+
+um-s8 restore
+
+% =================================================================
+% SECTION 138: unify-match — many arms (stress)
+% =================================================================
+
+save /um-s9 exch def
+
+10 [
+    [ 1 { (one) } ]
+    [ 2 { (two) } ]
+    [ 3 { (three) } ]
+    [ 4 { (four) } ]
+    [ 5 { (five) } ]
+    [ 6 { (six) } ]
+    [ 7 { (seven) } ]
+    [ 8 { (eight) } ]
+    [ 9 { (nine) } ]
+    [ 10 { (ten) } ]
+] unify-match
+(ten) eq                                  (um-stress: last of 10 arms) rt-ok  clear
+
+um-s9 restore
+
+% =================================================================
+% SECTION 139: unify-match — fuzz: nested once wrapping unify-match
+% =================================================================
+
+save /um-s10 exch def
+
+/z logic-var def
+{ 42 /ok tag [
+    [ z /ok tag  { z deref } ]
+] unify-match } once
+42 eq                                     (um-once: nested once+match) rt-ok  clear
+
+um-s10 restore
+
+% =================================================================
+% SECTION 140: unify-match — boundary: single-pair always matches
+% =================================================================
+
+save /um-s11 exch def
+
+(anything) [
+    [ (anything) { 99 } ]
+] unify-match
+99 eq                                     (um-single: single pair matches) rt-ok  clear
+
+um-s11 restore
+
+% =================================================================
+% SECTION 141: unify-match — fuzz: deeply nested array patterns
+% =================================================================
+
+save /um-s12 exch def
+
+/d logic-var def
+[[1 [2 [3]]]] [
+    [ [[d [2 [3]]]] { d deref } ]
+] unify-match
+1 eq                                      (um-deep: deep nested match) rt-ok  clear
+
+um-s12 restore
+
+% =================================================================
+% SECTION 142: once — fuzz: nested once
+% =================================================================
+
+save /um-s13 exch def
+
+{ { 42 } once } once
+42 eq                                     (once-nested: once inside once) rt-ok  clear
+
+um-s13 restore
+
+% =================================================================
+% SECTION 143: once — boundary: ExtValue result
+% =================================================================
+
+save /um-s14 exch def
+
+{ 1000000000l } once
+1000000000l eq                            (once-ext: long result) rt-ok  clear
+
+um-s14 restore
+
+% =================================================================
+% SECTION 144: naf — fuzz: nested naf (double negation)
+% =================================================================
+
+% Inner naf catches fail → returns true, so proc succeeds.
+% Outer naf sees success → returns false.
+{ { fail } naf } naf not
+                                          (naf-nested: double naf = false) rt-ok  clear
+
+% =================================================================
+% SECTION 145: naf — fuzz: naf with unify-match
+% =================================================================
+
+save /um-s15 exch def
+
+/n logic-var def
+{ 42 /err tag [
+    [ n /ok tag  { n deref } ]
+] unify-match } naf
+                                          (naf-match: naf of failed match = true) rt-ok
+n bound? not                            (naf-match: n still unbound) rt-ok  clear
+
+um-s15 restore
+
+% =================================================================
+% SECTION 146: find-n — fuzz: find-n inside choice
+% =================================================================
+
+save /um-s16 exch def
+
+[
+    { 2 [ { 10 } { 20 } { 30 } ] find-n }
+] choice
+dup length 2 eq                           (findn-choice: length = 2) rt-ok
+0 get 10 eq                               (findn-choice: first = 10) rt-ok  clear
+
+um-s16 restore
+
+% =================================================================
+% SECTION 147: find-n — stress: 20 alternatives, collect 5
+% =================================================================
+
+5 [
+    { 1 } { 2 } { 3 } { 4 } { 5 }
+    { 6 } { 7 } { 8 } { 9 } { 10 }
+    { 11 } { 12 } { 13 } { 14 } { 15 }
+    { 16 } { 17 } { 18 } { 19 } { 20 }
+] find-n
+dup length 5 eq                           (findn-stress: 5 of 20) rt-ok
+dup 0 get 1 eq                            (findn-stress: first = 1) rt-ok
+4 get 5 eq                                (findn-stress: last = 5) rt-ok  clear
+
+% =================================================================
+% SECTION 149: HAPPY -- choice-count basic (3 of 5 succeed)
+% =================================================================
+
+[
+  { 1 }
+  { fail }
+  { 2 }
+  { fail }
+  { 3 }
+] choice-count
+3 eq                                      (cc: 3 of 5 succeed) rt-ok  clear
+
+% =================================================================
+% SECTION 150: choice-count -- all succeed
+% =================================================================
+
+[
+  { 10 }
+  { 20 }
+  { 30 }
+  { 40 }
+] choice-count
+4 eq                                      (cc: all 4 succeed) rt-ok  clear
+
+% =================================================================
+% SECTION 151: choice-count -- none succeed
+% =================================================================
+
+[
+  { fail }
+  { fail }
+  { fail }
+] choice-count
+0 eq                                      (cc: 0 of 3) rt-ok  clear
+
+% =================================================================
+% SECTION 152: choice-count -- empty array
+% =================================================================
+
+[] choice-count
+0 eq                                      (cc: empty array = 0) rt-ok  clear
+
+% =================================================================
+% SECTION 153: choice-count -- bindings rolled back
+% =================================================================
+
+logic-var /x exch def
+[
+  { x 10 unify guard x deref }
+  { x 20 unify guard x deref }
+  { x 30 unify guard x deref }
+] choice-count
+3 eq                                      (cc: bindings rolled back each time) rt-ok
+x bound? not                            (cc: x still unbound after) rt-ok  clear
+
+% =================================================================
+% SECTION 154: choice-count -- non-Fail error propagates
+% =================================================================
+
+/cc-err false def
+{ [{ 1 0 div }] choice-count } try
+/cc-err true def
+cc-err                                    (cc: non-fail error propagates) rt-ok  clear
+
+% =================================================================
+% SECTION 155: choice-count -- ignores result on stack
+% =================================================================
+
+[
+  { 1 2 3 }
+  { fail }
+  { 100 200 }
+] choice-count
+2 eq                                      (cc: ignores multi-value results) rt-ok  clear
+
+% =================================================================
+% SECTION 156: choice-count -- stress 20 alts, even numbers succeed
+% =================================================================
+
+[
+  { 1  2 mod 0 eq guard }
+  { 2  2 mod 0 eq guard }
+  { 3  2 mod 0 eq guard }
+  { 4  2 mod 0 eq guard }
+  { 5  2 mod 0 eq guard }
+  { 6  2 mod 0 eq guard }
+  { 7  2 mod 0 eq guard }
+  { 8  2 mod 0 eq guard }
+  { 9  2 mod 0 eq guard }
+  { 10 2 mod 0 eq guard }
+  { 11 2 mod 0 eq guard }
+  { 12 2 mod 0 eq guard }
+  { 13 2 mod 0 eq guard }
+  { 14 2 mod 0 eq guard }
+  { 15 2 mod 0 eq guard }
+  { 16 2 mod 0 eq guard }
+  { 17 2 mod 0 eq guard }
+  { 18 2 mod 0 eq guard }
+  { 19 2 mod 0 eq guard }
+  { 20 2 mod 0 eq guard }
+] choice-count
+10 eq                                     (cc-stress: 10 of 20 even) rt-ok  clear
+
+% =================================================================
+% SECTION 157: choice-count -- single alternative succeeds
+% =================================================================
+
+[{ 42 }] choice-count
+1 eq                                      (cc: single success = 1) rt-ok  clear
+
+% =================================================================
+% SECTION 158: choice-count -- single alternative fails
+% =================================================================
+
+[{ fail }] choice-count
+0 eq                                      (cc: single fail = 0) rt-ok  clear
+
+% =================================================================
+% SECTION 159: HAPPY -- for-each-solution basic
+% =================================================================
+
+% String byte writes survive restore (not journaled).
+% Write byte 1 at positions 0, 1, 2 to track body execution.
+3 string /marker exch def
+{ marker exch 1b put }
+[
+  { 0 }
+  { 1 }
+  { 2 }
+] for-each-solution
+
+marker 0 get 1b eq                        (fes: body ran for alt 0) rt-ok
+marker 1 get 1b eq                        (fes: body ran for alt 1) rt-ok
+marker 2 get 1b eq                        (fes: body ran for alt 2) rt-ok  clear
+
+% =================================================================
+% SECTION 160: for-each-solution -- failed alternatives skipped
+% =================================================================
+
+5 string /marker exch def
+{ marker exch 1b put }
+[
+  { 0 }
+  { fail }
+  { 2 }
+  { fail }
+  { 4 }
+] for-each-solution
+
+marker 0 get 1b eq                        (fes: alt 0 ran) rt-ok
+marker 1 get 0b eq                        (fes: alt 1 skipped) rt-ok
+marker 2 get 1b eq                        (fes: alt 2 ran) rt-ok
+marker 3 get 0b eq                        (fes: alt 3 skipped) rt-ok
+marker 4 get 1b eq                        (fes: alt 4 ran) rt-ok  clear
+
+% =================================================================
+% SECTION 161: for-each-solution -- empty array is no-op
+% =================================================================
+
+{ pop } [] for-each-solution
+true                                      (fes: empty array = no-op) rt-ok  clear
+
+% =================================================================
+% SECTION 162: for-each-solution -- bindings rolled back
+% =================================================================
+
+logic-var /x exch def
+{ deref pop }
+[
+  { x 10 unify guard x deref }
+  { x 20 unify guard x deref }
+  { x 30 unify guard x deref }
+] for-each-solution
+
+x bound? not                            (fes: bindings rolled back) rt-ok  clear
+
+% =================================================================
+% SECTION 163: for-each-solution -- non-Fail error propagates
+% =================================================================
+
+/fes-err false def
+{ { pop } [{ 1 0 div }] for-each-solution } try
+/fes-err true def
+fes-err                                   (fes: non-fail error propagates) rt-ok  clear
+
+% =================================================================
+% SECTION 164: for-each-solution -- body receives result
+% =================================================================
+
+% Each alt pushes a unique index; body writes 1b at that position
+4 string /marker exch def
+{ marker exch 1b put }
+[
+  { 0 }
+  { 1 }
+  { 2 }
+  { 3 }
+] for-each-solution
+
+marker 0 get 1b eq                        (fes: body saw alt 0) rt-ok
+marker 1 get 1b eq                        (fes: body saw alt 1) rt-ok
+marker 2 get 1b eq                        (fes: body saw alt 2) rt-ok
+marker 3 get 1b eq                        (fes: body saw alt 3) rt-ok  clear
+
+% =================================================================
+% SECTION 165: for-each-solution -- type errors
+% =================================================================
+
+/fes-err1 false def
+{ 42 [{ 1 }] for-each-solution } try
+/fes-err1 true def
+fes-err1                                  (fes: non-proc body = type-check) rt-ok  clear
+
+/fes-err2 false def
+{ { pop } 42 for-each-solution } try
+/fes-err2 true def
+fes-err2                                  (fes: non-array alts = type-check) rt-ok  clear
+
+% =================================================================
+% SECTION 166: for-each-solution -- stress 15 alternatives
+% =================================================================
+
+% Write byte 1 at each position to verify all 15 body calls
+15 string /marker exch def
+{ marker exch 1b put }
+[
+  { 0 }  { 1 }  { 2 }  { 3 }  { 4 }
+  { 5 }  { 6 }  { 7 }  { 8 }  { 9 }
+  { 10 } { 11 } { 12 } { 13 } { 14 }
+] for-each-solution
+
+marker 0 get 1b eq                        (fes-stress: slot 0) rt-ok
+marker 7 get 1b eq                        (fes-stress: slot 7) rt-ok
+marker 14 get 1b eq                       (fes-stress: slot 14) rt-ok  clear
+
+% =================================================================
+% SECTION 167: for-each-solution -- with logic variables
+% =================================================================
+
+% Verify body sees deref'd lvar values: map 10->0, 20->1, 30->2
+3 string /marker exch def
+{ deref 10 div 1 sub marker exch 1b put }
+[
+  { logic-var /v exch def v 10 unify guard v deref }
+  { logic-var /v exch def v 20 unify guard v deref }
+  { logic-var /v exch def v 30 unify guard v deref }
+] for-each-solution
+
+marker 0 get 1b eq                        (fes-lvar: slot 0 written) rt-ok
+marker 1 get 1b eq                        (fes-lvar: slot 1 written) rt-ok
+marker 2 get 1b eq                        (fes-lvar: slot 2 written) rt-ok  clear
+
+% =================================================================
+% SECTION 168: choice-count + for-each-solution integration
+% =================================================================
+
+% choice-count counts, for-each-solution processes same alternatives
+/alts [
+  { 1 2 mod 0 eq guard 1 }
+  { 2 2 mod 0 eq guard 2 }
+  { 3 2 mod 0 eq guard 3 }
+  { 4 2 mod 0 eq guard 4 }
+  { 5 2 mod 0 eq guard 5 }
+  { 6 2 mod 0 eq guard 6 }
+] def
+
+alts choice-count
+3 eq                                      (integration: count evens = 3) rt-ok
+
+% Verify for-each-solution visits same 3 even alternatives
+6 string /marker exch def
+{ 1 sub marker exch 1b put }
+alts for-each-solution
+
+marker 1 get 1b eq                        (integration: alt 2 visited) rt-ok
+marker 3 get 1b eq                        (integration: alt 4 visited) rt-ok
+marker 5 get 1b eq                        (integration: alt 6 visited) rt-ok
+marker 0 get 0b eq                        (integration: alt 1 skipped) rt-ok  clear
+
+% =================================================================
+% SECTION 169: for-each-solution -- all alternatives fail
+% =================================================================
+
+3 string /marker exch def
+{ marker exch 1b put }
+[
+  { fail }
+  { fail }
+  { fail }
+] for-each-solution
+
+marker 0 get 0b eq                        (fes: all fail = body never ran 0) rt-ok
+marker 1 get 0b eq                        (fes: all fail = body never ran 1) rt-ok
+marker 2 get 0b eq                        (fes: all fail = body never ran 2) rt-ok  clear
+
+% =================================================================
+% SECTION 170: named-var — basic creation
+% =================================================================
+
+/x named-var /v exch def
+
+% is a logic variable
+v is-logic-var true eq
+    (named-var: is lvar) rt-ok
+
+% starts unbound
+v bound? false eq
+    (named-var: starts unbound) rt-ok  clear
+
+% =================================================================
+% SECTION 171: named-var — lvar-name returns name
+% =================================================================
+
+/temperature named-var /v exch def
+
+v lvar-name true eq
+    (lvar-name: named returns true) rt-ok
+/temperature eq
+    (lvar-name: returns correct name) rt-ok  clear
+
+% =================================================================
+% SECTION 172: lvar-name — unnamed lvar returns false
+% =================================================================
+
+logic-var /v exch def
+v lvar-name false eq
+    (lvar-name: unnamed returns false) rt-ok  clear
+
+% =================================================================
+% SECTION 173: named-var — unification works
+% =================================================================
+
+/x named-var /v exch def
+v 42 unify pop
+v deref 42 eq
+    (named-var: unify works) rt-ok
+
+v bound? true eq
+    (named-var: bound? after unify) rt-ok  clear
+
+% =================================================================
+% SECTION 174: named-var — == printing with name (unbound)
+% =================================================================
+
+/pressure named-var /v exch def
+v ==s (--lvar:pressure:unbound--) eq
+    (named-var: ==s unbound with name) rt-ok  clear
+
+% =================================================================
+% SECTION 175: named-var — == printing with name (bound)
+% =================================================================
+
+/speed named-var /v exch def
+v 99 unify pop
+v ==s (--lvar:speed:99--) eq
+    (named-var: ==s bound with name) rt-ok  clear
+
+% =================================================================
+% SECTION 176: named-var — unnamed == printing unchanged
+% =================================================================
+
+logic-var /v exch def
+v ==s (--lvar:unbound--) eq
+    (lvar: ==s unnamed unbound) rt-ok
+
+v 77 unify pop
+v ==s (--lvar:77--) eq
+    (lvar: ==s unnamed bound) rt-ok  clear
+
+% =================================================================
+% SECTION 177: named-var — save/restore rolls back binding
+% =================================================================
+
+/x named-var /v exch def
+save /s exch def
+v 42 unify pop
+v deref 42 eq
+    (named-var: bound in save) rt-ok
+s restore
+v bound? false eq
+    (named-var: unbound after restore) rt-ok
+
+% name survives restore (it's part of the array, not a journaled element)
+v lvar-name pop /x eq
+    (named-var: name survives restore) rt-ok  clear
+
+% =================================================================
+% SECTION 178: lvar-name — type error on non-lvar
+% =================================================================
+
+{ 42 lvar-name } try /type-check eq
+    (lvar-name: non-lvar error) rt-ok  clear
+
+% =================================================================
+% SECTION 179: named-var — type error on non-name
+% =================================================================
+
+{ 42 named-var } try /type-check eq
+    (named-var: non-name error) rt-ok  clear
+
+% =================================================================
+% SECTION 180: named-var — used in find-all
+% =================================================================
+
+/x named-var /v exch def
+
+[
+  { v 1 unify { v deref } { fail } if-else }
+  { v 2 unify { v deref } { fail } if-else }
+  { v 3 unify { v deref } { fail } if-else }
+] find-all
+
+dup length 3 eq
+    (named-var: find-all count) rt-ok
+dup 0 get 1 eq
+    (named-var: find-all result 0) rt-ok
+dup 1 get 2 eq
+    (named-var: find-all result 1) rt-ok
+2 get 3 eq
+    (named-var: find-all result 2) rt-ok  clear
+
+% =================================================================
+% SECTION 181: named-var — choice-count
+% =================================================================
+
+/y named-var /v exch def
+
+[
+  { v 10 unify guard }
+  { v 20 unify guard }
+  { fail }
+  { v 30 unify guard }
+] choice-count 3 eq
+    (named-var: choice-count) rt-ok  clear
+
+% =================================================================
+% SECTION 182: vm-validate
+% =================================================================
+
+/vm-validate query-status true eq         (vm-validate: heap integrity) rt-ok  clear
+
+% =================================================================
+% SECTION 183: backtracking over a lvar created inside ${...} (global)
+% =================================================================
+% A logic variable created inside ${...} lives in GLOBAL VM; its binding cell is
+% journal-skipped by default, so pre-fix the per-alternative restore could not
+% undo the binding -- every alternative after the first unified against the stale
+% value and was silently dropped (find-all returned only the FIRST result).  The
+% Flavor::LvarBinding journal path now records + reverts the global binding.  This
+% reproduces WITHOUT vm-gc-stress (pure save/restore correctness; the gc-stress
+% suite adds the result-clone UAF coverage).
+
+${ /gv logic-var def [ { gv 10 unify guard gv deref } { gv 20 unify guard gv deref } { gv 30 unify guard gv deref } ] find-all } /gvr exch def
+gvr length 3 eq                  (global-lvar find-all: all 3 alternatives, not just first) rt-ok
+gvr 0 { add } reduce 60 eq       (global-lvar find-all: sum 60) rt-ok  clear
+${ /gv2 logic-var def [ { gv2 1 unify guard } { gv2 2 unify guard } { gv2 3 unify guard } ] choice-count } 3 eq (global-lvar choice-count: 3 succeed) rt-ok  clear
+% global lvar bound ONCE outside backtracking still persists (survive-restore feature intact)
+${ /gv3 logic-var def gv3 99 unify pop gv3 deref } 99 eq (global-lvar single-bind survives) rt-ok  clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_logic: ALL TESTS PASSED) =
+(__test_ok__) =

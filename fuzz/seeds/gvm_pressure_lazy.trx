@@ -1,0 +1,4 @@
+% lazy chains built inside ${...}; realize after pressure.
+${ mark 30 { 300 string } repeat array-from-mark } pop
+${ 1 lazy-from { 2 mul } lazy-map { 100 lt } lazy-filter 10 lazy-take lazy-to-array } length
+${ [1 2 3] lazy-seq lazy-cycle 7 lazy-take } lazy-to-array length

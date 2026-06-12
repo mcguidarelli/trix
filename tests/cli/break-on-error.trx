@@ -1,0 +1,9 @@
+% break-on-error.trx -- engine-level break-on-error gate (no UI).
+% A recorder callback stands in for the inspector: the /error event must
+% fire for the uncaught name below, and after the callback returns the
+% error must complete with its normal diagnostic and /undefined exit
+% code (40).  run_cli_tests.sh pins both.
+{ /e exch def (halt-tag=) print e tag-name = debug-continue } debug-on-event
+true debug-break-on-error
+(armed) =
+no-such-op-zzz

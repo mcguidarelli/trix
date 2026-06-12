@@ -1,0 +1,231 @@
+% test_debug_hooks.trx -- regression suite for the Phase B C++ debugger
+% hooks (plan_debugger_tui.md).  Drives the new debug-step / step-over /
+% step-out / continue / break / unbreak / on-event ops via a recording
+% callback that bumps counters, and asserts on the counter values.
+%
+% Requires TRIX_DEBUGGER (debug build).  Skipped at debug-build-only
+% level until the run_all.sh skip list is updated; for release builds
+% the breakpoint / debug-* ops do not exist (compile-time gated).
+
+/passed 0 def
+/failed 0 def
+/total  0 def
+/expect {                           % cond label --
+    total 1 add /total exch def
+    exch
+    { pop passed 1 add /passed exch def }
+    { (FAILED: ) print = failed 1 add /failed exch def }
+    if-else
+} def
+
+% --- Plumbing: recording callback + reset helper ----------------------------
+
+/event-count 0 def-persist
+/last-tag    /none def-persist
+/last-sid    0 def-persist
+/last-line   0 def-persist
+
+% Reset all counters to zero between sections.  Uses def-persist so writes
+% survive the @end-callback discipline (the callback runs with whatever
+% save-level the user code is at).
+/reset-counters {
+    /event-count 0     def-persist
+    /last-tag    /none def-persist
+    /last-sid    0     def-persist
+    /last-line   0     def-persist
+} def
+
+% Standard recording callback.  Pops the event Tagged, extracts the tag
+% Name + payload, bumps event-count, captures the most-recent tag and
+% the payload's sid/line.  Does NOT re-arm StepIn -- each test installs
+% whatever resume behaviour it wants.
+/recorder {
+    % event-Tagged --
+    /e exch def
+    /event-count event-count 1 add def-persist
+    /last-tag    e tag-name       def-persist
+    e tag-value       /payload exch def
+    /last-sid    payload 0 get    def-persist
+    /last-line   payload 1 get    def-persist
+} def
+
+% Recorder that ALSO re-arms StepIn -- used by source-line stepping tests
+% to count consecutive line transitions.
+/recorder-step {
+    recorder
+    debug-step
+} def
+
+% --- SECTION 1: debug-call-depth / debug-pc / debug-pc-source -----------
+
+reset-counters
+
+% debug-call-depth reads the live exec-stack depth.  At top level it is
+% small (~1 for the @run frame) but always >= 0.
+debug-call-depth 0 gt                                       (call-depth: top-level >= 0) expect
+
+% debug-pc-source at top level -- no @call frame, returns 0/0/0.
+debug-pc-source                                             % sid line col
+/col exch def
+/line exch def
+/sid exch def
+sid 0 eq                                                    (pc-source: top-level sid=0) expect
+line 0 eq                                                   (pc-source: top-level line=0) expect
+col 0 eq                                                    (pc-source: top-level col=0) expect
+
+% debug-pc at top level -- null (no @call frame).
+debug-pc null eq                                            (pc: top-level null) expect
+
+% Inside a proc, debug-pc returns the proc's name.
+/probe-pc { debug-pc /probe-pc eq                           (pc: inside proc = /probe-pc) expect } def
+probe-pc
+
+% Inside a proc, debug-pc-source returns non-zero sid + line.
+/probe-loc {
+    debug-pc-source                                         % sid line col
+    /pc-col exch def
+    /pc-line exch def
+    /pc-sid exch def
+    pc-sid 0 gt                                             (pc-source: in-proc sid > 0) expect
+    pc-line 0 gt                                            (pc-source: in-proc line > 0) expect
+} def
+probe-loc
+
+% --- SECTION 2: debug-on-event installation -----------------------------
+
+reset-counters
+{ recorder } debug-on-event
+event-count 0 eq                                            (on-event: install does NOT fire) expect
+
+% Clear callback -- pass null.
+null debug-on-event
+debug-continue                                              % drop mode in case any test left it set
+
+% --- SECTION 3: breakpoint op (in-source halt) --------------------------
+
+reset-counters
+{ recorder debug-continue } debug-on-event
+% breakpoint op with debugger inactive -- should NOT fire callback (terse
+% stderr fallback instead).  We can't read stderr from inside the test,
+% so just verify no event was recorded.
+breakpoint
+event-count 0 eq                                            (breakpoint: inactive -> no callback fire) expect
+
+% Activate debugger via debug-step, then trip breakpoint.
+debug-step
+breakpoint
+event-count 1 ge                                            (breakpoint: active -> fires callback) expect
+
+debug-continue
+
+% --- SECTION 4: debug-step + source-line coalescing ---------------------
+
+reset-counters
+{ recorder-step } debug-on-event
+
+% Pure top-level ops: same sid=0/line=0, source-line coalescing means
+% only the FIRST step fires; subsequent ones suppressed.
+debug-step
+1 1 add pop
+1 1 add pop
+1 1 add pop
+% At most a small number of events from the top-level (one for initial,
+% maybe one when re-entering top-level after step-in setup).
+event-count 5 le                                            (step: top-level coalesces) expect
+
+debug-continue
+
+% Stepping into / out of a proc DOES register a line transition.
+reset-counters
+{ recorder-step } debug-on-event
+/two-lines { 1 1 add pop } def
+debug-step
+two-lines
+debug-continue
+event-count 1 ge                                            (step: enters proc -> at least one fire) expect
+
+% --- SECTION 5: debug-step-over / debug-step-out --------------------------
+
+reset-counters
+{ recorder } debug-on-event
+% step-over snapshots current call-depth; halts only when depth <= snapshot.
+debug-step-over
+two-lines  % enters and exits a proc; step-over does NOT halt inside
+% step-over fires ONLY after we return to the snapshot frame.
+event-count 2 le                                            (step-over: <= 2 halts) expect
+
+debug-continue
+
+reset-counters
+{ recorder } debug-on-event
+% step-out semantics: capture exec-depth snapshot inside a proc; the
+% next halt boundary at strictly shallower depth fires the callback.
+% Phase B uses an asynchronous push-on-exec model: when the surrounding
+% dispatch is stream-driven (top-level script tokens), the queued
+% callback does not run until the stream-loop yields.  A truly
+% synchronous halt is Phase D work (coroutine handoff).  This test
+% asserts the mode-management plumbing is correct -- a deeper test of
+% the async fire ordering is deferred to Phase D's integration suite.
+/caller {
+    debug-step-out
+} def
+caller
+debug-call-depth 0 gt                                       (step-out: post-caller exec-depth sane) expect
+
+debug-continue
+
+% --- SECTION 6: debug-break / debug-unbreak ------------------------------
+
+reset-counters
+null debug-on-event              % drop callback
+/target { 42 } def
+
+% Without a breakpoint, calling target does nothing observable.
+target pop
+event-count 0 eq                                            (break: no breakpoint -> silent) expect
+
+% Set a breakpoint on /target; with no callback installed the stderr
+% fallback fires but event-count stays 0 (callback null).
+/target debug-break
+target pop
+event-count 0 eq                                            (break: no callback -> silent count) expect
+
+% Install a callback + verify fire on next /target call.
+reset-counters
+{ recorder } debug-on-event
+target pop
+event-count 1 ge                                            (break: callback fires on /target) expect
+last-tag /breakpoint eq                                     (break: tag is /breakpoint) expect
+
+% Clear the breakpoint; calling target should not fire.
+reset-counters
+/target debug-unbreak
+debug-continue
+target pop
+event-count 0 eq                                            (unbreak: no fire on cleared name) expect
+
+null debug-on-event
+
+% --- SECTION 7: callback receives Tagged event with sid/line ------------
+
+reset-counters
+{ recorder } debug-on-event
+/probe { 1 2 add pop } def
+debug-step
+probe
+last-tag dup /debug-step eq exch /breakpoint eq or          (tag: step or breakpoint) expect
+last-sid 0 ge                                               (tag-payload: sid >= 0) expect
+last-line 0 ge                                              (tag-payload: line >= 0) expect
+
+debug-continue
+null debug-on-event
+
+% --- Wrap up ------------------------------------------------------------
+
+(passed: ) print passed = clear
+(failed: ) print failed = clear
+(total:  ) print total  = clear
+
+failed 0 eq                                                 (test-debug-hooks: all green) expect
+
+(__test_ok__) =

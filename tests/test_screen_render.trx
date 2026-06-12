@@ -1,0 +1,233 @@
+% test_screen_render.trx -- byte-level coverage for screen-render-to.
+% Captures rendered bytes via make-string-stream and asserts exact CSI
+% + SGR + character byte sequences.  Each capture is closed after use
+% to keep stream-pool slots available across tests.
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+% ESC = byte 27.
+/ESC 27 def
+
+% Helper: render `screen` to a fresh capture, return the captured bytes,
+% close the capture so its slot returns to the pool.  Stack: screen :- str
+/render-bytes {
+    1024 make-string-stream
+    /cap exch def
+    cap screen-render-to pop
+    cap get-string-stream
+    cap close-stream
+} def
+
+% Helper: bool form of `search` -- str seek :- bool.  search pushes
+% post/match/pre/true on hit OR str/false on miss; collapse to a clean
+% boolean.
+/contains? {
+    search
+    { pop pop pop true }
+    { pop false }
+    if-else
+} def
+
+% --- 1x1 fresh-screen full repaint ------------------------------------------
+
+1 1 make-screen /s1 exch def
+s1 render-bytes length 25 eq (1x1-fresh-render-length=25) rt-ok
+% 6 (cursor) + 18 (SGR) + 1 (space) = 25
+
+% --- Second render of unchanged screen produces zero bytes ------------------
+
+s1 render-bytes length 0 eq (no-op-render-zero-bytes) rt-ok
+
+% --- Single-cell change, same SGR, emits cursor-move + 1 char ---------------
+
+s1 0 0 65 7 0 0 screen-put-cell pop  % 'A' same fg/bg/attrs as default
+s1 render-bytes length 7 eq (single-cell-change-length=7) rt-ok
+% 6 (cursor) + 1 ('A') = 7
+
+% --- Same screen rendered again: 0 bytes ------------------------------------
+
+s1 render-bytes length 0 eq (idempotent-render-zero-bytes) rt-ok
+
+% --- SGR change emits full reset + new attrs --------------------------------
+
+s1 0 0 65 7 0 1 screen-put-cell pop  % 'A' bold (attrs=0x01)
+s1 render-bytes length 27 eq (sgr-change-length=27) rt-ok
+% 6 (cursor) + 20 (SGR with bold) + 1 = 27
+
+% --- Color change emits full reset + new colors -----------------------------
+
+2 1 make-screen /s2 exch def
+s2 render-bytes length 26 eq (2x1-first-render-length=26) rt-ok
+% 6 + 18 + 2 = 26
+
+s2 0 0 65 196 21 0 screen-put-cell pop  % red on royal-blue (no attrs)
+s2 render-bytes length 28 eq (color-change-length=28) rt-ok
+% 6 + 21 (SGR with 3-digit + 2-digit colors) + 1 = 28
+
+% --- UTF-8 multi-byte codepoint ---------------------------------------------
+
+1 1 make-screen /s3 exch def
+s3 0 0 9472 7 0 0 screen-put-cell pop  % 0x2500 box-drawing horizontal
+s3 render-bytes length 27 eq (utf8-3byte-length=27) rt-ok
+% 6 + 18 + 3 = 27
+
+1 1 make-screen /s4 exch def
+s4 0 0 161 7 0 0 screen-put-cell pop  % 0xA1 inverted exclamation
+s4 render-bytes length 26 eq (utf8-2byte-length=26) rt-ok
+% 6 + 18 + 2 = 26
+
+% --- Skip-and-jump cursor: dirty cells separated by clean cells -------------
+
+4 1 make-screen /s5 exch def
+s5 render-bytes pop  % first render to set prev
+s5 0 0 65 7 0 0 screen-put-cell pop  % 'A' at col 0
+s5 3 0 90 7 0 0 screen-put-cell pop  % 'Z' at col 3
+s5 render-bytes length 14 eq (skip-jump-cursor-length=14) rt-ok
+% 6 + 1 + 6 + 1 = 14
+
+% --- Run of dirty cells on same row: single cursor move + chars -------------
+
+s5 render-bytes pop  % snapshot so cells == prev
+s5 0 0 (BC) 7 0 0 screen-put-string pop  % overwrite cols 0..1
+s5 render-bytes length 8 eq (run-of-dirty-length=8) rt-ok
+% 6 + 2 = 8
+
+% --- Exact byte verification: 1x1 first render ------------------------------
+
+1 1 make-screen /s6 exch def
+s6 render-bytes
+40 make-string-stream /exp exch def
+exp ESC write
+exp ([1;1H) write-string
+exp ESC write
+exp ([0;38;5;7;48;5;0m ) write-string
+exp get-string-stream
+exp close-stream
+eq (1x1-exact-byte-sequence) rt-ok
+
+% --- Type-check on non-stream second arg ------------------------------------
+
+mark { 1 1 make-screen 42 screen-render-to } try
+/type-check eq (render-to-non-stream-rejected) rt-ok
+clear
+
+% --- Type-check on non-screen first arg -------------------------------------
+
+mark { 42 256 make-string-stream screen-render-to } try
+/type-check eq (render-to-non-screen-rejected) rt-ok
+clear
+
+% --- screen-render's direct-::write-to-STDOUT path (m_stdout flush-
+%     first, 4 KiB stack buffer drain, EAGAIN/EINTR poll-retry) is
+%     exercised in tests/test_screen_render_direct.trx (D5).  Render
+%     emit code (cursor moves, SGR diff, UTF-8 encode) is byte-level
+%     asserted here via screen-render-to into a string-stream.
+
+% --- D3: out-of-range codepoints are rejected at the put site ---------------
+% screen-put-cell validates the codepoint contract (<= 0x10FFFF, no
+% surrogate halves), matching screen-put-utf8-string's decoder.  The
+% renderer's U+FFFD fallback in utf8_encode survives as defense-in-
+% depth for non-put paths, but is no longer reachable through put.
+% (This section originally pinned the degrade-to-U+FFFD behavior the
+% vacuous pre-validation allowed; the put-site contract replaced it.)
+
+1 1 make-screen /sFFFD exch def
+{ sFFFD 0 0 1114112u 7 0 0 screen-put-cell } try  % 1114112 = 0x110000, just past max
+/range-check eq                                           (D3: cp beyond 0x10FFFF rejected) rt-ok clear
+
+{ sFFFD 0 0 4294967295u 7 0 0 screen-put-cell } try  % top of uinteger32
+/range-check eq                                           (D3: cp 0xFFFFFFFF rejected)  rt-ok clear
+
+{ sFFFD 0 0 0xD800#u 7 0 0 screen-put-cell } try  % surrogate half (was CESU-8 on the wire)
+/range-check eq                                           (D3: surrogate cp rejected)   rt-ok clear
+
+% Max VALID codepoint still lands and renders as real UTF-8 (F4 8F BF BF).
+sFFFD 0 0 0x10FFFF#u 7 0 0 screen-put-cell pop
+/sFFFDcap 64 make-string-stream def
+sFFFD sFFFDcap screen-render-to pop
+/sFFFDbytes sFFFDcap get-string-stream def
+sFFFDcap close-stream
+sFFFDbytes (\xF4\x8F\xBF\xBF) contains?                   (D3: U+10FFFF renders intact) rt-ok
+
+% --- D4: SGR multi-attrs (all 7 valid bits) ---------------------------------
+% Bit 0 bold, 1 dim, 2 italic, 3 underline, 4 blink, 5 reverse, 6 strike
+% (bit 7 reserved).  attrs=0x7F sets all valid bits; assert each SGR
+% sub-code appears in the emitted byte stream.
+
+1 1 make-screen /sAll exch def
+sAll 0 0 64 7 0 127 screen-put-cell pop      % '@' fg=7 bg=0 attrs=0x7F (all 7 bits)
+/sAllcap 128 make-string-stream def
+sAll sAllcap screen-render-to pop
+/sAllbytes sAllcap get-string-stream def
+sAllcap close-stream
+% SGR codes: 1=bold, 2=dim, 3=italic, 4=underline, 5=blink, 7=reverse, 9=strike.
+sAllbytes (;1) contains?                                  (D4: bold sub-code present)      rt-ok
+sAllbytes (;2) contains?                                  (D4: dim sub-code present)       rt-ok
+sAllbytes (;3) contains?                                  (D4: italic sub-code present)    rt-ok
+sAllbytes (;4) contains?                                  (D4: underline sub-code present) rt-ok
+sAllbytes (;5) contains?                                  (D4: blink sub-code present)     rt-ok
+sAllbytes (;7) contains?                                  (D4: reverse sub-code present)   rt-ok
+sAllbytes (;9) contains?                                  (D4: strike sub-code present)    rt-ok
+
+% --- D6: print + screen-render-to byte-order interleaving -------------------
+% screen-render-to writes through the same Stream interface as write-string,
+% so two writes sandwiching a render-to into the same stream must produce
+% output in source order.  Locks down the (stream-routed) variant of the
+% A5 footgun: render-to is well-behaved, only screen-render bypasses
+% buffering.
+
+1 1 make-screen /sMix exch def
+sMix 0 0 65 7 0 0 screen-put-cell pop  % 'A'
+/sMixcap 256 make-string-stream def
+sMixcap (BEFORE-) write-string
+sMix sMixcap screen-render-to pop
+sMixcap (-AFTER) write-string
+/sMixbytes sMixcap get-string-stream def
+sMixcap close-stream
+% First 7 chars must be "BEFORE-" and last 6 chars must be "-AFTER".
+sMixbytes 0 7 get-interval (BEFORE-) deep-eq                 (D6: prefix preserved) rt-ok
+sMixbytes dup length 6 sub 6 get-interval (-AFTER) deep-eq   (D6: suffix preserved) rt-ok
+
+% --- D7: render-diff perf bound (one-cell change emits minimal bytes) -------
+% Full repaint of a 50x20 screen runs ~25 KB.  With a single cell changed
+% after a warm prior render, the diff should emit a tight envelope: one
+% cursor-position CSI + the codepoint byte (+ optional trailing SGR).
+% Assert the diff stays under a generous 32-byte ceiling so any future
+% change that breaks the diff loop trips this test.  Screen size kept
+% under MaxStreamBufferSize so the warm capture fits one make-string-stream.
+
+50 20 make-screen /sPerf exch def
+% First render warms prev buffer + SGR cache.
+/sPerfWarm 65535 make-string-stream def
+sPerf sPerfWarm screen-render-to pop
+sPerfWarm close-stream
+% One cell mutated, fg/bg/attrs unchanged from default (no SGR re-emit).
+sPerf 25 10 67 7 0 0 screen-put-cell pop  % 'C' at (25, 10)
+/sPerfDiff 1024 make-string-stream def
+sPerf sPerfDiff screen-render-to pop
+/sPerfBytes sPerfDiff get-string-stream def
+sPerfDiff close-stream
+sPerfBytes length 32 le                                   (D7: one-cell diff <= 32 bytes) rt-ok
+
+% --- Summary ----------------------------------------------------------------
+
+(\npassed: ) print passed = (failed: ) print failed = (total: ) print total =
+failed 0 eq { (test_screen_render OK) } { (test_screen_render FAILED) } if-else =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

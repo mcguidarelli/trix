@@ -1,0 +1,94 @@
+% ============================================================================
+% test_b7_safety.trx -- B7 group 1a (standalone HIGH correctness)
+% ============================================================================
+% genserver:1-0  @gen-call-timeout-done read matched-message element [1] with no
+%                is_array/length guard -> OOB read on a 1-element [ref] reply
+%                (the ref-matching predicate accepts any array whose element 0
+%                equals the pending ref, including [ref]).  Now validated
+%                (is_array && arrays_length >= 2) -> clean /range-check.
+% reactive:1-1   cell-combine computed-proc length 2*N+2 was narrowed to length_t
+%                (uint16_t) for N >= 32767 -> truncated allocation -> heap write
+%                overflow (CWE-190 -> CWE-787).  Now bounded wide BEFORE the
+%                narrowing -> clean /limit-check.
+% reactive:2-0   cell-value recompute of a dirty computed cell cleared its deps
+%                but never set m_current_cell, so the proc's cell-get reads never
+%                rebuilt them -> permanent staleness (a later source cell-set was
+%                ignored, cell-get returned the stale cached value).  Now sets
+%                m_current_cell so the cell's own deps/rdeps rebuild.
+% pipeline:3-0   pipe_alloc_stage_context left m_last_joined_exit_reason /
+%                m_curr_alloc_global / m_last_mailbox_capacity uninitialized in a
+%                recycled CoroutineContext -> the GC walker reads a stale
+%                exit-reason for every registry context, and the stale
+%                global-alloc flag leaks into the stage.  Now initialized like
+%                coroutine_launch_common.  (Functional + GC-survival coverage;
+%                the deterministic fault depends on recycled-byte contents, so
+%                the unrooted-field hazard itself is code-inspection-covered.)
+% ============================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ---------------------------------------------------------------------------
+% genserver:1-0 -- malformed 1-element reply rejected (not OOB-read)
+% ---------------------------------------------------------------------------
+% The caller must be an actor (own a mailbox).  Pre-load a malformed [ref]
+% reply into the caller's own mailbox (the first generated gen ref is 1), then
+% gen-call-timeout: its selective receive matches [1] (element 0 == ref) and
+% would read element [1] of a 1-element array.
+mark {
+  actor-self /me exch def
+  [ 1 ] me actor-send
+  mark { } actor-spawn /dummy exch def
+  { dummy 42 1000 gen-call-timeout } try
+  /range-check eq (genserver:1-0 malformed 1-elem reply -> range-check, not OOB) rt-ok
+} actor-spawn coroutine-join pop clear
+
+% ---------------------------------------------------------------------------
+% reactive:1-1 -- cell-combine bounds the combined-proc length before narrowing
+% ---------------------------------------------------------------------------
+/c 42 cell def
+32767 range { pop /c load } map /cells exch def
+{ cells { add } cell-combine } try
+/limit-check eq (reactive:1-1 cell-combine 32767 cells -> limit-check, not heap overflow) rt-ok
+clear
+
+% A normal small cell-combine still works.
+/a 3 cell def
+/b 4 cell def
+[ /a load /b load ] { add } cell-combine /sum exch def
+sum cell-get 7 eq (reactive:1-1 small cell-combine still works: 3+4=7) rt-ok
+
+% ---------------------------------------------------------------------------
+% reactive:2-0 -- dirty computed-cell recompute rebuilds its own deps
+% ---------------------------------------------------------------------------
+/base 10 cell def
+/comp { base cell-get 2 mul } cell-computed def
+comp cell-value 20 eq (reactive:2-0 cell-value forces dirty computed -> 20) rt-ok
+99 base cell-set
+comp cell-get 198 eq (reactive:2-0 source change invalidates after cell-value -> 198) rt-ok
+base cell-rdeps length 1 eq (reactive:2-0 source rdeps include the computed cell) rt-ok
+
+% ---------------------------------------------------------------------------
+% pipeline:3-0 -- recycled stage contexts are fully initialized; GC survives
+% ---------------------------------------------------------------------------
+% Seed the coroutine-context free list with dead coroutines, then run a
+% pipeline whose stage coroutines recycle those freed contexts, then GC.
+mark { 1 } coroutine-launch coroutine-join pop
+mark { 2 } coroutine-launch coroutine-join pop
+mark { 3 } coroutine-launch coroutine-join pop
+[ 1 2 3 4 5 ] { 2 mul } pipe-map 16 pipe-collect /pr exch def
+vm-global-gc
+pr length 5 eq (pipeline:3-0 pipe-map over recycled ctxs: length 5) rt-ok
+pr 0 get 2 eq (pipeline:3-0 element 0 == 2) rt-ok
+pr 4 get 10 eq (pipeline:3-0 element 4 == 10 after vm-global-gc) rt-ok
+
+(test_b7_safety.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

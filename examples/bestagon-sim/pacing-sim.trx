@@ -1,0 +1,301 @@
+% =====================================================================
+% pacing-sim.trx -- Bestagon Wars Power-meter pacing sim (Phase 0.5C)
+% =====================================================================
+%
+% Tier 1.2 of plan_bestagon_balance_prototyping.md.  Validates §9.2's
+% per-CO pacing target ("exchanges to first Power") against simulated
+% means.
+%
+% Method (per plan §0.5C):
+%   Setup per matchup -- Tank-vs-Tank on Plain, both full HP, luck on.
+%   Loop until atk-stars >= power-cost[atk-co].
+%   Reset HP to 10 at start of EVERY exchange (pure per-exchange charge
+%     accumulation, not death cycles).
+%   Record exchange-count -> histogram[atk-co][n].
+%   Run 1000 trials per (atk-co, def-co) matchup = 36,000 trials.
+%
+% Outputs (gitignored under examples/bestagon-sim/out/):
+%   pacing-summary.md      per-atk-CO mean/median/std-dev + §9.2 delta
+%   pacing-histogram.csv   exchange-count distribution per atk-CO
+%
+% Memory: each trial wraps in save/restore so combat-core's per-call
+% counter-spec dicts are reclaimed per trial.  Histogram increments
+% via put-persist + trial counter via def-persist survive the rollback.
+% No --vm-size override needed at default 1 MB.
+%
+% Run with the prod build (debug is 10-30x slower):
+%   ./trix.opt examples/bestagon-sim/pacing-sim.trx
+% =====================================================================
+
+(examples/bestagon-sim/combat-core.trx) run
+
+
+% ====================================================================
+% Section 1: configuration
+% ====================================================================
+
+/all-cos          [ /bishop /hammer /hawk /boots /veil /talon ] def
+/trials-per-pair  1000 def
+/hist-bins        50   def
+
+% §9.2 GDD targets -- post-Phase-0.5F balance pass 1 (2026-05-15).
+% Updated to match the new table values; re-run should land all 6
+% within ±1 (and within ±0.40 from the original sim mean).
+/gdd-pacing-target <<
+    /bishop  6
+    /hammer  7
+    /hawk    8
+    /boots   5
+    /veil    7
+    /talon   8
+>>#r def
+
+
+% ====================================================================
+% Section 2: mutable specs + ctx
+% ====================================================================
+
+/atk-spec << /type /tank  /hp 10  /vet-tier 0  /co /bishop
+             /power-active false  /super-active false  /terrain /plain >> def
+/def-spec << /type /tank  /hp 10  /vet-tier 0  /co /bishop
+             /power-active false  /super-active false  /terrain /plain >> def
+/ctx-on   << /luck-mode /on  /weather-current /clear
+             /attacker-can-see-defender true >>#r def
+
+
+% ====================================================================
+% Section 3: per-atk-CO histogram arrays
+% ====================================================================
+%
+% One zero-init array per CO of length hist-bins, stored in a Dict
+% keyed by CO Name.  Array index i = "exchange count i"; cell value =
+% number of trials that hit Power at exactly i exchanges.
+
+/make-zero-array {|n|#+2
+    /a n array local-def
+    0 1 n 1 sub  {
+        /i exch def
+        a i 0 put
+    } for
+    a
+} def
+
+/histograms <<
+    /bishop  hist-bins make-zero-array
+    /hammer  hist-bins make-zero-array
+    /hawk    hist-bins make-zero-array
+    /boots   hist-bins make-zero-array
+    /veil    hist-bins make-zero-array
+    /talon   hist-bins make-zero-array
+>> def
+
+
+% ====================================================================
+% Section 4: per-CO Power thresholds (from combat-core's roster)
+% ====================================================================
+
+/power-cost-for {|co|
+    co-roster co get /power-cost get
+} def
+
+
+% ====================================================================
+% Section 5: single-trial harness
+% ====================================================================
+%
+% Stack at call: atk-co def-co  (consumed via |args| frame).
+% Effect: increments histograms[atk-co][n] for the exchange-count n.
+%
+% Loop wrapped in save/restore so resolve-attack's per-call counter-
+% spec dict allocations get reclaimed.  Mutable state that must survive
+% the rollback uses persist-family ops: /trial-n via def-persist;
+% histogram increment via put-persist.
+
+/run-trial {|atk-co def-co|#+9
+    /atk-cost-real  atk-co power-cost-for /real-type cast  local-def
+    /trial-n        0    def-persist
+    /stars-atk-acc  0.0  def-persist
+
+    save pop                                       % drop save token; use -1 restore
+
+    atk-spec /co atk-co put
+    def-spec /co def-co put
+
+    {
+        atk-spec /hp 10 put
+        def-spec /hp 10 put
+
+        % luck_pp = uniform_int(0, 9) per §7.3 (luck-on)
+        /luck-pp  10u rand-bounded-uinteger /integer-type cast  local-def
+
+        atk-spec def-spec ctx-on luck-pp resolve-attack
+        /counter exch local-def
+        /damage  exch local-def
+
+        atk-co def-co damage counter /tank /tank compute-star-gains
+        pop                                          % drop def-star-gain
+        /atk-star-gain exch local-def
+        /stars-atk-acc  $[ stars-atk-acc + atk-star-gain ]  def-persist
+
+        /trial-n  trial-n 1 add  def-persist
+        stars-atk-acc atk-cost-real ge { exit } if
+        trial-n hist-bins 1 sub ge   { exit } if
+    } loop
+
+    % Increment histogram BEFORE restore so the put-persist mutation
+    % survives the rollback.
+    /hist-arr  histograms atk-co get  local-def
+    hist-arr trial-n  hist-arr trial-n get 1 add  put-persist
+
+    -1 restore
+} def
+
+
+% ====================================================================
+% Section 6: stats helpers (operate over a histogram array)
+% ====================================================================
+%
+% A histogram is an Array[hist-bins] of Integers; arr[i] = count of
+% trials that landed at exchange-count i.  Mean / std-dev / median
+% are derived from the histogram directly without unrolling into a
+% sample array.
+
+/hist-total {|hist|#+2
+    /sum 0 local-def
+    0 1 hist-bins 1 sub  {
+        /i exch def
+        /sum sum hist i get add store
+    } for
+    sum
+} def
+
+/hist-mean {|hist|#+3
+    /sum-i 0 local-def
+    /n hist hist-total local-def
+    0 1 hist-bins 1 sub  {
+        /i exch def
+        /sum-i  sum-i  i hist i get mul  add  store
+    } for
+    n 0 le { 0.0 } { $[ (sum-i * 1.0) / n ] } if-else
+} def
+
+/hist-median {|hist|#+4
+    % Sweep cumulative count until we cross n/2.
+    /n hist hist-total local-def
+    /target  n 2 div local-def
+    /cumul 0 local-def
+    /result 0 local-def
+    0 1 hist-bins 1 sub  {
+        /i exch def
+        /cumul cumul hist i get add store
+        cumul target ge result 0 eq and {
+            /result i store
+        } if
+    } for
+    result
+} def
+
+/hist-stddev {|hist|#+5
+    /n hist hist-total local-def
+    /mean hist hist-mean local-def
+    /sum-sq 0.0 local-def
+    0 1 hist-bins 1 sub  {
+        /i exch def
+        /freq hist i get local-def
+        freq 0 gt {
+            /delta  $[ i - mean ]  local-def
+            /sum-sq  $[ sum-sq + freq * delta * delta ]  store
+        } if
+    } for
+    n 1 le { 0.0 } { $[ (sum-sq / (n - 1)) ** 0.5 ] } if-else
+} def
+
+
+% ====================================================================
+% Section 7: summary + histogram CSV writers
+% ====================================================================
+
+/out-summary    (examples/bestagon-sim/out/pacing-summary.md)   def
+/out-histogram  (examples/bestagon-sim/out/pacing-histogram.csv) def
+
+/write-summary {||#+2
+    /s out-summary (w)#b stream local-def
+    s (# Bestagon pacing sim summary\n\n) write-string
+    s (Tank-vs-Tank on Plain, full HP each exchange, luck-on, ) write-string
+    s ({0} trials per [atk_co, def_co] pair = {1} per atk_co.\n\n)
+        mark trials-per-pair  $[ trials-per-pair * 6 ] fprint-fmt pop pop
+    s (## Per-atk-CO mean exchanges to first Power\n\n) write-string
+    s (| atk_co | GDD §9.2 | sim mean | sim median | sim std | within ±1? |\n)
+        write-string
+    s (|---|---|---|---|---|---|\n) write-string
+    all-cos { |co|#+7
+        /h        histograms co get        local-def
+        /mean     h hist-mean              local-def
+        /median   h hist-median            local-def
+        /std      h hist-stddev            local-def
+        /target   gdd-pacing-target co get local-def
+        /delta    $[ mean - target ]       local-def
+        /within   delta abs /real-type cast  1.0 le  local-def
+        s (| {0:s} | {1} | {2:.2f} | {3} | {4:.2f} | {5} |\n)
+            mark
+            co target mean median std
+            within { (yes) } { (NO) } if-else
+            fprint-fmt pop pop
+    } for-all
+    s close-stream
+} def
+
+/write-histogram {||#+2
+    /h-stream  out-histogram (w)#b stream  local-def
+    h-stream (atk_co,exchange_count,frequency\n) write-string
+    all-cos { |co|#+1
+        /hist histograms co get local-def
+        0 1 hist-bins 1 sub  {
+            /i exch def
+            hist i get 0 gt {
+                h-stream ({0:s},{1},{2}\n)
+                    mark co i hist i get fprint-fmt pop pop
+            } if
+        } for
+    } for-all
+    h-stream close-stream
+} def
+
+
+% ====================================================================
+% Section 8: orchestration
+% ====================================================================
+
+% Seed the RNG deterministically so runs are repeatable.  Comment out
+% for entropy-seeded runs.
+2026051501ul rand-seed
+
+(=== pacing-sim starting ===\n) print
+(  trials per pair: {0}  (36 pairs = {1} trials)\n)
+    mark trials-per-pair  $[ trials-per-pair * 36 ] print-fmt pop pop
+
+all-cos { |atk-co|#+1
+    all-cos { |def-co|#+1
+        1 1 trials-per-pair  {
+            pop                          % discard `for` counter
+            atk-co def-co run-trial
+        } for
+    } for-all
+} for-all
+
+write-summary
+(  summary written: {0:s}\n) mark out-summary print-fmt pop pop
+
+write-histogram
+(  histogram written: {0:s}\n) mark out-histogram print-fmt pop pop
+
+(\n=== summary ===\n) print
+all-cos { |co|#+5
+    /h        histograms co get        local-def
+    /mean     h hist-mean              local-def
+    /median   h hist-median            local-def
+    /std      h hist-stddev            local-def
+    /target   gdd-pacing-target co get local-def
+    (  {0:s}: mean={1:.2f}  median={2}  std={3:.2f}  [GDD §9.2 target: {4}]\n)
+        mark co mean median std target print-fmt pop pop
+} for-all

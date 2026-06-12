@@ -1,0 +1,2 @@
+logic-var /x exch def
+x 42 unify x bound?

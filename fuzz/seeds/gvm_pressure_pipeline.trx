@@ -1,0 +1,8 @@
+% pipeline stage descriptors and aux arrays inside ${...}.
+${ mark 20 { 256 string } repeat array-from-mark } pop
+8 pipe-buffer /src exch def
+${ src 3 pipe-batch } pop
+${ src 2 pipe-window } pop
+${ [ src src ] pipe-zip } pop
+${ [ src src ] pipe-merge } pop
+src pipe-close

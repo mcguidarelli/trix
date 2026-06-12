@@ -1,0 +1,3 @@
+(/tmp/q.bin) file-size =
+(/tmp/q.bin) delete-file
+(/tmp/a) (/tmp/b) rename-file

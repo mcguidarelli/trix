@@ -1,0 +1,59 @@
+% test_memory_sandbox.trx -- sandbox-block tests for the raw memory
+% family (ops_memory.inl).
+%
+% Run with --sandbox (run_all.sh SPECIAL_ARGS) to verify the host-op
+% ban applies before any operand validation -- the 0a null address
+% never reaches the address probe.  Companion to
+% test_raw_mode_sandbox.trx; the non-sandbox sad paths live in
+% test_memory_errors.trx.
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+%% === Sandbox blocks peek/poke ===
+
+<< /unsupported { clear true } >> { 0a /byte-type peek } try-catch
+(peek: blocked in sandbox) rt-ok
+
+<< /unsupported { clear true } >> { 0 0a poke } try-catch
+(poke: blocked in sandbox) rt-ok
+
+%% === Sandbox blocks alloc/free ===
+
+<< /unsupported { clear true } >> { 16 alloc } try-catch
+(alloc: blocked in sandbox) rt-ok
+
+<< /unsupported { clear true } >> { 0a free } try-catch
+(free: blocked in sandbox) rt-ok
+
+%% === Sandbox ALLOWS pure in-VM memory ops ===
+
+mark 1 2 (BB) pack (BB) unpack
+2 eq exch 2b eq and exch 1b eq and
+(pack/unpack: allowed in sandbox) rt-ok
+
+1 3 bit-set 9 eq (bit-set: allowed in sandbox) rt-ok
+
+%% === Results ===
+
+failed 0 eq
+{ total (memory-sandbox: all tests passed) = = }
+{ (memory-sandbox: FAILURES = ) print failed = } if-else
+failed 0 eq { } { /assert-failed throw } if-else
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

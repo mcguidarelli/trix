@@ -1,0 +1,194 @@
+% ====================================================================
+% Phase 8: PackedExt subcode scheme -- 128-bit values in packed data.
+%
+% Before Phase 8, Int128 / UInt128 literals triggered TypeCheck inside:
+%   - Procedure bodies { ... }       (packed via make_packed_data)
+%   - Multi-token infix $( ... )     (packed via pack_infix_tokens)
+%   - Packed curry / packed arrays   (same underlying path)
+%
+% Phase 8 introduces the PackedExt PackedType slot (formerly Reserved1).
+% Encoding: [header][subcode][offset: SS+1 bytes]
+%   header X=0 (literal), SS=offset_size-1, T=PackedExt slot (3)
+%   subcode 0x00=Int128, 0x01=UInt128, 0x02-0xFF reserved
+%
+% This file exercises every path: literal inside proc bodies, nested
+% procs, infix, curry capture, round-trip through save/restore, and
+% snapshot persistence.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: 128-bit literals in procedure bodies
+% ====================================================================
+
+% simple literal
+{ 42q } exec 42q deep-eq
+    (proc: Int128 literal) rt-ok clear
+
+{ 42uq } exec 42uq deep-eq
+    (proc: UInt128 literal) rt-ok clear
+
+% boundary values
+{ 16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q } exec
+16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q deep-eq
+    (proc: INT128_MAX literal) rt-ok clear
+
+{ 16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq } exec
+16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq deep-eq
+    (proc: UINT128_MAX literal) rt-ok clear
+
+{ -170141183460469231731687303715884105728q } exec
+-170141183460469231731687303715884105728q deep-eq
+    (proc: INT128_MIN literal) rt-ok clear
+
+% negative Int128
+{ -1q } exec -1q deep-eq
+    (proc: negative Int128) rt-ok clear
+
+% arithmetic with literal inside proc
+{ 42q 1q add } exec 43q deep-eq
+    (proc: Int128 add in body) rt-ok clear
+
+{ 100uq 50uq sub } exec 50uq deep-eq
+    (proc: UInt128 sub in body) rt-ok clear
+
+% mul with literal
+{ 7q 6q mul } exec 42q deep-eq
+    (proc: Int128 mul in body) rt-ok clear
+
+% ====================================================================
+% SECTION 2: nested procedure bodies
+% ====================================================================
+
+{ { 42q } exec } exec 42q deep-eq
+    (proc: nested Int128 literal) rt-ok clear
+
+{ { { 99q } exec } exec } exec 99q deep-eq
+    (proc: triple-nested Int128 literal) rt-ok clear
+
+% a proc that returns another proc which returns an Int128
+/make-42 { { 42q } } def
+make-42 exec exec 42q deep-eq
+    (proc: returned proc produces Int128) rt-ok clear
+
+% ====================================================================
+% SECTION 3: multi-token infix $(...) with 128-bit
+% ====================================================================
+
+$( 10q + 20q ) 30q deep-eq
+    (infix: Int128 add) rt-ok clear
+
+$( 100uq - 50uq ) 50uq deep-eq
+    (infix: UInt128 sub) rt-ok clear
+
+$( 7q * 6q ) 42q deep-eq
+    (infix: Int128 mul) rt-ok clear
+
+$( 100q / 7q ) 14q deep-eq
+    (infix: Int128 div) rt-ok clear
+
+$( 100q % 7q ) 2q deep-eq
+    (infix: Int128 mod) rt-ok clear
+
+% mixed 128-bit and regular Int via promote
+$[ 10q + 5q ] 15q deep-eq
+    (infix: auto-promote Int128 add) rt-ok clear
+
+% parenthesized
+$( ( 10q + 5q ) * 2q ) 30q deep-eq
+    (infix: parenthesized Int128) rt-ok clear
+
+% comparison
+$( 10q < 20q )
+    (infix: Int128 lt true) rt-ok clear
+
+$( 20uq >= 20uq )
+    (infix: UInt128 ge true) rt-ok clear
+
+% INT128_MAX in infix
+$( 16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q - 1q )
+16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE#q deep-eq
+    (infix: INT128_MAX minus 1) rt-ok clear
+
+% ====================================================================
+% SECTION 4: packed arrays containing 128-bit
+% ====================================================================
+
+% packed array via named proc (procs are packed internally)
+/p [ 1q 2q 3q ] def
+p 0 get 1q deep-eq (packed: array Int128 [0]) rt-ok clear
+p 1 get 2q deep-eq (packed: array Int128 [1]) rt-ok clear
+p 2 get 3q deep-eq (packed: array Int128 [2]) rt-ok clear
+
+% array of UInt128 values
+/q [ 10uq 20uq 30uq ] def
+q 1 get 20uq deep-eq (packed: array UInt128 [1]) rt-ok clear
+
+% iterate over packed array of 128-bit
+/sum 0q def
+[ 1q 2q 3q 4q ] { sum add /sum exch def } for-all
+sum 10q deep-eq
+    (packed: for-all sum 1q+2q+3q+4q) rt-ok clear
+
+% array proc reference inside proc body
+/make-list { [ 1q 2q 3q ] } def
+make-list exec length 3 eq
+    (packed: proc produces Int128 array) rt-ok clear
+
+% ====================================================================
+% SECTION 5: curry capturing 128-bit
+% ====================================================================
+
+% curry literal capture using exec
+42q { 1q add } curry exec 43q deep-eq
+    (curry: Int128 capture + proc) rt-ok clear
+
+% curry with UInt128 + operator
+100uq //add curry 50uq exch exec 150uq deep-eq
+    (curry: UInt128 capture + op) rt-ok clear
+
+% nested curry with 128-bit
+10q { 20q add } curry exec 30q deep-eq
+    (curry: nested Int128 capture) rt-ok clear
+
+% a proc that uses a captured 128-bit value internally via curry
+/bias 100q def
+/add-bias { bias add } def
+5q add-bias exec 105q deep-eq
+    (curry: proc uses packed Int128 constant from userdict) rt-ok clear
+
+% ====================================================================
+% SECTION 6: save/restore preserves packed 128-bit
+% ====================================================================
+
+/sv save def
+/my-proc { 42q 1q add } def
+my-proc exec 43q deep-eq
+    (save/restore: pre-restore Int128 works) rt-ok clear
+sv restore
+
+% ====================================================================
+% SECTION 7: heap integrity after packed-128-bit churn
+% ====================================================================
+
+% 100 iterations of build + exec a packed proc containing 128-bit
+0 1 99 { pop
+    { 42q 1q add } exec pop
+} for
+
+//:status:widevalue-validate   (packed churn: widevalue OK) rt-ok
+//:status:vm-validate          (packed churn: vm OK)        rt-ok
+//:status:extvalue-validate    (packed churn: extvalue OK)  rt-ok
+
+(test_int128_packed.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

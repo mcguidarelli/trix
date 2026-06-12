@@ -1,0 +1,21 @@
+% S7: read-key-byte inside an ACTOR while main cycles 20ms sleeps --
+% the tetrix/chip8 input-actor shape.  Same scheduler regression as S6
+% (timer-list corruption on early real-sleep wake), exercised from the
+% actor context: actors add mailbox plumbing and were the configuration
+% the dead-keyboard reports came from.
+(lib/keys.trx) run
+/done false def
+/reader-actor {
+    (actor-start\n) print flush
+    read-key-byte
+    { (actor-got: ) print /integer-type cast = flush }
+    { (actor-eof\n) print flush }
+    if-else
+    /done true store
+} def
+{
+    mark { reader-actor } actor-spawn pop
+    { done not } { 20 coroutine-sleep } while
+} with-raw-mode
+(S7-done\n) print flush
+quit

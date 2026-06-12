@@ -1,0 +1,3 @@
+% update-persist: dict key proc -- ; proc takes old value, returns new.
+4 dict /st exch def st /counter 1 put save /sv exch def st /counter { 10 add } update-persist sv restore st /counter get
+mark { 4 dict dup /missing { 1 add } update-persist } try

@@ -1,0 +1,80 @@
+% ============================================================================
+% test_b7_debugger_safety.trx -- B7 group 1a (debugger:1-1)
+% ============================================================================
+% debugger:1-1  proc-disasm reserved operand-stack room with
+%               require_op_capacity(static_cast<stack_depth_t>(length + 1)).
+%               For a 65535-element Array/Packed proc, length+1 == 65536
+%               truncates to 0 in the uint16_t cast, require_op_capacity(0)
+%               passes, then the op pushes a mark + 65535 rows past m_op_limit
+%               -> operand-stack overflow / corruption.  Dropping the cast lets
+%               length+1 stay in int32 so the count is bound-checked, raising a
+%               clean /opstack-overflow.
+% (Debugger-gated: this file is SKIPPED when TRIX_DEBUGGER is compiled out --
+%  proc-disasm is a debug-* op absent from the optimized / --release build.)
+% ============================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% A 65535-element proc forces length+1 == 65536; the bound check must see the
+% true count and raise opstack-overflow rather than silently smashing the stack.
+{ 65535 range proc-disasm } try
+/opstack-overflow eq (debugger:1-1 proc-disasm 65535-elem proc -> opstack-overflow, not stack smash) rt-ok
+clear
+
+% proc-disasm on a normal small proc still produces rows.
+{ 1 2 add } proc-disasm length 0 gt (debugger:1-1 small proc-disasm still produces rows) rt-ok
+clear
+
+% ---------------------------------------------------------------------------
+% debugger:1-0 -- breakpoints Dict is a GC root (survives vm-global-gc)
+% ---------------------------------------------------------------------------
+% debug_breakpoints_dict allocates in global VM but is referenced only from
+% m_debug.m_breakpoints_offset; walk_all_roots never marked it, so vm-global-gc
+% swept it and debug-bp-hits then read freed memory.  Now marked (gated).
+/foo { } def
+/foo debug-break
+foo                                   % bp fires once -> hit count 1
+vm-global-gc-probe /dead get 0 eq (debugger:1-0 bp dict is reachable, not a dead block) rt-ok
+vm-global-gc pop                      % real sweep: must NOT reclaim the bp dict
+${ 0 1 500 { pop [ 1 2 3 4 5 6 7 8 ] pop } for }   % global churn to reuse any freed slot
+/foo debug-bp-hits 1 eq (debugger:1-0 bp hit count survives vm-global-gc + churn) rt-ok
+
+% ---------------------------------------------------------------------------
+% debugger:1-2 -- proc-disasm under ${...} builds region-correct rows
+% ---------------------------------------------------------------------------
+% debug_disasm_row built the row's name string with non-region-aware make_string,
+% so a global row (under ${ proc-disasm }) embedded a LOCAL string that dangled
+% after a restore, and name_obj/preview were unrooted across the row's
+% make_empty_array (a global GC could sweep them).  Now uses make_string_dispatch
+% + roots the strings across the row alloc.  Functional: disasm under global mode
+% produces rows whose name element reads correctly (the restore dangle is a
+% silent VM-heap UAF, so the region fix itself is code-inspection-covered).
+${ { 1 2 add } proc-disasm } /drows exch def
+drows length 3 eq (debugger:1-2 proc-disasm under global mode produces 3 rows) rt-ok
+drows 0 get 3 get (integer) eq (debugger:1-2 row name string is region-correct under global mode) rt-ok
+
+% ---------------------------------------------------------------------------
+% debugger:1-3 -- proc-disasm renders a bound USER-DEFINED operator
+% ---------------------------------------------------------------------------
+% debug_disasm_row called sysoperator_value(m_operator) unconditionally, but a
+% user-defined operator carries a NEGATIVE m_operator (>= 0 built-in, < 0 user).
+% The implicit widen to name_index_t turned, e.g., -1 into 65535, tripping
+% sysoperator_value's range assert (debug) or reading past the built-in table
+% (release).  Now uses operator_string, which branches on the sign and indexes
+% m_useroperators for user ops.  my-square is a host-registered user operator in
+% trix.cpp, so { 4 my-square }#e binds it to a negative-index Operator object.
+{ 4 my-square }#e proc-disasm /urows exch def
+urows 1 get 3 get (my-square) eq (debugger:1-3 proc-disasm renders bound user-op name, no OOB) rt-ok
+clear
+
+(test_b7_debugger_safety.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

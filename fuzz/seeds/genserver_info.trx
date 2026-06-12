@@ -1,0 +1,3 @@
+<< /init { 0 } /handle-cast { pop 1 add } >> gen-server /s exch def
+s 42 gen-cast
+s /normal gen-stop

@@ -1,0 +1,58 @@
+
+===========================================================
+  SYMBOLIC DIFFERENTIATION   (variable: x)
+===========================================================
+
+  f(x) = x
+    raw  : 1
+    simp : 1
+
+  f(x) = x ^ 2
+    raw  : 2*x^1*1
+    simp : 2*x
+
+  f(x) = x ^ 3
+    raw  : 3*x^2*1
+    simp : 3*x^2
+
+  f(x) = 3 * x ^ 2 + 2 * x + 1
+    raw  : 0*x^2 + 3*(2*x^1*1) + (0*x + 2*1) + 0
+    simp : 6*x + 2
+
+  f(x) = sin(x)
+    raw  : cos(x)*1
+    simp : cos(x)
+
+  f(x) = cos(x)
+    raw  : -sin(x)*1
+    simp : -sin(x)
+
+  f(x) = tan(x)
+    raw  : 1/cos(x)^2
+    simp : 1/cos(x)^2
+
+  f(x) = exp(x)
+    raw  : exp(x)*1
+    simp : exp(x)
+
+  f(x) = log(x)
+    raw  : 1/x
+    simp : 1/x
+
+  f(x) = x * sin(x)
+    raw  : 1*sin(x) + x*(cos(x)*1)
+    simp : sin(x) + x*cos(x)
+
+  f(x) = sin(x) / x
+    raw  : (cos(x)*1*x - sin(x)*1)/(x*x)
+    simp : (cos(x)*x - sin(x))/(x*x)
+
+  f(x) = exp(-x ^ 2)
+    raw  : exp(-x^2)*-(2*x^1*1)
+    simp : -(exp(-x^2)*(2*x))
+
+  f(x) = log(1 + x ^ 2)
+    raw  : (0 + 2*x^1*1)/(1 + x^2)
+    simp : 2*x/(1 + x^2)
+
+===========================================================

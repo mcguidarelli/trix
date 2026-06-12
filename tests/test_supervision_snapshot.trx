@@ -1,0 +1,93 @@
+% ====================================================================
+% test_supervision_snapshot.trx -- supervision snap-shot / thaw round-trip
+% ====================================================================
+% Phase 1: create supervisor with children, snap-shot, verify + exercise.
+% Phase 2: thaw via tests/supervision_snapshot_thaw.trx re-runs verification.
+%
+% Must NOT run inside save/restore (actors/supervisors cannot span save scopes).
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+/yield-many { 0 1 49 { pop 0 coroutine-sleep } for } def
+
+% --- setup: create supervisor with 2 permanent children ---
+/COUNTER 0 def
+/COUNTER2 0 def
+
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /worker1  /start {
+            /COUNTER COUNTER 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+        << /id /worker2  /start {
+            /COUNTER2 COUNTER2 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+    ]
+>> supervisor /SUP exch def
+
+% Let supervisor spawn children and enter recv loop
+yield-many yield-many
+
+(tests/supervision_snapshot.img) snap-shot
+
+% ==== post-snap-shot: runs in BOTH phases ====
+
+% Supervisor is alive and is an actor
+SUP is-actor                (ss:sup-is-actor) rt-ok
+SUP is-coroutine            (ss:sup-is-coroutine) rt-ok
+SUP coroutine-status /dead ne (ss:sup-alive) rt-ok  clear
+
+% which-children returns correct state
+/WC SUP supervisor-which-children def
+WC length 2 eq              (ss:which-children-count-2) rt-ok
+WC 0 get /id get /worker1 eq (ss:which-children-id-w1) rt-ok
+WC 1 get /id get /worker2 eq (ss:which-children-id-w2) rt-ok  clear
+
+% Children ran once each (COUNTER=1, COUNTER2=1 at snap-shot time)
+COUNTER 1 eq                (ss:counter-1-at-snap) rt-ok
+COUNTER2 1 eq               (ss:counter2-1-at-snap) rt-ok  clear
+
+% Kill worker1 externally -- supervisor should restart it
+/WC2 SUP supervisor-which-children def
+/W1 WC2 0 get /actor get def
+W1 coroutine-kill
+yield-many yield-many yield-many
+
+% After restart: COUNTER should be 2 (original run + restart)
+COUNTER 2 eq                (ss:counter-2-after-restart) rt-ok
+
+% Supervisor still has 2 active children
+/WC3 SUP supervisor-which-children def
+WC3 length 2 eq             (ss:which-children-still-2) rt-ok  clear
+
+% Worker2 is still the original (not restarted)
+COUNTER2 1 eq               (ss:counter2-unchanged) rt-ok  clear
+
+% m_next_monitor_ref survived (new monitors can be created)
+/MON-ACTOR [ { { actor-recv pop 0 coroutine-sleep } loop } actor-spawn def
+/MON-W [ {
+    MON-ACTOR monitor /REF exch def
+    /MON-REF-OK REF is-integer def
+    MON-ACTOR coroutine-kill yield-many
+    /MON-MSG-OK actor-recv tag-name /down eq def
+} actor-spawn def
+yield-many yield-many
+MON-REF-OK                  (ss:monitor-ref-after-thaw) rt-ok
+MON-MSG-OK                  (ss:monitor-msg-after-thaw) rt-ok  clear
+
+% Clean up: kill supervisor and remaining actors
+SUP coroutine-kill yield-many yield-many
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_supervision_snapshot: ALL TESTS PASSED) =
+(__test_ok__) =

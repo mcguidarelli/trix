@@ -1,0 +1,1119 @@
+% ======================================================================
+%  Showcase: Mini SQL database with transactions
+%  ----------------------------------------------------------------------
+%  A self-contained in-memory relational database with a hand-rolled
+%  SQL parser, a records-backed schema + row layer, and BEGIN /
+%  COMMIT / ROLLBACK transactions mapped onto Trix's `save` / `restore`.
+%
+%  Features demonstrated that do not appear in the other showcases:
+%
+%    records as schemas AND rows -- CREATE TABLE dynamically builds a
+%        record-type whose field names are the column names; every row
+%        inserted into that table is an instance of that record.  Row
+%        access is Trix's record-`get`; row values are untyped at the
+%        Trix level but enforced by the executor at INSERT time.
+%
+%    tagged-value AST -- every parsed SQL statement becomes a tagged
+%        command (/create-table, /insert, /select, ...).  WHERE clauses
+%        recursively nest the same way: /where-eq, /where-lt, /where-gt,
+%        /where-and, /where-true.  Executor dispatch is one `tag-match`.
+%
+%    save/restore as user-facing transactions -- BEGIN pushes a save
+%        onto the tx stack; ROLLBACK pops the save and calls `restore`,
+%        which reverts every mutation performed since.  COMMIT is a
+%        bookkeeping no-op (Trix has no separate commit primitive --
+%        the interesting operator IS rollback).  The demo proves undo
+%        by inserting rows inside a transaction, ROLLBACK-ing, and
+%        showing them gone.
+%
+%    primary-key index -- the table's `rows` dict IS the PK index.
+%        Every row-record is stored under its id key.  `WHERE id = X`
+%        is recognized by the executor as an indexed-path query and
+%        resolved by one `known-get`, not a full table scan.  The demo
+%        prints a line tagging which WHERE form took the indexed path
+%        so a reader can see it happen.
+%
+%  SQL surface (intentionally small):
+%      CREATE TABLE <name> (<col> INT|TEXT|BOOL, ...)
+%      INSERT INTO <name> VALUES (<lit>, ...)
+%      SELECT * | <col>, ... FROM <name>
+%          [WHERE <cond> [AND <cond>]]
+%          [ORDER BY <col>] [LIMIT <n>]
+%      BEGIN / COMMIT / ROLLBACK
+%      .schema [<name>]          list schema(s)
+%      .dump   <name>            list rows
+%      .quit                     end the session
+%
+%  Run:
+%      ./trix examples/minidb.trx                  (demo prelude only)
+%      ./trix examples/minidb.trx < my-sql.txt     (prelude then batch)
+% ======================================================================
+
+
+% ======================================================================
+%  1. Global state
+% ======================================================================
+
+% Table registry: table-name -> table-record.  Mutations via `put` are
+% journaled by `save`, so restoring unwinds CREATE TABLE / INSERT.
+/tables 16 dynamic-dict def
+
+% Per-table record schema fields: these are static across the session.
+/table-schema [ /name /col-names /col-types /rows ] def
+
+% Transaction stack: array of save tokens, oldest at index 0.  BEGIN
+% appends, COMMIT drops the top, ROLLBACK pops and `restore`s.
+/tx-stack [] def
+
+% Quit flag for the REPL loop.
+/quit-requested false def
+
+
+% ======================================================================
+%  2. Tokenizer
+%
+%  Byte-level scanner over the input string.  Emits an array of tagged
+%  tokens.  Keywords are normalized to lowercase names so parser
+%  dispatch is a single `eq` per token.  String literals are 'single-
+%  quoted'; a '' inside a string encodes a literal quote (standard SQL).
+% ======================================================================
+
+/is-ident-start { |ch|#2 ch alpha? ch 95b eq or } def            % letter or _
+/is-ident-cont  { |ch|#2 ch alnum? ch 95b eq or } def            % letter, digit, _
+
+/keyword-dict <<
+    /create null  /table null   /insert null   /into null   /values null
+    /select null  /from null    /where null    /and null    /order null
+    /by null      /limit null   /asc null      /desc null
+    /int null     /text null    /bool null     /true null   /false null
+    /begin null   /commit null  /rollback null
+>> def
+
+/tok-star   null /star   tag def
+/tok-comma  null /comma  tag def
+/tok-semi   null /semi   tag def
+/tok-lparen null /lparen tag def
+/tok-rparen null /rparen tag def
+/tok-dot    null /dot    tag def
+/tok-eq     null /eq-op  tag def
+/tok-lt     null /lt-op  tag def
+/tok-gt     null /gt-op  tag def
+
+/tokenize {
+    |src|#16
+    /len   src length  local-def
+    /i     0           local-def
+    /toks  []          local-def
+    { i len lt } {
+        /ch src i get local-def
+        ch space? {
+            /i i 1 add local-def
+        }
+        { ch 45b eq
+          { i 1 add len lt { src i 1 add get 45b eq } and? } and?
+        {
+            % '--' line comment
+            { i len lt { src i get 10b ne } and? }
+            { /i i 1 add local-def } while
+        }
+        { ch 44b eq { /toks toks tok-comma  append local-def  /i i 1 add local-def }
+        { ch 59b eq { /toks toks tok-semi   append local-def  /i i 1 add local-def }
+        { ch 40b eq { /toks toks tok-lparen append local-def  /i i 1 add local-def }
+        { ch 41b eq { /toks toks tok-rparen append local-def  /i i 1 add local-def }
+        { ch 42b eq { /toks toks tok-star   append local-def  /i i 1 add local-def }
+        { ch 46b eq { /toks toks tok-dot    append local-def  /i i 1 add local-def }
+        { ch 61b eq { /toks toks tok-eq     append local-def  /i i 1 add local-def }
+        { ch 60b eq { /toks toks tok-lt     append local-def  /i i 1 add local-def }
+        { ch 62b eq { /toks toks tok-gt     append local-def  /i i 1 add local-def }
+        { ch 39b eq {
+            % '...' string; '' inside = literal '
+            /i i 1 add local-def
+            /buf 32 string local-def  /buf-len 0 local-def
+            { i len lt } {
+                /c2 src i get local-def
+                c2 39b eq {
+                    i 1 add len lt { src i 1 add get 39b eq } and?
+                        {
+                            % escaped quote
+                            buf buf-len 39b put
+                            /buf-len buf-len 1 add local-def
+                            /i i 2 add local-def
+                        }
+                        {
+                            /i i 1 add local-def
+                            exit
+                        }
+                    if-else
+                }
+                {
+                    buf-len buf length ge
+                        {
+                            /bigger buf length 2 mul string local-def
+                            bigger 0 buf put-interval
+                            /buf bigger local-def
+                        }
+                    if
+                    buf buf-len c2 put
+                    /buf-len buf-len 1 add local-def
+                    /i i 1 add local-def
+                } if-else
+            } while
+            /toks toks buf 0 buf-len get-interval /string tag append local-def
+        }
+        { ch digit? {
+            /start i local-def
+            { i len lt { src i get digit? } and? }
+            { /i i 1 add local-def } while
+            /lex src start i start sub get-interval local-def
+            /toks toks lex to-number /number tag append local-def
+        }
+        { ch is-ident-start {
+            /start i local-def
+            { i len lt { src i get is-ident-cont } and? }
+            { /i i 1 add local-def } while
+            /lex src start i start sub get-interval lowercase local-def
+            /nm lex to-name local-def
+            keyword-dict nm known?
+                { /toks toks nm /keyword tag append local-def }
+                { /toks toks nm /ident   tag append local-def }
+            if-else
+        }
+        {
+            % Unknown byte -- report and skip.
+            (minidb: skipping unknown char {0:c} at pos {1}\n)
+                mark ch i print-fmt pop pop
+            /i i 1 add local-def
+        } if-else } if-else } if-else
+        } if-else } if-else } if-else } if-else } if-else
+        } if-else } if-else } if-else } if-else
+        } if-else } if-else
+    } while
+    toks
+} def
+
+
+% ======================================================================
+%  3. Parser
+%
+%  Recursive-descent.  Parser state (token array + cursor) lives in a
+%  single dict so the mutually-recursive WHERE parser can advance the
+%  cursor without threading it through operand stack.  parse-batch
+%  returns an array of commands, one per ';'-terminated statement.
+% ======================================================================
+
+/parser-state << /tokens null /pos 0 >> def
+
+/p-reset      {
+    % tokens --
+    parser-state exch /tokens exch put
+    parser-state /pos 0 put
+} def
+/p-peek       { parser-state /tokens get parser-state /pos get get } def
+/p-advance    { parser-state /pos parser-state /pos get 1 add put } def
+/p-eof?       { parser-state /pos get parser-state /tokens get length ge } def
+/p-take       { p-peek p-advance } def
+
+% Error helper.  Throws a /minidb-parse-error with a string message.
+/p-fail {
+    % message --
+    /minidb-parse-error exch throw-with
+} def
+
+/p-expect-keyword {
+    % /name --
+    |nm|#2
+    p-eof? { (unexpected end of input) p-fail } if
+    /tk p-peek local-def
+    tk tag-name /keyword ne  tk tag-value nm ne or
+        {
+            256 string (expected keyword {0}) mark nm sprint-fmt pop p-fail
+        }
+    if
+    p-advance
+} def
+
+/p-expect-tag {
+    % /tagname --
+    |tgt|#2
+    p-eof? { (unexpected end of input) p-fail } if
+    /tk p-peek local-def
+    tk tag-name tgt ne
+        {
+            256 string (expected {0}) mark tgt sprint-fmt pop p-fail
+        }
+    if
+    p-advance
+} def
+
+/p-accept-keyword {
+    % /name -- bool
+    |nm|#2
+    p-eof? { false }
+        {
+            /tk p-peek local-def
+            tk tag-name /keyword eq  tk tag-value nm eq and
+                { p-advance true }
+                { false }
+            if-else
+        }
+    if-else
+} def
+
+/p-accept-tag {
+    % /tagname -- bool
+    |tgt|#2
+    p-eof? { false }
+        {
+            p-peek tag-name tgt eq
+                { p-advance true }
+                { false }
+            if-else
+        }
+    if-else
+} def
+
+% Literal: number, string, true, false.  Returns the Trix value.
+/p-literal {
+    ||#1
+    p-eof? { (expected literal) p-fail } if
+    /tk p-take local-def
+    tk tag-name /number eq { tk tag-value }
+    {
+    tk tag-name /string eq { tk tag-value }
+    {
+    tk tag-name /keyword eq  tk tag-value /true  eq and { true }
+    {
+    tk tag-name /keyword eq  tk tag-value /false eq and { false }
+    {
+        (expected literal) p-fail
+        null
+    } if-else } if-else } if-else } if-else
+} def
+
+% Identifier name (plain, not keyword).  Returns Trix name.
+/p-ident {
+    ||#1
+    p-eof? { (expected identifier) p-fail } if
+    /tk p-take local-def
+    tk tag-name /ident eq { tk tag-value }
+        { (expected identifier) p-fail null }
+    if-else
+} def
+
+% WHERE comparator parse: identifier OP literal.
+/parse-where-atom {
+    ||#4
+    /col p-ident local-def
+    p-eof? { (expected comparator in WHERE) p-fail } if
+    /op-tok p-take local-def
+    /op-tag op-tok tag-name local-def
+    /val p-literal local-def
+    op-tag /eq-op eq { col val [ /col /val ] record /where-eq tag }
+    {
+    op-tag /lt-op eq { col val [ /col /val ] record /where-lt tag }
+    {
+    op-tag /gt-op eq { col val [ /col /val ] record /where-gt tag }
+    {
+        (bad comparator in WHERE) p-fail
+        null
+    } if-else } if-else } if-else
+} def
+
+/parse-where-clause {
+    ||#2
+    /lhs parse-where-atom local-def
+    { /and p-accept-keyword } {
+        /rhs parse-where-atom local-def
+        /lhs lhs rhs [ /left /right ] record /where-and tag local-def
+    } while
+    lhs
+} def
+
+% Optional ORDER BY / LIMIT / WHERE, assembled into a SELECT record.
+/parse-select-tail {
+    ||#3
+    /wh null /order-by null /limit null local-def local-def local-def
+    /where p-accept-keyword { /wh parse-where-clause local-def } if
+    /order p-accept-keyword {
+        /by p-expect-keyword
+        /order-by p-ident local-def
+    } if
+    /limit p-accept-keyword { /limit p-literal local-def } if
+    wh null eq { /wh null /where-true tag local-def } if
+    wh order-by limit [ /where /order-by /limit ] record
+} def
+
+% Column list: * | ident (, ident)*
+/parse-col-list {
+    ||#1
+    /star p-accept-tag
+        { null /all tag }
+        {
+            /cols [] local-def
+            /cols cols p-ident append local-def
+            { /comma p-accept-tag } { /cols cols p-ident append local-def } while
+            cols /cols tag
+        }
+    if-else
+} def
+
+% CREATE TABLE <name> (<col> TYPE, ...)
+/parse-create {
+    ||#3
+    /table p-expect-keyword
+    /tbl-name p-ident local-def
+    /lparen p-expect-tag
+    /names [] local-def  /types [] local-def
+    {
+        /names names p-ident append local-def
+        /types types parse-col-type append local-def
+        /comma p-accept-tag not { exit } if
+    } loop
+    /rparen p-expect-tag
+    tbl-name names types [ /name /col-names /col-types ] record
+        /create-table tag
+} def
+
+/parse-col-type {
+    ||#2
+    p-eof? { (expected type) p-fail } if
+    /tk p-take local-def
+    tk tag-name /keyword ne { (expected type keyword) p-fail } if
+    /ty tk tag-value local-def
+    ty /int  eq  ty /text eq or  ty /bool eq or
+        { ty }
+        { (unknown type) p-fail null }
+    if-else
+} def
+
+% INSERT INTO <name> VALUES (<lit>, ...)
+/parse-insert {
+    ||#2
+    /into p-expect-keyword
+    /tbl-name p-ident local-def
+    /values p-expect-keyword
+    /lparen p-expect-tag
+    /vals [] local-def
+    {
+        /vals vals p-literal append local-def
+        /comma p-accept-tag not { exit } if
+    } loop
+    /rparen p-expect-tag
+    tbl-name vals [ /name /vals ] record /insert tag
+} def
+
+% SELECT <col-list> FROM <name> [WHERE ...] [ORDER BY ...] [LIMIT ...]
+/parse-select {
+    ||#3
+    /cols parse-col-list local-def
+    /from p-expect-keyword
+    /tbl-name p-ident local-def
+    /tail parse-select-tail local-def
+    cols tbl-name
+      tail /where get
+      tail /order-by get
+      tail /limit get
+    [ /cols /name /where /order-by /limit ] record /select tag
+} def
+
+% Dot-command: `.schema` or `.dump <name>` or `.quit`.  Dot already
+% consumed; next token must be an ident keyword-like.
+/parse-dot-command {
+    ||#2
+    p-eof? { (expected dot-command name) p-fail } if
+    /tk p-take local-def
+    tk tag-name /ident ne { (expected dot-command name) p-fail } if
+    /cmd tk tag-value local-def
+    cmd /schema eq {
+        % Optional table name: `.schema` or `.schema <name>`
+        /semi p-accept-tag
+            { null /dot-schema-all tag }
+            {
+                p-eof?
+                    { null /dot-schema-all tag }
+                    { p-ident /dot-schema-one tag }
+                if-else
+            }
+        if-else
+        % Consumer will re-accept semi, so don't discard it if we took it.
+        % parse-statement below treats the semicolon as optional terminator.
+    }
+    {
+    cmd /dump eq {
+        p-ident /dot-dump tag
+    }
+    {
+    cmd /quit eq {
+        null /dot-quit tag
+    }
+    {
+        (unknown dot-command) p-fail
+        null
+    } if-else } if-else } if-else
+} def
+
+% One statement -- dispatches on first token.
+/parse-statement {
+    ||#1
+    p-eof? { null }
+        {
+            /dot p-accept-tag { parse-dot-command }
+                {
+                    /tk p-peek local-def
+                    tk tag-name /keyword ne
+                        { (expected statement) p-fail null }
+                        {
+                            p-advance
+                            tk tag-value /create eq { parse-create }
+                            {
+                            tk tag-value /insert eq { parse-insert }
+                            {
+                            tk tag-value /select eq { parse-select }
+                            {
+                            tk tag-value /begin    eq { null /begin    tag }
+                            {
+                            tk tag-value /commit   eq { null /commit   tag }
+                            {
+                            tk tag-value /rollback eq { null /rollback tag }
+                            {
+                                (unknown statement)
+                                p-fail null
+                            } if-else } if-else } if-else } if-else } if-else } if-else
+                        }
+                    if-else
+                }
+            if-else
+            % Optional trailing semicolon.
+            /semi p-accept-tag pop
+        }
+    if-else
+} def
+
+% parse-batch: tokens -- array of commands
+/parse-batch {
+    |tokens|#3
+    tokens p-reset
+    /cmds [] local-def
+    {
+        p-eof? { exit } if
+        /cmd parse-statement local-def
+        cmd null ne { /cmds cmds cmd append local-def } if
+    } loop
+    cmds
+} def
+
+
+% ======================================================================
+%  4. Row + table layer
+%
+%  Each CREATE TABLE builds a record-type whose fields are the column
+%  names, then stores a descriptor record in the global `tables` dict.
+%  Rows are instances of that per-table record-type and live in a dict
+%  keyed by the first column's value (the primary key).
+% ======================================================================
+
+/table-create {
+    % name col-names col-types --
+    |nm cols tys|#8
+    tables nm known?
+        { 256 string (table already exists: {0}) mark nm sprint-fmt pop
+          /minidb-run-error exch throw-with }
+    if
+    /rows 16 dynamic-dict local-def
+    tables nm
+        nm cols tys rows table-schema record
+        put
+    (ok. table {0} created (pk={1}).\n) mark nm cols 0 get print-fmt pop pop
+} def
+
+/table-get {
+    % name -- table-record
+    |nm|#2
+    tables nm known?
+        { tables nm get }
+        {
+            256 string (no such table: {0}) mark nm sprint-fmt pop
+            /minidb-run-error exch throw-with
+            null
+        }
+    if-else
+} def
+
+/type-check-value {
+    % val type --
+    |v ty|#4
+    ty /int eq {
+        v is-integer
+            { }
+            { (expected INT value) /minidb-run-error exch throw-with }
+        if-else
+    }
+    {
+    ty /text eq {
+        v is-string
+            { }
+            { (expected TEXT value) /minidb-run-error exch throw-with }
+        if-else
+    }
+    {
+    ty /bool eq {
+        v is-boolean
+            { }
+            { (expected BOOL value) /minidb-run-error exch throw-with }
+        if-else
+    }
+    {
+        (internal: unknown column type) /minidb-run-error exch throw-with
+    } if-else } if-else } if-else
+} def
+
+/row-insert {
+    % table-record vals --
+    |tbl vals|#16
+    /cols tbl /col-names get local-def
+    /tys  tbl /col-types get local-def
+    /rows tbl /rows      get local-def
+    cols length vals length ne
+        {
+            256 string
+            (INSERT column count mismatch: expected {0}, got {1})
+                mark cols length vals length sprint-fmt pop
+            /minidb-run-error exch throw-with
+        }
+    if
+    % Type-check each value.
+    /i 0 local-def
+    { i cols length lt } {
+        vals i get  tys i get  type-check-value
+        /i i 1 add local-def
+    } while
+    % Build row record with the table's column-name schema.
+    /row vals array-load pop cols record local-def
+    /pk row cols 0 get get local-def
+    rows pk known?
+        {
+            256 string (duplicate primary key: {0}) mark pk sprint-fmt pop
+            /minidb-run-error exch throw-with
+        }
+    if
+    rows pk row put
+    (ok. inserted into {0} (pk={1}).\n) mark tbl /name get pk print-fmt pop pop
+} def
+
+
+% ======================================================================
+%  5. Query executor
+%
+%  SELECT walks the WHERE AST into a predicate closure, chooses between
+%  an indexed path (WHERE pk = literal) and a full table scan, then
+%  sorts, projects, and prints.
+% ======================================================================
+
+/row-match? {
+    % row where-tag -- bool
+    |row w|#8
+    /tg w tag-name local-def
+    tg /where-true eq { true }
+    {
+    tg /where-eq eq {
+        /p w tag-value local-def
+        row p /col get get  p /val get  deep-eq
+    }
+    {
+    tg /where-lt eq {
+        /p w tag-value local-def
+        row p /col get get  p /val get  lt
+    }
+    {
+    tg /where-gt eq {
+        /p w tag-value local-def
+        row p /col get get  p /val get  gt
+    }
+    {
+    tg /where-and eq {
+        /p w tag-value local-def
+        row  p /left  get  row-match?
+        row  p /right get  row-match?
+        and
+    }
+    {
+        (unknown WHERE tag) /minidb-run-error exch throw-with
+        false
+    } if-else } if-else } if-else } if-else } if-else
+} def
+
+% When WHERE is exactly `pk = literal`, answer with the indexed-path
+% row lookup.  Returns [row] or [] -- no scan.  Also prints a
+% (PLAN: indexed lookup on pk) line so readers can see the fast path
+% take hold.
+/try-indexed-path {
+    % table-record where-tag -- [row] true | false
+    |tbl w|#8
+    /pk-name tbl /col-names get 0 get local-def
+    /rows tbl /rows get local-def
+    w tag-name /where-eq eq
+        {
+            /p w tag-value local-def
+            p /col get pk-name eq
+                {
+                    (  PLAN: indexed lookup on {0}={1}\n)
+                        mark pk-name  p /val get  print-fmt pop pop
+                    /key p /val get local-def
+                    rows key known?
+                        { [ rows key get ] true }
+                        { [] true }
+                    if-else
+                }
+                { false }
+            if-else
+        }
+        { false }
+    if-else
+} def
+
+/full-scan {
+    % table-record where-tag -- arr-of-rows
+    |tbl w|#4
+    (  PLAN: full table scan\n) print
+    /out [] local-def
+    tbl /rows get {
+        |k row|#4
+        row w row-match?
+            { /out out row append store }
+        if
+    } for-all
+    out
+} def
+
+/select-rows {
+    % table-record where-tag -- arr-of-rows
+    |tbl w|#4
+    tbl w try-indexed-path
+        { }                       % indexed path already left [row] on stack
+        { tbl w full-scan }
+    if-else
+} def
+
+/project-row {
+    % row col-spec -- arr-of-values
+    |row spec|#8
+    spec tag-name /all eq
+        {
+            /out [] local-def
+            row { |nm v| /out out v append store } for-all
+            out
+        }
+        {
+            /names spec tag-value local-def
+            /out [] local-def
+            /i 0 local-def
+            { i names length lt } {
+                /out out  row names i get get  append local-def
+                /i i 1 add local-def
+            } while
+            out
+        }
+    if-else
+} def
+
+/project-col-names {
+    % col-spec table-record -- arr-of-names
+    |spec tbl|#4
+    spec tag-name /all eq
+        { tbl /col-names get }
+        { spec tag-value }
+    if-else
+} def
+
+% Render a value as a Trix string using sprint-fmt.  Records/arrays are
+% unlikely in row cells (type-check blocks them), so the default `s`
+% form is good enough for INT/TEXT/BOOL.
+/value-to-string {
+    % val -- str
+    |v|#2
+    64 string ({0}) mark v sprint-fmt pop
+} def
+
+/print-table {
+    % rows col-names --
+    |rows names|#16
+    /ncols names length local-def
+    % Compute column widths: max(header, widest row cell).
+    /widths ncols array local-def
+    /i 0 local-def
+    { i ncols lt } {
+        widths i names i get value-to-string length put
+        /i i 1 add local-def
+    } while
+    rows {
+        |r|#8
+        /ii 0 local-def
+        { ii ncols lt } {
+            /cell r ii get value-to-string local-def
+            cell length  widths ii get  gt
+                { widths ii cell length put }
+            if
+            /ii ii 1 add store
+        } while
+    } for-all
+    % Header line.
+    /i 0 local-def
+    { i ncols lt } {
+        i 0 gt { (  ) print } if
+        ({0:<{1}s})
+            mark names i get value-to-string  widths i get
+            print-fmt pop pop
+        /i i 1 add local-def
+    } while
+    nl
+    % Separator.
+    /i 0 local-def
+    { i ncols lt } {
+        i 0 gt { (  ) print } if
+        (-) widths i get repeat-string print
+        /i i 1 add local-def
+    } while
+    nl
+    % Rows.
+    rows {
+        |r|#8
+        /ii 0 local-def
+        { ii ncols lt } {
+            ii 0 gt { (  ) print } if
+            /cell r ii get value-to-string local-def
+            ({0:<{1}s})
+                mark cell widths ii get
+                print-fmt pop pop
+            /ii ii 1 add store
+        } while
+        nl
+    } for-all
+    (({0} row{1}))
+        mark  rows length  rows length 1 eq { () } { (s) } if-else
+        print-fmt pop pop
+    nl
+} def
+
+/execute-select {
+    % select-record --
+    |sel|#16
+    /tbl-name sel /name get local-def
+    /tbl     tbl-name table-get local-def
+    /rows    tbl sel /where get select-rows local-def
+    % ORDER BY
+    sel /order-by get null ne
+        {
+            /key-name sel /order-by get local-def
+            /rows rows { |row|#2 row key-name get } sort-by local-def
+        }
+    if
+    % LIMIT
+    sel /limit get null ne
+        {
+            /n sel /limit get local-def
+            rows length n gt
+                { /rows rows 0 n get-interval local-def }
+            if
+        }
+    if
+    % Project rows to value arrays in the order of the column spec.
+    /col-spec sel /cols get local-def
+    /col-names col-spec tbl project-col-names local-def
+    /out rows { col-spec project-row } map local-def
+    out col-names print-table
+} def
+
+
+% ======================================================================
+%  6. Dot-commands + transactions
+% ======================================================================
+
+/execute-dot-schema-all {
+    tables length 0 eq
+        { (no tables.\n) print }
+        {
+            tables {
+                |nm tbl|#4
+                (TABLE {0}:\n) mark nm print-fmt pop pop
+                /cols tbl /col-names get local-def
+                /tys  tbl /col-types get local-def
+                /i 0 local-def
+                { i cols length lt } {
+                    (  {0:<12s} {1:<6s}{2}\n)
+                        mark cols i get  tys i get
+                             i 0 eq { ( PRIMARY KEY) } { () } if-else
+                        print-fmt pop pop
+                    /i i 1 add local-def
+                } while
+            } for-all
+        }
+    if-else
+} def
+
+/execute-dot-schema-one {
+    % /name --
+    |nm|#8
+    /tbl nm table-get local-def
+    (TABLE {0}:\n) mark nm print-fmt pop pop
+    /cols tbl /col-names get local-def
+    /tys  tbl /col-types get local-def
+    /i 0 local-def
+    { i cols length lt } {
+        (  {0:<12s} {1:<6s}{2}\n)
+            mark cols i get  tys i get
+                 i 0 eq { ( PRIMARY KEY) } { () } if-else
+            print-fmt pop pop
+        /i i 1 add local-def
+    } while
+} def
+
+/execute-dot-dump {
+    % /name --
+    |nm|#8
+    /tbl nm table-get local-def
+    /col-names tbl /col-names get local-def
+    /rows-arr [] local-def
+    tbl /rows get {
+        |k row|#4
+        /rows-arr rows-arr row append store
+    } for-all
+    /rows-arr rows-arr { |r|#2 r col-names 0 get get } sort-by local-def
+    /out rows-arr {
+        |r|#2
+        /vals [] local-def
+        r { |nm v| /vals vals v append store } for-all
+        vals
+    } map local-def
+    out col-names print-table
+} def
+
+% Transactions.
+/execute-begin {
+    /tx-stack tx-stack save append store
+    (BEGIN (tx depth = {0}).\n) mark tx-stack length print-fmt pop pop
+} def
+
+/execute-commit {
+    tx-stack length 0 eq
+        { (COMMIT with no active transaction.\n) print }
+        {
+            /tx-stack tx-stack 0 tx-stack length 1 sub get-interval store
+            (COMMIT (tx depth = {0}).  [Trix note: no-op; see comment.]\n)
+                mark tx-stack length print-fmt pop pop
+        }
+    if-else
+} def
+
+/execute-rollback {
+    tx-stack length 0 eq
+        { (ROLLBACK with no active transaction.\n) print }
+        {
+            /sv tx-stack tx-stack length 1 sub get def
+            % Restore first; the tx-stack entry we just referenced is reclaimed
+            % along with all other mutations.  `sv` is an inline Integer save
+            % token, so it survives restore trivially on the operand stack.
+            sv restore
+            % After restore, the `/tx-stack` mutation we'd have made is also
+            % undone, so the stack is one shorter automatically.
+            (ROLLBACK (tx depth after = {0}).\n)
+                mark tx-stack length print-fmt pop pop
+        }
+    if-else
+} def
+
+
+% ======================================================================
+%  7. Dispatch
+% ======================================================================
+
+/execute-command {
+    % cmd-tagged --
+    |cmd|#4
+    /tg cmd tag-name local-def
+    tg /create-table eq
+        {
+            /r cmd tag-value local-def
+            r /name get  r /col-names get  r /col-types get  table-create
+        }
+    {
+    tg /insert eq
+        {
+            /r cmd tag-value local-def
+            r /name get table-get  r /vals get  row-insert
+        }
+    {
+    tg /select eq { cmd tag-value execute-select }
+    {
+    tg /begin    eq { execute-begin    }
+    {
+    tg /commit   eq { execute-commit   }
+    {
+    tg /rollback eq { execute-rollback }
+    {
+    tg /dot-schema-all eq { execute-dot-schema-all }
+    {
+    tg /dot-schema-one eq { cmd tag-value execute-dot-schema-one }
+    {
+    tg /dot-dump       eq { cmd tag-value execute-dot-dump }
+    {
+    tg /dot-quit       eq { /quit-requested true store (bye.\n) print }
+    {
+        (minidb: unknown command tag {0}\n) mark tg print-fmt pop pop
+    } if-else } if-else } if-else } if-else } if-else
+    } if-else } if-else } if-else } if-else } if-else
+} def
+
+% Run a single SQL string as a batch of statements.  Parse errors fall
+% through the try handler.  Runtime errors abort the current statement
+% only (simulating per-statement SQL semantics).
+/run-sql {
+    % src --
+    |src|#3
+    << /minidb-parse-error {
+        (\nparse error: {0}\n) mark last-error-data print-fmt pop pop
+    } >>
+    {
+        /src-cmds src tokenize parse-batch local-def
+        src-cmds {
+            /cmd exch local-def
+            quit-requested
+                { }
+                {
+                    <<  /minidb-run-error {
+                            (runtime error: {0}\n)
+                                mark last-error-data print-fmt pop pop
+                        }
+                    >>
+                    { cmd execute-command }
+                    try-catch
+                }
+            if-else
+        } for-all
+    }
+    try-catch
+} def
+
+
+% ======================================================================
+%  8. Demo prelude
+%
+%  A fixed batch exercising every feature: CREATE, 12 INSERTs, several
+%  SELECTs (projection, predicate, AND, ORDER BY, LIMIT, indexed lookup),
+%  and a BEGIN / INSERT / ROLLBACK round-trip that proves undo.
+% ======================================================================
+
+/demo-script (
+CREATE TABLE employees (id INT, name TEXT, salary INT, active BOOL);
+
+INSERT INTO employees VALUES (1,  'Alice',   95000, true);
+INSERT INTO employees VALUES (2,  'Bob',     72000, true);
+INSERT INTO employees VALUES (3,  'Carol',   88000, false);
+INSERT INTO employees VALUES (4,  'Dave',    61000, true);
+INSERT INTO employees VALUES (5,  'Erin',   120000, true);
+INSERT INTO employees VALUES (6,  'Frank',   54000, true);
+INSERT INTO employees VALUES (7,  'Gina',    98000, true);
+INSERT INTO employees VALUES (8,  'Henry',   48000, false);
+INSERT INTO employees VALUES (9,  'Iris',    85000, true);
+INSERT INTO employees VALUES (10, 'Jake',    73000, false);
+INSERT INTO employees VALUES (11, 'Kate',   110000, true);
+INSERT INTO employees VALUES (12, 'Luis',    77500, true);
+
+-- Everyone, alphabetical:
+SELECT id, name, salary FROM employees ORDER BY name;
+
+-- Everyone over 80k, highest paid first by salary desc -- no DESC support,
+-- so ORDER BY salary then read bottom-up.  Limit 5 top.
+SELECT name, salary FROM employees WHERE salary > 80000 ORDER BY salary LIMIT 5;
+
+-- Active employees under 75k with ORDER BY name:
+SELECT name, salary FROM employees WHERE active = true AND salary < 75000 ORDER BY name;
+
+-- PK-indexed lookup demo (executor prints PLAN: indexed...):
+SELECT * FROM employees WHERE id = 7;
+
+-- Full-scan demo for comparison (executor prints PLAN: full table scan):
+SELECT * FROM employees WHERE name = 'Carol';
+
+-- Transaction round-trip proving ROLLBACK undoes the INSERT.
+BEGIN;
+INSERT INTO employees VALUES (13, 'Mallory', 200000, true);
+SELECT name, salary FROM employees WHERE id = 13;
+ROLLBACK;
+-- After ROLLBACK the new row is gone:
+SELECT name, salary FROM employees WHERE id = 13;
+
+-- COMMIT demonstration: the insert below sticks around for the rest of run.
+BEGIN;
+INSERT INTO employees VALUES (13, 'Nina', 67000, true);
+COMMIT;
+SELECT id, name FROM employees WHERE id = 13;
+
+-- Schema dump:
+.schema employees
+) def
+
+% --no-timing: suppress the wall-clock trailer so the byte-exact golden
+% gate (tests/golden/example-minidb) stays stable; the demo output
+% itself is deterministic.
+/show-timing true def
+command-line-args { /arg exch def
+    arg (--no-timing) eq { /show-timing false store } if
+} for-all
+
+(=== minidb demo ===\n\n) print
+flush
+/demo-start-us clock def
+demo-script run-sql
+/demo-elapsed-us clock demo-start-us sub def
+show-timing
+{
+    (\n--- demo complete in {0:.1f} ms ---\n\n)
+        mark demo-elapsed-us 1000.0d promote div print-fmt pop pop
+}
+{ (\n) print }
+if-else
+
+
+% ======================================================================
+%  9. Optional stdin REPL
+%
+%  After the demo, if stdin has more input (redirected file, here-doc,
+%  or an interactive user), read and execute statement-by-statement.
+%  `read-line` returns `false` on EOF, which ends the loop cleanly.
+%  A `.quit` command sets quit-requested to true for an early exit.
+%
+%  If stdin is an interactive terminal and the user just presses Ctrl-D,
+%  the loop exits on the first EOF.
+% ======================================================================
+
+/read-stdin-batch {
+    ||#3
+    /buf 4096 string local-def
+    /out () local-def
+    {
+        quit-requested { exit } if
+        stdin buf read-line
+            {
+                /line exch local-def
+                /out out line concat (\n) concat local-def
+            }
+            { pop exit }
+        if-else
+    } loop
+    out
+} def
+
+% Consume any additional SQL piped in on stdin.  If stdin is a tty
+% we announce the interactive REPL and prompt on Ctrl-D; if it's a
+% redirected script we stay silent so the output isn't noisy.
+% `read-line` returns false on EOF, so the loop ends cleanly either way.
+stdin interactive?
+    { (=== minidb REPL: enter SQL, Ctrl-D to exit ===\n) print flush }
+if
+/repl-input read-stdin-batch def
+repl-input length 0 gt
+    { repl-input run-sql }
+if
+
+(\nminidb: session ended.  bye.\n) print
+flush

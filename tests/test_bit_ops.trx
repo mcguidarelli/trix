@@ -1,0 +1,227 @@
+% test_bit_ops.trx — bit?, bit-set, bit-clear, bit-toggle operators
+% Tests: all integer types, boundary positions, type preservation, errors
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION: bit? (test bit)
+% ====================================================================
+
+% Byte: 42 = 0b00101010
+42b 0 bit? not   (bit?: 42 bit 0 = false) rt-ok clear
+42b 1 bit?       (bit?: 42 bit 1 = true) rt-ok clear
+42b 2 bit? not   (bit?: 42 bit 2 = false) rt-ok clear
+42b 3 bit?       (bit?: 42 bit 3 = true) rt-ok clear
+42b 4 bit? not   (bit?: 42 bit 4 = false) rt-ok clear
+42b 5 bit?       (bit?: 42 bit 5 = true) rt-ok clear
+42b 6 bit? not   (bit?: 42 bit 6 = false) rt-ok clear
+42b 7 bit? not   (bit?: 42 bit 7 = false) rt-ok clear
+
+% Integer
+0 31 bit-set 31 bit?       (bit?: int32 bit 31) rt-ok clear
+0 31 bit? not              (bit?: zero bit 31) rt-ok clear
+1 0 bit?                   (bit?: 1 bit 0) rt-ok clear
+
+% UInteger
+16#FFFFFFFF#u 0 bit?       (bit?: uint32 all-ones bit 0) rt-ok clear
+16#FFFFFFFF#u 31 bit?      (bit?: uint32 all-ones bit 31) rt-ok clear
+
+% Long
+1l 0 bit?                  (bit?: long bit 0) rt-ok clear
+0l 63 bit? not             (bit?: long zero bit 63) rt-ok clear
+
+% ULong
+1ul 0 bit?                 (bit?: ulong bit 0) rt-ok clear
+16#8000000000000000#ul 63 bit? (bit?: ulong bit 63) rt-ok clear
+
+% ====================================================================
+% SECTION: bit-set
+% ====================================================================
+
+% Byte
+0b 0 bit-set 1b eq         (bit-set: byte bit 0) rt-ok clear
+0b 7 bit-set 128b eq       (bit-set: byte bit 7) rt-ok clear
+42b 0 bit-set 43b eq       (bit-set: 42 set bit 0) rt-ok clear
+42b 1 bit-set 42b eq       (bit-set: 42 set bit 1 = no change) rt-ok clear
+
+% Integer
+0 0 bit-set 1 eq           (bit-set: int bit 0) rt-ok clear
+0 31 bit-set -2147483648 eq (bit-set: int bit 31 = min-int) rt-ok clear
+
+% UInteger
+0u 31 bit-set 16#80000000#u eq (bit-set: uint bit 31) rt-ok clear
+
+% Type preservation: byte in, byte out
+0b 3 bit-set type /byte-type eq (bit-set: preserves byte type) rt-ok clear
+0 3 bit-set type /integer-type eq (bit-set: preserves int type) rt-ok clear
+0u 3 bit-set type /uinteger-type eq (bit-set: preserves uint type) rt-ok clear
+0l 3 bit-set type /long-type eq (bit-set: preserves long type) rt-ok clear
+0ul 3 bit-set type /ulong-type eq (bit-set: preserves ulong type) rt-ok clear
+
+% ====================================================================
+% SECTION: bit-clear
+% ====================================================================
+
+% Byte
+255b 0 bit-clear 254b eq   (bit-clear: byte bit 0) rt-ok clear
+255b 7 bit-clear 127b eq   (bit-clear: byte bit 7) rt-ok clear
+42b 1 bit-clear 40b eq     (bit-clear: 42 clear bit 1) rt-ok clear
+42b 0 bit-clear 42b eq     (bit-clear: 42 clear bit 0 = no change) rt-ok clear
+
+% Integer
+-1 0 bit-clear -2 eq       (bit-clear: all-ones clear bit 0) rt-ok clear
+
+% UInteger
+16#FFFFFFFF#u 31 bit-clear 16#7FFFFFFF#u eq (bit-clear: uint clear bit 31) rt-ok clear
+
+% Type preservation
+255b 3 bit-clear type /byte-type eq (bit-clear: preserves byte type) rt-ok clear
+-1 3 bit-clear type /integer-type eq (bit-clear: preserves int type) rt-ok clear
+
+% ====================================================================
+% SECTION: bit-toggle
+% ====================================================================
+
+% Byte
+42b 0 bit-toggle 43b eq    (bit-toggle: 42 toggle bit 0 = 43) rt-ok clear
+42b 1 bit-toggle 40b eq    (bit-toggle: 42 toggle bit 1 = 40) rt-ok clear
+0b 7 bit-toggle 128b eq    (bit-toggle: 0 toggle bit 7 = 128) rt-ok clear
+
+% Double toggle = identity
+42b 3 bit-toggle 3 bit-toggle 42b eq (bit-toggle: double toggle = identity) rt-ok clear
+
+% Integer
+0 31 bit-toggle -2147483648 eq (bit-toggle: int toggle bit 31) rt-ok clear
+
+% UInteger
+0u 31 bit-toggle 16#80000000#u eq (bit-toggle: uint toggle bit 31) rt-ok clear
+
+% Type preservation
+42b 3 bit-toggle type /byte-type eq (bit-toggle: preserves byte type) rt-ok clear
+
+% ====================================================================
+% SECTION: boundary bit positions
+% ====================================================================
+
+% Byte: all 8 bit positions
+true 0 1 7 {
+    /pos exch def
+    0b pos bit-set pos bit? not { pop false } if
+} for
+(boundary: byte all 8 positions set+test) rt-ok clear
+
+% Integer: bit 0 and bit 31
+0 0 bit-set 0 bit?       (boundary: int bit 0) rt-ok clear
+0 31 bit-set 31 bit?     (boundary: int bit 31) rt-ok clear
+
+% Long: bit 0 and bit 63
+0l 0 bit-set 0 bit?      (boundary: long bit 0) rt-ok clear
+0l 63 bit-set 63 bit?    (boundary: long bit 63) rt-ok clear
+
+% ====================================================================
+% SECTION: combined operations (practical use)
+% ====================================================================
+
+% Extract bits 1 and 3 from flags byte
+/flags 42b def  % 0b00101010
+flags 1 bit?    (practical: flag bit 1 set) rt-ok clear
+flags 3 bit?    (practical: flag bit 3 set) rt-ok clear
+flags 0 bit? not (practical: flag bit 0 clear) rt-ok clear
+
+% Build a flags byte from individual bits
+0b 1 bit-set 3 bit-set 5 bit-set 42b eq (practical: build flags) rt-ok clear
+
+% Modify a register: set bit 4, clear bit 1
+42b 4 bit-set 1 bit-clear
+dup 4 bit?     (practical: modified bit 4 set) rt-ok
+dup 1 bit? not (practical: modified bit 1 clear) rt-ok
+pop clear
+
+% ====================================================================
+% SECTION: error handling
+% ====================================================================
+
+% Bit position out of range for byte (max 7)
+<< /range-check { pop clear true } >>
+{ 42b 8 bit? } try-catch
+(error: byte bit 8 out of range) rt-ok clear
+
+% Bit position out of range for integer (max 31)
+<< /range-check { pop clear true } >>
+{ 42 32 bit-set } try-catch
+(error: int bit 32 out of range) rt-ok clear
+
+% Negative bit position
+<< /range-check { pop clear true } >>
+{ 42b 0 1 sub bit? } try-catch
+(error: negative bit position) rt-ok clear
+
+% Type error: float
+<< /type-check { pop clear true } >>
+{ 3.14 0 bit? } try-catch
+(error: float type-check) rt-ok clear
+
+% Type error: string
+<< /type-check { pop clear true } >>
+{ (hello) 0 bit? } try-catch
+(error: string type-check) rt-ok clear
+
+% Type error: boolean
+<< /type-check { pop clear true } >>
+{ true 0 bit-set } try-catch
+(error: bool type-check) rt-ok clear
+
+% ====================================================================
+% SECTION: stress tests
+% ====================================================================
+
+% Set all 8 bits of a byte
+0b 0 bit-set 1 bit-set 2 bit-set 3 bit-set 4 bit-set 5 bit-set 6 bit-set 7 bit-set
+255b eq (stress: set all 8 bits) rt-ok clear
+
+% Clear all 8 bits of a byte
+255b 0 bit-clear 1 bit-clear 2 bit-clear 3 bit-clear 4 bit-clear 5 bit-clear 6 bit-clear 7 bit-clear
+0b eq (stress: clear all 8 bits) rt-ok clear
+
+% Toggle all bits twice = identity
+/v 42b def
+v 0 bit-toggle 1 bit-toggle 2 bit-toggle 3 bit-toggle
+  4 bit-toggle 5 bit-toggle 6 bit-toggle 7 bit-toggle
+  0 bit-toggle 1 bit-toggle 2 bit-toggle 3 bit-toggle
+  4 bit-toggle 5 bit-toggle 6 bit-toggle 7 bit-toggle
+v eq (stress: double toggle all = identity) rt-ok clear
+
+% Set all 32 bits of an unsigned integer
+0u
+0 1 31 { bit-set } for
+16#FFFFFFFF#u eq (stress: set all 32 uint bits) rt-ok clear
+% ====================================================================
+% SECTION: regression -- out-of-range bit position is range-checked
+% ====================================================================
+% Before the int128 widening fix, the position was static_cast<int>'d
+% BEFORE the range check, so a 64-bit position such as 2^32 truncated
+% to 0 (and 2^32+5 to 5) and silently addressed a valid-looking bit
+% instead of raising range-check.  Value 0 is an Integer (max bit 31).
+
+<< /range-check { pop clear true } >>
+{ 0 4294967296l bit-set } try-catch
+(regress: bit-set position 2^32 Long range-checked) rt-ok clear
+
+<< /range-check { pop clear true } >>
+{ 0 4294967296l bit? } try-catch
+(regress: bit? position 2^32 Long range-checked) rt-ok clear
+
+<< /range-check { pop clear true } >>
+{ 0 4294967301l bit-toggle } try-catch
+(regress: bit-toggle position 2^32+5 Long range-checked) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

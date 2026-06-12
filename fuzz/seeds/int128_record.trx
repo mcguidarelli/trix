@@ -1,0 +1,2 @@
+42q 99uq [ /a /b ] record /a get
+42q 3.14d [ /h /d ] record record-to-dict

@@ -1,0 +1,218 @@
+% ====================================================================
+% test_raw_string.trx -- <(...)> raw string syntax tests
+% ====================================================================
+% Validates that <(...)> raw strings do not process escape sequences,
+% handle parenthesis nesting, support suffixes, and produce correct
+% error conditions.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Basic raw strings — no escape processing
+% ====================================================================
+
+<(hello)> (hello) eq                          (rs: basic raw string) rt-ok clear
+<()> () eq                                    (rs: empty raw string) rt-ok clear
+<(hello world)> length 11 eq                  (rs: raw string length) rt-ok clear
+
+% Backslash-n is literal backslash + n, not newline
+<(\n)> length 2 eq                            (rs: \\n is 2 bytes) rt-ok clear
+<(\n)> 0 get 92b eq                           (rs: \\n byte 0 is backslash) rt-ok clear
+<(\n)> 1 get 110b eq                          (rs: \\n byte 1 is 'n') rt-ok clear
+
+% Backslash-t is literal backslash + t, not tab
+<(\t)> length 2 eq                            (rs: \\t is 2 bytes) rt-ok clear
+<(\t)> 0 get 92b eq                           (rs: \\t byte 0 is backslash) rt-ok clear
+<(\t)> 1 get 116b eq                          (rs: \\t byte 1 is 't') rt-ok clear
+
+% Multiple escape sequences are all literal (8 two-char sequences = 16 bytes)
+<(\a\b\e\f\n\r\t\v)> length 16 eq            (rs: all escapes are literal, 16 bytes) rt-ok clear
+
+% Double backslash is two literal backslashes
+<(\\)> length 2 eq                            (rs: double backslash is 2 bytes) rt-ok clear
+<(\\)> 0 get 92b eq                           (rs: double backslash byte 0) rt-ok clear
+<(\\)> 1 get 92b eq                           (rs: double backslash byte 1) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Escape sequences NOT processed
+% ====================================================================
+
+% Octal escape is literal: \077 = 4 chars: \ 0 7 7
+<(\077)> length 4 eq                          (rs: octal escape is literal, 4 bytes) rt-ok clear
+<(\077)> 0 get 92b eq                         (rs: octal byte 0 is backslash) rt-ok clear
+<(\077)> 1 get 48b eq                         (rs: octal byte 1 is '0') rt-ok clear
+
+% Hex escape is literal: \x41 = 4 chars: \ x 4 1
+<(\x41)> length 4 eq                          (rs: hex escape is literal, 4 bytes) rt-ok clear
+<(\x41)> (A) eq not                           (rs: hex escape is not 'A') rt-ok clear
+<(\x41)> 0 get 92b eq                         (rs: hex escape byte 0 is backslash) rt-ok clear
+<(\x41)> 1 get 120b eq                        (rs: hex escape byte 1 is 'x') rt-ok clear
+
+% Caret escape is literal: \^A = 3 chars: \ ^ A
+<(\^A)> length 3 eq                           (rs: caret escape is literal, 3 bytes) rt-ok clear
+<(\^A)> 0 get 92b eq                          (rs: caret byte 0 is backslash) rt-ok clear
+
+% Backslash before parens: \ is literal, ( and ) still track nesting
+% <(\(x\))> = chars: \ ( x \ ) — 5 bytes (inner parens balance)
+<(\(x\))> length 5 eq                        (rs: backslash-parens are literal, 5 bytes) rt-ok clear
+<(\(x\))> 0 get 92b eq                       (rs: backslash-paren byte 0 is backslash) rt-ok clear
+<(\(x\))> 1 get 40b eq                       (rs: backslash-paren byte 1 is open-paren) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Parenthesis nesting
+% ====================================================================
+
+<(text (with parens) inside)> (text (with parens) inside) eq
+                                              (rs: balanced parens work) rt-ok clear
+
+<((()))> ((())) eq                            (rs: nested parens) rt-ok clear
+
+<(a(b(c)d)e)> (a(b(c)d)e) eq                 (rs: multi-level nested parens) rt-ok clear
+
+<((one)(two)(three))> ((one)(two)(three)) eq  (rs: sequential paren groups) rt-ok clear
+
+% Empty inner parens
+<(())> (()) eq                                (rs: empty inner parens) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Suffix composition
+% ====================================================================
+
+% Read-only suffix
+<(hello)>#r length 5 eq                      (rs: raw string with #r suffix) rt-ok clear
+{ <(hello)>#r 0 65b put } try
+/read-only eq                                 (rs: #r suffix makes read-only) rt-ok clear
+
+% Temp storage suffix
+<(temp)>#= length 4 eq                       (rs: raw string with #= suffix) rt-ok clear
+
+% Byte suffix
+<(A)>#b 65b eq                               (rs: raw string #b suffix) rt-ok clear
+
+% Executable suffix: exec runs the string as code
+<(1 2 add)>#x exec 3 eq                      (rs: raw #x exec produces result) rt-ok clear
+
+% Combined suffixes
+<(data)>#=r length 4 eq                      (rs: raw #=r suffix) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Comparison with regular strings
+% ====================================================================
+
+% Same content, different scan paths, equal result
+<(hello)> (hello) eq                          (rs: raw matches regular for plain text) rt-ok clear
+
+% Different when escapes are involved
+<(\n)> (\n) eq not                            (rs: raw \\n differs from escape \\n) rt-ok clear
+(\n) length 1 eq                              (rs: escape \\n is 1 byte) rt-ok clear
+<(\n)> length 2 eq                            (rs: raw \\n is 2 bytes) rt-ok clear
+
+<(\t)> (\t) eq not                            (rs: raw \\t differs from escape \\t) rt-ok clear
+<(\\)> (\\) eq not                            (rs: raw \\\\ differs from escape \\\\) rt-ok clear
+(\\) length 1 eq                              (rs: escape \\\\ is 1 byte) rt-ok clear
+<(\\)> length 2 eq                            (rs: raw \\\\ is 2 bytes) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Regex use case — readability
+% ====================================================================
+
+% A regex pattern: \d+\.\d+ = 8 bytes (\ d + \ . \ d +)
+<(\d+\.\d+)> length 8 eq                     (rs: regex pattern length) rt-ok clear
+<(\d+\.\d+)> 0 get 92b eq                    (rs: regex pattern starts with backslash) rt-ok clear
+<(\d+\.\d+)> 1 get 100b eq                   (rs: regex pattern byte 1 is 'd') rt-ok clear
+
+% Verify raw and double-escaped produce the same string
+<(\d+\.\d+)> (\\d+\\.\\d+) eq               (rs: raw regex equals double-escaped) rt-ok clear
+
+% \bword\b = 8 bytes (\ b w o r d \ b)
+<(\bword\b)> (\\bword\\b) eq                 (rs: raw word boundary equals double-escaped) rt-ok clear
+<(\bword\b)> length 8 eq                     (rs: word boundary pattern length) rt-ok clear
+
+<([a-z]+\s*=\s*\d+)> ([a-z]+\\s*=\\s*\\d+) eq  (rs: complex regex pattern) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Special characters in raw strings
+% ====================================================================
+
+% ~!@#$%^&*_+-= = 13 characters
+<(~!@#$%^&*_+-=)> length 13 eq              (rs: special ASCII characters) rt-ok clear
+
+% Angle brackets inside raw string (not delimiters inside parens)
+<(a<b>c)> (a<b>c) eq                         (rs: angle brackets inside raw string) rt-ok clear
+
+% Percent sign (not a comment inside raw string)
+<(50%)> (50%) eq                              (rs: percent inside raw string) rt-ok clear
+
+% Square brackets
+<([1,2,3])> ([1,2,3]) eq                     (rs: square brackets inside raw string) rt-ok clear
+
+% Curly braces
+<({code})> ({code}) eq                        (rs: curly braces inside raw string) rt-ok clear
+
+% Slash and backslash
+<(/name)> (/name) eq                          (rs: slash inside raw string) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Error cases — write broken syntax to files and run them
+% ====================================================================
+
+% Missing closing > after ): file contains "<(hello) 42"
+% hex: 3C 28 68 65 6C 6C 6F 29 20 34 32 0A  (<(hello) 42 newline)
+% The ) at nesting 0 expects > but finds space => syntax error
+(test_raw_err1.tmp) (w)#b { <3C2868656C6C6F2920343220> write-string } with-stream
+{ (test_raw_err1.tmp) run } try
+/syntax-error eq                              (rs: missing > is syntax error) rt-ok clear
+(test_raw_err1.tmp) delete-file
+
+% Unterminated raw string: file contains "<(unterminated" then EOF
+% hex: 3C 28 75 6E 74 65 72 6D 69 6E 61 74 65 64
+(test_raw_err2.tmp) (w)#b { <3C28756E7465726D696E61746564> write-string } with-stream
+{ (test_raw_err2.tmp) run } try
+/syntax-error eq                              (rs: unterminated raw string is syntax error) rt-ok clear
+(test_raw_err2.tmp) delete-file
+
+% ====================================================================
+% SECTION 9: Edge cases
+% ====================================================================
+
+% Single character raw string
+<(X)> (X) eq                                 (rs: single char raw string) rt-ok clear
+
+% Raw string containing only backslashes (4 literal backslashes)
+<(\\\\)> length 4 eq                         (rs: four backslashes in raw) rt-ok clear
+
+% Raw string containing only parens (balanced)
+<(())> (()) eq                                (rs: only balanced parens) rt-ok clear
+
+% Deeply nested parens
+<(((((())))))> (((((()))))) eq               (rs: deeply nested parens) rt-ok clear
+
+% Raw string type is string-type
+<(hello)> type /string-type eq               (rs: raw string type is string-type) rt-ok clear
+
+% Raw string inside a procedure
+{ <(\d+)> } exec length 3 eq                (rs: raw string inside procedure) rt-ok clear
+
+% Raw string with the token operator (use plain content to avoid escape issues in outer string)
+% token returns: remaining value true
+(<(hello world)> 42) token pop exch pop length 11 eq
+                                              (rs: raw string via token operator) rt-ok clear
+
+% Verify raw string can be used with regex operators
+(hello123world) <([0-9]+)> regex-search
+pop 0 get (123) eq                            (rs: raw string works with regex-search) rt-ok clear
+
+% Verify read-write is default (can modify)
+<(abc)> dup 0 65b put 0 get 65b eq          (rs: raw string is read-write by default) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_raw_string: ALL TESTS PASSED) =
+(__test_ok__) =

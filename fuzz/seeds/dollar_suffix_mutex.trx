@@ -1,0 +1,33 @@
+% Mutex pairs across containers + procs.  Each line is a separately
+% scanned snippet; the libFuzzer driver feeds them in turn.  Every
+% line raises /syntax-error.
+
+{ <([ 1 ]#=$)>#x exec } try clear
+{ <([ 1 ]#=$$)>#x exec } try clear
+{ <([ 1 ]#$=)>#x exec } try clear
+{ <([ 1 ]#$$=)>#x exec } try clear
+{ <([ 1 ]#$$$)>#x exec } try clear
+
+{ <(<< /a 1 >>#=$)>#x exec } try clear
+{ <(<< /a 1 >>#=$$)>#x exec } try clear
+{ <(<< /a 1 >>#$=)>#x exec } try clear
+{ <(<< /a 1 >>#$$=)>#x exec } try clear
+{ <(<< /a 1 >>#$$$)>#x exec } try clear
+
+{ <({{ /a }}#=$)>#x exec } try clear
+{ <({{ /a }}#=$$)>#x exec } try clear
+{ <({{ /a }}#$=)>#x exec } try clear
+{ <({{ /a }}#$$=)>#x exec } try clear
+{ <({{ /a }}#$$$)>#x exec } try clear
+
+{ <((x)#=$)>#x exec } try clear
+{ <((x)#=$$)>#x exec } try clear
+{ <((x)#$=)>#x exec } try clear
+{ <((x)#$$=)>#x exec } try clear
+{ <((x)#$$$)>#x exec } try clear
+
+{ <({ 1 }#=$)>#x exec } try clear
+{ <({ 1 }#=$$)>#x exec } try clear
+{ <({ 1 }#$=)>#x exec } try clear
+{ <({ 1 }#$$=)>#x exec } try clear
+{ <({ 1 }#$$$)>#x exec } try clear

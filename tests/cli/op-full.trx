@@ -1,0 +1,6 @@
+% op-full.trx -- fill the operand stack COMPLETELY inside try.  With no
+% free slot to deliver the error name, try is bypassed and the global
+% handler exits with the opstack-overflow code (28); run_cli_tests.sh
+% pins that escalation contract.
+{ { 1 } loop } try
+(unreachable) =

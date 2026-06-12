@@ -1,0 +1,29 @@
+
+=== Village morning, 6 AM to 8 AM ===
+06:00    [baker] stokes the oven for the morning bake
+06:15    [guard] begins morning patrol at the gate
+06:30    [baker] sweeps the shop floor
+06:30    [farmer] walks out to the wheat field
+06:45    [guard] checks the west watchtower
+06:45    [farmer] harvests a full cart of wheat
+07:00    [farmer] delivers fresh flour to the baker
+07:15    [baker] mixes dough from the fresh flour
+07:30    [baker] slides eight loaves into the oven
+07:30    [guard] reports the streets are clear
+07:30    [farmer] takes a short rest at home
+07:45    [baker] pulls eight warm loaves out
+08:00    [baker] hangs the OPEN sign, bread is ready
+08:00    [guard] stops by the bakery for a fresh loaf
+
+-- end of baseline sim --
+    flour in stock : 5
+    bread in stock : 8
+
+=== 8 AM -- snap-shotting village state ===
+
+=== Fork the timeline: same snapshot, two futures ===
+
+--- Timeline A: festival day ---
+
+--- Timeline B: rainstorm day ---
+

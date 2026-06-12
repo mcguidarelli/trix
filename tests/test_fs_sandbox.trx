@@ -1,0 +1,74 @@
+% test_fs_sandbox.trx -- sandbox-block tests for the filesystem family
+% (ops_stream_io.inl).
+%
+% Run with --sandbox (run_all.sh SPECIAL_ARGS) to verify the host-op
+% ban applies before any operand validation or filesystem access.
+% Companion to test_raw_mode_sandbox.trx / test_memory_sandbox.trx;
+% the non-sandbox sad paths live in test_stream_errors.trx.
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+%% === Sandbox blocks file streams and file manipulation ===
+
+<< /unsupported { clear true } >> { (/tmp/x) (r)#b stream } try-catch
+(stream: blocked in sandbox) rt-ok
+
+<< /unsupported { clear true } >> { (/tmp/x) (r)#b { pop } with-stream } try-catch
+(with-stream: blocked in sandbox) rt-ok
+
+<< /unsupported { clear true } >> { (/tmp/x) delete-file } try-catch
+(delete-file: blocked in sandbox) rt-ok
+
+<< /unsupported { clear true } >> { (/tmp/x) (/tmp/y) rename-file } try-catch
+(rename-file: blocked in sandbox) rt-ok
+
+<< /unsupported { clear true } >> { (/tmp/x) 0o644 chmod } try-catch
+(chmod: blocked in sandbox) rt-ok
+
+<< /unsupported { clear true } >> { (/tmp/x) file-stat } try-catch
+(file-stat: blocked in sandbox) rt-ok
+
+%% === Sandbox blocks directory ops ===
+
+<< /unsupported { clear true } >> { getcwd } try-catch
+(getcwd: blocked in sandbox) rt-ok
+
+<< /unsupported { clear true } >> { (/tmp/xd) mkdir } try-catch
+(mkdir: blocked in sandbox) rt-ok
+
+<< /unsupported { clear true } >> { (/tmp/xd) rmdir } try-catch
+(rmdir: blocked in sandbox) rt-ok
+
+<< /unsupported { clear true } >> { (/tmp) chdir } try-catch
+(chdir: blocked in sandbox) rt-ok
+
+%% === Sandbox ALLOWS string streams (no host effect) ===
+
+50 make-string-stream dup (ok) write-string
+dup get-string-stream (ok) eq exch close-stream
+(make-string-stream: allowed in sandbox) rt-ok
+
+%% === Results ===
+
+failed 0 eq
+{ total (fs-sandbox: all tests passed) = = }
+{ (fs-sandbox: FAILURES = ) print failed = } if-else
+failed 0 eq { } { /assert-failed throw } if-else
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

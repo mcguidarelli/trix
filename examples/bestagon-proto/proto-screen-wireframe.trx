@@ -1,0 +1,412 @@
+% =====================================================================
+% proto-screen-wireframe.trx -- Phase 0.6C screen wireframe prototype
+% =====================================================================
+%
+% Tier P0 of plan_bestagon_derisk_prototyping.md.  Validates GDD
+% section 18.1's screen layout (floating top-bar + viewport + 2-column
+% lower section [side+combat on left, minimap on right] + floating
+% keybind) at the three target terminal sizes (120x40 minimum,
+% 160x50 typical, 200x60 large).
+%
+% The de-risk question this prototype answered: does the layout fit at
+% the minimum terminal, and how many hexes does the viewport actually
+% accommodate at each size?  Phase 0.6C measured 80x24 unable to fit
+% the layout cleanly -- the minimum was raised from 80x24 to 120x40
+% (locked decision 39 added 2026-05-15; layout refined 2026-05-16 to
+% the floating-top/bottom + tall-minimap-column design).
+%
+% Public API (graduates to Phase 12 production renderer):
+%   build-wireframe   w h -- screen          % composed layout
+%   screen-to-text    screen -- str          % read back as ASCII
+%
+% Self-test asserts:
+%   - 120x40 layout: viewport top divider corners are '+' at (0,1)+(w-1,1)
+%   - Section top divider has '+' at (0,r)+(c-mid,r)+(w-1,r)
+%   - Mid-divider has '+' at (0,r)+(c-mid,r) (left col only)
+%   - Section bottom divider has '+' at (0,r)+(c-mid,r)+(w-1,r)
+%   - Floating top-bar text at row 0 (no leading '|')
+%   - Floating keybind text at row h-1 (no leading '|')
+%   - Section top divider contains "minimap" label inline
+%   - Top-bar contains "Day 7" string
+%   - Side panel contains "Selected:" string
+%   - Combat log contains "Combat:" string
+%   - Keybind bar contains "WASD" string
+%
+% Run with the prod build (debug is 10-30x slower):
+%   ./trix.opt examples/bestagon-proto/proto-screen-wireframe.trx
+% =====================================================================
+
+(examples/bestagon-proto/proto-render-gate.trx) run
+
+
+% ====================================================================
+% Section 1: byte constants
+% ====================================================================
+
+/CH-SPACE     32 def
+/CH-PLUS      43 def
+/CH-DASH      45 def
+/CH-PIPE     124 def
+/CH-DOT       46 def
+
+
+% ====================================================================
+% Section 2: low-level drawing primitives
+% ====================================================================
+
+% screen col row w --
+% Draw a horizontal rule of '-' from (col, row) of length w.
+/draw-h-rule {|scr col row w|#+1
+    /c-end  $[ col + w - 1 ]  local-def
+    col 1 c-end { |x|
+        scr x row CH-DASH 7 0 0 screen-put-cell pop
+    } for
+} def
+
+% screen row col-left col-right --
+% Draw '+' at (col-left, row) and (col-right, row), '-' between.
+/draw-divider {|scr row c-left c-right|
+    scr c-left  row CH-PLUS 7 0 0 screen-put-cell pop
+    scr c-right row CH-PLUS 7 0 0 screen-put-cell pop
+    scr $[ c-left + 1 ]  row  $[ c-right - c-left - 1 ]  draw-h-rule
+} def
+
+% screen col row str -- ; draw a string with default fg/bg/attrs.
+/draw-text {|scr col row s|
+    scr col row s 7 0 0 screen-put-string pop
+} def
+
+
+% ====================================================================
+% Section 3: per-panel renderers
+% ====================================================================
+%
+% Each panel takes the screen and its bounding box.  Floating panels
+% (top-bar, keybind) place content at row+0 (no top border).  Bordered
+% panels (viewport, side, combat, minimap) place content at row+1
+% (the row is the panel's top divider).
+
+% scr col row w h --
+% Top bar (floating - no borders): content at row, indented to align
+% with the side-panel content column (3 leading spaces).
+/draw-top-bar {|scr col row w h|
+    scr  $[ col + 2 ]  row
+        ( Day 7 / Turn 4 / Bishop's turn (funds 12500, power 3.2) )
+        draw-text
+} def
+
+% scr col row w h --
+% Viewport: row is top divider; content at rows row+1 to row+h-1.
+% (No bottom divider -- that's the section top, drawn by composer.)
+/draw-viewport {|scr col row w h|#+5
+    /diamond-buf  23 13  diamond-empty-hexes  render-grid  local-def
+    /lines  diamond-buf (\n) split  local-def
+
+    /lim  $[ h - 1 ]  local-def              % rows available below top div
+    /n    lines length lim min  local-def
+    0 1 $[ n - 1 ] { |i|#+1
+        /line  lines i get  local-def
+        scr  $[ col + 2 ]  $[ row + 1 + i ]  line  draw-text
+    } for
+} def
+
+% scr col row w h --
+% Side panel (left column): row is section top divider; content at
+% row+1 and row+2.
+/draw-side-panel {|scr col row w h|
+    scr  $[ col + 2 ]  $[ row + 1 ]
+        ( Selected: Tank (HP 10/10, fuel 70/70, ammo 9/9, ready) )  draw-text
+    scr  $[ col + 2 ]  $[ row + 2 ]
+        ( Adjacent enemies: 2 Inf (E, NE) )  draw-text
+} def
+
+% scr col row w h --
+% Combat log (left column): row is mid-divider; content at row+1,row+2.
+/draw-combat-log {|scr col row w h|
+    scr  $[ col + 2 ]  $[ row + 1 ]
+        ( Combat: Bishop Tank hit Hammer for 7 HP )  draw-text
+    scr  $[ col + 2 ]  $[ row + 2 ]
+        ( (counter 1 HP) )  draw-text
+} def
+
+% scr col row w h --
+% Minimap (right column): row is section top divider (label drawn by
+% composer); 5 content rows of dots at row+1..row+5.
+/draw-minimap {|scr col row w h|#+2
+    /inner-w  $[ w - 4 ]  local-def        % col+2 .. col+w-3 inclusive
+    /n-rows   $[ h - 2 ]  local-def        % between top + bottom dividers
+    0 1 $[ n-rows - 1 ] { |y|#+1
+        0 1 $[ inner-w - 1 ] { |x|
+            scr  $[ col + 2 + x ]  $[ row + 1 + y ]
+                CH-DOT  8 0 0  screen-put-cell pop
+        } for
+    } for
+} def
+
+% scr col row w h --
+% Keybind (floating - no borders): content at row, indented to align
+% with the side-panel content column (3 leading spaces).
+/draw-keybind {|scr col row w h|
+    scr  $[ col + 2 ]  row
+        ( WASD/HJKL move | Enter select | Space menu | Shift-E end | ? help )
+        draw-text
+} def
+
+
+% ====================================================================
+% Section 4: layout composer
+% ====================================================================
+%
+% Row allocation (rows are screen-row indices, inclusive).  Layout
+% from top to bottom:
+%
+%   r-top-text     = 0          floating top-bar text (no borders)
+%   r-vp-div       = 1          top-of-viewport divider (full width)
+%   2 .. r-section-top - 1      viewport content (with `|` side bars)
+%   r-section-top  = h - 8      section top divider with --minimap label
+%   r-side-1, r-side-2          side-panel content (left col)
+%   r-mid-div                   mid-divider (left col only)
+%   r-combat-1, r-combat-2      combat-log content (left col)
+%   r-section-bot  = h - 2      section bottom divider (full width)
+%   r-keybind      = h - 1      floating keybind text (no borders)
+%
+% Section is 7 rows tall: top-div + 2 side + mid-div + 2 combat + bot-div.
+
+/build-wireframe {|w h|#+15
+    /scr  w h make-screen  local-def
+
+    scr 0 0 w h CH-SPACE 7 0 0 screen-fill-rect pop
+
+    /c-end          $[ w - 1 ]                  local-def
+    /c-mid          $[ w - 36 ]                 local-def     % minimap section locked to 36 cols (GDD §18.1)
+
+    /r-top-text     0                           local-def
+    /r-vp-div       1                           local-def
+    /r-section-bot  $[ h - 2 ]                  local-def
+    /r-section-top  $[ r-section-bot - 6 ]      local-def
+    /r-side-1       $[ r-section-top + 1 ]      local-def
+    /r-side-2       $[ r-section-top + 2 ]      local-def
+    /r-mid-div      $[ r-section-top + 3 ]      local-def
+    /r-combat-1     $[ r-section-top + 4 ]      local-def
+    /r-combat-2     $[ r-section-top + 5 ]      local-def
+    /r-keybind      $[ h - 1 ]                  local-def
+
+    % --- Outer-side vertical bars `|` at col 0 + c-end ---
+    % Viewport content rows: r-vp-div+1 .. r-section-top-1
+    $[ r-vp-div + 1 ] 1 $[ r-section-top - 1 ] { |y|
+        scr 0     y CH-PIPE 7 0 0 screen-put-cell pop
+        scr c-end y CH-PIPE 7 0 0 screen-put-cell pop
+    } for
+    % Section body rows: r-section-top+1 .. r-section-bot-1
+    $[ r-section-top + 1 ] 1 $[ r-section-bot - 1 ] { |y|
+        scr 0     y CH-PIPE 7 0 0 screen-put-cell pop
+        scr c-end y CH-PIPE 7 0 0 screen-put-cell pop
+    } for
+
+    % --- Central vertical divider `|` at col c-mid (section body) ---
+    $[ r-section-top + 1 ] 1 $[ r-section-bot - 1 ] { |y|
+        scr c-mid y CH-PIPE 7 0 0 screen-put-cell pop
+    } for
+
+    % --- Horizontal dividers ---
+    % Top of viewport (full width)
+    scr r-vp-div  0 c-end draw-divider
+
+    % Section top divider (full width) with central + and "minimap" label
+    scr r-section-top  0 c-end draw-divider
+    scr c-mid r-section-top CH-PLUS 7 0 0 screen-put-cell pop
+    scr  $[ c-mid + 3 ]  r-section-top  (minimap)  draw-text
+
+    % Mid-divider (left col only)
+    scr r-mid-div  0 c-mid draw-divider
+
+    % Section bottom divider (full width) with central +
+    scr r-section-bot  0 c-end draw-divider
+    scr c-mid r-section-bot CH-PLUS 7 0 0 screen-put-cell pop
+
+    % --- Panel content ---
+    /h-vp-panel  $[ r-section-top - r-vp-div ]  local-def
+    scr 0 r-top-text         w 1                       draw-top-bar
+    scr 0 r-vp-div           w h-vp-panel              draw-viewport
+    scr 0 r-section-top      $[ c-mid + 1 ]  4         draw-side-panel
+    scr 0 r-mid-div          $[ c-mid + 1 ]  3         draw-combat-log
+    scr c-mid r-section-top  $[ w - c-mid ]   7        draw-minimap
+    scr 0 r-keybind          w 1                       draw-keybind
+
+    scr
+} def
+
+
+% ====================================================================
+% Section 5: read-back as text (for assertion + dump)
+% ====================================================================
+
+% screen -- str
+% Read every cell, build per-row rstripped strings, join by \n.
+/screen-to-text {|scr|#+8
+    /w  scr screen-cols  local-def
+    /h  scr screen-rows  local-def
+    /n  $[ w * h ]  local-def
+    /buf n string  local-def
+    0 1 $[ n - 1 ] { |i| buf i 32b put } for
+
+    0 1 $[ h - 1 ] { |y|#+1
+        0 1 $[ w - 1 ] { |x|#+1
+            scr x y screen-get-cell
+            pop pop pop                        % drop fg, bg, attrs
+            /ch exch local-def
+            buf  $[ y * w + x ]  ch /byte-type cast  put
+        } for
+    } for
+
+    % rstrip per row + join with \n.
+    /cap  $[ (w + 1) * h ]  local-def
+    /out  cap make-string-stream  local-def
+    0 1 $[ h - 1 ] { |y|#+2
+        /raw  buf  $[ y * w ]  w  get-interval  local-def
+        /trim raw rstrip-spaces  local-def
+        out trim write-string
+        y $[ h - 1 ] lt { out 10b write } if
+    } for
+    out get-string-stream
+} def
+
+
+% ====================================================================
+% Section 6: viewport hex-count report
+% ====================================================================
+%
+% Given the screen-size (w, h), viewport interior (inner w x h), and
+% the corrected hex stride 7 / vertical step 4 (Phase 0.6B finding),
+% report how many hex columns x rows fit inside.
+
+% inner-w inner-h -- hex-cols hex-rows
+/viewport-hex-count {|w h|#+2
+    /cols  w 9 lt { 0 } { $[ (w - 9) / 7 + 1 ] } if-else  local-def
+    /rows  h 5 lt { 0 } { $[ (h - 5) / 4 + 1 ] } if-else  local-def
+    cols rows
+} def
+
+
+% ====================================================================
+% Section 7: write per-size wireframe + viewport report
+% ====================================================================
+
+% w h label --
+/render-and-report {|w h label|#+15
+    % Ensure the output directory exists.  out/ is gitignored, so it is absent
+    % on a fresh checkout; mkdir is not idempotent (raises on EEXIST), so guard
+    % the create on file-exists?.
+    (examples/bestagon-proto/out) file-exists? not
+        { (examples/bestagon-proto/out) mkdir } if
+
+    /scr  w h build-wireframe  local-def
+    /text scr screen-to-text  local-def
+
+    /fout  (examples/bestagon-proto/out/wireframe-)
+           label concat
+           (.txt) concat
+           local-def
+    /f  fout (w)#b stream  local-def
+    f text write-string
+    f close-stream
+
+    % Viewport interior: cols 2 .. w-3 (= w-4 wide); rows 2 .. r-section-top-1.
+    % r-section-top = h - 8, so viewport content rows count = h - 8 - 2 = h - 10.
+    /inner-w  $[ w - 4 ]  local-def
+    /inner-h  $[ h - 10 ]  local-def
+    inner-w inner-h viewport-hex-count
+    /hex-rows exch local-def
+    /hex-cols exch local-def
+
+    (  {0:s}: {1}x{2} screen, viewport interior {3}x{4}, {5}x{6} hexes ({7} visible)\n)
+        mark label w h inner-w inner-h hex-cols hex-rows  $[ hex-cols * hex-rows ]
+        print-fmt pop pop
+} def
+
+
+% ====================================================================
+% Section 8: self-test
+% ====================================================================
+
+/assert-cell-eq {|scr col row expected-ch label|#+1
+    scr col row screen-get-cell
+    pop pop pop                                  % drop fg, bg, attrs
+    /got exch local-def
+    got expected-ch ne {
+        (  FAIL: {0} at ({1},{2}) expected 0x{3:X} got 0x{4:X}\n)
+            mark label col row expected-ch got print-fmt pop pop
+        /cell-mismatch throw
+    } if
+} def
+
+/assert-text-contains {|haystack needle label|
+    haystack needle contains? not {
+        (  FAIL: {0} -- text does not contain '{1:s}'\n)
+            mark label needle print-fmt pop pop
+        /text-missing throw
+    } if
+} def
+
+/run-self-test {||#+8
+    (proto-screen-wireframe: starting self-test...\n) print
+
+    % --- Section A: build 120x40 layout, probe structural cells ---
+    (\n[A] 120x40 (minimum) layout structural assertions\n) print
+
+    /scr120  120 40 build-wireframe  local-def
+    /c-mid120  $[ 120 - 36 ]  local-def             % = 84 (minimap fixed at 36 cols)
+    /r-section-top120  $[ 40 - 2 - 6 ]  local-def   % = 32
+    /r-mid-div120      $[ r-section-top120 + 3 ]  local-def  % = 35
+    /r-section-bot120  $[ 40 - 2 ]  local-def       % = 38
+
+    % Floating rows: NO `|` at col 0 / col w-1 on row 0 or row h-1.
+    scr120   0   0  CH-SPACE  (top-bar floating col 0)   assert-cell-eq
+    scr120 119   0  CH-SPACE  (top-bar floating col w-1) assert-cell-eq
+    scr120   0  39  CH-SPACE  (keybind floating col 0)   assert-cell-eq
+    scr120 119  39  CH-SPACE  (keybind floating col w-1) assert-cell-eq
+
+    % Viewport top divider (row 1): '+' at both ends.
+    scr120   0   1  CH-PLUS  (vp-top-div left)   assert-cell-eq
+    scr120 119   1  CH-PLUS  (vp-top-div right)  assert-cell-eq
+
+    % Section top divider (row 32): '+' at left, c-mid, right.
+    scr120   0  32  CH-PLUS  (section-top left)   assert-cell-eq
+    scr120  84  32  CH-PLUS  (section-top c-mid)  assert-cell-eq
+    scr120 119  32  CH-PLUS  (section-top right)  assert-cell-eq
+
+    % Mid-divider (row 35): '+' at left, '+' at c-mid (T-junction with central |).
+    scr120   0  35  CH-PLUS  (mid-div left)   assert-cell-eq
+    scr120  84  35  CH-PLUS  (mid-div c-mid)  assert-cell-eq
+
+    % Section bottom divider (row 38): '+' at left, c-mid, right.
+    scr120   0  38  CH-PLUS  (section-bot left)   assert-cell-eq
+    scr120  84  38  CH-PLUS  (section-bot c-mid)  assert-cell-eq
+    scr120 119  38  CH-PLUS  (section-bot right)  assert-cell-eq
+
+    (  PASS: floating rows + dividers\n) print
+
+    % --- Section B: text content checks ---
+    (\n[B] 120x40 text content presence\n) print
+
+    /text120  scr120 screen-to-text  local-def
+
+    text120 (Day 7)         (top-bar)      assert-text-contains
+    text120 (Selected:)     (side-panel)   assert-text-contains
+    text120 (Combat:)       (combat-log)   assert-text-contains
+    text120 (minimap)       (minimap-lbl)  assert-text-contains
+    text120 (WASD)          (keybind)      assert-text-contains
+
+    (  PASS: 5 panel text labels present\n) print
+
+    % --- Section C: viewport hex-count report at 3 supported sizes ---
+    (\n[C] viewport hex-count at 3 terminal sizes\n) print
+
+    save pop  120  40  (120x40)  render-and-report  -1 restore
+    save pop  160  50  (160x50)  render-and-report  -1 restore
+    save pop  200  60  (200x60)  render-and-report  -1 restore
+
+    (\nproto-screen-wireframe: SELF-TEST PASS\n) print
+} def
+
+run-self-test

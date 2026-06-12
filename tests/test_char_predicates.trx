@@ -1,0 +1,247 @@
+% test_char_predicates.trx — Character predicate operators
+% Tests: digit?, alpha?, alnum?, hex-digit?, lower?, upper?, space?, printable?
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+/rt-fail { = (FAILED) = } def
+
+% ====================================================================
+% SECTION: digit?
+% ====================================================================
+
+% Byte: digits
+48b digit?      (digit?: 0 is digit) rt-ok clear
+57b digit?      (digit?: 9 is digit) rt-ok clear
+
+% Byte: non-digits
+47b digit? not  (digit?: / is not digit) rt-ok clear
+58b digit? not  (digit?: : is not digit) rt-ok clear
+65b digit? not  (digit?: A is not digit) rt-ok clear
+32b digit? not  (digit?: space is not digit) rt-ok clear
+0b digit? not   (digit?: NUL is not digit) rt-ok clear
+
+% String: all digits
+(0123456789) digit?  (digit?: all-digit string) rt-ok clear
+
+% String: mixed
+(123a) digit? not    (digit?: mixed string fails) rt-ok clear
+(a123) digit? not    (digit?: alpha-first fails) rt-ok clear
+
+% String: empty
+() digit? not        (digit?: empty string is false) rt-ok clear
+
+% String: single char
+(5) digit?           (digit?: single digit string) rt-ok clear
+(x) digit? not       (digit?: single non-digit string) rt-ok clear
+
+% ====================================================================
+% SECTION: alpha?
+% ====================================================================
+
+% Byte: letters
+65b alpha?      (alpha?: A is alpha) rt-ok clear
+90b alpha?      (alpha?: Z is alpha) rt-ok clear
+97b alpha?      (alpha?: a is alpha) rt-ok clear
+122b alpha?     (alpha?: z is alpha) rt-ok clear
+
+% Byte: non-letters
+48b alpha? not  (alpha?: 0 is not alpha) rt-ok clear
+32b alpha? not  (alpha?: space is not alpha) rt-ok clear
+64b alpha? not  (alpha?: @ is not alpha) rt-ok clear
+
+% String
+(Hello) alpha?            (alpha?: all-letter string) rt-ok clear
+(Hello World) alpha? not  (alpha?: space breaks alpha) rt-ok clear
+() alpha? not             (alpha?: empty is false) rt-ok clear
+
+% ====================================================================
+% SECTION: alnum?
+% ====================================================================
+
+% Byte
+65b alnum?      (alnum?: A is alnum) rt-ok clear
+48b alnum?      (alnum?: 0 is alnum) rt-ok clear
+32b alnum? not  (alnum?: space is not alnum) rt-ok clear
+33b alnum? not  (alnum?: ! is not alnum) rt-ok clear
+
+% String
+(Hello123) alnum?          (alnum?: mixed letters+digits) rt-ok clear
+(abc) alnum?               (alnum?: all letters) rt-ok clear
+(123) alnum?               (alnum?: all digits) rt-ok clear
+(Hello 123) alnum? not     (alnum?: space breaks alnum) rt-ok clear
+(abc!) alnum? not          (alnum?: punctuation breaks alnum) rt-ok clear
+() alnum? not              (alnum?: empty is false) rt-ok clear
+
+% ====================================================================
+% SECTION: hex-digit?
+% ====================================================================
+
+% Byte: hex digits
+48b hex-digit?   (hex-digit?: 0) rt-ok clear
+57b hex-digit?   (hex-digit?: 9) rt-ok clear
+65b hex-digit?   (hex-digit?: A) rt-ok clear
+70b hex-digit?   (hex-digit?: F) rt-ok clear
+97b hex-digit?   (hex-digit?: a) rt-ok clear
+102b hex-digit?  (hex-digit?: f) rt-ok clear
+
+% Byte: non-hex
+71b hex-digit? not   (hex-digit?: G is not hex) rt-ok clear
+103b hex-digit? not  (hex-digit?: g is not hex) rt-ok clear
+32b hex-digit? not   (hex-digit?: space is not hex) rt-ok clear
+
+% String
+(0123456789abcdefABCDEF) hex-digit?  (hex-digit?: all hex chars) rt-ok clear
+(DEADBEEF) hex-digit?                (hex-digit?: uppercase hex) rt-ok clear
+(cafebabe) hex-digit?                (hex-digit?: lowercase hex) rt-ok clear
+(0xDEAD) hex-digit? not              (hex-digit?: x breaks hex) rt-ok clear
+() hex-digit? not                    (hex-digit?: empty is false) rt-ok clear
+
+% ====================================================================
+% SECTION: lower?
+% ====================================================================
+
+% Byte
+97b lower?       (lower?: a is lower) rt-ok clear
+122b lower?      (lower?: z is lower) rt-ok clear
+65b lower? not   (lower?: A is not lower) rt-ok clear
+48b lower? not   (lower?: 0 is not lower) rt-ok clear
+
+% String
+(hello) lower?            (lower?: all lowercase) rt-ok clear
+(Hello) lower? not        (lower?: capital breaks lower) rt-ok clear
+(hello1) lower? not       (lower?: digit breaks lower) rt-ok clear
+() lower? not             (lower?: empty is false) rt-ok clear
+
+% ====================================================================
+% SECTION: upper?
+% ====================================================================
+
+% Byte
+65b upper?       (upper?: A is upper) rt-ok clear
+90b upper?       (upper?: Z is upper) rt-ok clear
+97b upper? not   (upper?: a is not upper) rt-ok clear
+48b upper? not   (upper?: 0 is not upper) rt-ok clear
+
+% String
+(HELLO) upper?            (upper?: all uppercase) rt-ok clear
+(Hello) upper? not        (upper?: lowercase breaks upper) rt-ok clear
+(HELLO1) upper? not       (upper?: digit breaks upper) rt-ok clear
+() upper? not             (upper?: empty is false) rt-ok clear
+
+% ====================================================================
+% SECTION: space?
+% ====================================================================
+
+% Byte: whitespace chars
+32b space?      (space?: SP) rt-ok clear
+9b space?       (space?: HT) rt-ok clear
+10b space?      (space?: LF) rt-ok clear
+13b space?      (space?: CR) rt-ok clear
+12b space?      (space?: FF) rt-ok clear
+11b space?      (space?: VT) rt-ok clear
+
+% Byte: non-whitespace
+65b space? not  (space?: A is not space) rt-ok clear
+0b space? not   (space?: NUL is not space) rt-ok clear
+33b space? not  (space?: ! is not space) rt-ok clear
+
+% String
+3 string dup 0 32b put dup 1 9b put dup 2 10b put
+space?                   (space?: all-whitespace string) rt-ok clear
+
+(hello) space? not       (space?: letters not space) rt-ok clear
+() space? not            (space?: empty is false) rt-ok clear
+
+% ====================================================================
+% SECTION: printable?
+% ====================================================================
+
+% Byte: printable range 0x20..0x7E
+32b printable?       (printable?: space is printable) rt-ok clear
+126b printable?      (printable?: ~ is printable) rt-ok clear
+65b printable?       (printable?: A is printable) rt-ok clear
+33b printable?       (printable?: ! is printable) rt-ok clear
+
+% Byte: non-printable
+31b printable? not   (printable?: US control char) rt-ok clear
+0b printable? not    (printable?: NUL) rt-ok clear
+127b printable? not  (printable?: DEL) rt-ok clear
+10b printable? not   (printable?: LF) rt-ok clear
+9b printable? not    (printable?: HT) rt-ok clear
+128b printable? not  (printable?: 0x80 high byte) rt-ok clear
+255b printable? not  (printable?: 0xFF high byte) rt-ok clear
+
+% String
+(Hello, World!) printable?     (printable?: normal text) rt-ok clear
+(abc 123 !@#) printable?       (printable?: mixed printable) rt-ok clear
+
+% String with control chars
+5 string dup 0 65b put dup 1 10b put dup 2 66b put dup 3 67b put dup 4 68b put
+printable? not                 (printable?: embedded LF fails) rt-ok clear
+
+() printable? not              (printable?: empty is false) rt-ok clear
+
+% ====================================================================
+% SECTION: type-check errors
+% ====================================================================
+
+% Integer is rejected (not Byte or String)
+<< /type-check { pop clear true } >> { 42 digit? } try-catch
+(digit?: integer rejected) rt-ok clear
+
+% Array is rejected
+<< /type-check { pop clear true } >> { [1 2 3] digit? } try-catch
+(alpha?: array rejected) rt-ok clear
+
+% Name is rejected
+<< /type-check { pop clear true } >> { /foo alpha? } try-catch
+(alpha?: name rejected) rt-ok clear
+
+% ====================================================================
+% SECTION: boundary and stress tests
+% ====================================================================
+
+% All 10 digits — test each byte 0..9 individually
+true 0 1 9 { 48 add /byte-type cast digit? not { pop false } if } for
+(digit?: all 10 digit bytes pass) rt-ok clear
+
+% All 26 lowercase letters
+true 0 1 25 { 97 add /byte-type cast lower? not { pop false } if } for
+(lower?: all 26 lowercase bytes pass) rt-ok clear
+
+% All 26 uppercase letters
+true 0 1 25 { 65 add /byte-type cast upper? not { pop false } if } for
+(upper?: all 26 uppercase bytes pass) rt-ok clear
+
+% Printable range: all of 0x20..0x7E
+true 0 1 94 { 32 add /byte-type cast printable? not { pop false } if } for
+(printable?: all 95 printable bytes pass) rt-ok clear
+
+% Non-printable: 0x00..0x1F
+true 0 1 31 { /byte-type cast printable? { pop false } if } for
+(printable?: all 32 control chars fail) rt-ok clear
+
+% Non-printable: DEL (127)
+127b printable? not  (printable?: DEL fails) rt-ok clear
+
+% Non-printable: 0x80..0xFF (high bytes)
+true 0 1 127 { 128 add /byte-type cast printable? { pop false } if } for
+(printable?: all 128 high bytes fail) rt-ok clear
+
+% Large string stress: 1000-byte all-digit string
+1000 string 0 1 999 { over exch 48b put } for
+digit?  (digit?: 1000-byte digit string) rt-ok clear
+
+% Large string with one bad byte at end
+1000 string 0 1 999 { over exch 48b put } for
+dup 999 65b put
+digit? not  (digit?: 1000-byte string with trailing alpha fails) rt-ok clear
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

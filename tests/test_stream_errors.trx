@@ -1,0 +1,284 @@
+% ====================================================================
+% test_stream_errors.trx -- Phase-3 P3 batch 5: ops_stream_io.inl sad
+% paths (stream construction caps, set-stdout access, write range,
+% read-all length cap, read-key-byte-timeout range, chmod mode bits,
+% getcwd failure).  Targets enumerated from per-line gcov
+% (release-audit/tools/sad_path_gaps.py); every trigger and error name
+% was probed live before being pinned.  Contracts: trix-reference.md
+% 3.17 (I/O and streams), 3.22 (system).
+%
+% Companions: test_fs_sandbox.trx pins the ten sandbox /unsupported
+% arms (run with --sandbox); tests/pty/read_key_conflict.trx (PTY
+% suite S5) pins the single-stdin-reader /invalid-access arm.
+%
+% Accepted-uncovered arms (cannot be reached deterministically):
+%   - read-key read-failure errno arms (would need EIO injection on a
+%     raw-mode tty mid-read)
+%   - raw-mode tcsetattr failure (needs a tty where tcsetattr fails)
+%   - @with-stream error-stack underflow (defensive InternalError)
+%   - flush with no stdout configured (embedder-only configuration)
+%   - read-all vm-full (needs < 64KB free VM at call -> stress bucket)
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: make-string-stream capacity arms
+% ====================================================================
+
+{ 70000 make-string-stream } try
+/limit-check eq (make-string-stream: capacity beyond 65535) rt-ok clear
+{ 0x100000000#l make-string-stream } try
+/range-check eq (make-string-stream: capacity beyond uinteger) rt-ok clear
+{ 0 make-string-stream } try
+/range-check eq (make-string-stream: zero capacity) rt-ok clear
+
+% ====================================================================
+% SECTION 2: set-stdout access arms.  Read-only OBJECTS ((r)-mode file
+% streams, memory streams, stdin) are rejected by the VerifyRWStream
+% gate as /read-only; the op's own /invalid-stream-access arm needs a
+% stream whose OBJECT stays read-write while the stream is not
+% writable -- a closed string-stream.
+% ====================================================================
+
+/probe-file (/tmp/trix_stream_probe.txt) def
+/wf probe-file (w)#b stream def
+wf (hello) write-string wf close-stream
+
+/rf probe-file (r)#b stream def
+{ rf set-stdout } try
+/read-only eq (set-stdout: read-only file stream gated by verify) rt-ok clear
+rf close-stream
+/ms (abc) make-memory-stream def
+{ ms set-stdout } try
+/read-only eq (set-stdout: memory stream gated by verify) rt-ok clear
+ms close-stream
+{ stdin set-stdout } try
+/read-only eq (set-stdout: stdin gated by verify) rt-ok clear
+
+/closed 50 make-string-stream def
+closed close-stream
+{ closed set-stdout } try
+/invalid-stream-access eq (set-stdout: closed stream not writable) rt-ok clear
+
+% control: swap to a string stream and back, output arrives in order
+/ss 100 make-string-stream def
+ss set-stdout /prev-out exch def
+(redirected) print
+prev-out set-stdout pop
+ss get-string-stream (redirected) eq  ss close-stream
+(set-stdout: swap and restore round-trip) rt-ok clear
+
+% ====================================================================
+% SECTION 3: write byte-range arm (writable stream, value outside
+% 0..255; Long operand exercises the ExtValue width)
+% ====================================================================
+
+/ws 100 make-string-stream def
+{ ws 300 write } try
+/range-check eq (write: 300 beyond byte range) rt-ok clear
+{ ws -1 write } try
+/range-check eq (write: negative value rejected) rt-ok clear
+{ ws 0x100000000#l write } try
+/range-check eq (write: Long beyond byte range) rt-ok clear
+ws 65 write  ws get-string-stream (A) eq  ws close-stream
+(write: byte 65 lands as A control) rt-ok clear
+
+% ====================================================================
+% SECTION 4: read-all length cap (file beyond MaxStringLength)
+% ====================================================================
+
+/chunk (a) 60000 repeat-string def
+/bf (/tmp/trix_stream_big.bin) (w)#b stream def
+bf chunk write-string  bf chunk write-string
+bf close-stream
+/bin (/tmp/trix_stream_big.bin) (r)#b stream def
+{ bin read-all } try
+/limit-check eq (read-all: 120000-byte file beyond string max) rt-ok clear
+bin close-stream
+
+% ====================================================================
+% SECTION 5: read-key-byte-timeout ms range (validated before any tty
+% interaction, so reachable without a terminal; Long = ExtValue width)
+% ====================================================================
+
+{ 0x100000000#l read-key-byte-timeout } try
+/type-check eq (read-key-byte-timeout: ms beyond int32) rt-ok clear
+
+% ====================================================================
+% SECTION 6: chmod mode-bit range (validated before touching the file)
+% ====================================================================
+
+{ probe-file 0o10000 chmod } try
+/range-check eq (chmod: mode beyond 07777 rejected) rt-ok clear
+{ (/no/such/file/zz) 0o644 chmod } try
+/filename-not-found eq (chmod: missing file rejected) rt-ok clear
+
+% ====================================================================
+% SECTION 7: getcwd failure -- the working directory is deleted out
+% from under the process, then restored (restoration is asserted so an
+% in-process suite never inherits a dead cwd)
+% ====================================================================
+
+/savedcwd getcwd def
+(/tmp/trix_cwd_probe) mkdir
+(/tmp/trix_cwd_probe) chdir
+(/tmp/trix_cwd_probe) rmdir
+{ getcwd } try
+/io-read-error eq (getcwd: deleted cwd raises io-read-error) rt-ok clear
+savedcwd chdir
+getcwd savedcwd eq (getcwd: cwd restored after probe) rt-ok clear
+
+% ====================================================================
+% SECTION 8: read/write direction transitions at the stream-buffer
+% boundary.  The set-file-position-required guard lives in the buffer
+% machinery (fill_file / flush), and the buffer boundary is where that
+% machinery has shipped a real bug before (the putn 4 KiB boundary
+% defect) -- so the guard and the data path are pinned exactly there.
+% Buffer-size-relative so --stream-buffer=N runs stay correct.
+% ====================================================================
+
+/bs //:status:stream-buffer-size def
+/bsfull (x) bs repeat-string def
+
+% write EXACTLY one buffer, then read without seek: the guard must
+% survive the exact-boundary flush
+/fa (/tmp/trix_bnd_a.bin) (W)#b stream def
+fa bsfull write-string
+{ fa read } try
+/set-file-position-required eq
+(boundary: write exact buffer then read still guarded) rt-ok clear
+fa close-stream
+
+% write exactly one buffer, seek, read back byte-exact
+/fb (/tmp/trix_bnd_b.bin) (W)#b stream def
+fb bsfull write-string
+fb 0 set-stream-position
+fb read-all bsfull eq
+(boundary: exact-buffer write round-trips byte-exact) rt-ok clear
+fb close-stream
+
+% write buffer+3 (putn crosses the boundary), seek, byte-exact
+/bsfull3 bsfull (yzw) concat def
+/fc (/tmp/trix_bnd_c.bin) (W)#b stream def
+fc bsfull3 write-string
+fc 0 set-stream-position
+fc read-all bsfull3 eq
+(boundary: crossing write round-trips byte-exact) rt-ok clear
+fc close-stream
+
+% read EXACTLY one buffer (read buffer exhausted), then write
+/fd (/tmp/trix_bnd_b.bin) (R)#b stream def
+fd bs string read-string pop pop
+{ fd 65b write } try
+/set-file-position-required eq
+(boundary: read exact buffer then write still guarded) rt-ok clear
+fd close-stream
+
+% read buffer+1 (forces a refill), then write
+/fe (/tmp/trix_bnd_c.bin) (R)#b stream def
+fe bs 1 add string read-string pop pop
+{ fe 65b write } try
+/set-file-position-required eq
+(boundary: read across refill then write still guarded) rt-ok clear
+fe close-stream
+
+% at EOF the guard STILL applies -- Trix is deliberately stricter than
+% C stdio (which exempts write-after-read at end-of-file); one uniform
+% rule: any direction change needs set-stream-position
+/ff (/tmp/trix_bnd_c.bin) (R)#b stream def
+ff read-all pop
+{ ff 65b write } try
+/set-file-position-required eq
+(boundary: write at EOF still requires seek) rt-ok clear
+ff close-stream
+
+% ====================================================================
+% SECTION 9: set-stream-position beyond EOF (POSIX hole semantics) and
+% Long (ExtValue) position operands
+% ====================================================================
+
+/fg (/tmp/trix_hole.bin) (W)#b stream def
+fg (abc) write-string
+fg 10 set-stream-position
+fg (xyz) write-string
+fg 0 set-stream-position
+fg read-all /hole-str exch def
+hole-str length 13 eq
+(seek-hole: 3 + gap to 10 + 3 = 13 bytes) rt-ok clear
+hole-str 3 get 0b eq
+(seek-hole: gap reads back as zero bytes) rt-ok clear
+hole-str 10 get 120b eq
+(seek-hole: data after the hole intact) rt-ok clear
+fg close-stream
+
+% seek past EOF then read: clean EOF, not an error
+/fh (/tmp/trix_hole.bin) (R)#b stream def
+fh 100 set-stream-position
+fh read false eq
+(seek-past-eof: read reports EOF) rt-ok clear
+fh close-stream
+
+% Long position operand: in-range Long seeks; beyond-int32 rejected.
+% Stream `read` returns a Byte (aligned with read-key-byte, string
+% get, and unpack 'B'; Integer was a PostScript holdover) -- the type
+% is pinned here.
+/fi (/tmp/trix_hole.bin) (R)#b stream def
+fi 10l set-stream-position
+fi read pop dup 120b eq exch is-byte and
+(seek: Long position operand lands on byte 10 as Byte) rt-ok clear
+{ fi 0x100000000#l set-stream-position } try
+/range-check eq
+(seek: Long position beyond int32 rejected) rt-ok clear
+fi close-stream
+
+% ====================================================================
+% SECTION 10: string-stream buffer-full arm (exact fill is fine, one
+% byte past raises io-write-error on both the putc and putn paths)
+% ====================================================================
+
+/sfull 10 make-string-stream def
+sfull (0123456789) write-string
+sfull get-string-stream length 10 eq
+(string-stream: exact fill holds 10 bytes) rt-ok clear
+{ sfull (Z) write-string } try
+/io-write-error eq
+(string-stream: one byte past capacity raises) rt-ok clear
+sfull close-stream
+
+/sfull2 10 make-string-stream def
+{ sfull2 (0123456789ABC) write-string } try
+/io-write-error eq
+(string-stream: oversize putn raises) rt-ok clear
+sfull2 close-stream
+
+% ====================================================================
+% SECTION 11: global-VM region pass
+% ====================================================================
+
+${
+    { 70000 make-string-stream } try
+    /limit-check eq (global: make-string-stream capacity cap) rt-ok clear
+    /gws 50 make-string-stream def
+    { gws 300 write } try
+    /range-check eq (global: write byte range) rt-ok clear
+    gws 66 write  gws get-string-stream (B) eq  gws close-stream
+    (global: write control) rt-ok clear
+}
+
+% ====================================================================
+% Done
+% ====================================================================
+
+(Stream error tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

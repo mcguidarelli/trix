@@ -1,0 +1,192 @@
+% ====================================================================
+% test_dollar_name.trx -- $/foo and $\foo global name prefixes
+% ====================================================================
+% $/foo  interns the literal name /foo in the global VM region
+% $\foo  interns the executable name \foo in the global VM region
+%
+% A global Name struct survives save/restore, so a Dict entry keyed by
+% such a name remains valid (and known?) after a restore that would
+% have nuked a local name interned at the same save level.
+%
+% $//foo and $\\foo (immediate-lookup forms) are rejected with a
+% scanner /syntax-error -- immediate lookup yields a value, not a name,
+% so the "global allocation" prefix is meaningless there.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: $/foo persists a Dict key across restore
+% ====================================================================
+
+${ 8 dict } /g exch def
+
+save /sv1 exch def
+g $/dn-alpha 11 put                         % $/dn-alpha interned globally at scan time
+g $/dn-alpha get 11 eq                      (dn1: $/dn-alpha visible in-save) rt-ok
+sv1 restore
+
+g $/dn-alpha known? true eq                 (dn1: $/dn-alpha known after restore) rt-ok
+g $/dn-alpha get 11 eq                      (dn1: $/dn-alpha value after restore) rt-ok
+
+% Contrast: a plain /local-key interned at sl=1 is local-fragile;
+% R6 pointer-hygiene rejects storing it into a global dict at write time.
+${ 8 dict } /g2 exch def
+save /sv2 exch def
+mark { g2 /dn-local-key 22 put } try
+/invalid-access eq                          (dn1: R6 rejects plain Name into global) rt-ok
+clear
+sv2 restore
+
+% ====================================================================
+% SECTION 2: $\foo executable name interns globally (scanned but not
+% executed)
+% ====================================================================
+% $\foo is the executable form.  We don't want to actually invoke it,
+% so we scan it inside a proc literal where it sits as an unexecuted
+% token.  After scanning, the Name struct is global; its string-twin
+% /foo (looked up afterwards) resolves to the same global Name, so a
+% Dict entry keyed by /foo survives restore just like a $/foo entry.
+
+${ 8 dict } /g3 exch def
+
+save /sv3 exch def
+
+% Scan a proc with $\... -- the body's first element is the global
+% executable Name struct.  Discarding the proc afterwards keeps the
+% Name interned (Name structs aren't refcounted; once interned, they
+% stay until restore-time unlink).
+{ $\dn-exec-twin } pop
+
+% Now /dn-exec-twin (literal) hits the same global Name struct via
+% string lookup, and a Dict entry keyed by it persists across restore.
+g3 /dn-exec-twin 77 put
+g3 /dn-exec-twin get 77 eq                  <(dn2: literal twin of $\foo visible)> rt-ok
+
+sv3 restore
+g3 /dn-exec-twin known? true eq             (dn2: literal-twin survives restore) rt-ok
+g3 /dn-exec-twin get 77 eq                  (dn2: literal-twin value persists) rt-ok
+
+% ====================================================================
+% SECTION 3: alloc flag is local to the prefix -- doesn't leak after
+% ====================================================================
+
+current-global false eq                      (dn3: top flag false before $/foo) rt-ok
+$/dn-flag-probe pop
+current-global false eq                      (dn3: top flag still false after $/foo) rt-ok
+
+{ $\dn-flag-probe-2 } pop
+current-global false eq                      <(dn3: top flag still false after $\foo)> rt-ok
+
+% Inside a ${...} the flag is true; $/foo inside it doesn't disturb.
+${
+    current-global /dn-saw-pre exch def
+    $/dn-inner-name pop
+    current-global /dn-saw-post exch def
+    dn-saw-pre  true eq                     (dn3: in-block flag true before $/) rt-ok
+    dn-saw-post true eq                     (dn3: in-block flag still true after $/) rt-ok
+}
+
+% ====================================================================
+% SECTION 4: $/ alone synthesises the literal name '/' in global VM
+% ====================================================================
+% Per scan_name's no-body rule, '/' alone is the literal name '/'.
+% The $/ prefix should make that single-char name global too.
+
+${ 8 dict } /g4 exch def
+save /sv4 exch def
+g4 $/ 555 put                               % key is the 1-char name '/'
+g4 $/ get 555 eq                            (dn4: $/ alone in-save) rt-ok
+sv4 restore
+g4 $/ known? true eq                        (dn4: $/ alone known after restore) rt-ok
+g4 $/ get 555 eq                            (dn4: $/ alone value after restore) rt-ok
+
+% ====================================================================
+% SECTION 5: $//foo and $\\foo are scanner /syntax-error
+% ====================================================================
+% These would mean "global allocation prefix on an immediate-lookup",
+% which has no semantic meaning -- immediate lookup pushes a value, not
+% a Name, so global allocation has nothing to apply to.  The scanner
+% rejects them; `token` propagates the SyntaxError into the try frame.
+
+{ <($//xyzzy)> token } try /syntax-error eq <(dn5: $//foo raises syntax-error)> rt-ok clear
+{ <($\\xyzzy)> token } try /syntax-error eq <(dn5: $\\foo raises syntax-error)> rt-ok clear
+
+% ====================================================================
+% SECTION 6: $/foo inside a proc body still allocates globally
+% ====================================================================
+% Names interned during proc-body scanning should also honor the
+% global flag; $/foo inside { ... } interns the Name globally.
+
+${ 8 dict } /g6 exch def
+
+/dn-populate {
+    g6 $/dn-proc-key 333 put
+} def
+
+save /sv6 exch def
+dn-populate
+g6 $/dn-proc-key get 333 eq                 (dn6: $/dn-proc-key visible in-save) rt-ok
+sv6 restore
+
+g6 $/dn-proc-key known? true eq             (dn6: $/dn-proc-key known after restore) rt-ok
+g6 $/dn-proc-key get 333 eq                 (dn6: $/dn-proc-key value after restore) rt-ok
+
+% ====================================================================
+% SECTION 7: $$/foo and $$\foo -- force-local name prefixes
+% ====================================================================
+% Symmetric inverse of $/foo / $\foo: scoped scan with
+% m_curr_alloc_global=false so the Name interns in local VM even when
+% an enclosing ${...} or set-global true would have flipped the flag
+% globally.
+%
+% Outside ${...}, $$/foo is equivalent to /foo (the flag was already
+% false).  Inside ${...}, $$/foo overrides the enclosing global scope
+% for the single name.
+
+% ---- 7a: $$/foo at top level is equivalent to /foo ----
+$$/dn-local-top pop                          % no error; interns locally
+current-global false eq                      (dn7: $$/foo at top: flag still false) rt-ok
+
+% ---- 7b: $$/foo inside ${...} does NOT bump global VM ----
+//:status:vm-global-used /dn-vg0 exch def
+${ $$/dn-local-inside pop }
+//:status:vm-global-used /dn-vg1 exch def
+dn-vg1 dn-vg0 sub /dn-delta exch def
+% Block overhead is a small constant (~32 bytes); the Name itself
+% should NOT contribute to the delta.  A globally-interned Name would
+% account for a much larger delta (Name struct + string + dict slot).
+dn-delta 256 lt true eq                      (dn7: $$/foo inside ${...} doesn't grow global beyond block overhead) rt-ok
+
+% ---- 7c: $/foo vs $$/foo of same string -- two distinct Names ----
+$/dn-twin-name /dn-A exch def
+$$/dn-twin-name /dn-B exch def
+% Both should be /name-type (literal name), but the global one is
+% interned in global VM, the local one in local VM.  They share the
+% string but ARE different Name structs.
+dn-A type /name-type eq                      (dn7: $/dn-twin-name type) rt-ok
+dn-B type /name-type eq                      (dn7: $$/dn-twin-name type) rt-ok
+
+% ---- 7d: $$\foo executable form ----
+{ $$\dn-exec-local } pop                     % scanned but not executed; interns locally
+current-global false eq                      <(dn7: $$\foo at top: flag still false)> rt-ok
+
+% ---- 7e: $$//foo and $$\\foo immediate-lookup forms are syntax-error ----
+{ <($$//xyzzy)> token } try /syntax-error eq <(dn7: $$//foo raises syntax-error)> rt-ok clear
+{ <($$\\xyzzy)> token } try /syntax-error eq <(dn7: $$\\foo raises syntax-error)> rt-ok clear
+
+% ---- 7f: $$/ alone is the literal name '/', flag-honoring ----
+$$/ /dn-slash-local exch def
+dn-slash-local type /name-type eq            (dn7: $$/ alone is name) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_dollar_name: ALL TESTS PASSED) =
+(__test_ok__) =

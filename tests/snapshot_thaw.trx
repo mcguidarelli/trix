@@ -1,0 +1,3 @@
+% snapshot_thaw.trx -- phase 2: thaw the snapshot created by test_snapshot.trx.
+% Run test_snapshot.trx first to produce tests/snapshot.img.
+(tests/snapshot.img) thaw

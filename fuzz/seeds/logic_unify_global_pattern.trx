@@ -1,0 +1,1 @@
+${ logic-var /x exch def [ x 99l ] /pat exch def } [ 42l 99l ] pat unify pop

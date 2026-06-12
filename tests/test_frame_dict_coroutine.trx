@@ -1,0 +1,142 @@
+% ====================================================================
+% test_frame_dict_coroutine.trx -- coroutine + |locals| + save/restore
+% stress (plan_frame_dict_followups.md item #3)
+% ====================================================================
+% Documents the contract when save/restore intersects with coroutines
+% that carry frame dicts on their (suspended) dictionary stacks.
+%
+% Observed behavior (matches Save::restore in src/save.inl):
+%   - Coroutines spawned AFTER save have their CoroutineContext struct
+%     at an offset >= barrier and are killed by the coroutine-kill
+%     pass (m_context_offset >= barrier branch).
+%   - Coroutines spawned BEFORE save survive the kill pass but are
+%     STRANDED: Save::restore clears m_ready_head / m_ready_tail /
+%     m_timer_head on restore, so no surviving coroutine can be
+%     scheduled again.  They hold a "ready" status but 0 coroutine-
+%     sleep never reaches them.
+%   - If a surviving coroutine's dict stack holds a post-barrier
+%     frame dict (acquired via |locals| entered while the save was
+%     active), Save::restore raises /invalid-restore -- the post-
+%     barrier dict would otherwise be reclaimed and leave the
+%     coroutine's dict stack referencing freed/reused memory.  The
+%     validator was added 2026-04-27 (commit ab33c9e); see
+%     feedback_bootstrap_coroutine_before_save.md.
+%   - coroutine-kill on a stranded (or validator-blocking) coroutine
+%     works cleanly (drops it to Dead without walking the dict stack).
+%     Once Dead, the validator skips it and a subsequent restore
+%     succeeds.
+%   - coroutine-join on a stranded coroutine hangs (waits forever for
+%     Dead status that never arrives); callers must kill first.
+%
+% If any of these invariants changes (e.g. Save::restore starts re-
+% scheduling surviving coroutines, or a new primitive accesses a
+% suspended coroutine's dict stack), the assertions here will catch it.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: coroutine spawned pre-save with |locals|, save without
+% yielding to it, restore -- coroutine survives, stranded.
+% ====================================================================
+[ { 5 { |x|#1 0 coroutine-sleep 0 coroutine-sleep } exec } coroutine-launch
+/co-a exch def
+0 coroutine-sleep                  % let A enter its |locals| and yield
+/sv1 save def
+sv1 restore
+co-a coroutine-status /ready eq
+  (coro-pre-save-locals: survives restore as ready) rt-ok clear
+co-a coroutine-kill
+co-a coroutine-status /dead eq
+  (coro-pre-save-locals: kill after restore works) rt-ok clear
+
+% ====================================================================
+% SECTION 2: coroutine spawned pre-save, main saves, yields-to-A,
+% A pushes additional |locals| post-barrier, yields back, main
+% restores.  A's dict stack now holds a post-barrier frame dict --
+% Save::restore detects this and raises /invalid-restore (validator
+% added in commit ab33c9e).  Killing A clears its Suspended status so
+% the validator skips it on a retry, and the second restore succeeds.
+% ====================================================================
+[ { 5 { |x|#1 0 coroutine-sleep 10 { |y|#1 0 coroutine-sleep } exec } exec }
+  coroutine-launch
+/co-b exch def
+0 coroutine-sleep                  % A enters outer |locals|, yields
+/sv2 save def
+0 coroutine-sleep                  % main yields -> A enters inner (post-save) |locals|, yields
+{ sv2 restore } try /invalid-restore eq
+  (coro-post-save-locals: validator catches post-barrier frame dict) rt-ok clear
+co-b coroutine-kill
+sv2 restore                         % retry succeeds: co-b is Dead, validator skips it
+co-b coroutine-status /dead eq
+  (coro-post-save-locals: kill + retry-restore clears the block) rt-ok clear
+
+% ====================================================================
+% SECTION 3: coroutine spawned AFTER save -- VM Redux Phase 5 changed
+% the semantics.  Pre-Phase-5, restore killed the post-save spawn via
+% the m_context_offset >= barrier branch.  Post-Phase-5, the
+% CoroutineContext lives in global VM and survives restore; but the
+% proc body packed at scan time inside the save scope sits in local
+% VM above the barrier, so the cross-coroutine scan rejects the
+% restore with /invalid-restore until the coroutine is killed.
+% ====================================================================
+//:status:coroutine-count /count-before-3 exch def
+/sv3 save def
+[ { 0 coroutine-sleep 0 coroutine-sleep } coroutine-launch /co-c exch def
+0 coroutine-sleep                  % let the new coroutine start
+//:status:coroutine-count count-before-3 gt
+  (coro-post-save-spawn: count rises inside save scope) rt-ok clear
+{ sv3 restore } try /invalid-restore eq
+  (coro-post-save-spawn: validator rejects post-save proc body) rt-ok clear
+co-c coroutine-kill
+sv3 restore                         % retry succeeds once the offender is Dead
+//:status:coroutine-count count-before-3 eq
+  (coro-post-save-spawn: kill + retry-restore clears the block) rt-ok clear
+
+% ====================================================================
+% SECTION 4: post-barrier |locals| on a post-save coroutine is also
+% caught by the validator; same kill-and-retry pattern.
+% ====================================================================
+//:status:coroutine-count /count-before-4 exch def
+/sv4 save def
+[ { 99 { |z|#1 0 coroutine-sleep } exec } coroutine-launch /co-d exch def
+0 coroutine-sleep                  % new coroutine enters |locals|, yields
+{ sv4 restore } try /invalid-restore eq
+  (coro-post-save-spawn+locals: validator rejects frame-dict ref) rt-ok clear
+co-d coroutine-kill
+sv4 restore
+//:status:coroutine-count count-before-4 eq
+  (coro-post-save-spawn+locals: killed cleanly with frame dict live) rt-ok clear
+
+% ====================================================================
+% SECTION 5: two pre-save coroutines, main saves without yielding
+% and restores -- both survive as stranded, both killable.
+% ====================================================================
+[ { 1 { |x|#1 0 coroutine-sleep 0 coroutine-sleep } exec } coroutine-launch
+/co-e exch def
+[ { 2 { |x|#1 0 coroutine-sleep 0 coroutine-sleep } exec } coroutine-launch
+/co-f exch def
+0 coroutine-sleep 0 coroutine-sleep
+/sv5 save def
+sv5 restore
+co-e coroutine-status /ready eq
+  (two-coros: first survives) rt-ok clear
+co-f coroutine-status /ready eq
+  (two-coros: second survives) rt-ok clear
+co-e coroutine-kill
+co-f coroutine-kill
+co-e coroutine-status /dead eq
+  (two-coros: first killable) rt-ok clear
+co-f coroutine-status /dead eq
+  (two-coros: second killable) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_frame_dict_coroutine: ALL TESTS PASSED) =
+(__test_ok__) =

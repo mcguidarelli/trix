@@ -1,0 +1,3 @@
+4 1 make-screen 0 0 65 1 0 0 screen-put-cell 0 0 2 1 8 4 make-screen 0 0 screen-blit pop
+4 1 make-screen 100 100 4 4 8 4 make-screen 0 0 screen-blit pop
+1 1 make-screen 0 0 1 1 1 1 make-screen 0 0 screen-blit pop

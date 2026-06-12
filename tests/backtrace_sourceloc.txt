@@ -1,0 +1,47 @@
+Test: backtrace_sourceloc
+Feature: Type::SourceLoc call-site location in @call backtrace frames
+
+Run
+---
+  cd /home/parallels/cps
+  ./ps tests/backtrace_sourceloc.ps
+
+Input
+-----
+None (script is self-contained).
+
+Expected stdout
+---------------
+(empty)
+
+Expected stderr
+---------------
+  #0: --div--
+  #1: inner at tests/backtrace_sourceloc.ps:13:6
+  #2: outer at tests/backtrace_sourceloc.ps:13:6
+      at tests/backtrace_sourceloc.ps:13:5
+  operands: --integer-- 0 --integer-- 1
+Trix div-by-zero --div--: division by zero
+Trix exiting --interpreter--
+
+Notes
+-----
+- Both @call frames point to line 13, where 'outer' was called.
+
+- #2 (outer) is exact: 'outer' is a directly-streamed executable name.
+  execute_name() captures m_last_scan_location immediately after the
+  scanner returns, so col 6 is the position right after scanning 'outer'.
+
+- #1 (inner) is approximate: 'inner' is executed from inside outer's
+  packed proc body.  By the time execute_name() runs for 'inner', the
+  scanner has not been called again, so m_last_scan_location still holds
+  the position recorded when 'outer' was scanned (line 13 col 6).
+  This is the known limitation for proc-body names.
+
+- "at tests/backtrace_sourceloc.ps:13:5" is the @run stream context
+  (Phase 1): the scanner's position when the error fired — one column
+  behind the SourceLoc because the @run stream tracks the raw read
+  pointer, which trails the token end by one character.
+
+- The col values (5 vs 6) reflect a one-character offset between the
+  @run stream pointer and the scanner's post-token position.

@@ -1,0 +1,754 @@
+% ====================================================================
+% test_chrono.trx -- Chrono Tier 1 Phase A: PrintFmt + ScanFmt :I / :Il
+% ====================================================================
+% Coverage for the :I format-spec extension that formats and parses
+% ULong instants (ms since 1970 UTC) via strftime templates.  The
+% optional `l` flag selects local-zone semantics; local-zone behavior
+% is exercised here as a smoke test only -- divergent local vs UTC
+% values land in the Phase C local-accessor test suite where the
+% runner pins TZ.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: PrintFmt :I -- known UTC vectors
+% ====================================================================
+
+% Unix epoch.
+=string ({0:I%Y-%m-%d %H:%M:%S}) mark 0ul sprint-fmt pop
+(1970-01-01 00:00:00) deep-eq                           (s1: epoch zero -> midnight Jan 1 1970)  rt-ok
+
+% 2023-11-14 22:13:20 UTC (ms = 1700000000000).
+=string ({0:I%Y-%m-%d %H:%M:%S}) mark 1700000000000ul sprint-fmt pop
+(2023-11-14 22:13:20) deep-eq                           (s1: 2023-11-14 vector)                  rt-ok
+
+% Sub-second precision is dropped: ms 1700000000999 still formats as :20.
+=string ({0:I%H:%M:%S}) mark 1700000000999ul sprint-fmt pop
+(22:13:20) deep-eq                                      (s1: ms below second is dropped)         rt-ok
+
+% Day-of-week / day-of-year.
+=string ({0:I%a %j}) mark 0ul sprint-fmt pop
+(Thu 001) deep-eq                                       (s1: epoch was Thursday day 001)         rt-ok
+
+% Month name (short) and full.
+=string ({0:I%b %B}) mark 1700000000000ul sprint-fmt pop
+(Nov November) deep-eq                                  (s1: November short + long)              rt-ok
+
+% Plain literal text inside the template (e.g. ISO 'T' separator).
+=string ({0:I%Y-%m-%dT%H:%M:%SZ}) mark 1700000000000ul sprint-fmt pop
+(2023-11-14T22:13:20Z) deep-eq                          (s1: ISO 8601 with literal T and Z)      rt-ok
+
+% ====================================================================
+% SECTION 2: PrintFmt :I -- boundaries and edge cases
+% ====================================================================
+
+% End-of-year transition: 2023-12-31 23:59:59 UTC = 1704067199000.
+=string ({0:I%Y-%m-%d %H:%M:%S}) mark 1704067199000ul sprint-fmt pop
+(2023-12-31 23:59:59) deep-eq                           (s2: end of 2023)                        rt-ok
+
+% Just past midnight into 2024: 1704067200000.
+=string ({0:I%Y-%m-%d %H:%M:%S}) mark 1704067200000ul sprint-fmt pop
+(2024-01-01 00:00:00) deep-eq                           (s2: start of 2024)                      rt-ok
+
+% Leap day 2024-02-29 12:00:00 UTC = 1709208000000.
+=string ({0:I%Y-%m-%d (%a)}) mark 1709208000000ul sprint-fmt pop
+(2024-02-29 (Thu)) deep-eq                              (s2: 2024 leap day)                      rt-ok
+
+% Day 366 in a leap year.
+=string ({0:I%j}) mark 1735603200000ul sprint-fmt pop  % 2024-12-31
+(366) deep-eq                                           (s2: 366th day in leap year)             rt-ok
+
+% ====================================================================
+% SECTION 3: PrintFmt :I -- width / align / fill prefix
+% ====================================================================
+
+% Right-aligned in a 30-wide field.
+=string (>{0:>30I%Y-%m-%d}<) mark 1700000000000ul sprint-fmt pop
+(>                    2023-11-14<) deep-eq              (s3: right-align width 30)               rt-ok
+
+% Left-aligned (default for strings) in a 25-wide field.
+=string (>{0:<25I%Y-%m-%d}<) mark 1700000000000ul sprint-fmt pop
+(>2023-11-14               <) deep-eq                   (s3: left-align width 25)                rt-ok
+
+% Centered with explicit fill char.
+=string (>{0:.^16I%Y-%m-%d}<) mark 1700000000000ul sprint-fmt pop
+(>...2023-11-14...<) deep-eq                            (s3: center-align fill .)                rt-ok
+
+% ====================================================================
+% SECTION 4: ScanFmt :I -- parse round-trip
+% ====================================================================
+
+% Format then parse, expect original ms back.
+=string ({0:I%Y-%m-%d %H:%M:%S}) mark 1700000000000ul sprint-fmt pop
+({0:I%Y-%m-%d %H:%M:%S}) mark 0ul sscan-fmt
+1 eq                                                    (s4: round-trip count = 1)               rt-ok
+1700000000000ul eq                                      (s4: round-trip ms preserved)            rt-ok
+
+% Round-trip across leap day.
+=string ({0:I%Y-%m-%d %H:%M:%S}) mark 1709208000000ul sprint-fmt pop
+({0:I%Y-%m-%d %H:%M:%S}) mark 0ul sscan-fmt pop
+1709208000000ul eq                                      (s4: leap-day round-trip)                rt-ok
+
+% Round-trip ISO 8601 with literal Z.
+=string ({0:I%Y-%m-%dT%H:%M:%SZ}) mark 1700000000000ul sprint-fmt pop
+({0:I%Y-%m-%dT%H:%M:%SZ}) mark 0ul sscan-fmt pop
+1700000000000ul eq                                      (s4: ISO 8601 round-trip)                rt-ok
+
+% Sub-second precision is lost on round-trip (ms drops to 0).
+=string ({0:I%Y-%m-%dT%H:%M:%S}) mark 1700000000999ul sprint-fmt pop
+({0:I%Y-%m-%dT%H:%M:%S}) mark 0ul sscan-fmt pop
+1700000000000ul eq                                      (s4: sub-second is dropped on parse)     rt-ok
+
+% ====================================================================
+% SECTION 5: ScanFmt :I -- failure modes
+% ====================================================================
+
+% Bad input raises scan-type-fail.
+{ (not-a-date) ({0:I%Y-%m-%d}) mark 0ul sscan-fmt }
+try /scan-type-fail eq                                  (s5: malformed input -> scan-type-fail)  rt-ok clear
+
+% Pre-1970 inputs map to negative ms; we treat as parse failure.
+{ (1969-12-31 23:59:00) ({0:I%Y-%m-%d %H:%M:%S}) mark 0ul sscan-fmt }
+try /scan-type-fail eq                                  (s5: pre-1970 -> scan-type-fail)         rt-ok clear
+
+% Time-of-day-only template leaves tm_year/tm_mon/tm_mday at zero, which
+% produces an invalid year_month_day -> /scan-type-fail.  This pins the
+% post-strptime stricter-than-chrono::parse behavior documented in
+% trix-reference.md (year+month+day required for scan).
+{ (22:13:20) ({0:I%H:%M:%S}) mark 0ul sscan-fmt }
+try /scan-type-fail eq                                  (s5: time-only template -> scan-type-fail) rt-ok clear
+
+% Year-only template (no month/day specifier) leaves tm_mon/tm_mday at
+% zero, so the resulting year_month_day is invalid -> /scan-type-fail.
+{ (2023) ({0:D%Y}) mark 0u sscan-fmt }
+try /scan-type-fail eq                                  (s5: year-only template -> scan-type-fail) rt-ok clear
+
+% Input where the parseable record exceeds the 256-byte scan window
+% surfaces as /scan-type-fail.  Construct an input where the timestamp
+% sits beyond 256 bytes of leading literal text; strptime is anchored at
+% offset 0 of the copied buffer so the date prefix never matches.
+{
+    /__pad 260 string def      % 260 zero bytes; padding only
+    0 1 259 { /__i exch def __pad __i 32b put } for   % fill with spaces
+    /__long-input __pad (2023-11-14) concat def        % spaces... + date
+    __long-input ({0:I%Y-%m-%d %H:%M:%S}) mark 0ul sscan-fmt
+}
+try /scan-type-fail eq                                  (s5: input > 256-byte cap -> scan-type-fail) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Format-string error modes
+% ====================================================================
+
+% Empty :I template raises invalid-format-string.
+{ =string ({0:I}) mark 0ul sprint-fmt }
+try /invalid-format-string eq                           (s6: empty :I template raises)           rt-ok clear
+
+% Bad strftime conversion (%Q is not a strftime spec) raises.
+{ =string ({0:I%Q}) mark 0ul sprint-fmt }
+try /invalid-format-string eq                           (s6: bad strftime spec raises)           rt-ok clear
+
+% Unterminated :I template (no closing brace) raises.
+{ =string ({0:I%Y-%m-%d) mark 0ul sprint-fmt }
+try /invalid-format-string eq                           (s6: unterminated :I raises)             rt-ok clear
+
+% :I on non-ULong arg raises invalid-format-string (type mismatch).
+{ =string ({0:I%Y}) mark 42 sprint-fmt }
+try /invalid-format-string eq                           (s6: :I on integer raises)               rt-ok clear
+
+% Template body over MaxStrftimeTemplateLength (64) raises /limit-check
+% on the scan side at format-spec parse time, before any input is read.
+{ (x) ({0:I%Y-%m-%d %H:%M:%S extra padding text to drive the template body past sixty four chars}) mark 0ul sscan-fmt }
+try /limit-check eq                                     (s6: :I template > 64 -> limit-check)    rt-ok clear
+
+{ (x) ({0:D%Y-%m-%d extra padding text to drive the template body past sixty four chars padding}) mark 0u sscan-fmt }
+try /limit-check eq                                     (s6: :D template > 64 -> limit-check)    rt-ok clear
+
+% Fractional-second specifier %f is unsupported on scan (strptime has no
+% equivalent); rejected at format-spec parse time with a clear diagnostic.
+{ (1700000000.123) ({0:I%s.%f}) mark 0ul sscan-fmt }
+try /invalid-format-string eq                           (s6: :I %f -> invalid-format-string)     rt-ok clear
+
+{ (2026-04-30 .123) ({0:D%Y-%m-%d .%f}) mark 0u sscan-fmt }
+try /invalid-format-string eq                           (s6: :D %f -> invalid-format-string)     rt-ok clear
+
+% '%%f' is literal "%f", not a specifier -- must NOT trigger the %f reject.
+{ (2026-04-30 %f) ({0:D%Y-%m-%d %%f}) mark 0u sscan-fmt }
+try /no-error eq                                        (s6: '%%f' literal not rejected)         rt-ok clear
+
+% Print output buffer is MaxStrftimeOutputLength (256) bytes.  A %c-heavy
+% template can expand past that and must surface as /limit-check rather
+% than silently truncating (feedback_no_silent_footguns.md).  %c expands
+% to ~24 chars in the C locale (e.g. "Wed Nov 14 22:13:20 2023"), so a
+% template with ~16 %c specifiers triggers the cap.
+{ =string ({0:I%c %c %c %c %c %c %c %c %c %c %c %c %c %c %c %c}) mark 1700000000000ul sprint-fmt }
+try /limit-check eq                                     (s6: :I print overflow -> limit-check)   rt-ok clear
+
+% Print side has the same 64-char template cap as scan (parallel limits).
+{ =string ({0:I%Y-%m-%d %H:%M:%S extra padding text to drive the template body past sixty four chars}) mark 0ul sprint-fmt }
+try /limit-check eq                                     (s6: :I print template > 64 -> limit-check) rt-ok clear
+
+% Positive: glibc's strptime back-fills tm_mon/tm_mday from %j when %Y
+% is also present, so '%Y %j' produces a valid date.  Pin this so a
+% future libc divergence (or a non-glibc port) trips here.
+(2023 318 00:00:00) ({0:I%Y %j %H:%M:%S}) mark 0ul sscan-fmt
+1 eq                                                    (s6: '%Y %j' parses on glibc)            rt-ok pop
+
+% ====================================================================
+% SECTION 6b: ScanFmt :I/:D round-trip differential
+% ====================================================================
+% For each documented strftime template, print an instant/udate then
+% scan it back; expect exact recovery.  Catches any chrono-vs-strptime
+% vocabulary divergence introduced by the 2026-05-01 strptime switch.
+
+/__rt-instant 1700000000000ul def
+% Note: round-trippable templates must populate tm_year + tm_mon + tm_mday
+% (and time fields).  Templates that only set tm_yday (e.g. '%j %Y') leave
+% tm_mon/tm_mday at zero and surface as /scan-type-fail -- a stricter
+% behavior than the pre-2026-05-01 std::chrono::parse path which
+% defaulted missing date fields to the epoch.
+/__rt-templates [
+    (%Y-%m-%d %H:%M:%S)
+    (%Y-%m-%dT%H:%M:%SZ)
+    (%Y-%m-%dT%H:%M:%S)
+    (%Y%m%d%H%M%S)
+    (%Y/%m/%d at %H:%M:%S)
+] def
+/__rt-ok true def
+__rt-templates {
+    /__t exch def
+    % concat allocates fresh strings; avoids =string-buffer aliasing
+    % between __buf and sprint-fmt's output buffer.
+    /__buf ({0:I) __t concat (}) concat def
+    /__formatted =string __buf mark __rt-instant sprint-fmt pop def
+    /__parsed __formatted __buf mark 0ul sscan-fmt pop def
+    __parsed __rt-instant ne { /__rt-ok false def } if
+} for-all
+__rt-ok                                                 (s6b: :I round-trip recovers ms)         rt-ok
+
+/__rt-udate 2026 4 30 make-date def
+/__rt-d-templates [
+    (%Y-%m-%d)
+    (%Y%m%d)
+    (%Y/%m/%d)
+] def
+/__rt-d-ok true def
+__rt-d-templates {
+    /__t exch def
+    /__buf ({0:D) __t concat (}) concat def
+    /__formatted =string __buf mark __rt-udate sprint-fmt pop def
+    /__parsed __formatted __buf mark 0u sscan-fmt pop def
+    __parsed __rt-udate ne { /__rt-d-ok false def } if
+} for-all
+__rt-d-ok                                               (s6b: :D round-trip recovers udate)      rt-ok
+
+% ====================================================================
+% SECTION 7: :Il smoke (local-zone variant)
+% ====================================================================
+% Phase A only smoke-tests :Il -- it must produce some non-empty
+% output without erroring on systems that have a usable zone db.
+% Divergence assertions live in Phase C with TZ-pinned runners.
+
+=string ({0:Il%Y-%m-%d}) mark 1700000000000ul sprint-fmt pop length
+1 ge                                                    (s7: :Il produces non-empty output)      rt-ok
+
+% Round-trip :Il (the round-trip is exact when format and parse use the
+% same zone, regardless of which zone that is, because parse_instant
+% uses the same cached zone as format_instant).
+=string ({0:Il%Y-%m-%d %H:%M:%S}) mark 1700000000000ul sprint-fmt pop
+({0:Il%Y-%m-%d %H:%M:%S}) mark 0ul sscan-fmt pop
+1700000000000ul eq                                      (s7: :Il round-trip preserves ms)        rt-ok
+
+% ====================================================================
+% SECTION 8: UTC instant accessors -- known vectors
+% ====================================================================
+
+% Unix epoch.
+0ul instant-year         1970 eq                        (s8: epoch year 1970)               rt-ok
+0ul instant-month           1 eq                        (s8: epoch month 1)                 rt-ok
+0ul instant-day             1 eq                        (s8: epoch day 1)                   rt-ok
+0ul instant-hour            0 eq                        (s8: epoch hour 0)                  rt-ok
+0ul instant-minute          0 eq                        (s8: epoch minute 0)                rt-ok
+0ul instant-second          0 eq                        (s8: epoch second 0)                rt-ok
+0ul instant-millisecond     0 eq                        (s8: epoch ms 0)                    rt-ok
+0ul instant-weekday  /thursday eq                       (s8: epoch was Thursday)            rt-ok
+
+% 2023-11-14 22:13:20.999 UTC.
+1700000000999ul instant-year         2023 eq            (s8: 2023-11-14 year)               rt-ok
+1700000000999ul instant-month          11 eq            (s8: 2023-11-14 month)              rt-ok
+1700000000999ul instant-day            14 eq            (s8: 2023-11-14 day)                rt-ok
+1700000000999ul instant-hour           22 eq            (s8: 2023-11-14 hour)               rt-ok
+1700000000999ul instant-minute         13 eq            (s8: 2023-11-14 minute)             rt-ok
+1700000000999ul instant-second         20 eq            (s8: 2023-11-14 second)             rt-ok
+1700000000999ul instant-millisecond   999 eq            (s8: 2023-11-14 ms 999)             rt-ok
+1700000000999ul instant-weekday /tuesday eq             (s8: 2023-11-14 was Tuesday)        rt-ok
+
+% ====================================================================
+% SECTION 9: Accessor boundaries
+% ====================================================================
+
+% End-of-year transition: 2023-12-31 23:59:59 UTC = 1704067199000.
+1704067199000ul instant-year   2023 eq                  (s9: end-of-2023 year)              rt-ok
+1704067199000ul instant-month    12 eq                  (s9: end-of-2023 month)             rt-ok
+1704067199000ul instant-day      31 eq                  (s9: end-of-2023 day)               rt-ok
+1704067199000ul instant-hour     23 eq                  (s9: end-of-2023 hour)              rt-ok
+1704067199000ul instant-minute   59 eq                  (s9: end-of-2023 minute)            rt-ok
+1704067199000ul instant-second   59 eq                  (s9: end-of-2023 second)            rt-ok
+
+% One ms later: 2024-01-01 00:00:00 UTC = 1704067200000.  Boundary check.
+1704067200000ul instant-year   2024 eq                  (s9: start-of-2024 year)            rt-ok
+1704067200000ul instant-month     1 eq                  (s9: start-of-2024 month)           rt-ok
+1704067200000ul instant-day       1 eq                  (s9: start-of-2024 day)             rt-ok
+1704067200000ul instant-hour      0 eq                  (s9: start-of-2024 hour)            rt-ok
+
+% Leap day 2024-02-29 12:00:00 UTC = 1709208000000.
+1709208000000ul instant-year         2024 eq            (s9: leap-day year)                 rt-ok
+1709208000000ul instant-month           2 eq            (s9: leap-day month)                rt-ok
+1709208000000ul instant-day            29 eq            (s9: leap-day day 29)               rt-ok
+1709208000000ul instant-weekday /thursday eq            (s9: leap-day was Thursday)         rt-ok
+
+% Sub-second slicing: ms component independent of seconds.
+1700000000123ul instant-millisecond 123 eq              (s9: ms 123 extracted)              rt-ok
+1700000000000ul instant-millisecond   0 eq              (s9: ms 0 extracted)                rt-ok
+1700000000999ul instant-millisecond 999 eq              (s9: ms 999 max)                    rt-ok
+
+% ====================================================================
+% SECTION 10: Weekday cycle (every weekday name appears across 7 days)
+% ====================================================================
+% Day 1970-01-01 was Thursday; consecutive days iterate through each
+% weekday in order.  86_400_000 ms = 1 day.
+
+0ul                  instant-weekday /thursday  eq       (s10: day 0 -> Thursday)            rt-ok
+86400000ul           instant-weekday /friday    eq       (s10: day 1 -> Friday)              rt-ok
+172800000ul          instant-weekday /saturday  eq       (s10: day 2 -> Saturday)            rt-ok
+259200000ul          instant-weekday /sunday    eq       (s10: day 3 -> Sunday)              rt-ok
+345600000ul          instant-weekday /monday    eq       (s10: day 4 -> Monday)              rt-ok
+432000000ul          instant-weekday /tuesday   eq       (s10: day 5 -> Tuesday)             rt-ok
+518400000ul          instant-weekday /wednesday eq       (s10: day 6 -> Wednesday)           rt-ok
+
+% Type check: weekday returns a Name.
+0ul instant-weekday type /name-type eq                  (s10: weekday returns name)         rt-ok
+
+% ====================================================================
+% SECTION 11: Accessor sad-path
+% ====================================================================
+
+% Wrong arg type -> type-check.
+{ 42 instant-year } try /type-check eq                  (s11: instant-year on int -> type-check) rt-ok clear
+{ 42 instant-weekday } try /type-check eq               (s11: instant-weekday on int -> type-check) rt-ok clear
+{ (notulong) instant-month } try /type-check eq         (s11: instant-month on string -> type-check) rt-ok clear
+
+% Empty stack -> opstack-underflow.
+{ instant-year } try /opstack-underflow eq              (s11: empty stack instant-year -> underflow) rt-ok clear
+
+% Accessor return types.
+0ul instant-year type        /integer-type eq           (s11: year returns integer)         rt-ok
+0ul instant-millisecond type /integer-type eq           (s11: ms returns integer)           rt-ok
+
+% ====================================================================
+% SECTION 12: Cross-check accessors against :I format
+% ====================================================================
+% Pull each component out with an accessor and via :I; compare.
+
+/ms 1700000000000ul def
+
+% Year matches :I %Y.
+=string ({0:I%Y}) mark ms sprint-fmt pop
+(2023) deep-eq                                          (s12: :Y produces 2023 string)      rt-ok
+ms instant-year 2023 eq                                 (s12: instant-year is 2023 int)     rt-ok
+
+% Day-of-week via :I %A vs accessor (full weekday name).
+=string ({0:I%A}) mark ms sprint-fmt pop
+(Tuesday) deep-eq                                       (s12: :A produces Tuesday)          rt-ok
+ms instant-weekday /tuesday eq                          (s12: instant-weekday is /tuesday)  rt-ok
+
+% ====================================================================
+% SECTION 13: udate constructor + accessors (Phase E)
+% ====================================================================
+
+% make-date validates and packs
+2026 4 30 make-date /d exch def
+
+d type /uinteger-type eq                                (s13: make-date returns uinteger)   rt-ok
+d date-year   2026 eq                                   (s13: date-year 2026)               rt-ok
+d date-month     4 eq                                   (s13: date-month 4)                 rt-ok
+d date-day      30 eq                                   (s13: date-day 30)                  rt-ok
+d date-weekday /thursday eq                             (s13: date-weekday Thursday)        rt-ok
+d day-of-year  120 eq                                   (s13: day-of-year 120)              rt-ok
+
+% Leap year: 2024-02-29 is day 60 of the year
+2024 2 29 make-date day-of-year   60 eq                 (s13: leap-day day-of-year 60)       rt-ok
+
+% Non-leap year: Mar 1 is day 60 of 2023, day 61 of leap-2024
+2023 3 1 make-date day-of-year    60 eq                 (s13: non-leap Mar 1 day 60)         rt-ok
+2024 3 1 make-date day-of-year    61 eq                 (s13: leap-year Mar 1 day 61)        rt-ok
+
+% End of year
+2024 12 31 make-date day-of-year 366 eq                 (s13: leap end of year day 366)      rt-ok
+2023 12 31 make-date day-of-year 365 eq                 (s13: non-leap end of year day 365)  rt-ok
+
+% Year 0, year 16383 (boundaries)
+0 1 1 make-date date-year 0 eq                          (s13: year 0 packs)                  rt-ok
+16383 12 31 make-date date-year 16383 eq                (s13: year 16383 packs)              rt-ok
+
+% Chronological ordering: UInteger < gives calendar < (year first, then month, then day)
+2024 1 1 make-date 2024 2 1 make-date lt                (s13: Jan < Feb 2024)                rt-ok
+2024 12 31 make-date 2025 1 1 make-date lt              (s13: 2024-12-31 < 2025-01-01)       rt-ok
+
+% ====================================================================
+% SECTION 14: make-date validation (sad path)
+% ====================================================================
+
+{ 2024 2 30 make-date } try /range-check eq             (s14: Feb 30 -> range-check)         rt-ok clear
+{ 2023 2 29 make-date } try /range-check eq             (s14: non-leap Feb 29 -> range-check) rt-ok clear
+{ 2024 4 31 make-date } try /range-check eq             (s14: Apr 31 -> range-check)         rt-ok clear
+{ 2024 0 15 make-date } try /range-check eq             (s14: month 0 -> range-check)        rt-ok clear
+{ 2024 13 15 make-date } try /range-check eq            (s14: month 13 -> range-check)       rt-ok clear
+{ 2024 1 0 make-date } try /range-check eq              (s14: day 0 -> range-check)          rt-ok clear
+{ 2024 1 32 make-date } try /range-check eq             (s14: day 32 -> range-check)         rt-ok clear
+{ -1 1 1 make-date } try /range-check eq                (s14: negative year -> range-check)  rt-ok clear
+{ 16384 1 1 make-date } try /range-check eq             (s14: year 16384 -> range-check)     rt-ok clear
+
+% Type checks
+{ (notint) 1 1 make-date } try /type-check eq           (s14: string year -> type-check)     rt-ok clear
+{ make-date } try /opstack-underflow eq                 (s14: empty stack -> underflow)      rt-ok clear
+
+% udate accessors validate the bit pattern
+{ 0xFF800000#u date-year } try /range-check eq          (s14: reserved bits set -> range-check) rt-ok clear
+{ 42 date-year } try /type-check eq                     (s14: integer arg -> type-check)     rt-ok clear
+
+% Accessor weekday cycle: pick known Mondays through Sundays
+2026 4 27 make-date date-weekday /monday    eq          (s14: Apr 27 2026 is Monday)         rt-ok
+2026 4 28 make-date date-weekday /tuesday   eq          (s14: Apr 28 2026 is Tuesday)        rt-ok
+2026 4 29 make-date date-weekday /wednesday eq          (s14: Apr 29 2026 is Wednesday)      rt-ok
+2026 4 30 make-date date-weekday /thursday  eq          (s14: Apr 30 2026 is Thursday)       rt-ok
+2026 5 1  make-date date-weekday /friday    eq          (s14: May 1 2026 is Friday)          rt-ok
+2026 5 2  make-date date-weekday /saturday  eq          (s14: May 2 2026 is Saturday)        rt-ok
+2026 5 3  make-date date-weekday /sunday    eq          (s14: May 3 2026 is Sunday)          rt-ok
+
+% ====================================================================
+% SECTION 15: Calendar arithmetic (Phase F)
+% ====================================================================
+
+% date-add-days
+2026 4 30 make-date  1 date-add-days   2026 5  1 make-date eq   (s15: +1 day rolls month)         rt-ok
+2026 4 30 make-date -1 date-add-days   2026 4 29 make-date eq   (s15: -1 day stays in month)      rt-ok
+2026 4 30 make-date 365 date-add-days  2027 4 30 make-date eq   (s15: +365 days lands next year)  rt-ok
+2024 12 31 make-date 1 date-add-days   2025 1  1 make-date eq   (s15: +1 day at year boundary)    rt-ok
+
+% date-add-months with day clamp
+2026 1 31 make-date 1 date-add-months  2026 2 28 make-date eq   (s15: Jan 31 + 1 month -> Feb 28) rt-ok
+2024 1 31 make-date 1 date-add-months  2024 2 29 make-date eq   (s15: leap clamp -> Feb 29)       rt-ok
+2026 5 31 make-date 1 date-add-months  2026 6 30 make-date eq   (s15: May 31 + 1 -> Jun 30)       rt-ok
+2026 1 1 make-date 12 date-add-months  2027 1 1 make-date eq    (s15: +12 months = +1 year)       rt-ok
+2026 1 31 make-date -1 date-add-months 2025 12 31 make-date eq  (s15: -1 month at year boundary)  rt-ok
+
+% date-add-years with Feb 29 clamp
+2024 2 29 make-date 1 date-add-years   2025 2 28 make-date eq   (s15: leap+1 -> Feb 28)           rt-ok
+2024 2 29 make-date 4 date-add-years   2028 2 29 make-date eq   (s15: leap+4 lands on Feb 29)     rt-ok
+2026 4 30 make-date -1 date-add-years  2025 4 30 make-date eq   (s15: -1 year preserves day)      rt-ok
+
+% date-diff-days
+2024 1 1 make-date 2024 12 31 make-date date-diff-days   365 eq (s15: leap year diff = 365)       rt-ok
+2023 1 1 make-date 2023 12 31 make-date date-diff-days   364 eq (s15: non-leap diff = 364)        rt-ok
+2026 4 30 make-date 2026 4 30 make-date date-diff-days     0 eq (s15: same date diff 0)           rt-ok
+2026 4 30 make-date 2026 4 29 make-date date-diff-days    -1 eq (s15: backwards diff is negative) rt-ok
+2024 2 28 make-date 2024 3 1 make-date date-diff-days      2 eq (s15: leap Feb 28 -> Mar 1)       rt-ok
+2023 2 28 make-date 2023 3 1 make-date date-diff-days      1 eq (s15: non-leap Feb 28 -> Mar 1)   rt-ok
+
+% ====================================================================
+% SECTION 16: Predicates
+% ====================================================================
+
+2024 leap-year?                                       (s16: 2024 is leap)                  rt-ok
+2023 leap-year? not                                   (s16: 2023 is not leap)              rt-ok
+2000 leap-year?                                       (s16: 2000 (div 400) is leap)        rt-ok
+1900 leap-year? not                                   (s16: 1900 (div 100 not 400) not leap) rt-ok
+2400 leap-year?                                       (s16: 2400 (div 400) is leap)        rt-ok
+
+% out-of-udate-range years are rejected, not silently truncated (std::chrono::year is short)
+{ 65540 leap-year? } try /range-check eq               (s16: leap-year? rejects year > udate max)    rt-ok
+{ 65540 1 days-in-month } try /range-check eq          (s16: days-in-month rejects year > udate max)  rt-ok
+
+2024 1  days-in-month 31 eq                             (s16: Jan has 31 days)               rt-ok
+2024 2  days-in-month 29 eq                             (s16: leap Feb has 29 days)          rt-ok
+2023 2  days-in-month 28 eq                             (s16: non-leap Feb has 28 days)      rt-ok
+2024 3  days-in-month 31 eq                             (s16: Mar has 31 days)               rt-ok
+2024 4  days-in-month 30 eq                             (s16: Apr has 30 days)               rt-ok
+2024 12 days-in-month 31 eq                             (s16: Dec has 31 days)               rt-ok
+
+% Sad-path
+{ 2024 0 days-in-month } try /range-check eq            (s16: month 0 -> range-check)        rt-ok clear
+{ 2024 13 days-in-month } try /range-check eq           (s16: month 13 -> range-check)       rt-ok clear
+
+% ====================================================================
+% SECTION 17: instant <-> date conversion (Phase G)
+% ====================================================================
+
+% instant-to-date: drops time-of-day
+1700000000000ul instant-to-date 2023 11 14 make-date eq         (s17: instant->date 2023-11-14) rt-ok
+0ul instant-to-date 1970 1 1 make-date eq                       (s17: epoch->1970-01-01)        rt-ok
+
+% Type checks
+1700000000000ul instant-to-date type /uinteger-type eq          (s17: instant-to-date returns udate) rt-ok
+2023 11 14 make-date 0 0 0 0 make-instant type /ulong-type eq   (s17: make-instant returns ulong)    rt-ok
+
+% make-instant: round-trip with all components
+2023 11 14 make-date 22 13 20 999 make-instant /ms exch def
+ms instant-year   2023 eq                                       (s17: make-instant year)       rt-ok
+ms instant-month   11 eq                                        (s17: make-instant month)      rt-ok
+ms instant-day     14 eq                                        (s17: make-instant day)        rt-ok
+ms instant-hour    22 eq                                        (s17: make-instant hour)       rt-ok
+ms instant-minute  13 eq                                        (s17: make-instant minute)     rt-ok
+ms instant-second  20 eq                                        (s17: make-instant second)     rt-ok
+ms instant-millisecond 999 eq                                   (s17: make-instant ms)         rt-ok
+
+% Round-trip: instant -> date + time -> instant (whole-second precision)
+% epoch-time of 2023-11-14 22:13:20 UTC = 1700000000000
+2023 11 14 make-date 22 13 20 0 make-instant 1700000000000ul eq (s17: instant round-trip)      rt-ok
+
+% Midnight of an arbitrary date
+2026 4 30 make-date 0 0 0 0 make-instant /md exch def
+md instant-to-date 2026 4 30 make-date eq                       (s17: midnight->same date)     rt-ok
+md instant-hour    0 eq                                         (s17: midnight hour 0)         rt-ok
+md instant-minute  0 eq                                         (s17: midnight minute 0)       rt-ok
+
+% Sad-path: out-of-range time components
+{ 2026 4 30 make-date 24 0 0 0 make-instant } try /range-check eq      (s17: hour 24 -> range)  rt-ok clear
+{ 2026 4 30 make-date 0 60 0 0 make-instant } try /range-check eq      (s17: minute 60 -> range) rt-ok clear
+{ 2026 4 30 make-date 0 0 60 0 make-instant } try /range-check eq      (s17: second 60 -> range) rt-ok clear
+{ 2026 4 30 make-date 0 0 0 1000 make-instant } try /range-check eq    (s17: ms 1000 -> range)   rt-ok clear
+{ 2026 4 30 make-date -1 0 0 0 make-instant } try /range-check eq      (s17: hour -1 -> range)   rt-ok clear
+
+% Pre-1970: udate that maps to negative ms must raise range-check
+{ 1900 1 1 make-date 0 0 0 0 make-instant } try /range-check eq        (s17: pre-1970 -> range)  rt-ok clear
+
+% ====================================================================
+% SECTION 18: PrintFmt + ScanFmt :D (Phase H)
+% ====================================================================
+
+% :D formats udate via strftime
+=string ({0:D%Y-%m-%d}) mark 2026 4 30 make-date sprint-fmt pop
+(2026-04-30) deep-eq                                    (s18: :D %Y-%m-%d)             rt-ok
+
+=string ({0:D%a %b %d}) mark 2026 4 30 make-date sprint-fmt pop
+(Thu Apr 30) deep-eq                                    (s18: :D %a %b %d)             rt-ok
+
+=string ({0:D%j}) mark 2024 12 31 make-date sprint-fmt pop
+(366) deep-eq                                           (s18: :D %j leap year)         rt-ok
+
+=string ({0:D%Y-%j}) mark 2026 1 1 make-date sprint-fmt pop
+(2026-001) deep-eq                                      (s18: :D %Y-%j zero-padded)    rt-ok
+
+% Width / align prefix on :D
+=string (>{0:>16D%Y-%m-%d}<) mark 2026 4 30 make-date sprint-fmt pop
+(>      2026-04-30<) deep-eq                            (s18: :D right-align width 16) rt-ok
+
+% :D round-trip via sscan-fmt
+=string ({0:D%Y-%m-%d}) mark 2026 4 30 make-date sprint-fmt pop
+({0:D%Y-%m-%d}) mark 0u sscan-fmt
+1 eq                                                    (s18: :D scan count = 1)       rt-ok
+2026 4 30 make-date eq                                  (s18: :D round-trip preserved) rt-ok
+
+% End-of-year + leap day round-trip
+=string ({0:D%Y-%m-%d}) mark 2024 2 29 make-date sprint-fmt pop
+({0:D%Y-%m-%d}) mark 0u sscan-fmt pop
+2024 2 29 make-date eq                                  (s18: :D leap-day round-trip)  rt-ok
+
+% Sad-path: :D failure modes
+{ (notadate) ({0:D%Y-%m-%d}) mark 0u sscan-fmt } try /scan-type-fail eq         (s18: bad input -> scan-type-fail)  rt-ok clear
+{ =string ({0:D%Q}) mark 2026 4 30 make-date sprint-fmt } try /invalid-format-string eq  (s18: bad strftime -> invalid-format-string) rt-ok clear
+{ =string ({0:D}) mark 2026 4 30 make-date sprint-fmt } try /invalid-format-string eq    (s18: empty :D template -> invalid-format-string) rt-ok clear
+
+% :D requires UInteger arg (rejects other numeric types)
+{ =string ({0:D%Y}) mark 42 sprint-fmt } try /invalid-format-string eq                   (s18: :D on integer rejected) rt-ok clear
+
+% Year out of udate range fails parse
+{ (16384-01-01) ({0:D%Y-%m-%d}) mark 0u sscan-fmt } try /scan-type-fail eq               (s18: year > 16383 -> scan-type-fail) rt-ok clear
+
+% ====================================================================
+% SECTION 19: fscan-fmt :I and :D over a stream (option 2a)
+% ====================================================================
+% fscan-fmt parses chrono format specs over the buffered window of a
+% readable stream.  The whole record must fit within the current fill
+% cycle; a record straddling a buffer-fill boundary surfaces as
+% scan-type-fail and the caller should fall back to read-string +
+% sscan-fmt.
+
+% --- :I round-trip via a file ---
+(/tmp/trix_chrono_stream_test.txt) (w)#b stream
+dup ({0:I%Y-%m-%d %H:%M:%S}\n) mark 1700000000000ul fprint-fmt pop pop
+close-stream
+
+(/tmp/trix_chrono_stream_test.txt) (r)#b stream
+dup ({0:I%Y-%m-%d %H:%M:%S}) mark 0ul fscan-fmt
+1 eq                                                    (s19: :I fscan count = 1)             rt-ok
+1700000000000ul eq                                      (s19: :I fscan ms preserved)          rt-ok
+close-stream  clear
+
+% --- :D round-trip via a file ---
+(/tmp/trix_chrono_stream_test.txt) (w)#b stream
+dup ({0:D%Y-%m-%d}\n) mark 2026 4 30 make-date fprint-fmt pop pop
+close-stream
+
+(/tmp/trix_chrono_stream_test.txt) (r)#b stream
+dup ({0:D%Y-%m-%d}) mark 0u fscan-fmt
+1 eq                                                    (s19: :D fscan count = 1)             rt-ok
+2026 4 30 make-date eq                                  (s19: :D fscan udate preserved)       rt-ok
+close-stream  clear
+
+% --- Two :I records in sequence (advance_read advances correctly) ---
+(/tmp/trix_chrono_stream_test.txt) (w)#b stream
+dup ({0:I%Y-%m-%dT%H:%M:%S} {1:I%Y-%m-%dT%H:%M:%S}\n)
+    mark 1700000000000ul 1709208000000ul fprint-fmt pop pop
+close-stream
+
+(/tmp/trix_chrono_stream_test.txt) (r)#b stream
+dup ({0:I%Y-%m-%dT%H:%M:%S} {1:I%Y-%m-%dT%H:%M:%S}) mark 0ul 0ul fscan-fmt
+2 eq                                                    (s19: two :I fields scanned)          rt-ok
+1709208000000ul eq                                      (s19: second :I value)                rt-ok
+1700000000000ul eq                                      (s19: first :I value)                 rt-ok
+close-stream  clear
+
+% --- Mixed :D and :I in the same stream ---
+(/tmp/trix_chrono_stream_test.txt) (w)#b stream
+dup ({0:D%Y-%m-%d} @ {1:I%Y-%m-%dT%H:%M:%S}\n)
+    mark 2026 4 30 make-date 1700000000000ul fprint-fmt pop pop
+close-stream
+
+(/tmp/trix_chrono_stream_test.txt) (r)#b stream
+dup ({0:D%Y-%m-%d} @ {1:I%Y-%m-%dT%H:%M:%S}) mark 0u 0ul fscan-fmt
+2 eq                                                    (s19: :D + :I count)                  rt-ok
+1700000000000ul eq                                      (s19: :I from mixed stream)           rt-ok
+2026 4 30 make-date eq                                  (s19: :D from mixed stream)           rt-ok
+close-stream  clear
+
+% --- Sad path: malformed stream input still surfaces as scan-type-fail ---
+(/tmp/trix_chrono_stream_test.txt) (w)#b stream
+dup (not-a-date\n) write-string
+close-stream
+
+% Stash the stream in a variable so try's stack unwind can clear freely;
+% reload from the variable to close after the assertion.
+(/tmp/trix_chrono_stream_test.txt) (r)#b stream /chrono-bad-stream exch def
+{ chrono-bad-stream ({0:I%Y-%m-%d}) mark 0ul fscan-fmt }
+try /scan-type-fail eq                                  (s19: malformed stream -> scan-type-fail) rt-ok clear
+chrono-bad-stream close-stream
+
+% ====================================================================
+% SECTION 20: Stress sweeps
+% ====================================================================
+% Looped tests that verify invariants over a wide range of dates and
+% across calendar-arithmetic chains.  Each sweep is sized to fit
+% comfortably inside the default VM and uses save/restore around any
+% iteration that allocates so the heap stays bounded.
+
+% Helper: weekday name -> 0..6 (Sunday=0).
+/weekday-num <<
+    /sunday 0  /monday 1  /tuesday 2  /wednesday 3
+    /thursday 4  /friday 5  /saturday 6
+>> make-readonly def
+
+% --- 20a. Leap-year day-by-day sweep (2024, 366 iterations) ---
+% Walks Jan 1 2024 through Dec 31 2024 by `1 date-add-days`.
+% Verifies day-of-year matches the iteration counter and the weekday
+% advances by exactly 1 (mod 7) each step.
+/__d 2024 1 1 make-date def
+/__expected-doy 1 def
+/__last-wd weekday-num __d date-weekday get def
+/__sweep-ok true def
+1 1 366 {
+    pop
+    __d day-of-year __expected-doy ne { /__sweep-ok false def } if
+    /__expected-doy __expected-doy 1 add def
+    __expected-doy 367 lt {
+        /__d __d 1 date-add-days def
+        /__cur-wd weekday-num __d date-weekday get def
+        __cur-wd __last-wd 1 add 7 mod ne { /__sweep-ok false def } if
+        /__last-wd __cur-wd def
+    } if
+} for
+__sweep-ok                                              (s20a: leap-year day sweep invariants)  rt-ok
+
+% Sanity: the 366th day-of-year (2024-12-31) is day 366.
+2024 12 31 make-date day-of-year 366 eq                 (s20a: 2024 has 366 days)               rt-ok
+% Non-leap year sanity.
+2025 12 31 make-date day-of-year 365 eq                 (s20a: 2025 has 365 days)               rt-ok
+
+% --- 20b. :D round-trip sweep, sampled from 1970..2099 every 100 days ---
+% Format every sampled udate with :D %Y-%m-%d, parse back, verify identity.
+/__cursor 1970 1 1 make-date def
+/__rt-fail 0 def
+0 1 474 {
+    pop
+    save
+    256 string ({0:D%Y-%m-%d}) mark __cursor sprint-fmt pop /__s exch def
+    __s ({0:D%Y-%m-%d}) mark 0u sscan-fmt
+    1 ne { /__rt-fail __rt-fail 1 add def } if
+    __cursor ne { /__rt-fail __rt-fail 1 add def } if
+    restore
+    /__cursor __cursor 100 date-add-days def
+} for
+__rt-fail 0 eq                                          (s20b: :D round-trip sweep clean)       rt-ok
+
+% --- 20c. date-add-months walk from 2000-01-15, 0..599 months ---
+% Verifies the result's year/month matches arithmetic and day stays 15.
+/__add-ok true def
+0 1 599 {
+    /__n exch def
+    /__r 2000 1 15 make-date __n date-add-months def
+    __r date-day 15 ne { /__add-ok false def } if
+    __r date-month __n 12 mod 1 add ne { /__add-ok false def } if
+    __r date-year 2000 __n 12 div add ne { /__add-ok false def } if
+} for
+__add-ok                                                (s20c: date-add-months walk invariants) rt-ok
+
+% --- 20d. date-diff-days symmetry across a fixed pair list ---
+% diff(a,b) + diff(b,a) must be 0 for every pair.
+/__pairs [
+    [1970 1 1   2026 4 30]
+    [2024 2 28  2024 3 1 ]
+    [2024 2 29  2025 2 28]
+    [2000 1 1   2099 12 31]
+    [2026 4 30  2026 4 30]
+    [1999 12 31 2000 1 1 ]
+    [2026 1 31  2026 2 28]
+    [2024 12 31 2025 1 1 ]
+    [2026 6 23  1815 12 10]
+    [2100 1 1   1970 1 1 ]
+] def
+/__sym-ok true def
+__pairs {
+    /__p exch def
+    /__a __p 0 get __p 1 get __p 2 get make-date def
+    /__b __p 3 get __p 4 get __p 5 get make-date def
+    __a __b date-diff-days __b __a date-diff-days add 0 ne { /__sym-ok false def } if
+} for-all
+__sym-ok                                                (s20d: date-diff-days symmetry)         rt-ok
+
+% --- 20e. Feb 29 clamp under date-add-years across a 12-year horizon ---
+% Adding 1..12 years to 2024-02-29: result should be Feb 29 in leap years
+% (2028, 2032, 2036) and Feb 28 in non-leap years.
+/__leap-day 2024 2 29 make-date def
+/__clamp-ok true def
+1 1 12 {
+    /__yrs exch def
+    /__r __leap-day __yrs date-add-years def
+    __r date-month 2 ne { /__clamp-ok false def } if
+    2024 __yrs add leap-year?
+        { __r date-day 29 ne { /__clamp-ok false def } if }
+        { __r date-day 28 ne { /__clamp-ok false def } if }
+    if-else
+} for
+__clamp-ok                                              (s20e: Feb 29 add-years clamp)          rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_chrono: ALL TESTS PASSED) =
+(__test_ok__) =

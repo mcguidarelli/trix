@@ -1,0 +1,195 @@
+% test_collection_ergonomics.trx -- get-default, map-indexed, update
+% Tests: happy path, error handling, boundary, stress
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: get-default — happy path
+% ====================================================================
+
+% Key found: return value, discard default
+<< /x 42 >> /x 0 get-default 42 eq         (get-default: found returns value) rt-ok clear
+
+% Key not found: return default
+<< /x 42 >> /y 0 get-default 0 eq           (get-default: missing returns default) rt-ok clear
+
+% Empty dict: return default
+<< >> /x 99 get-default 99 eq               (get-default: empty dict returns default) rt-ok clear
+
+% String value
+<< /msg (hello) >> /msg (fallback) get-default (hello) eq  (get-default: string value) rt-ok clear
+
+% String default used
+<< /msg (hello) >> /other (fallback) get-default (fallback) eq  (get-default: string default) rt-ok clear
+
+% Boolean value
+<< /flag true >> /flag false get-default true eq  (get-default: boolean found) rt-ok clear
+
+% Default is different type than stored value
+<< /x 42 >> /x (wrong) get-default 42 eq    (get-default: found ignores default type) rt-ok clear
+
+% ExtValue types: long value
+<< /big 999999999l >> /big 0l get-default 999999999l eq  (get-default: long value) rt-ok clear
+
+% ExtValue types: double default
+<< /x 1 >> /missing 3.14d get-default 3.14d eq  (get-default: double default) rt-ok clear
+
+% Read-only dict works (no mutation)
+<< /a 1 /b 2 >>#r /a 0 get-default 1 eq    (get-default: readonly dict) rt-ok clear
+
+% Multiple lookups same dict
+/d << /x 10 /y 20 >> def
+d /x 0 get-default 10 eq                    (get-default: multi lookup x) rt-ok clear
+d /y 0 get-default 20 eq                    (get-default: multi lookup y) rt-ok clear
+d /z 0 get-default 0 eq                     (get-default: multi lookup z missing) rt-ok clear
+clear
+
+% ====================================================================
+% SECTION 2: get-default — error handling
+% ====================================================================
+
+% Type error: non-dict
+{ [1 2 3] /x 0 get-default } try /type-check eq  (get-default: non-dict type-check) rt-ok clear
+
+% Type error: null key (not a valid key type)
+{ << /x 1 >> null 0 get-default } try /type-check eq  (get-default: null key type-check) rt-ok clear
+
+% Underflow
+{ get-default } try /opstack-underflow eq    (get-default: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 3: map-indexed — happy path
+% ====================================================================
+
+% Basic: elem + index
+[10 20 30] { add } map-indexed
+dup 0 get 10 eq                              (map-indexed: elem 0 + idx 0 = 10) rt-ok
+dup 1 get 21 eq                              (map-indexed: elem 1 + idx 1 = 21) rt-ok
+dup 2 get 32 eq                              (map-indexed: elem 2 + idx 2 = 32) rt-ok
+pop clear
+
+% Index only (ignore element)
+[99 99 99] { exch pop } map-indexed
+dup 0 get 0 eq                               (map-indexed: index-only 0) rt-ok
+dup 1 get 1 eq                               (map-indexed: index-only 1) rt-ok
+dup 2 get 2 eq                               (map-indexed: index-only 2) rt-ok
+pop clear
+
+% Element only (ignore index)
+[10 20 30] { pop 2 mul } map-indexed
+dup 0 get 20 eq                              (map-indexed: elem-only 20) rt-ok
+dup 1 get 40 eq                              (map-indexed: elem-only 40) rt-ok
+dup 2 get 60 eq                              (map-indexed: elem-only 60) rt-ok
+pop clear
+
+% Empty array
+[] { add } map-indexed length 0 eq           (map-indexed: empty array) rt-ok clear
+
+% Single element
+[42] { add } map-indexed 0 get 42 eq         (map-indexed: single element) rt-ok clear
+
+% Result is always an array (not packed)
+{ 10 20 30 } { add } map-indexed type /array-type eq  (map-indexed: result is array) rt-ok clear
+
+% ====================================================================
+% SECTION 4: map-indexed — error handling
+% ====================================================================
+
+{ 42 { add } map-indexed } try /type-check eq  (map-indexed: non-array type-check) rt-ok clear
+{ [1 2] 42 map-indexed } try /type-check eq    (map-indexed: non-proc type-check) rt-ok clear
+{ map-indexed } try /opstack-underflow eq       (map-indexed: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 5: update — happy path
+% ====================================================================
+
+% Basic increment
+1 dict dup /x 10 put
+dup /x { 1 add } update
+/x get 11 eq                                 (update: basic increment) rt-ok clear
+
+% Complex proc
+1 dict dup /x 5 put
+dup /x { 2 mul 1 add } update
+/x get 11 eq                                 (update: complex proc) rt-ok clear
+
+% Multiple updates to same key
+1 dict dup /x 0 put
+dup /x { 1 add } update
+dup /x { 1 add } update
+dup /x { 1 add } update
+/x get 3 eq                                  (update: triple increment) rt-ok clear
+
+% Update with string value
+1 dict dup /msg (hello) put
+dup /msg { ( world) concat } update
+/msg get (hello world) eq                    (update: string concat) rt-ok clear
+
+% Update does not push result to stack (only dict remains)
+mark
+1 dict dup /x 42 put
+dup /x { 1 add } update
+count-to-mark 1 eq                           (update: no result on stack) rt-ok
+clear-to-mark clear
+
+% ====================================================================
+% SECTION 6: update — error handling
+% ====================================================================
+
+% Key not found -> undefined
+{ 1 dict /missing { 1 add } update } try /undefined eq  (update: missing key) rt-ok clear
+
+% Read-only dict
+{ << /x 1 >>#r /x { 1 add } update } try /read-only eq    (update: readonly dict) rt-ok clear
+
+% Non-proc
+{ 1 dict dup /x 1 put /x 42 update } try /type-check eq  (update: non-proc type-check) rt-ok clear
+
+% Underflow
+{ update } try /opstack-underflow eq         (update: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 7: update — save/restore
+% ====================================================================
+
+1 dict dup /x 10 put
+/d exch def
+/sv save def
+  d /x { 5 add } update
+  d /x get 15 eq                             (update: inside save = 15) rt-ok clear
+sv restore
+d /x get 10 eq                               (update: restored to 10) rt-ok clear
+
+% ====================================================================
+% SECTION 8: stress tests
+% ====================================================================
+
+% map-indexed on 1000-element array
+1000 range { add } map-indexed
+dup 0 get 0 eq                               (stress: map-indexed first = 0+0) rt-ok
+dup 999 get 1998 eq                          (stress: map-indexed last = 999+999) rt-ok
+length 1000 eq                               (stress: map-indexed length) rt-ok
+clear
+
+% 100 sequential updates
+1 dict dup /n 0 put
+/d exch def
+0 1 99 { pop d /n { 1 add } update } for
+d /n get 100 eq                              (stress: 100 updates) rt-ok clear
+
+% get-default on large dict
+100 dict
+/d exch def
+0 1 99 { /i exch def d i i 10 mul put } for
+d 50 0 get-default 500 eq                    (stress: get-default found in large dict) rt-ok clear
+d 999 0 get-default 0 eq                     (stress: get-default missing in large dict) rt-ok clear
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

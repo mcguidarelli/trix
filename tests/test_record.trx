@@ -1,0 +1,1280 @@
+% ====================================================================
+% Record Type Tests
+% ====================================================================
+% Tests for the Record immutable named-field composite type.
+% Records are always Literal, always ReadOnly, use HasObjectLength.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Basic creation and type
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+3 4 point type /record-type eq
+    (record-type: type is record-type) rt-ok clear
+
+3 4 point is-record
+    (record-type: is-record true) rt-ok clear
+
+% is-record false for every non-record type
+42 is-record not                         (is-record: false for integer) rt-ok clear
+42u is-record not                        (is-record: false for uinteger) rt-ok clear
+42l is-record not                        (is-record: false for long) rt-ok clear
+42ul is-record not                       (is-record: false for ulong) rt-ok clear
+65b is-record not                        (is-record: false for byte) rt-ok clear
+3.14 is-record not                       (is-record: false for real) rt-ok clear
+3.14d is-record not                      (is-record: false for double) rt-ok clear
+0a is-record not                         (is-record: false for address) rt-ok clear
+true is-record not                       (is-record: false for boolean) rt-ok clear
+null is-record not                       (is-record: false for null) rt-ok clear
+(hello) is-record not                    (is-record: false for string) rt-ok clear
+/foo is-record not                       (is-record: false for name) rt-ok clear
+mark count-to-mark pop is-record not     (is-record: false for mark) rt-ok clear
+[1 2 3] is-record not                    (is-record: false for array) rt-ok clear
+{ 1 add } is-record not                  (is-record: false for packed) rt-ok clear
+<< /a 1 >> is-record not                 (is-record: false for dict) rt-ok clear
+{{ /a /b }} is-record not                (is-record: false for set) rt-ok clear
+5 //add curry is-record not              (is-record: false for curry) rt-ok clear
+42 /some tag is-record not               (is-record: false for tagged) rt-ok clear
+save dup is-record not exch restore      (is-record: false for save) rt-ok clear
+
+% record is always literal
+3 4 point executable? not
+    (record: always literal) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Field access with get
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+3 4 point /x get 3 eq             (get: x field) rt-ok clear
+3 4 point /y get 4 eq             (get: y field) rt-ok clear
+
+% get with various value types
+42l 3.14d [ /a /b ] record /a get 42l eq
+    (get: long value) rt-ok clear
+
+(hello) true [ /msg /flag ] record
+dup /msg get (hello) eq           (get: string value) rt-ok
+/flag get true eq                 (get: boolean value) rt-ok clear
+
+% get error on missing field
+{ 3 4 point /z get } try /undefined eq
+    (get: missing field error) rt-ok clear
+
+% ====================================================================
+% SECTION 3: length
+% ====================================================================
+
+/point [ /x /y ] record-type def
+3 4 point length 2 eq             (length: 2 fields) rt-ok clear
+
+[ /a /b /c /d /e ] record-type /five exch def
+1 2 3 4 5 five length 5 eq        (length: 5 fields) rt-ok clear
+
+[ ] record-type /empty exch def
+empty length 0 eq                 (length: 0 fields) rt-ok clear
+
+% ====================================================================
+% SECTION 4: record-fields (destructure)
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% basic round-trip
+3 4 point record-fields
+4 eq (record-fields: y value) rt-ok
+3 eq (record-fields: x value) rt-ok clear
+
+% 3-field round-trip
+[ /r /g /b ] record-type /color exch def
+10 20 30 color record-fields
+30 eq (record-fields: b) rt-ok
+20 eq (record-fields: g) rt-ok
+10 eq (record-fields: r) rt-ok clear
+
+% empty record round-trip
+[ ] record-type /empty exch def
+empty record-fields count 0 eq
+    (record-fields: empty pushes nothing) rt-ok clear
+
+% construct-destructure round-trip identity
+/point2 [ /x /y ] record-type def
+7 8 point2 record-fields point2
+dup /x get 7 eq               (record-fields: round-trip x) rt-ok
+/y get 8 eq                   (record-fields: round-trip y) rt-ok clear
+
+% ====================================================================
+% SECTION 5: record-schema
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+3 4 point record-schema
+dup length 2 eq               (record-schema: length) rt-ok
+dup 0 get /x eq               (record-schema: name 0) rt-ok
+1 get /y eq                   (record-schema: name 1) rt-ok clear
+
+% schema is a copy (modifying it doesn't affect the record)
+3 4 point dup record-schema 0 /z put
+record-schema 0 get /x eq
+    (record-schema: copy not shared) rt-ok clear
+
+% ====================================================================
+% SECTION 6: record-update
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% basic update
+3 4 point /x 10 record-update
+dup /x get 10 eq              (record-update: new x) rt-ok
+/y get 4 eq                   (record-update: y unchanged) rt-ok clear
+
+% original is unchanged after update
+3 4 point /orig exch def
+orig /x 99 record-update pop
+orig /x get 3 eq
+    (record-update: original unchanged) rt-ok clear
+
+% update y field
+3 4 point /y 99 record-update /y get 99 eq
+    (record-update: update y) rt-ok clear
+
+% chained updates
+1 2 point /x 10 record-update /y 20 record-update
+dup /x get 10 eq              (record-update: chain x) rt-ok
+/y get 20 eq                  (record-update: chain y) rt-ok clear
+
+% error on missing field
+{ 3 4 point /z 10 record-update } try /undefined eq
+    (record-update: missing field error) rt-ok clear
+
+% ====================================================================
+% SECTION 7: record
+% ====================================================================
+
+100 200 [ /width /height ] record
+dup is-record                 (record: is-record) rt-ok
+dup /width get 100 eq         (record: width) rt-ok
+/height get 200 eq            (record: height) rt-ok clear
+
+% empty record
+[ ] record
+dup is-record                 (record: empty is-record) rt-ok
+length 0 eq                   (record: empty length) rt-ok clear
+
+% ====================================================================
+% SECTION 8: for-all
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% for-all pushes name value pairs in field order
+% W07: body must consume both iter values; collect them into an array
+% via locals + append store, then verify the resulting order.
+/collected [] def
+3 4 point { |fname fval|#2
+    collected fname append /collected exch store
+    collected fval append /collected exch store
+} for-all
+collected length 4 eq (for-all: 4 items appended) rt-ok
+collected 0 get /x eq (for-all: name 0) rt-ok
+collected 1 get 3 eq (for-all: value 0) rt-ok
+collected 2 get /y eq (for-all: name 1) rt-ok
+collected 3 get 4 eq (for-all: value 1) rt-ok clear
+
+% for-all sum values
+0 3 4 point { exch pop add } for-all
+7 eq (for-all: sum values) rt-ok clear
+
+% for-all count iterations on 3-field record
+0 10 20 30 [ /a /b /c ] record { pop pop 1 add } for-all
+3 eq (for-all: count 3 iterations) rt-ok clear
+
+% for-all on empty record
+0 [ ] record { pop pop 1 add } for-all
+0 eq (for-all: empty no iterations) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Equality
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% eq: same object
+3 4 point dup eq
+    (eq: same object identity) rt-ok clear
+
+% eq: different objects with same values
+3 4 point 3 4 point eq not
+    (eq: different objects) rt-ok clear
+
+% deep-eq: same schema same values
+3 4 point 3 4 point deep-eq
+    (deep-eq: same values) rt-ok clear
+
+% deep-eq: different values
+3 4 point 3 5 point deep-eq not
+    (deep-eq: different values) rt-ok clear
+
+% deep-eq: different schema same values
+3 4 point
+3 4 [ /a /b ] record
+deep-eq not
+    (deep-eq: different schema) rt-ok clear
+
+% deep-eq: nested records
+3 4 point 10 20 point [ /first /second ] record
+3 4 point 10 20 point [ /first /second ] record
+deep-eq
+    (deep-eq: nested records) rt-ok clear
+
+% deep-eq: nested records different inner
+3 4 point 10 20 point [ /first /second ] record
+3 4 point 10 21 point [ /first /second ] record
+deep-eq not
+    (deep-eq: nested different) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Integration with Tagged
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% wrap record in tagged
+3 4 point /:circle tag
+dup is-tagged                 (tagged-record: is-tagged) rt-ok
+dup tag-name /:circle eq      (tagged-record: tag-name) rt-ok
+tag-value is-record           (tagged-record: payload is-record) rt-ok clear
+
+% untag and access field
+3 4 point /:shape tag
+untag pop /x get 3 eq
+    (tagged-record: untag get) rt-ok clear
+
+% tag-value access
+3 4 point /:shape tag
+tag-value /y get 4 eq
+    (tagged-record: tag-value get) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Integration with Curry
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% curry the constructor with one argument
+% curry pushes its value, then executes the callable
+% so "10 //point curry" pushes 10 (becomes y) after the caller's x
+/make-y10-point 10 //point curry def
+20 make-y10-point
+dup is-record                 (curry: is-record) rt-ok
+dup /x get 20 eq              (curry: x from caller) rt-ok
+/y get 10 eq                  (curry: y from curry) rt-ok clear
+
+% ====================================================================
+% SECTION 12: Packed round-trip
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% single record in packed array
+3 4 point 1 packed
+0 get dup is-record           (packed: is-record) rt-ok
+dup /x get 3 eq               (packed: x value) rt-ok
+/y get 4 eq                   (packed: y value) rt-ok clear
+
+% multiple records in packed
+1 2 point 3 4 point 5 6 point 3 packed
+dup 0 get /x get 1 eq              (packed: elem 0 x) rt-ok clear
+1 2 point 3 4 point 5 6 point 3 packed
+dup 1 get /y get 4 eq              (packed: elem 1 y) rt-ok clear
+1 2 point 3 4 point 5 6 point 3 packed
+2 get /x get 5 eq                  (packed: elem 2 x) rt-ok clear
+
+% record in bound procedure
+{ 3 4 point } bind exec
+dup is-record                 (packed-bind: is-record) rt-ok
+/x get 3 eq                   (packed-bind: get x) rt-ok clear
+
+% deep-eq preserved through pack round-trip
+3 4 point /orig exch def
+orig 1 packed 0 get orig deep-eq
+    (packed: deep-eq round-trip) rt-ok clear
+
+% empty record pack round-trip
+[ ] record-type /empty exch def
+empty 1 packed 0 get
+dup is-record                 (packed: empty is-record) rt-ok
+length 0 eq                   (packed: empty length) rt-ok clear
+
+% record + other types in same packed
+42 3 4 point (hello) 3 packed
+dup 0 get 42 eq               (packed-mixed: int) rt-ok clear
+42 3 4 point (hello) 3 packed
+dup 1 get is-record           (packed-mixed: record) rt-ok clear
+42 3 4 point (hello) 3 packed
+2 get (hello) eq              (packed-mixed: string) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Error paths
+% ====================================================================
+
+% record-type with non-name element
+{ [ 42 ] record-type } try /type-check eq
+    (error: non-name element) rt-ok clear
+
+% record-type with mixed names and non-names
+{ [ /a 42 /b ] record-type } try /type-check eq
+    (error: mixed name/non-name) rt-ok clear
+
+% record-type with duplicate names
+{ [ /x /y /x ] record-type } try /range-check eq
+    (error: duplicate names) rt-ok clear
+
+% constructor with too few args
+/point [ /x /y ] record-type def
+{ 1 point } try /opstack-underflow eq
+    (error: too few constructor args) rt-ok clear
+
+% record with non-array
+{ 42 record } try /type-check eq
+    (error: record non-array) rt-ok clear
+
+% record with too few values
+{ 1 [ /a /b ] record } try /opstack-underflow eq
+    (error: record too few values) rt-ok clear
+
+% record-update on non-record
+{ 42 /x 10 record-update } try /type-check eq
+    (error: record-update non-record) rt-ok clear
+
+% record-schema on non-record
+{ 42 record-schema } try /type-check eq
+    (error: record-schema non-record) rt-ok clear
+
+% record-fields on non-record
+{ 42 record-fields } try /type-check eq
+    (error: record-fields non-record) rt-ok clear
+
+% get with integer key on record
+{ 3 4 point 0 get } try /type-check eq
+    (error: get integer key on record) rt-ok clear
+
+% make-executable on record
+{ 3 4 point make-executable } try /type-check eq
+    (error: make-executable on record) rt-ok clear
+
+% ====================================================================
+% SECTION 14: Stress tests
+% ====================================================================
+
+% many records created and accessed
+/point [ /x /y ] record-type def
+/sum 0 def
+1 1 100 { dup dup point /x get /sum exch sum add def } for
+sum 5050 eq
+    (stress: 100 records sum) rt-ok clear
+
+% nested record update chain
+/point2 [ /x /y ] record-type def
+1 2 point2
+1 1 100 { pop dup /x get 1 add /x exch record-update } for
+/x get 101 eq
+    (stress: 100 chained updates) rt-ok clear
+
+% for-all sum on 10-field record
+0 1 2 3 4 5 6 7 8 9 [ /a /b /c /d /e /f /g /h /i /j ] record
+0 exch { exch pop add } for-all
+45 eq
+    (stress: for-all 10 fields sum) rt-ok clear
+
+% rapid pack/unpack cycle
+/point3 [ /x /y ] record-type def
+1 2 point3 /r exch def
+r 1 packed 0 get 1 packed 0 get 1 packed 0 get
+dup is-record                 (stress: triple pack is-record) rt-ok
+r deep-eq                     (stress: triple pack deep-eq) rt-ok clear
+
+% ====================================================================
+% SECTION 15: Boundary tests
+% ====================================================================
+
+% single-field record
+[ /val ] record-type /single exch def
+42 single
+dup /val get 42 eq            (boundary: 1-field get) rt-ok
+dup record-fields 42 eq       (boundary: 1-field destructure) rt-ok
+dup length 1 eq               (boundary: 1-field length) rt-ok
+/val 99 record-update /val get 99 eq
+    (boundary: 1-field update) rt-ok clear
+
+% empty record equality
+[ ] record-type /empty exch def
+empty dup deep-eq             (boundary: empty self deep-eq) rt-ok clear
+empty empty deep-eq           (boundary: two empty deep-eq) rt-ok clear
+
+% empty record schema
+empty record-schema length 0 eq
+    (boundary: empty schema length) rt-ok clear
+
+% record with null and false values
+null false [ /n /b ] record
+dup /n get null eq            (boundary: null field) rt-ok
+/b get false eq               (boundary: false field) rt-ok clear
+
+% record with ExtValue types (long, ulong, double, address)
+42l 99ul 3.14d 100a [ /l /ul /d /a ] record
+dup /l get 42l eq             (boundary: long field) rt-ok
+dup /ul get 99ul eq           (boundary: ulong field) rt-ok
+dup /d get 3.14d eq           (boundary: double field) rt-ok
+/a get 100a eq                (boundary: address field) rt-ok clear
+
+% record as field value (nested)
+3 4 point /inner exch def
+inner (outer) [ /pt /label ] record
+dup /pt get /x get 3 eq       (boundary: record-in-record get) rt-ok
+/label get (outer) eq         (boundary: nested label) rt-ok clear
+
+% ====================================================================
+% SECTION 16: Fuzz / Mixed type values
+% ====================================================================
+
+% record with all basic types as field values
+null
+65b
+-1
+42u
+-1l
+42ul
+0a
+3.14
+2.718d
+true
+//add
+[ /n /byte /int /uint /lng /ulng /addr /r /dbl /bool /op ] record
+dup /n get null eq                (fuzz: null field) rt-ok
+dup /byte get 65b eq              (fuzz: byte field) rt-ok
+dup /int get -1 eq                (fuzz: int field) rt-ok
+dup /uint get 42u eq              (fuzz: uint field) rt-ok
+dup /lng get -1l eq               (fuzz: long field) rt-ok
+dup /ulng get 42ul eq             (fuzz: ulong field) rt-ok
+dup /addr get 0a eq               (fuzz: address field) rt-ok
+dup /r get 3.14 eq                (fuzz: real field) rt-ok
+dup /dbl get 2.718d eq            (fuzz: double field) rt-ok
+dup /bool get true eq             (fuzz: bool field) rt-ok
+/op get type /operator-type eq    (fuzz: operator field) rt-ok clear
+
+% record containing composite types
+[1 2 3]
+(hello)
+<< /k 1 >>
+{{ /a /b }}
+42 /some tag
+10 //add curry
+[ /arr /str /dict /set /tgd /cur ] record
+dup /arr get length 3 eq          (fuzz: array field len) rt-ok
+dup /str get (hello) eq           (fuzz: string field) rt-ok
+dup /dict get /k get 1 eq         (fuzz: dict field get) rt-ok
+dup /set get /a set-member?           (fuzz: set field member) rt-ok
+dup /tgd get tag-name /some eq    (fuzz: tagged field name) rt-ok
+/cur get 5 exch exec 15 eq        (fuzz: curry field exec) rt-ok clear
+
+% record update preserves unrelated ExtValue fields
+42l 3.14d [ /a /b ] record
+/a 99l record-update
+dup /a get 99l eq                 (fuzz: update long field) rt-ok
+/b get 3.14d eq                   (fuzz: update preserves double) rt-ok clear
+
+% deep-eq with ExtValue fields
+42l 3.14d [ /a /b ] record
+42l 3.14d [ /a /b ] record
+deep-eq                           (fuzz: deep-eq extvalue) rt-ok clear
+
+% record in array
+/point4 [ /x /y ] record-type def
+3 4 point4 /r exch def
+[ r r r ]
+1 get /x get 3 eq                 (fuzz: record in array) rt-ok clear
+
+% ====================================================================
+% SECTION 17: Gap coverage — stress
+% ====================================================================
+
+% stress: many distinct schemas created
+/schema-count 0 def
+1 1 50 {
+    /i exch def
+    [ /a /b ] record-type pop
+    /schema-count schema-count 1 add def
+} for
+schema-count 50 eq
+    (stress: 50 distinct schemas) rt-ok clear
+
+% stress: repeated get access
+/point [ /x /y ] record-type def
+3 4 point /p exch def
+/sum 0 def
+1 1 200 { pop /sum p /x get sum add def } for
+sum 600 eq
+    (stress: 200 get accesses) rt-ok clear
+
+% stress: for-all on 20-field record
+0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19
+[ /a /b /c /d /e /f /g /h /i /j /k /l /m /n /o /p /q /r /s /t ] record
+0 exch { exch pop add } for-all
+190 eq
+    (stress: for-all 20 fields) rt-ok clear
+
+% stress: many record calls
+/sum2 0 def
+1 1 100 { dup dup [ /v ] record /v get /sum2 exch sum2 add def } for
+sum2 5050 eq
+    (stress: 100 record calls) rt-ok clear
+
+% ====================================================================
+% SECTION 18: Gap coverage — sad paths
+% ====================================================================
+
+% record-fields on non-record types
+{ 42 record-fields } try /type-check eq
+    (sad: record-fields on integer) rt-ok clear
+{ (hello) record-fields } try /type-check eq
+    (sad: record-fields on string) rt-ok clear
+{ [1 2] record-fields } try /type-check eq
+    (sad: record-fields on array) rt-ok clear
+
+% record-update with non-name field key
+/point [ /x /y ] record-type def
+{ 3 4 point 0 10 record-update } try /type-check eq
+    (sad: record-update integer key) rt-ok clear
+
+% record-update with non-record target
+{ 42 /x 10 record-update } try /type-check eq
+    (sad: record-update on integer) rt-ok clear
+{ [1 2] /x 10 record-update } try /type-check eq
+    (sad: record-update on array) rt-ok clear
+
+% get on record with boolean key
+{ 3 4 point true get } try /type-check eq
+    (sad: get boolean key on record) rt-ok clear
+
+% constructor extra args left on stack (not an error — extras remain)
+/point2 [ /x /y ] record-type def
+99 3 4 point2
+is-record (sad: extra arg leaves record on top) rt-ok
+99 eq (sad: extra arg remains below) rt-ok clear
+
+% record with zero values for non-empty schema
+{ [ /a /b /c ] record } try /opstack-underflow eq
+    (sad: record zero values) rt-ok clear
+
+% ====================================================================
+% SECTION 19: Gap coverage — fuzz
+% ====================================================================
+
+% record-update replaces field with record value
+/point [ /x /y ] record-type def
+10 20 point /inner exch def
+3 4 point /x inner record-update
+dup /x get is-record          (fuzz: update field to record) rt-ok
+/x get /x get 10 eq           (fuzz: nested record after update) rt-ok clear
+
+% record-update replaces field with tagged value
+3 4 point /x 42 /some tag record-update
+/x get is-tagged              (fuzz: update field to tagged) rt-ok clear
+
+% record-update replaces field with null
+3 4 point /x null record-update
+/x get null eq                (fuzz: update field to null) rt-ok clear
+
+% record-update replaces field with string
+3 4 point /y (hello) record-update
+dup /x get 3 eq               (fuzz: update preserves other field) rt-ok
+/y get (hello) eq             (fuzz: update field to string) rt-ok clear
+
+% deep-eq with mixed ExtValue and non-ExtValue fields
+42 42l 3.14d (hello) [ /i /l /d /s ] record
+42 42l 3.14d (hello) [ /i /l /d /s ] record
+deep-eq                       (fuzz: deep-eq mixed types) rt-ok clear
+
+% deep-eq fails on type difference in field
+42 42l [ /a /b ] record
+42 42 [ /a /b ] record
+deep-eq not                   (fuzz: deep-eq type mismatch in field) rt-ok clear
+
+% for-all with side effects (def inside loop)
+3 4 point { def } for-all
+x 3 eq                        (fuzz: for-all def x) rt-ok
+y 4 eq                        (fuzz: for-all def y) rt-ok clear
+
+% packed record with ExtValue fields
+42l 3.14d [ /a /b ] record 1 packed 0 get
+dup /a get 42l eq             (fuzz: packed extvalue long) rt-ok
+/b get 3.14d eq               (fuzz: packed extvalue double) rt-ok clear
+
+% packed record followed by record in packed
+/point3 [ /x /y ] record-type def
+1 2 point3 3 4 point3 true 3 packed
+dup 0 get /x get 1 eq         (fuzz: packed rec+rec elem 0) rt-ok clear
+1 2 point3 3 4 point3 true 3 packed
+dup 1 get /y get 4 eq         (fuzz: packed rec+rec elem 1) rt-ok clear
+1 2 point3 3 4 point3 true 3 packed
+2 get true eq                 (fuzz: packed rec+rec elem 2) rt-ok clear
+
+% ====================================================================
+% SECTION 20: record-map-field
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% happy
+3 4 point /x { 2 mul } record-map-field
+dup /x get 6 eq               (map-field: x doubled) rt-ok
+/y get 4 eq                   (map-field: y unchanged) rt-ok clear
+
+3 4 point /y { 10 add } record-map-field
+/y get 14 eq                  (map-field: last field) rt-ok clear
+
+3 4 point /x { 100 add } record-map-field
+/x get 103 eq                 (map-field: transform value) rt-ok clear
+
+3 4 point /x { } record-map-field
+/x get 3 eq                   (map-field: identity) rt-ok clear
+
+3 4 point /orig exch def
+orig /x { 99 add } record-map-field pop
+orig /x get 3 eq              (map-field: original unchanged) rt-ok clear
+
+% sad
+{ 42 /x { } record-map-field } try /type-check eq
+    (map-field: non-record error) rt-ok clear
+{ 3 4 point /z { } record-map-field } try /undefined eq
+    (map-field: missing field error) rt-ok clear
+
+% stress
+3 4 point
+1 1 100 { pop /x { 1 add } record-map-field } for
+/x get 103 eq                 (map-field: 100 chained) rt-ok clear
+
+% fuzz
+3 4 point /x { /long-type cast } record-map-field
+/x get 3l eq                  (map-field: ExtValue result) rt-ok clear
+
+1 2 point /inner exch def
+inner 99 [ /pt /v ] record /v { 1 add } record-map-field
+/pt get is-record             (map-field: nested record preserved) rt-ok clear
+
+% ====================================================================
+% SECTION 21: record-map
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% happy
+3 4 point { 10 mul } record-map
+dup /x get 30 eq              (map: x) rt-ok
+/y get 40 eq                  (map: y) rt-ok clear
+
+3 4 point { } record-map
+3 4 point deep-eq             (map: identity deep-eq) rt-ok clear
+
+3 4 point { 100 add } record-map
+dup /x get 103 eq             (map: add 100 x) rt-ok
+/y get 104 eq                 (map: add 100 y) rt-ok clear
+
+42 [ /val ] record { 2 mul } record-map
+/val get 84 eq                (map: 1-field) rt-ok clear
+
+% sad
+{ 42 { } record-map } try /type-check eq
+    (map: non-record error) rt-ok clear
+
+% stress
+3 4 point
+1 1 50 { pop { 1 add } record-map } for
+dup /x get 53 eq              (map: 50 chained x) rt-ok
+/y get 54 eq                  (map: 50 chained y) rt-ok clear
+
+% fuzz
+[ ] record { 999 } record-map
+length 0 eq                   (map: empty record) rt-ok clear
+
+3 4 point { /long-type cast } record-map
+dup /x get 3l eq              (map: ExtValue result x) rt-ok
+/y get 4l eq                  (map: ExtValue result y) rt-ok clear
+
+% ====================================================================
+% SECTION 22: record-merge
+% ====================================================================
+
+% happy: disjoint
+1 [ /a ] record 2 [ /b ] record record-merge
+dup /a get 1 eq               (merge: disjoint a) rt-ok
+dup /b get 2 eq               (merge: disjoint b) rt-ok
+length 2 eq                   (merge: disjoint length) rt-ok clear
+
+% happy: overlap — record2 wins
+1 2 [ /x /y ] record
+10 [ /x ] record record-merge
+dup /x get 10 eq              (merge: override x) rt-ok
+/y get 2 eq                   (merge: keep y) rt-ok clear
+
+% happy: full override
+1 [ /x ] record 10 [ /x ] record record-merge
+/x get 10 eq                  (merge: full override) rt-ok clear
+
+% happy: merge with empty
+1 [ /a ] record [ ] record record-merge
+/a get 1 eq                   (merge: r1 + empty) rt-ok clear
+
+[ ] record 1 [ /a ] record record-merge
+/a get 1 eq                   (merge: empty + r2) rt-ok clear
+
+[ ] record [ ] record record-merge
+length 0 eq                   (merge: empty + empty) rt-ok clear
+
+% happy: field order — r1 first, then new r2 fields
+1 2 [ /a /b ] record
+3 4 [ /b /c ] record record-merge
+record-schema
+dup 0 get /a eq               (merge: order a first) rt-ok
+dup 1 get /b eq               (merge: order b second) rt-ok
+2 get /c eq                   (merge: order c third) rt-ok clear
+
+% sad
+{ 42 [ ] record record-merge } try /type-check eq
+    (merge: non-record r1 error) rt-ok clear
+{ [ ] record 42 record-merge } try /type-check eq
+    (merge: non-record r2 error) rt-ok clear
+
+% stress
+1 2 3 4 5 [ /a /b /c /d /e ] record
+6 7 8 [ /c /d /f ] record record-merge
+dup length 6 eq               (merge: 5+3 overlap length) rt-ok
+dup /c get 6 eq               (merge: 5+3 override c) rt-ok
+/f get 8 eq                   (merge: 5+3 new f) rt-ok clear
+
+% fuzz
+42l 3.14d [ /l /d ] record
+99l [ /l ] record record-merge
+dup /l get 99l eq             (merge: ExtValue override) rt-ok
+/d get 3.14d eq               (merge: ExtValue preserved) rt-ok clear
+
+1 2 [ /a /b ] record
+3 4 [ /a /b ] record record-merge
+1 2 [ /a /b ] record
+3 4 [ /a /b ] record record-merge
+deep-eq                       (merge: deep-eq identical merges) rt-ok clear
+
+% ====================================================================
+% SECTION 23: record-select
+% ====================================================================
+
+% happy
+1 2 3 [ /a /b /c ] record [ /a /c ] record-select
+dup /a get 1 eq               (select: a) rt-ok
+dup /c get 3 eq               (select: c) rt-ok
+length 2 eq                   (select: length) rt-ok clear
+
+% all fields (identity)
+1 2 [ /x /y ] record [ /x /y ] record-select
+1 2 [ /x /y ] record deep-eq
+    (select: all fields deep-eq) rt-ok clear
+
+% single field
+1 2 3 [ /a /b /c ] record [ /b ] record-select
+dup /b get 2 eq               (select: single field) rt-ok
+length 1 eq                   (select: single length) rt-ok clear
+
+% reorder
+1 2 [ /x /y ] record [ /y /x ] record-select
+record-schema dup 0 get /y eq exch 1 get /x eq and
+    (select: reorder) rt-ok clear
+
+% empty selector
+1 2 [ /a /b ] record [ ] record-select
+length 0 eq                   (select: empty selector) rt-ok clear
+
+% sad
+{ 1 2 [ /a /b ] record [ /z ] record-select } try /undefined eq
+    (select: missing field error) rt-ok clear
+{ 42 [ /a ] record-select } try /type-check eq
+    (select: non-record error) rt-ok clear
+{ 1 2 [ /a /b ] record [ /a /a ] record-select } try /range-check eq
+    (select: duplicate selector error) rt-ok clear
+
+% fuzz
+42l 3.14d (hello) [ /l /d /s ] record [ /d /l ] record-select
+dup /d get 3.14d eq           (select: ExtValue double) rt-ok
+/l get 42l eq                 (select: ExtValue long) rt-ok clear
+
+% ====================================================================
+% SECTION 24: record-to-dict
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% happy
+3 4 point record-to-dict
+dup /x get 3 eq               (to-dict: x) rt-ok
+dup /y get 4 eq               (to-dict: y) rt-ok
+length 2 eq                   (to-dict: length) rt-ok clear
+
+% empty
+[ ] record record-to-dict
+length 0 eq                   (to-dict: empty) rt-ok clear
+
+% sad
+{ 42 record-to-dict } try /type-check eq
+    (to-dict: non-record error) rt-ok clear
+
+% fuzz: round-trip
+3 4 point /orig exch def
+orig record-to-dict [ /x /y ] record-from-dict
+orig deep-eq                  (to-dict: round-trip deep-eq) rt-ok clear
+
+42l 3.14d [ /l /d ] record record-to-dict
+dup /l get 42l eq             (to-dict: ExtValue long) rt-ok
+/d get 3.14d eq               (to-dict: ExtValue double) rt-ok clear
+
+% ====================================================================
+% SECTION 25: record-from-dict
+% ====================================================================
+
+% happy
+<< /x 3 /y 4 >> [ /x /y ] record-from-dict
+dup /x get 3 eq               (from-dict: x) rt-ok
+/y get 4 eq                   (from-dict: y) rt-ok clear
+
+% extras ignored
+<< /x 3 /y 4 /z 5 >> [ /x ] record-from-dict
+dup /x get 3 eq               (from-dict: extras ignored) rt-ok
+length 1 eq                   (from-dict: length 1) rt-ok clear
+
+% field order from name_array
+<< /b 2 /a 1 >> [ /a /b ] record-from-dict
+record-schema 0 get /a eq     (from-dict: field order) rt-ok clear
+
+% sad
+{ << /x 3 >> [ /y ] record-from-dict } try /undefined eq
+    (from-dict: missing key error) rt-ok clear
+{ 42 [ /a ] record-from-dict } try /type-check eq
+    (from-dict: non-dict error) rt-ok clear
+
+% fuzz: round-trip
+<< /a 42l /b 3.14d >> /d exch def
+d [ /a /b ] record-from-dict record-to-dict
+dup /a get 42l eq             (from-dict: rt long) rt-ok
+/b get 3.14d eq               (from-dict: rt double) rt-ok clear
+
+% ====================================================================
+% SECTION 26: record-zip
+% ====================================================================
+
+% happy
+[ [ (Alice) (Bob) ] [ 30 25 ] ] [ /name /age ] record-zip
+dup length 2 eq               (zip: length) rt-ok
+dup 0 get /name get (Alice) eq (zip: r0 name) rt-ok
+dup 0 get /age get 30 eq      (zip: r0 age) rt-ok
+dup 1 get /name get (Bob) eq  (zip: r1 name) rt-ok
+1 get /age get 25 eq          (zip: r1 age) rt-ok clear
+
+% single column
+[ [ 10 20 30 ] ] [ /val ] record-zip
+dup length 3 eq               (zip: single col length) rt-ok
+2 get /val get 30 eq          (zip: single col r2) rt-ok clear
+
+% single row
+[ [ 1 ] [ 2 ] ] [ /a /b ] record-zip
+dup length 1 eq               (zip: single row length) rt-ok
+0 get dup /a get 1 eq exch /b get 2 eq and
+    (zip: single row values) rt-ok clear
+
+% empty
+[ [ ] [ ] ] [ /a /b ] record-zip
+length 0 eq                   (zip: empty result) rt-ok clear
+
+% sad
+{ [ [ 1 2 ] ] [ /a /b ] record-zip } try /range-check eq
+    (zip: col != name count error) rt-ok clear
+{ [ [ 1 2 ] [ 1 ] ] [ /a /b ] record-zip } try /range-check eq
+    (zip: unequal col lengths error) rt-ok clear
+
+% stress
+/cols [
+    [ 0 1 49 { } for ]
+    [ 0 1 49 { } for ]
+    [ 0 1 49 { } for ]
+] def
+/names [ /a /b /c ] def
+cols names record-zip
+dup length 50 eq              (zip: 3x50 length) rt-ok
+0 get length 3 eq             (zip: 3x50 r0 fields) rt-ok clear
+
+% ====================================================================
+% SECTION 27: record-group-by
+% ====================================================================
+
+/emp [ /name /dept ] record-type def
+/alice (Alice) /eng emp def
+/bob (Bob) /sales emp def
+/charlie (Charlie) /eng emp def
+
+% happy
+[ alice bob charlie ] /dept record-group-by
+dup /eng get length 2 eq      (group-by: eng count) rt-ok
+/sales get length 1 eq        (group-by: sales count) rt-ok clear
+
+% single group
+[ alice charlie ] /dept record-group-by
+dup /eng get length 2 eq      (group-by: single group) rt-ok
+length 1 eq                   (group-by: 1 group) rt-ok clear
+
+% each in own group
+[ alice bob ] /name record-group-by
+length 2 eq                   (group-by: each own group) rt-ok clear
+
+% empty
+[ ] /dept record-group-by
+length 0 eq                   (group-by: empty array) rt-ok clear
+
+% sad
+{ 42 /x record-group-by } try /type-check eq
+    (group-by: non-array error) rt-ok clear
+
+% stress
+/items [
+    0 1 99 {
+        dup 3 mod 0 eq { /a } { dup 3 mod 1 eq { /b } { /c } if-else } if-else
+        exch [ /grp /val ] record
+    } for
+] def
+items /grp record-group-by
+dup /a get length
+exch dup /b get length
+exch /c get length
+add add 100 eq                (group-by: 100 items sum) rt-ok clear
+
+% fuzz: grouped records retain fields
+[ alice bob charlie ] /dept record-group-by
+/eng get 0 get /name get (Alice) eq
+    (group-by: retained fields) rt-ok clear
+
+% sad: NaN/Inf/null in group-by field (fuzz-regression for NaN != NaN crash)
+/measured [ /temp /label ] record-type def
+{ [ 1.0 (a) measured nan (b) measured ] /temp record-group-by } try /numerical-nan eq
+    (record-group-by: NaN key) rt-ok clear
+{ [ 1.0 (a) measured inf (b) measured ] /temp record-group-by } try /numerical-inf eq
+    (record-group-by: Inf key) rt-ok clear
+{ [ 1.0 (a) measured null (b) measured ] /temp record-group-by } try /type-check eq
+    (record-group-by: null key) rt-ok clear
+
+% ====================================================================
+% SECTION 28: Pipeline integration
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% map-field + select chain
+1 2 3 [ /a /b /c ] record
+/a { 10 mul } record-map-field
+[ /a /c ] record-select
+dup /a get 10 eq              (pipeline: map-field+select a) rt-ok
+/c get 3 eq                   (pipeline: map-field+select c) rt-ok clear
+
+% merge + map chain
+1 2 [ /x /y ] record
+3 [ /z ] record record-merge
+{ 10 mul } record-map
+dup /x get 10 eq              (pipeline: merge+map x) rt-ok
+dup /y get 20 eq              (pipeline: merge+map y) rt-ok
+/z get 30 eq                  (pipeline: merge+map z) rt-ok clear
+
+% from-dict + select + to-dict
+<< /a 1 /b 2 /c 3 >> [ /a /b /c ] record-from-dict
+[ /a /c ] record-select
+record-to-dict
+dup /a get 1 eq               (pipeline: dict-select-dict a) rt-ok
+/c get 3 eq                   (pipeline: dict-select-dict c) rt-ok clear
+
+% zip + map-field
+[ [ 1 2 3 ] [ 10 20 30 ] ] [ /x /y ] record-zip
+1 get /x { 100 add } record-map-field
+/x get 102 eq                 (pipeline: zip+map-field) rt-ok clear
+
+% ====================================================================
+% SECTION 29: Lazy sequence + record patterns
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% lazy-iterate with record state
+0 0 point { /x { 1 add } record-map-field } lazy-iterate
+5 lazy-take lazy-to-array
+dup 4 get /x get 4 eq         (lazy: iterate record x) rt-ok
+0 get /y get 0 eq             (lazy: iterate record y) rt-ok clear
+
+% lazy-map with record-map-field on lazy-iterate records
+0 0 point { /x { 1 add } record-map-field } lazy-iterate
+{ /x { 10 mul } record-map-field } lazy-map
+3 lazy-take lazy-to-array
+dup 0 get /x get 0 eq         (lazy: lazy-map r0 x) rt-ok
+2 get /x get 20 eq            (lazy: lazy-map r2 x) rt-ok clear
+
+% lazy-filter by field value on record stream
+0 0 point { /x { 1 add } record-map-field } lazy-iterate
+{ /x get 2 mod 0 eq } lazy-filter
+3 lazy-take lazy-to-array
+dup 0 get /x get 0 eq         (lazy: lazy-filter r0 x) rt-ok
+1 get /x get 2 eq             (lazy: lazy-filter r1 x) rt-ok clear
+
+% ====================================================================
+% SECTION 30: record-values
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% happy: basic
+3 4 point record-values
+dup length 2 eq               (values: length) rt-ok
+dup 0 get 3 eq                (values: elem 0) rt-ok
+1 get 4 eq                    (values: elem 1) rt-ok clear
+
+% happy: empty record
+[ ] record record-values
+length 0 eq                   (values: empty) rt-ok clear
+
+% happy: 3-field
+10 20 30 [ /a /b /c ] record record-values
+dup 0 get 10 eq               (values: 3-field a) rt-ok
+dup 1 get 20 eq               (values: 3-field b) rt-ok
+2 get 30 eq                   (values: 3-field c) rt-ok clear
+
+% values is a copy — modifying doesn't affect record
+3 4 point /r exch def
+r record-values 0 99 put
+r /x get 3 eq                 (values: copy not shared) rt-ok clear
+
+% sad
+{ 42 record-values } try /type-check eq
+    (values: non-record error) rt-ok clear
+
+% fuzz: ExtValue
+42l 3.14d [ /l /d ] record record-values
+dup 0 get 42l eq              (values: ExtValue long) rt-ok
+1 get 3.14d eq                (values: ExtValue double) rt-ok clear
+
+% fuzz: round-trip schema + values reconstruct record
+3 4 point /orig exch def
+orig record-values /vals exch def
+orig record-schema /names exch def
+vals 0 get vals 1 get names record
+orig deep-eq                  (values: schema+values round-trip) rt-ok clear
+
+% ====================================================================
+% SECTION 31: record-known
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% happy: field exists
+3 4 point /x record-known
+    (known: x exists) rt-ok clear
+
+3 4 point /y record-known
+    (known: y exists) rt-ok clear
+
+% happy: field missing
+3 4 point /z record-known not
+    (known: z missing) rt-ok clear
+
+% happy: empty record
+[ ] record /a record-known not
+    (known: empty always false) rt-ok clear
+
+% sad
+{ 42 /x record-known } try /type-check eq
+    (known: non-record error) rt-ok clear
+
+% stress: check all fields of 10-field record
+0 1 2 3 4 5 6 7 8 9 [ /a /b /c /d /e /f /g /h /i /j ] record /big exch def
+big /a record-known           (known: 10-field a) rt-ok
+big /e record-known           (known: 10-field e) rt-ok
+big /j record-known           (known: 10-field j) rt-ok
+big /z record-known not       (known: 10-field z missing) rt-ok clear
+
+% fuzz: record-known + get pattern (safe access)
+3 4 point /r exch def
+r /x record-known { r /x get } { -1 } if-else
+3 eq                          (known: safe access pattern) rt-ok clear
+
+r /z record-known { r /z get } { -1 } if-else
+-1 eq                         (known: safe access missing) rt-ok clear
+
+% ====================================================================
+% SECTION 32: exit in record for-all
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% exit after first field
+/exit-count 0 def
+10 20 30 [ /a /b /c ] record
+{ pop pop /exit-count exit-count 1 add def exit } for-all
+exit-count 1 eq               (for-all-exit: stops at 1) rt-ok clear
+
+% exit after 2 of 3 fields
+/exit-count 0 def
+10 20 30 [ /a /b /c ] record
+{ pop pop /exit-count exit-count 1 add def exit-count 2 eq { exit } if } for-all
+exit-count 2 eq               (for-all-exit: stops at 2) rt-ok clear
+
+% exit in nested loop (outer for, inner record for-all)
+/result 0 def
+1 1 3 { pop
+    10 20 [ /x /y ] record
+    { pop pop exit } for-all
+    /result result 1 add def
+} for
+result 3 eq                   (for-all-exit: inner exit, outer continues) rt-ok clear
+
+% exit through try-catch inside record for-all
+/n 0 def
+<< /type-check { pop 0 } >> {
+    10 20 30 [ /a /b /c ] record
+    { pop pop /n n 1 add def n 2 eq { exit } if } for-all
+} try-catch
+n 2 eq                        (for-all-exit: try-catch cleanup) rt-ok
+{ 1 } try /no-error eq        (for-all-exit: try works after) rt-ok clear
+
+% ====================================================================
+% SECTION 33: exit in record-map
+% ====================================================================
+
+% exit during record-map proc terminates iteration
+/point [ /x /y ] record-type def
+/count 0 def
+1 2 3 [ /a /b /c ] record
+{ pop /count count 1 add def 0 count 2 eq { exit } if } record-map
+count 2 eq                    (record-map-exit: stops at 2) rt-ok clear
+
+% ====================================================================
+% SECTION 34: Packed round-trip field values after record
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% verify all values survive round-trip when record is NOT last
+42 3 4 point (hello) 3 packed
+dup 0 get 42 eq               (packed-values: int before record) rt-ok
+dup 1 get dup /x get 3 eq exch /y get 4 eq and
+                              (packed-values: record fields intact) rt-ok
+2 get (hello) eq              (packed-values: string after record) rt-ok clear
+
+% record as first element
+3 4 point 99 true 3 packed
+dup 0 get /x get 3 eq         (packed-values: record first x) rt-ok
+dup 1 get 99 eq               (packed-values: int after record) rt-ok
+2 get true eq                 (packed-values: bool after record) rt-ok clear
+
+% stress: pack with record, force intervening allocation, then verify
+% if packed_size was wrong, the allocation could overwrite the tail
+/point [ /x /y ] record-type def
+42 3 4 point (hello) true 4 packed /p exch def
+% force VM allocations that could overwrite under-committed packed tail
+100 200 point pop
+(allocation-pressure) =string pop
+[1 2 3 4 5] pop
+p 0 get 42 eq                 (packed-alloc: int survives) rt-ok
+p 1 get /x get 3 eq           (packed-alloc: record survives) rt-ok
+p 2 get (hello) eq            (packed-alloc: string survives) rt-ok
+p 3 get true eq               (packed-alloc: bool survives) rt-ok clear
+
+% ====================================================================
+% SECTION 35: record-select reorder value verification
+% ====================================================================
+
+/point3 [ /x /y /z ] record-type def
+
+% reorder and verify BOTH schema and values follow
+10 20 30 point3 [ /z /x ] record-select /sel exch def
+sel record-schema dup 0 get /z eq exch 1 get /x eq and
+                              (select-reorder: schema z,x) rt-ok
+sel /z get 30 eq              (select-reorder: z value correct) rt-ok
+sel /x get 10 eq              (select-reorder: x value correct) rt-ok clear
+
+% reverse all fields
+10 20 30 point3 [ /z /y /x ] record-select /rev exch def
+rev /z get 30 eq              (select-reorder: reverse z) rt-ok
+rev /y get 20 eq              (select-reorder: reverse y) rt-ok
+rev /x get 10 eq              (select-reorder: reverse x) rt-ok clear
+
+% ====================================================================
+% SECTION 36: Additional coverage gaps
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+% save/restore with records
+save
+3 4 point /r exch def
+r /x get 3 eq                 (save-restore: access before restore) rt-ok
+restore clear
+
+% make-literal on record (no-op)
+3 4 point make-literal
+dup is-record                 (make-literal: still record) rt-ok
+executable? not               (make-literal: still literal) rt-ok clear
+
+% record-type with non-array argument
+{ 42 record-type } try /type-check eq
+    (error: record-type non-array) rt-ok clear
+
+% record-group-by with non-record in array
+{ [ 42 ] /x record-group-by } try pop true
+    (error: group-by non-record element) rt-ok clear
+
+% record-group-by with missing field
+/pair [ /a /b ] record-type def
+{ [ 1 2 pair ] /c record-group-by } try pop true
+    (error: group-by missing field) rt-ok clear
+
+% type-name on record
+3 4 point type /record-type eq
+    (type: record type name) rt-ok clear
+
+% copy on record (should error -- records are read-only)
+{ 3 4 point copy } try /type-check eq
+    (error: copy on record) rt-ok clear
+
+% record-merge full overlap (second wins)
+/point [ /x /y ] record-type def
+1 2 point 10 20 point record-merge /m exch def
+m /x get 10 eq                (merge-overlap: x from second) rt-ok
+m /y get 20 eq                (merge-overlap: y from second) rt-ok clear
+
+% record-from-dict with duplicate names in array
+{ << /a 1 >> [ /a /a ] record-from-dict } try /range-check eq
+    (error: from-dict dup names) rt-ok clear
+
+% record-zip with non-array columns
+{ 42 [ /a ] record-zip } try /type-check eq
+    (error: zip non-array cols) rt-ok clear
+
+% ====================================================================
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_record: ALL TESTS PASSED) =
+(__test_ok__) =

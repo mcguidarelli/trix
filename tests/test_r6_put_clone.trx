@@ -1,0 +1,61 @@
+% ====================================================================
+% test_r6_put_clone.trx -- R6 store contract: a global container now CLONES a
+% restore-fragile local value into the global region instead of REJECTING it
+% (unifies Dict::put / set-add / array-store with cell-set's Option B).
+% ====================================================================
+% A "restore-fragile local" value = heap storage allocated above the BASE save
+% barrier (save level >= 1) OUTSIDE ${...} (so it is LOCAL).  A future restore
+% reclaims it.  Storing it into a global container (built in ${...}, journal-
+% skipped so the store persists across restore) used to raise /invalid-access
+% ("cannot store restore-fragile local-VM <type> into global container").  Now
+% the value is deep-cloned into the global region, so the store succeeds AND the
+% cloned value survives the restore.  Non-vacuous: pre-change every `put` /
+% `set-add` / array store below raised the reject error.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% Global containers (allocated inside ${...}); they outlive save/restore.
+${ << >> } /gd exch def
+${ {{ }} } /gs exch def
+${ [ 0l 0l 0l ] } /ga exch def
+${ << >> } /gdq exch def
+
+save /tok exch def
+% ---- at save level 1, OUTSIDE ${...}: keys/values are LOCAL + restore-fragile ----
+gd 100l 200l put
+gd 100l get 200l eq              (dict: fragile-local Long clone stored)        rt-ok
+gs 300l set-add
+gs 300l set-member? true eq      (set: fragile-local Long clone stored)         rt-ok
+ga 0 400l put
+ga 0 get 400l eq                 (array: fragile-local Long clone stored)       rt-ok
+gdq 111q 222q put
+gdq 111q get 222q eq             (dict: fragile-local Int128 clone stored)      rt-ok clear
+
+tok restore
+% ---- after restore to BASE: global containers persist; clones survive ----
+gd 100l get 200l eq              (dict: Long clone survives restore)            rt-ok
+gs 300l set-member? true eq      (set: Long clone survives restore)             rt-ok
+ga 0 get 400l eq                 (array: Long clone survives restore)           rt-ok
+gdq 111q get 222q eq             (dict: Int128 clone survives restore)          rt-ok clear
+
+% ---- sanity: a value built INSIDE ${...} is already global -> stored as-is,
+% no spurious clone, still correct ----
+${ << 500l 600l >> } /gd2 exch def
+gd2 500l get 600l eq             (dict: global value stored unchanged)          rt-ok clear
+
+% ---- sanity: BASE-level store of a local value into a global dict is immune
+% (restore never rolls back below BASE), so no clone needed and it works ----
+gd 700l 800l put
+gd 700l get 800l eq              (dict: BASE-local store works)                 rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_r6_put_clone: ALL TESTS PASSED) =
+(__test_ok__) =

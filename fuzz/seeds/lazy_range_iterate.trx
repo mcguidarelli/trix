@@ -1,0 +1,2 @@
+1 10 1 lazy-range lazy-to-array
+1 { 2 mul } lazy-iterate 5 lazy-take lazy-to-array

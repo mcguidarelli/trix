@@ -1,0 +1,161 @@
+% ====================================================================
+% test_compress.trx -- C-side deflate / deflate-level / inflate ops
+% ====================================================================
+% Coverage for Trix's RFC 1951 raw DEFLATE primitives in §3.9.
+%
+%   deflate         (str -- str)        level 6 default
+%   deflate-level   (str int -- str)    level in 0..9
+%   inflate         (str -- str)        raw RFC 1951 inverse
+%
+% All three produce / consume the bare deflate bitstream -- callers
+% wrap with zlib (RFC 1950) or gzip (RFC 1952) framing themselves
+% via the existing crc32 / adler32 ops.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: round-trip on representative payloads
+% ====================================================================
+
+() deflate inflate () eq                            (s1: empty round-trip)               rt-ok
+(a) deflate inflate (a) eq                          (s1: single-byte round-trip)         rt-ok
+(hello world) deflate inflate (hello world) eq      (s1: short ASCII round-trip)         rt-ok
+
+% Binary payload: every byte from 0x00..0xFF.  String-builder via put.
+/full-byte-range 256 string def
+0 1 255 {|i| full-byte-range i i /byte-type cast put} for
+full-byte-range deflate inflate full-byte-range eq  (s1: 256-byte all-bytes round-trip)  rt-ok
+
+% Repeated text -- highly compressible.
+/repeated (hello world ) 1000 repeat-string def
+repeated deflate inflate repeated eq                (s1: 12000-byte repeated round-trip) rt-ok
+
+% Output type check.
+(x) deflate type /string-type eq                    (s1: deflate returns string)         rt-ok
+(x) deflate inflate type /string-type eq            (s1: inflate returns string)         rt-ok
+
+% ====================================================================
+% SECTION 2: compression-level semantics
+% ====================================================================
+
+% Level 0 (store-only) is *larger* than input by a few bytes of block
+% framing.  Level 9 (best) on highly redundant input is *much* smaller.
+% Level 6 (default == `deflate`) sits between.
+/redundant (abcdefghij) 1000 repeat-string def      % 10000 bytes
+/redundant-len redundant length def
+
+redundant 0 deflate-level length /sz0 exch def
+redundant 1 deflate-level length /sz1 exch def
+redundant 6 deflate-level length /sz6 exch def
+redundant 9 deflate-level length /sz9 exch def
+redundant   deflate         length /szD exch def    % default (level 6)
+
+% Level 0 must be larger than the input (stored blocks add overhead).
+sz0 redundant-len gt                                (s2: level 0 > input size)           rt-ok
+
+% Level 9 must compress the redundant input drastically.
+sz9 redundant-len 10 div lt                        (s2: level 9 < input/10)             rt-ok
+
+% Default level matches level 6 (zlib's Z_DEFAULT_COMPRESSION == 6).
+szD sz6 eq                                          (s2: default == level 6)             rt-ok
+
+% Higher levels never produce more bytes than lower levels (monotone
+% on this input -- not guaranteed for arbitrary data, but holds for
+% repetitive patterns).
+sz9 sz6 le                                          (s2: level 9 <= level 6)             rt-ok
+sz6 sz1 le                                          (s2: level 6 <= level 1)             rt-ok
+
+% Round-trip preserved at every level.
+redundant 0 deflate-level inflate redundant eq      (s2: level 0 round-trip)             rt-ok
+redundant 1 deflate-level inflate redundant eq      (s2: level 1 round-trip)             rt-ok
+redundant 9 deflate-level inflate redundant eq      (s2: level 9 round-trip)             rt-ok
+
+% ====================================================================
+% SECTION 3: large round-trip (60 KiB compressible payload, near the
+%            65 535-byte MaxStringLength cap)
+% ====================================================================
+
+/big (the quick brown fox jumps over the lazy dog\n) 1300 repeat-string def
+big length /big-len exch def
+big deflate /big-z exch def
+big-z inflate big eq                                (s3: 60+ KiB round-trip)             rt-ok
+
+% Compressed size should be a tiny fraction of the input.
+big-z length big-len 100 div lt                     (s3: ratio < 1%)                     rt-ok
+
+% Sanity: deflate is deterministic.
+big deflate big-z eq                                (s3: deflate deterministic)          rt-ok
+
+% ====================================================================
+% SECTION 4: composition with existing checksum ops (zlib RFC 1950
+%            wrapper round-trip -- proves deflate output composes cleanly
+%            with the 2-byte zlib header + adler32 trailer)
+% ====================================================================
+
+% Build a zlib container manually:
+%   header = 0x78 0x9C   (deflate, 32 KiB window, default level)
+%   payload = deflate(data)
+%   trailer = adler32(data) packed big-endian uint32
+/data (Trix native compression sample payload.) def
+data deflate /payload exch def
+data adler32 /a32 exch def
+mark a32 (>I) pack /trailer exch def
+(\x78\x9C) payload concat trailer concat /zlib-blob exch def
+
+% The zlib-blob is "header + raw-deflate + adler32".  Strip header +
+% trailer then inflate the raw deflate to recover the original.  This
+% confirms deflate output is exactly the format zlib expects.
+zlib-blob 2 zlib-blob length 6 sub get-interval
+    inflate data eq                                 (s4: zlib RFC 1950 wrapper round-trip) rt-ok
+
+% Adler32 trailer round-trips.
+zlib-blob zlib-blob length 4 sub 4 get-interval (>I) unpack pop
+    a32 eq                                          (s4: adler32 trailer survived pack)  rt-ok
+
+% ====================================================================
+% SECTION 5: error paths
+% ====================================================================
+
+% Level out of range.  -1 fails the VerifyNotNegative constraint (range-check
+% from verify-time); 10 / 99 fail the explicit 0..9 bounds inside the op
+% (range-check from integer_value(trx, 0, 9)).
+{ (x) -1 deflate-level } try /range-check eq        (s5: deflate-level -1 -> range-check)   rt-ok clear
+{ (x) 10 deflate-level } try /range-check eq        (s5: deflate-level 10 -> range-check)   rt-ok clear
+{ (x) 99 deflate-level } try /range-check eq        (s5: deflate-level 99 -> range-check)   rt-ok clear
+
+% Malformed inflate input -> range-check.
+{ (garbage data not actually deflate) inflate } try /range-check eq
+                                                    (s5: garbage inflate -> range-check)    rt-ok clear
+
+% Truncated deflate stream -> range-check.
+(hello world hello world hello world) deflate /good-z exch def
+good-z 0 good-z length 1 sub get-interval
+    /truncated exch def
+{ truncated inflate } try /range-check eq           (s5: truncated -> range-check)          rt-ok clear
+
+% Empty input to inflate -> range-check (deflate streams always have >= 1
+% byte of block header; bare empty payload is malformed).
+{ () inflate } try /range-check eq                  (s5: empty inflate -> range-check)      rt-ok clear
+
+% Type check on non-strings.
+{ 42 deflate } try /type-check eq                   (s5: deflate(int) -> type-check)        rt-ok clear
+{ 42 inflate } try /type-check eq                   (s5: inflate(int) -> type-check)        rt-ok clear
+{ 42 0 deflate-level } try /type-check eq           (s5: deflate-level(int,int) -> type-check) rt-ok clear
+
+% Empty operand stack.
+{ deflate } try /opstack-underflow eq               (s5: deflate empty stack)               rt-ok clear
+{ inflate } try /opstack-underflow eq               (s5: inflate empty stack)               rt-ok clear
+{ deflate-level } try /opstack-underflow eq         (s5: deflate-level empty stack)         rt-ok clear
+{ (x) deflate-level } try /opstack-underflow eq     (s5: deflate-level 1-arg stack)         rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_compress: ALL TESTS PASSED) =
+(__test_ok__) =

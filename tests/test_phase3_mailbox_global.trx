@@ -1,0 +1,163 @@
+% ====================================================================
+% test_phase3_mailbox_global.trx -- VM Redux Phase 3 invariants
+% ====================================================================
+% After Phase 3, MailboxHeader is allocated from global VM via
+% gvm_alloc<MailboxHeader>(total, ChunkKind::Mailbox).  The mailbox
+% is BASE-immune to save/restore, and the per-save-level pool is
+% collapsed to a class-indexed-only pool.  Three invariants:
+%
+%   I1. Allocating a mailbox bumps /by-kind/mailbox.
+%   I2. An above-barrier actor's mailbox does NOT leak across
+%       restore -- coroutine_kill -> coroutine_cleanup_mailbox ->
+%       mailbox_recycle parks it back in the pool, where the next
+%       same-class spawn reuses the same offset.
+%   I3. A surviving actor's blocked-sender list is correctly
+%       scrubbed of dying senders (Hazard #1) -- after restore,
+%       the blocked-sender chain only contains live coroutines
+%       (or nulloffset).
+%
+% Note: actors mostly use yield-driven scheduling.  Each section
+% interleaves coroutine-sleep so the actor and any senders get a
+% chance to run.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+/yield-many { 0 1 29 { pop 0 coroutine-sleep } for } def
+
+% ====================================================================
+% SECTION 1: mailbox allocation lands in /by-kind/mailbox
+% ====================================================================
+% A fresh actor-spawn allocates a MailboxHeader via gvm_alloc tagged
+% ChunkKind::Mailbox.  /by-kind/mailbox count goes up by 1.
+
+vm-global-info /by-kind get /mailbox get /count get /pre1 exch def
+
+[ { 0 coroutine-sleep coroutine-die } actor-spawn pop
+yield-many
+
+vm-global-info /by-kind get /mailbox get /count get /post1 exch def
+post1 pre1 sub 1 ge   (s1: mailbox count +>=1 after actor-spawn)  rt-ok
+
+% ====================================================================
+% SECTION 2: above-barrier actor's mailbox is recycled, not leaked
+% ====================================================================
+% Spawn an actor inside a save scope; restore.  The actor dies via
+% coroutine_kill (above-barrier coroutine reclaim path), which runs
+% coroutine_cleanup_mailbox -> mailbox_recycle.  The mailbox returns
+% to the pool, NOT abandoned.
+%
+% Verification: spawn a SECOND actor at the same default capacity
+% after restore, then check that /by-kind/mailbox count is bounded
+% (the pool reused the original mailbox slot).
+
+% Drain to a steady state first.
+yield-many
+
+vm-global-info /by-kind get /mailbox get /count get /pre2 exch def
+
+save /sv2 exch def
+[ { 0 coroutine-sleep coroutine-die } actor-spawn pop
+yield-many
+sv2 restore
+
+% After restore, allocate a fresh actor.  If the recycler worked, the
+% global-mailbox count should NOT permanently grow.  We allow at most
+% 1 above the pre2 baseline (the new actor's mailbox; the old one is
+% in the pool ready for reuse, doesn't increase the live block count).
+yield-many
+
+[ { 0 coroutine-sleep coroutine-die } actor-spawn pop
+yield-many
+
+vm-global-info /by-kind get /mailbox get /count get /post2 exch def
+% Strict bound: after one save/spawn/restore + one fresh spawn, the
+% delta from pre2 must be at most 1 (the live new actor's mailbox).
+% A delta of 2+ would mean the recycled mailbox was abandoned.
+post2 pre2 sub 1 le   (s2: mailbox not leaked across restore)    rt-ok
+
+% ====================================================================
+% SECTION 3: surviving actor's blocked-sender list scrubbed after restore
+% ====================================================================
+% Setup: long-lived actor A at outer scope.  Inside save scope, fill
+% A's mailbox to capacity, then have an extra sender block on it.
+% Restore.  The blocked sender is killed by restore; A's mailbox
+% (global, surviving) must have its blocked-sender list scrubbed by
+% mailbox_scrub_above_barrier.  Verify A is still functional and no
+% stale offsets remain.
+
+yield-many
+
+% Spawn A with capacity 2 so we can fill it quickly.
+[ { { actor-receive pop } loop } 2 actor-spawn-capacity /actorA exch def
+yield-many
+
+save /sv3 exch def
+
+% Fill A's mailbox to capacity (2 messages) without giving A a chance
+% to drain.  We achieve "no drain" by NOT yielding from main between
+% sends -- main doesn't yield, A doesn't run.
+1 actorA actor-send
+2 actorA actor-send
+% Mailbox full.  Spawn an extra sender that will block.
+[ { 99 actorA actor-send } coroutine-launch /sender exch def
+% Yield once so sender can run, fill, and block on the full mailbox.
+0 coroutine-sleep
+% sender is now Sleeping/Blocked, sitting on actorA->m_blocked_sender list.
+
+sv3 restore
+
+% After restore: sender's CoroutineContext is above barrier and was
+% killed.  actorA's mailbox is in global VM, survives.  Its
+% m_blocked_sender list should have been scrubbed.
+%
+% Verify A is still alive and can receive a fresh message.
+yield-many
+
+42 actorA actor-send
+yield-many
+
+% Cleanup: kill A.
+actorA coroutine-kill
+yield-many
+
+% If we got here without an InternalError or stale-offset crash, the
+% scrub did its job.
+true (s3: surviving actor's mailbox functional after restore + scrub) rt-ok
+
+% ====================================================================
+% SECTION 4: mailbox lives in global VM (BASE-immune)
+% ====================================================================
+% The mailbox count after a deep save/restore cycle should match the
+% pre-cycle count plus the live actors' allocations.  No "the pool
+% died on restore" leak.
+
+yield-many
+
+vm-global-info /by-kind get /mailbox get /count get /pre4 exch def
+
+% Three nested save/restore cycles, each spawning + killing an actor.
+3 1 1 {
+    pop
+    save /sv-loop exch def
+    [ { coroutine-die } actor-spawn pop
+    yield-many
+    sv-loop restore
+} for
+yield-many
+
+vm-global-info /by-kind get /mailbox get /count get /post4 exch def
+% Bounded growth: the pool absorbs the recycled mailboxes.  Allow a
+% small delta for any transient slack from the loop's frame dicts.
+post4 pre4 sub 3 le   (s4: 3 spawn/restore cycles bounded growth)  rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_phase3_mailbox_global: ALL TESTS PASSED) =
+(__test_ok__) =

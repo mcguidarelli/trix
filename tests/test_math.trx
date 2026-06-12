@@ -1,0 +1,824 @@
+% ====================================================================
+% test_math.trx -- Comprehensive tests for math operators
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% Shortcuts for floating-point comparison
+/pi //:systemdict:numbers:real-type:pi def
+/nan //:systemdict:numbers:real-type:quiet-NaN def
+/inf //:systemdict:numbers:real-type:infinity def
+
+% Double-precision constants
+/pi-d //:systemdict:numbers:double-type:pi def
+/nan-d //:systemdict:numbers:double-type:quiet-NaN def
+/inf-d //:systemdict:numbers:double-type:infinity def
+
+% FP classification names
+/fp-normal     //:systemdict:numbers:classification:fp-normal def
+/fp-subnormal  //:systemdict:numbers:classification:fp-subnormal def
+/fp-zero       //:systemdict:numbers:classification:fp-zero def
+/fp-infinite   //:systemdict:numbers:classification:fp-infinite def
+/fp-nan        //:systemdict:numbers:classification:fp-nan def
+
+% Denorm-min for subnormal tests
+/denorm-min-r //:systemdict:numbers:real-type:denorm-min def
+/denorm-min-d //:systemdict:numbers:double-type:denorm-min def
+
+% ====================================================================
+% SECTION 1: atan (arctangent)
+% ====================================================================
+
+0.0 atan  0.0 eq  (atan: atan(0)=0) rt-ok  clear
+1.0 atan  pi 4.0 div  sub abs 1e-6 lt  (atan: atan(1)~=pi/4) rt-ok  clear
+-1.0 atan  pi -4.0 div  sub abs 1e-6 lt  (atan: atan(-1)~=-pi/4) rt-ok  clear
+1000000.0 atan  pi 2.0 div  sub abs 1e-4 lt  (atan: large value ~= pi/2) rt-ok  clear
+
+% atan with double
+1.0d atan  pi-d 4.0d div  sub abs 1e-10d lt  (atan: double atan(1)~=pi/4) rt-ok  clear
+
+% atan type-check error
+{ (hello) atan } try  /type-check eq  (atan: type-check on string) rt-ok  clear
+
+% ====================================================================
+% SECTION 2: tan (tangent)
+% ====================================================================
+
+0.0 tan  0.0 eq  (tan: tan(0)=0) rt-ok  clear
+pi 4.0 div  tan  1.0  sub abs 1e-6 lt  (tan: tan(pi/4)~=1) rt-ok  clear
+pi neg 4.0 div  tan  -1.0  sub abs 1e-6 lt  (tan: tan(-pi/4)~=-1) rt-ok  clear
+
+% tan with double
+0.0d tan  0.0d eq  (tan: double tan(0)=0) rt-ok  clear
+
+% tan type-check error
+{ (hello) tan } try  /type-check eq  (tan: type-check on string) rt-ok  clear
+
+% ====================================================================
+% SECTION 3: degrees-to-radians
+% ====================================================================
+
+0.0 degrees-to-radians  0.0 eq  (deg2rad: 0->0) rt-ok  clear
+90.0 degrees-to-radians  pi 2.0 div  sub abs 1e-6 lt  (deg2rad: 90->pi/2) rt-ok  clear
+180.0 degrees-to-radians  pi  sub abs 1e-6 lt  (deg2rad: 180->pi) rt-ok  clear
+360.0 degrees-to-radians  pi 2.0 mul  sub abs 1e-5 lt  (deg2rad: 360->2pi) rt-ok  clear
+-90.0 degrees-to-radians  pi -2.0 div  sub abs 1e-6 lt  (deg2rad: -90->-pi/2) rt-ok  clear
+45.0 degrees-to-radians  pi 4.0 div  sub abs 1e-6 lt  (deg2rad: 45->pi/4) rt-ok  clear
+
+% Double variant
+180.0d degrees-to-radians  pi-d  sub abs 1e-12d lt  (deg2rad: double 180->pi) rt-ok  clear
+
+% Double precision: ULP-level tests for two-part constant with FMA
+180.0d degrees-to-radians  pi-d  2 ulp-equal?  (deg2rad: double 180 within 2 ULP of pi) rt-ok  clear
+90.0d degrees-to-radians  pi-d 2.0d div  2 ulp-equal?  (deg2rad: double 90 within 2 ULP of pi/2) rt-ok  clear
+360.0d degrees-to-radians  pi-d 2.0d mul  2 ulp-equal?  (deg2rad: double 360 within 2 ULP of 2pi) rt-ok  clear
+45.0d degrees-to-radians  pi-d 4.0d div  2 ulp-equal?  (deg2rad: double 45 within 2 ULP of pi/4) rt-ok  clear
+30.0d degrees-to-radians  pi-d 6.0d div  2 ulp-equal?  (deg2rad: double 30 within 2 ULP of pi/6) rt-ok  clear
+1.0d degrees-to-radians  pi-d 180.0d div  2 ulp-equal?  (deg2rad: double 1 within 2 ULP of pi/180) rt-ok  clear
+
+% Real precision: double-intermediate path should tighten results
+180.0 degrees-to-radians  pi  sub abs 1e-7 lt  (deg2rad: real 180 tighter tolerance) rt-ok  clear
+90.0 degrees-to-radians  pi 2.0 div  sub abs 1e-7 lt  (deg2rad: real 90 tighter tolerance) rt-ok  clear
+
+% ====================================================================
+% SECTION 4: radians-to-degrees
+% ====================================================================
+
+0.0 radians-to-degrees  0.0 eq  (rad2deg: 0->0) rt-ok  clear
+pi radians-to-degrees  180.0  sub abs 1e-4 lt  (rad2deg: pi->180) rt-ok  clear
+pi 2.0 div  radians-to-degrees  90.0  sub abs 1e-4 lt  (rad2deg: pi/2->90) rt-ok  clear
+pi neg  radians-to-degrees  -180.0  sub abs 1e-4 lt  (rad2deg: -pi->-180) rt-ok  clear
+
+% Double variant
+pi-d radians-to-degrees  180.0d  sub abs 1e-10d lt  (rad2deg: double pi->180) rt-ok  clear
+
+% Double precision: ULP-level tests for two-part constant with FMA
+pi-d radians-to-degrees  180.0d  2 ulp-equal?  (rad2deg: double pi within 2 ULP of 180) rt-ok  clear
+pi-d 2.0d div  radians-to-degrees  90.0d  2 ulp-equal?  (rad2deg: double pi/2 within 2 ULP of 90) rt-ok  clear
+pi-d 4.0d div  radians-to-degrees  45.0d  2 ulp-equal?  (rad2deg: double pi/4 within 2 ULP of 45) rt-ok  clear
+pi-d 6.0d div  radians-to-degrees  30.0d  2 ulp-equal?  (rad2deg: double pi/6 within 2 ULP of 30) rt-ok  clear
+
+% Real precision: tighter tolerance with double intermediates
+pi radians-to-degrees  180.0  sub abs 1e-5 lt  (rad2deg: real pi tighter tolerance) rt-ok  clear
+
+% Round-trip: degrees -> radians -> degrees
+123.456 dup degrees-to-radians radians-to-degrees  sub abs 1e-4 lt  (deg-rad-deg: round-trip) rt-ok  clear
+
+% Double round-trip: tighter tolerance
+123.456789d dup degrees-to-radians radians-to-degrees  sub abs 1e-12d lt  (deg-rad-deg: double round-trip) rt-ok  clear
+0.001d dup degrees-to-radians radians-to-degrees  sub abs 1e-16d lt  (deg-rad-deg: double tiny round-trip) rt-ok  clear
+1e6d dup degrees-to-radians radians-to-degrees  4 ulp-equal?  (deg-rad-deg: double large round-trip 4 ULP) rt-ok  clear
+
+% ====================================================================
+% SECTION 5: frexp
+% ====================================================================
+
+% frexp: num :- num int  (fraction and exponent)
+8.0 frexp  4 eq  (frexp: frexp(8) exponent=4) rt-ok
+0.5 eq  (frexp: frexp(8) fraction=0.5) rt-ok  clear
+
+0.0 frexp  0 eq  (frexp: frexp(0) exponent=0) rt-ok
+0.0 eq  (frexp: frexp(0) fraction=0) rt-ok  clear
+
+1.0 frexp  1 eq  (frexp: frexp(1) exponent=1) rt-ok
+0.5 eq  (frexp: frexp(1) fraction=0.5) rt-ok  clear
+
+-4.0 frexp  3 eq  (frexp: frexp(-4) exponent=3) rt-ok
+-0.5 eq  (frexp: frexp(-4) fraction=-0.5) rt-ok  clear
+
+0.25 frexp  -1 eq  (frexp: frexp(0.25) exponent=-1) rt-ok
+0.5 eq  (frexp: frexp(0.25) fraction=0.5) rt-ok  clear
+
+% frexp double variant
+8.0d frexp  4 eq  (frexp: double frexp(8) exponent=4) rt-ok
+0.5d eq  (frexp: double frexp(8) fraction=0.5) rt-ok  clear
+
+% ====================================================================
+% SECTION 6: rem-quo
+% ====================================================================
+
+% rem-quo: num num :- num int  (remainder and partial quotient)
+7.0 3.0 rem-quo  2 eq  (rem-quo: rem-quo(7,3) quotient=2) rt-ok
+1.0 sub abs 1e-6 lt  (rem-quo: rem-quo(7,3) remainder=1) rt-ok  clear
+
+-7.0 3.0 rem-quo  -2 eq  (rem-quo: rem-quo(-7,3) quotient=-2) rt-ok
+-1.0 sub abs 1e-6 lt  (rem-quo: rem-quo(-7,3) remainder=-1) rt-ok  clear
+
+0.0 5.0 rem-quo  0 eq  (rem-quo: rem-quo(0,5) quotient=0) rt-ok
+0.0 eq  (rem-quo: rem-quo(0,5) remainder=0) rt-ok  clear
+
+% rem-quo double variant
+7.0d 3.0d rem-quo  2 eq  (rem-quo: double rem-quo(7,3) quotient=2) rt-ok
+1.0d sub abs 1e-10d lt  (rem-quo: double rem-quo(7,3) remainder=1) rt-ok  clear
+
+% ====================================================================
+% SECTION 7: fp-classify
+% ====================================================================
+
+1.0 fp-classify  fp-normal eq  (fp-classify: 1.0 is normal) rt-ok  clear
+-42.5 fp-classify  fp-normal eq  (fp-classify: -42.5 is normal) rt-ok  clear
+0.0 fp-classify  fp-zero eq  (fp-classify: 0.0 is zero) rt-ok  clear
+inf fp-classify  fp-infinite eq  (fp-classify: inf is infinite) rt-ok  clear
+inf neg fp-classify  fp-infinite eq  (fp-classify: -inf is infinite) rt-ok  clear
+nan fp-classify  fp-nan eq  (fp-classify: NaN is NaN) rt-ok  clear
+denorm-min-r fp-classify  fp-subnormal eq  (fp-classify: denorm-min is subnormal) rt-ok  clear
+
+% fp-classify double variants
+1.0d fp-classify  fp-normal eq  (fp-classify: double 1.0 is normal) rt-ok  clear
+0.0d fp-classify  fp-zero eq  (fp-classify: double 0.0 is zero) rt-ok  clear
+inf-d fp-classify  fp-infinite eq  (fp-classify: double inf is infinite) rt-ok  clear
+nan-d fp-classify  fp-nan eq  (fp-classify: double NaN is NaN) rt-ok  clear
+denorm-min-d fp-classify  fp-subnormal eq  (fp-classify: double denorm-min is subnormal) rt-ok  clear
+
+% ====================================================================
+% SECTION 8: next-after
+% ====================================================================
+
+1.0 2.0 next-after  1.0 gt  (next-after: next-after(1,2) > 1) rt-ok  clear
+1.0 0.0 next-after  1.0 lt  (next-after: next-after(1,0) < 1) rt-ok  clear
+1.0 1.0 next-after  1.0 eq  (next-after: next-after(1,1) = 1) rt-ok  clear
+0.0 1.0 next-after  0.0 gt  (next-after: next-after(0,1) > 0) rt-ok  clear
+
+% next-after double variant
+1.0d 2.0d next-after  1.0d gt  (next-after: double next-after(1,2) > 1) rt-ok  clear
+
+% ====================================================================
+% SECTION 9: next-toward
+% ====================================================================
+
+1.0 2.0 next-toward  1.0 gt  (next-toward: next-toward(1,2) > 1) rt-ok  clear
+1.0 0.0 next-toward  1.0 lt  (next-toward: next-toward(1,0) < 1) rt-ok  clear
+1.0 1.0 next-toward  1.0 eq  (next-toward: next-toward(1,1) = 1) rt-ok  clear
+0.0 1.0 next-toward  0.0 gt  (next-toward: next-toward(0,1) > 0) rt-ok  clear
+
+% ====================================================================
+% SECTION 10: beta
+% ====================================================================
+
+1.0 1.0 beta  1.0  sub abs 1e-6 lt  (beta: beta(1,1)=1) rt-ok  clear
+2.0 1.0 beta  0.5  sub abs 1e-6 lt  (beta: beta(2,1)=0.5) rt-ok  clear
+1.0 2.0 beta  0.5  sub abs 1e-6 lt  (beta: beta(1,2)=0.5) rt-ok  clear
+2.0 2.0 beta  0.1666667  sub abs 1e-5 lt  (beta: beta(2,2)~=1/6) rt-ok  clear
+0.5 0.5 beta  pi  sub abs 1e-4 lt  (beta: beta(0.5,0.5)~=pi) rt-ok  clear
+
+% beta double variant
+1.0d 1.0d beta  1.0d  sub abs 1e-10d lt  (beta: double beta(1,1)=1) rt-ok  clear
+
+% ====================================================================
+% SECTION 11: lgamma
+% ====================================================================
+
+1.0 lgamma  0.0  sub abs 1e-6 lt  (lgamma: lgamma(1)=0) rt-ok  clear
+2.0 lgamma  0.0  sub abs 1e-6 lt  (lgamma: lgamma(2)=0) rt-ok  clear
+
+% lgamma(0.5) = log(sqrt(pi)) = 0.5 * log(pi)
+0.5 lgamma  pi log 0.5 mul  sub abs 1e-5 lt  (lgamma: lgamma(0.5)~=log(sqrt(pi))) rt-ok  clear
+
+% lgamma(5) = log(4!) = log(24)
+5.0 lgamma  24.0 log  sub abs 1e-5 lt  (lgamma: lgamma(5)=log(24)) rt-ok  clear
+
+% lgamma double variant
+1.0d lgamma  0.0d  sub abs 1e-12d lt  (lgamma: double lgamma(1)=0) rt-ok  clear
+
+% domain: 0 and negative integers are poles (rejected); negative non-integers are valid
+{ 0.0 lgamma } try /range-check eq  (lgamma: 0 pole reject) rt-ok clear
+{ -2.0 lgamma } try /range-check eq (lgamma: -2 pole reject) rt-ok clear
+-0.5 lgamma 1.2655 sub abs 1e-3 lt  (lgamma: -0.5 valid non-integer) rt-ok clear
+
+% ====================================================================
+% SECTION 12: lerp (linear interpolation)
+% ====================================================================
+
+0.0 10.0 0.0 lerp  0.0 eq  (lerp: lerp(0,10,0)=0) rt-ok  clear
+0.0 10.0 1.0 lerp  10.0 eq  (lerp: lerp(0,10,1)=10) rt-ok  clear
+0.0 10.0 0.5 lerp  5.0  sub abs 1e-6 lt  (lerp: lerp(0,10,0.5)=5) rt-ok  clear
+-10.0 10.0 0.5 lerp  0.0  sub abs 1e-6 lt  (lerp: lerp(-10,10,0.5)=0) rt-ok  clear
+2.0 8.0 0.25 lerp  3.5  sub abs 1e-6 lt  (lerp: lerp(2,8,0.25)=3.5) rt-ok  clear
+5.0 5.0 0.7 lerp  5.0  sub abs 1e-6 lt  (lerp: lerp(5,5,0.7)=5) rt-ok  clear
+
+% lerp double variant
+0.0d 10.0d 0.5d lerp  5.0d  sub abs 1e-12d lt  (lerp: double lerp(0,10,0.5)=5) rt-ok  clear
+
+% ====================================================================
+% SECTION 13: Bessel functions
+% ====================================================================
+
+% cyl-bessel-j: J_0(0) = 1
+0.0 0.0 cyl-bessel-j  1.0  sub abs 1e-6 lt  (cyl-bessel-j: J_0(0)=1) rt-ok  clear
+
+% cyl-bessel-j: J_1(0) = 0
+1.0 0.0 cyl-bessel-j  0.0  sub abs 1e-6 lt  (cyl-bessel-j: J_1(0)=0) rt-ok  clear
+
+% cyl-bessel-i: I_0(0) = 1
+0.0 0.0 cyl-bessel-i  1.0  sub abs 1e-6 lt  (cyl-bessel-i: I_0(0)=1) rt-ok  clear
+
+% cyl-bessel-i: I_1(0) = 0
+1.0 0.0 cyl-bessel-i  0.0  sub abs 1e-6 lt  (cyl-bessel-i: I_1(0)=0) rt-ok  clear
+
+% cyl-bessel-j: J_0(1) ~ 0.7652
+0.0 1.0 cyl-bessel-j  0.7652 sub abs 1e-3 lt  (cyl-bessel-j: J_0(1)~0.7652) rt-ok  clear
+
+% cyl-bessel-i double variant
+0.0d 0.0d cyl-bessel-i  1.0d  sub abs 1e-10d lt  (cyl-bessel-i: double I_0(0)=1) rt-ok  clear
+
+% cyl-bessel-k: K_0(1) ~ 0.4211
+0.0 1.0 cyl-bessel-k  0.4211 sub abs 1e-3 lt  (cyl-bessel-k: K_0(1)~0.4211) rt-ok  clear
+
+% cyl-neumann: Y_0(1) ~ 0.0883
+0.0 1.0 cyl-neumann  0.0883 sub abs 1e-3 lt  (cyl-neumann: Y_0(1)~0.0883) rt-ok  clear
+
+% ====================================================================
+% SECTION 14: Elliptic integrals
+% ====================================================================
+
+% ellint-1: F(0, pi/4) = pi/4  (when k=0, F(0,phi)=phi)
+0.0 pi 4.0 div  ellint-1  pi 4.0 div  sub abs 1e-6 lt  (ellint-1: F(0,pi/4)=pi/4) rt-ok  clear
+
+% ellint-1: F(0, 0) = 0
+0.0 0.0 ellint-1  0.0 eq  (ellint-1: F(0,0)=0) rt-ok  clear
+
+% ellint-2: E(0, pi/4) = pi/4  (when k=0, E(0,phi)=phi)
+0.0 pi 4.0 div  ellint-2  pi 4.0 div  sub abs 1e-6 lt  (ellint-2: E(0,pi/4)=pi/4) rt-ok  clear
+
+% ellint-2: E(0, 0) = 0
+0.0 0.0 ellint-2  0.0 eq  (ellint-2: E(0,0)=0) rt-ok  clear
+
+% comp-ellint-3: Pi(0, 0) = pi/2
+0.0 0.0 comp-ellint-3  pi 2.0 div  sub abs 1e-6 lt  (comp-ellint-3: Pi(0,0)=pi/2) rt-ok  clear
+
+% ellint-1 double variant
+0.0d 0.0d ellint-1  0.0d eq  (ellint-1: double F(0,0)=0) rt-ok  clear
+
+% ====================================================================
+% SECTION 15: Quiet IEEE comparisons
+% ====================================================================
+
+% greater?: normal values
+3.0 2.0 greater?  true eq  (greater?: 3>2 is true) rt-ok  clear
+2.0 3.0 greater?  false eq  (greater?: 2>3 is false) rt-ok  clear
+2.0 2.0 greater?  false eq  (greater?: 2>2 is false) rt-ok  clear
+
+% greater?: NaN
+nan 1.0 greater?  false eq  (greater?: NaN>1 is false) rt-ok  clear
+1.0 nan greater?  false eq  (greater?: 1>NaN is false) rt-ok  clear
+
+% greater-equal?: normal values
+3.0 2.0 greater-equal?  true eq  (greater-equal?: 3>=2 is true) rt-ok  clear
+2.0 2.0 greater-equal?  true eq  (greater-equal?: 2>=2 is true) rt-ok  clear
+1.0 2.0 greater-equal?  false eq  (greater-equal?: 1>=2 is false) rt-ok  clear
+
+% greater-equal?: NaN
+nan 1.0 greater-equal?  false eq  (greater-equal?: NaN>=1 is false) rt-ok  clear
+
+% less?: normal values
+2.0 3.0 less?  true eq  (less?: 2<3 is true) rt-ok  clear
+3.0 2.0 less?  false eq  (less?: 3<2 is false) rt-ok  clear
+2.0 2.0 less?  false eq  (less?: 2<2 is false) rt-ok  clear
+
+% less?: NaN
+nan 1.0 less?  false eq  (less?: NaN<1 is false) rt-ok  clear
+1.0 nan less?  false eq  (less?: 1<NaN is false) rt-ok  clear
+
+% less-equal?: normal values
+2.0 3.0 less-equal?  true eq  (less-equal?: 2<=3 is true) rt-ok  clear
+2.0 2.0 less-equal?  true eq  (less-equal?: 2<=2 is true) rt-ok  clear
+3.0 2.0 less-equal?  false eq  (less-equal?: 3<=2 is false) rt-ok  clear
+
+% less-equal?: NaN
+nan 1.0 less-equal?  false eq  (less-equal?: NaN<=1 is false) rt-ok  clear
+
+% less-greater?: normal values
+2.0 3.0 less-greater?  true eq  (less-greater?: 2<>3 is true) rt-ok  clear
+2.0 2.0 less-greater?  false eq  (less-greater?: 2<>2 is false) rt-ok  clear
+
+% less-greater?: NaN
+nan 1.0 less-greater?  false eq  (less-greater?: NaN<>1 is false) rt-ok  clear
+nan nan less-greater?  false eq  (less-greater?: NaN<>NaN is false) rt-ok  clear
+
+% unordered?: normal values
+1.0 2.0 unordered?  false eq  (unordered?: ordered pair is false) rt-ok  clear
+
+% unordered?: NaN
+nan 1.0 unordered?  true eq  (unordered?: NaN,1 is unordered) rt-ok  clear
+1.0 nan unordered?  true eq  (unordered?: 1,NaN is unordered) rt-ok  clear
+nan nan unordered?  true eq  (unordered?: NaN,NaN is unordered) rt-ok  clear
+
+% IEEE comparisons with double
+3.0d 2.0d greater?  true eq  (greater?: double 3>2 is true) rt-ok  clear
+nan-d 1.0d unordered?  true eq  (unordered?: double NaN,1 is unordered) rt-ok  clear
+
+% ====================================================================
+% SECTION 16: Overflow/boundary for existing math ops
+% ====================================================================
+
+% abs(INT_MIN) -> numerical-overflow
+{ -2147483648 abs } try  /numerical-overflow eq  (abs: INT_MIN overflow) rt-ok  clear
+
+% neg(INT_MIN) -> numerical-overflow
+{ -2147483648 neg } try  /numerical-overflow eq  (neg: INT_MIN overflow) rt-ok  clear
+
+% abs of normal signed integers
+-42 abs  42 eq  (abs: abs(-42)=42) rt-ok  clear
+0 abs  0 eq  (abs: abs(0)=0) rt-ok  clear
+42 abs  42 eq  (abs: abs(42)=42) rt-ok  clear
+
+% neg of normal signed integers
+5 neg  -5 eq  (neg: neg(5)=-5) rt-ok  clear
+-5 neg  5 eq  (neg: neg(-5)=5) rt-ok  clear
+0 neg  0 eq  (neg: neg(0)=0) rt-ok  clear
+
+% gcd tests
+12 8 gcd  4 eq  (gcd: gcd(12,8)=4) rt-ok  clear
+7 13 gcd  1 eq  (gcd: gcd(7,13)=1 coprime) rt-ok  clear
+0u 0u gcd  0u eq  (gcd: gcd(0,0)=0) rt-ok  clear
+15u 0u gcd  15u eq  (gcd: gcd(15,0)=15) rt-ok  clear
+0u 15u gcd  15u eq  (gcd: gcd(0,15)=15) rt-ok  clear
+
+% gcd with INT_MIN -> numerical-overflow
+{ -2147483648 1 gcd } try  /numerical-overflow eq  (gcd: INT_MIN overflow) rt-ok  clear
+{ 1 -2147483648 gcd } try  /numerical-overflow eq  (gcd: INT_MIN overflow arg2) rt-ok  clear
+
+% lcm tests
+4 6 lcm  12 eq  (lcm: lcm(4,6)=12) rt-ok  clear
+3 5 lcm  15 eq  (lcm: lcm(3,5)=15) rt-ok  clear
+0u 5u lcm  0u eq  (lcm: lcm(0,5)=0) rt-ok  clear
+5u 0u lcm  0u eq  (lcm: lcm(5,0)=0) rt-ok  clear
+1u 7u lcm  7u eq  (lcm: lcm(1,7)=7) rt-ok  clear
+7u 1u lcm  7u eq  (lcm: lcm(7,1)=7) rt-ok  clear
+
+% lcm with INT_MIN -> numerical-overflow
+{ -2147483648 1 lcm } try  /numerical-overflow eq  (lcm: INT_MIN overflow) rt-ok  clear
+
+% ====================================================================
+% SECTION 17: Double variants of key functions
+% ====================================================================
+
+% sin/cos/tan with double
+0.0d sin  0.0d eq  (sin: double sin(0)=0) rt-ok  clear
+0.0d cos  1.0d eq  (cos: double cos(0)=1) rt-ok  clear
+0.0d tan  0.0d eq  (tan: double tan(0)=0) rt-ok  clear
+
+% sqrt with double
+4.0d sqrt  2.0d  sub abs 1e-12d lt  (sqrt: double sqrt(4)=2) rt-ok  clear
+9.0d sqrt  3.0d  sub abs 1e-12d lt  (sqrt: double sqrt(9)=3) rt-ok  clear
+
+% exp/ln with double
+1.0d exp  //:systemdict:numbers:double-type:e  sub abs 1e-12d lt  (exp: double exp(1)=e) rt-ok  clear
+1.0d log  0.0d  sub abs 1e-12d lt  (log: double log(1)=0) rt-ok  clear
+
+% log family domain (x > 0): rejects zero, negative, and NaN
+{ 0.0 log } try /range-check eq      (log: zero reject) rt-ok clear
+{ -1.0 log } try /range-check eq     (log: negative reject) rt-ok clear
+{ nan log } try /numerical-nan eq    (log: NaN reject) rt-ok clear
+{ nan log2 } try /numerical-nan eq   (log2: NaN reject) rt-ok clear
+{ nan log10 } try /numerical-nan eq  (log10: NaN reject) rt-ok clear
+
+% abs with double
+-3.14d abs  3.14d  sub abs 1e-12d lt  (abs: double abs(-3.14)=3.14) rt-ok  clear
+
+% floor/ceil/round with double
+3.7d floor  3.0d eq  (floor: double floor(3.7)=3) rt-ok  clear
+3.2d ceil  4.0d eq  (ceil: double ceil(3.2)=4) rt-ok  clear
+3.5d round  4.0d eq  (round: double round(3.5)=4) rt-ok  clear
+
+% asin/acos with double
+0.0d asin  0.0d  sub abs 1e-12d lt  (asin: double asin(0)=0) rt-ok  clear
+1.0d acos  0.0d  sub abs 1e-12d lt  (acos: double acos(1)=0) rt-ok  clear
+
+% pow with double
+2.0d 10.0d pow  1024.0d  sub abs 1e-8d lt  (pow: double 2^10=1024) rt-ok  clear
+
+% atan2 with double
+1.0d 1.0d atan2  pi-d 4.0d div  sub abs 1e-12d lt  (atan2: double atan2(1,1)=pi/4) rt-ok  clear
+0.0d 1.0d atan2  0.0d  sub abs 1e-12d lt  (atan2: double atan2(0,1)=0) rt-ok  clear
+
+% hypot with double
+3.0d 4.0d hypot  5.0d  sub abs 1e-12d lt  (hypot: double hypot(3,4)=5) rt-ok  clear
+
+% ====================================================================
+% SECTION 18: Additional edge cases
+% ====================================================================
+
+% atan2 edge cases (real)
+0.0 1.0 atan2  0.0  sub abs 1e-6 lt  (atan2: atan2(0,1)=0) rt-ok  clear
+1.0 0.0 atan2  pi 2.0 div  sub abs 1e-6 lt  (atan2: atan2(1,0)=pi/2) rt-ok  clear
+-1.0 0.0 atan2  pi -2.0 div  sub abs 1e-6 lt  (atan2: atan2(-1,0)=-pi/2) rt-ok  clear
+% NaN operand rejected (either position)
+{ nan 1.0 atan2 } try /numerical-nan eq  (atan2: NaN operand #1 reject) rt-ok clear
+{ 1.0 nan atan2 } try /numerical-nan eq  (atan2: NaN operand #2 reject) rt-ok clear
+
+% modf edge cases
+3.75 modf  3.0 eq  (modf: modf(3.75) integral=3) rt-ok
+0.75 sub abs 1e-6 lt  (modf: modf(3.75) frac=0.75) rt-ok  clear
+
+-2.25 modf  -2.0 eq  (modf: modf(-2.25) integral=-2) rt-ok
+-0.25 sub abs 1e-6 lt  (modf: modf(-2.25) frac=-0.25) rt-ok  clear
+
+0.0 modf  0.0 eq  (modf: modf(0) integral=0) rt-ok
+0.0 eq  (modf: modf(0) frac=0) rt-ok  clear
+
+% cbrt
+27.0 cbrt  3.0  sub abs 1e-6 lt  (cbrt: cbrt(27)=3) rt-ok  clear
+-8.0 cbrt  -2.0  sub abs 1e-6 lt  (cbrt: cbrt(-8)=-2) rt-ok  clear
+0.0 cbrt  0.0 eq  (cbrt: cbrt(0)=0) rt-ok  clear
+
+% exp2 and log2
+3.0 exp2  8.0  sub abs 1e-6 lt  (exp2: exp2(3)=8) rt-ok  clear
+8.0 log2  3.0  sub abs 1e-6 lt  (log2: log2(8)=3) rt-ok  clear
+
+% expm1 (accurate near zero)
+0.0 expm1  0.0  sub abs 1e-6 lt  (expm1: expm1(0)=0) rt-ok  clear
+
+% log1p (accurate near zero)
+0.0 log1p  0.0  sub abs 1e-6 lt  (log1p: log1p(0)=0) rt-ok  clear
+
+% logb and ilogb
+8.0 logb  3.0 eq  (logb: logb(8)=3) rt-ok  clear
+8.0 ilogb  3 eq  (ilogb: ilogb(8)=3) rt-ok  clear
+
+% fdim
+5.0 3.0 fdim  2.0  sub abs 1e-6 lt  (fdim: fdim(5,3)=2) rt-ok  clear
+3.0 5.0 fdim  0.0 eq  (fdim: fdim(3,5)=0) rt-ok  clear
+
+% fma
+2.0 3.0 4.0 fma  10.0  sub abs 1e-6 lt  (fma: fma(2,3,4)=10) rt-ok  clear
+
+% scalbn
+1.0 3 scalbn  8.0  sub abs 1e-6 lt  (scalbn: scalbn(1,3)=8) rt-ok  clear
+
+% remainder
+7.0 3.0 remainder  1.0  sub abs 1e-6 lt  (remainder: remainder(7,3)=1) rt-ok  clear
+
+% hypot
+3.0 4.0 hypot  5.0  sub abs 1e-6 lt  (hypot: hypot(3,4)=5) rt-ok  clear
+5.0 12.0 hypot  13.0  sub abs 1e-6 lt  (hypot: hypot(5,12)=13) rt-ok  clear
+
+% pow
+2.0 10.0 pow  1024.0  sub abs 1e-4 lt  (pow: 2^10=1024) rt-ok  clear
+10.0 0.0 pow  1.0  sub abs 1e-6 lt  (pow: 10^0=1) rt-ok  clear
+0.0 0.0 pow  1.0  sub abs 1e-6 lt  (pow: 0^0=1) rt-ok  clear
+% negative base with an integer exponent is valid
+-2.0 3.0 pow  -8.0  sub abs 1e-6 lt  (pow: (-2)^3=-8 valid) rt-ok  clear
+% domain rejects (libc++ would return NaN / +inf)
+{ -2.0 0.5 pow } try /range-check eq  (pow: neg base, non-int exp reject) rt-ok clear
+{ 0.0 -1.0 pow } try /range-check eq  (pow: zero base, neg exp reject) rt-ok clear
+{ -2.0d 0.5d pow } try /range-check eq (pow: double neg base, non-int exp reject) rt-ok clear
+
+% ====================================================================
+% SECTION 19: comp-ellint-1 (complete elliptic integral of 1st kind)
+% ====================================================================
+
+% K(0) = pi/2
+0.0 comp-ellint-1  //:systemdict:numbers:real-type:pi 2.0 div  sub abs 1e-5 lt
+(comp-ellint-1: K(0)=pi/2) rt-ok  clear
+
+% K(0.5) ~= 1.6858
+0.5 comp-ellint-1  1.6858 sub abs 1e-3 lt
+(comp-ellint-1: K(0.5) approx 1.686) rt-ok  clear
+
+% double variant
+0.0d comp-ellint-1  type /double-type eq
+(comp-ellint-1: double type) rt-ok  clear
+
+% error on NaN
+{ //:systemdict:numbers:real-type:quiet-NaN comp-ellint-1 } try
+/numerical-nan eq  (comp-ellint-1: NaN error) rt-ok  clear
+
+% ====================================================================
+% SECTION 20: comp-ellint-2 (complete elliptic integral of 2nd kind)
+% ====================================================================
+
+% E(0) = pi/2
+0.0 comp-ellint-2  //:systemdict:numbers:real-type:pi 2.0 div  sub abs 1e-5 lt
+(comp-ellint-2: E(0)=pi/2) rt-ok  clear
+
+% E(0.5) ~= 1.4675
+0.5 comp-ellint-2  1.4675 sub abs 1e-3 lt
+(comp-ellint-2: E(0.5) approx 1.467) rt-ok  clear
+
+% double variant
+0.0d comp-ellint-2  type /double-type eq
+(comp-ellint-2: double type) rt-ok  clear
+
+% ====================================================================
+% SECTION 21: expint (exponential integral)
+% ====================================================================
+
+% Ei(1) ~= 1.8951
+1.0 expint  1.8951 sub abs 1e-3 lt
+(expint: Ei(1) approx 1.895) rt-ok  clear
+
+% Ei(2) ~= 4.9542
+2.0 expint  4.9542 sub abs 1e-3 lt
+(expint: Ei(2) approx 4.954) rt-ok  clear
+
+% double variant
+1.0d expint  type /double-type eq
+(expint: double type) rt-ok  clear
+
+% negative argument
+-1.0 expint  -0.2194 sub abs 1e-3 lt
+(expint: Ei(-1) approx -0.219) rt-ok  clear
+
+% ====================================================================
+% SECTION 22: riemann-zeta
+% ====================================================================
+
+% zeta(2) = pi^2/6 ~= 1.6449
+2.0 riemann-zeta  1.6449 sub abs 1e-3 lt
+(riemann-zeta: zeta(2) approx pi^2/6) rt-ok  clear
+
+% zeta(4) = pi^4/90 ~= 1.0823
+4.0 riemann-zeta  1.0823 sub abs 1e-3 lt
+(riemann-zeta: zeta(4) approx pi^4/90) rt-ok  clear
+
+% zeta(0) = -0.5
+0.0 riemann-zeta  -0.5 sub abs 1e-5 lt
+(riemann-zeta: zeta(0) = -0.5) rt-ok  clear
+
+% zeta(-1) = -1/12
+-1.0 riemann-zeta  -1.0 12.0 div  sub abs 1e-5 lt
+(riemann-zeta: zeta(-1) = -1/12) rt-ok  clear
+
+% double variant
+2.0d riemann-zeta  type /double-type eq
+(riemann-zeta: double type) rt-ok  clear
+
+% stress: multiple evaluations
+2.0 riemann-zeta 3.0 riemann-zeta 4.0 riemann-zeta
+pop pop pop
+5.0 riemann-zeta 6.0 riemann-zeta 7.0 riemann-zeta
+pop pop pop
+true  (riemann-zeta: 6 evaluations ok) rt-ok  clear
+
+% ====================================================================
+% SECTION 23: hermite (Hermite polynomials)
+% ====================================================================
+
+% H_0(x) = 1 for all x
+0u 1.0 hermite  1.0 eq  (hermite: H_0(1)=1) rt-ok  clear
+0u 5.0 hermite  1.0 eq  (hermite: H_0(5)=1) rt-ok  clear
+
+% H_1(x) = 2x
+1u 3.0 hermite  6.0 eq  (hermite: H_1(3)=6) rt-ok  clear
+
+% H_2(x) = 4x^2 - 2
+2u 1.0 hermite  2.0 eq  (hermite: H_2(1)=2) rt-ok  clear
+2u 0.0 hermite  -2.0 eq  (hermite: H_2(0)=-2) rt-ok  clear
+
+% double variant
+0u 1.0d hermite  type /double-type eq  (hermite: double type) rt-ok  clear
+
+% error: non-uint order
+{ 0 1.0 hermite } try  /type-check eq  (hermite: int order -> error) rt-ok  clear
+
+% stress: multiple orders
+0u 1.0 hermite pop
+1u 1.0 hermite pop
+2u 1.0 hermite pop
+3u 1.0 hermite pop
+4u 1.0 hermite pop
+true  (hermite: 5 orders ok) rt-ok  clear
+
+% ====================================================================
+% SECTION 24: laguerre (Laguerre polynomials)
+% ====================================================================
+
+% L_0(x) = 1 for all x
+0u 1.0 laguerre  1.0 eq  (laguerre: L_0(1)=1) rt-ok  clear
+0u 5.0 laguerre  1.0 eq  (laguerre: L_0(5)=1) rt-ok  clear
+
+% L_1(x) = 1 - x
+1u 0.0 laguerre  1.0 eq  (laguerre: L_1(0)=1) rt-ok  clear
+1u 1.0 laguerre  0.0 sub abs 1e-6 lt  (laguerre: L_1(1)=0) rt-ok  clear
+
+% L_2(x) = (x^2 - 4x + 2) / 2
+2u 0.0 laguerre  1.0 eq  (laguerre: L_2(0)=1) rt-ok  clear
+
+% double variant
+0u 1.0d laguerre  type /double-type eq  (laguerre: double type) rt-ok  clear
+
+% error: non-uint order
+{ 0 1.0 laguerre } try  /type-check eq  (laguerre: int order -> error) rt-ok  clear
+
+% ====================================================================
+% SECTION 25: legendre (Legendre polynomials)
+% ====================================================================
+
+% P_0(x) = 1
+0u 0.5 legendre  1.0 eq  (legendre: P_0(0.5)=1) rt-ok  clear
+
+% P_1(x) = x
+1u 0.5 legendre  0.5 eq  (legendre: P_1(0.5)=0.5) rt-ok  clear
+1u -1.0 legendre  -1.0 eq  (legendre: P_1(-1)=-1) rt-ok  clear
+
+% P_2(x) = (3x^2 - 1) / 2
+2u 0.0 legendre  -0.5 eq  (legendre: P_2(0)=-0.5) rt-ok  clear
+2u 1.0 legendre  1.0 eq  (legendre: P_2(1)=1) rt-ok  clear
+
+% double variant
+1u 0.5d legendre  type /double-type eq  (legendre: double type) rt-ok  clear
+
+% error: non-uint order
+{ 0 1.0 legendre } try  /type-check eq  (legendre: int order -> error) rt-ok  clear
+
+% ====================================================================
+% SECTION 26: sph-bessel (spherical Bessel first kind)
+% ====================================================================
+
+% j_0(x) = sin(x)/x
+0u 1.0 sph-bessel  1.0 sin 1.0 div  sub abs 1e-5 lt  (sph-bessel: j_0(1)=sin(1)/1) rt-ok  clear
+
+% j_0(0) = 1
+% limit as x->0 of sin(x)/x = 1 -- but direct evaluation may differ
+% use small x instead
+0u 0.001 sph-bessel  1.0 sub abs 1e-4 lt  (sph-bessel: j_0(~0) approx 1) rt-ok  clear
+
+% j_1(0) = 0 at origin
+% j_1(x) = sin(x)/x^2 - cos(x)/x, limit at 0 is 0
+0u 1.0 sph-bessel  type /real-type eq  (sph-bessel: real type) rt-ok  clear
+
+% double variant
+0u 1.0d sph-bessel  type /double-type eq  (sph-bessel: double type) rt-ok  clear
+
+% error: non-uint order
+{ 0 1.0 sph-bessel } try  /type-check eq  (sph-bessel: int order -> error) rt-ok  clear
+
+% multiple orders
+0u 1.0 sph-bessel pop
+1u 1.0 sph-bessel pop
+2u 1.0 sph-bessel pop
+true  (sph-bessel: 3 orders ok) rt-ok  clear
+
+% ====================================================================
+% SECTION 27: sph-neumann (spherical Bessel second kind)
+% ====================================================================
+
+% y_0(x) = -cos(x)/x
+0u 1.0 sph-neumann  1.0 cos neg 1.0 div  sub abs 1e-5 lt  (sph-neumann: y_0(1)=-cos(1)/1) rt-ok  clear
+
+% double variant
+0u 1.0d sph-neumann  type /double-type eq  (sph-neumann: double type) rt-ok  clear
+
+% error: non-uint order
+{ 0 1.0 sph-neumann } try  /type-check eq  (sph-neumann: int order -> error) rt-ok  clear
+
+% multiple orders
+0u 1.0 sph-neumann pop
+1u 1.0 sph-neumann pop
+2u 1.0 sph-neumann pop
+true  (sph-neumann: 3 orders ok) rt-ok  clear
+
+% ====================================================================
+% SECTION 28: ellint-3 (incomplete elliptic integral of 3rd kind)
+% ====================================================================
+
+% Pi(0, 0, phi) = phi (degenerate case)
+0.0 0.0 1.0 ellint-3  1.0 sub abs 1e-5 lt  (ellint-3: Pi(0,0,1)=1) rt-ok  clear
+
+% Pi(0, 0, 0) = 0
+0.0 0.0 0.0 ellint-3  0.0 eq  (ellint-3: Pi(0,0,0)=0) rt-ok  clear
+
+% known? value: Pi(0.5, 0.5, 1.0) ~= 1.228
+0.5 0.5 1.0 ellint-3  1.228 sub abs 1e-2 lt  (ellint-3: Pi(0.5,0.5,1) approx 1.228) rt-ok  clear
+
+% double variant
+0.0d 0.0d 1.0d ellint-3  type /double-type eq  (ellint-3: double type) rt-ok  clear
+
+% ====================================================================
+% SECTION 29: assoc-laguerre (associated Laguerre polynomials)
+% ====================================================================
+
+% L_0^0(x) = 1
+0u 0u 1.0 assoc-laguerre  1.0 eq  (assoc-laguerre: L_0^0=1) rt-ok  clear
+
+% L_1^0(x) = 1 - x = L_1(x)
+1u 0u 1.0 assoc-laguerre  0.0 sub abs 1e-6 lt  (assoc-laguerre: L_1^0(1)=0) rt-ok  clear
+
+% L_0^m(x) = 1 for any m
+0u 5u 3.0 assoc-laguerre  1.0 eq  (assoc-laguerre: L_0^5=1) rt-ok  clear
+
+% L_1^1(x) = 2 - x
+1u 1u 0.0 assoc-laguerre  2.0 eq  (assoc-laguerre: L_1^1(0)=2) rt-ok  clear
+
+% double variant
+0u 0u 1.0d assoc-laguerre  type /double-type eq  (assoc-laguerre: double type) rt-ok  clear
+
+% error: signed int order
+{ 0 0u 1.0 assoc-laguerre } try  /type-check eq  (assoc-laguerre: int n -> error) rt-ok  clear
+
+% stress: multiple orders
+0u 0u 1.0 assoc-laguerre pop
+1u 0u 1.0 assoc-laguerre pop
+2u 0u 1.0 assoc-laguerre pop
+1u 1u 1.0 assoc-laguerre pop
+2u 1u 1.0 assoc-laguerre pop
+true  (assoc-laguerre: 5 evaluations ok) rt-ok  clear
+
+% ====================================================================
+% SECTION 30: assoc-legendre (associated Legendre polynomials)
+% ====================================================================
+
+% P_0^0(x) = 1
+0u 0u 0.5 assoc-legendre  1.0 eq  (assoc-legendre: P_0^0=1) rt-ok  clear
+
+% P_1^0(x) = x = P_1(x)
+1u 0u 0.5 assoc-legendre  0.5 eq  (assoc-legendre: P_1^0(0.5)=0.5) rt-ok  clear
+
+% P_1^1(0) = sqrt(1-0^2) = 1 (C++ convention, no Condon-Shortley phase)
+1u 1u 0.0 assoc-legendre  1.0 eq  (assoc-legendre: P_1^1(0)=1) rt-ok  clear
+
+% P_2^0(x) = P_2(x) = (3x^2-1)/2
+2u 0u 1.0 assoc-legendre  1.0 eq  (assoc-legendre: P_2^0(1)=1) rt-ok  clear
+
+% double variant
+1u 0u 0.5d assoc-legendre  type /double-type eq  (assoc-legendre: double type) rt-ok  clear
+
+% error: signed int order
+{ 0 0u 1.0 assoc-legendre } try  /type-check eq  (assoc-legendre: int n -> error) rt-ok  clear
+
+% ====================================================================
+% SECTION 31: sph-legendre (spherical harmonics)
+% ====================================================================
+
+% Y_0^0(theta) = 1/(2*sqrt(pi)) ~= 0.28209
+0u 0u 0.0 sph-legendre  0.28209 sub abs 1e-4 lt  (sph-legendre: Y_0^0 approx 0.282) rt-ok  clear
+
+% Y_0^0 is constant for any theta
+0u 0u 1.0 sph-legendre  0u 0u 0.0 sph-legendre  sub abs 1e-6 lt
+(sph-legendre: Y_0^0 constant) rt-ok  clear
+
+% Y_1^0(0) = sqrt(3/(4*pi)) ~= 0.48860
+1u 0u 0.0 sph-legendre  0.48860 sub abs 1e-4 lt  (sph-legendre: Y_1^0(0) approx 0.489) rt-ok  clear
+
+% double variant
+0u 0u 0.0d sph-legendre  type /double-type eq  (sph-legendre: double type) rt-ok  clear
+
+% error: signed int order
+{ 0 0u 1.0 sph-legendre } try  /type-check eq  (sph-legendre: int l -> error) rt-ok  clear
+
+% stress: multiple (l,m) pairs
+0u 0u 1.0 sph-legendre pop
+1u 0u 1.0 sph-legendre pop
+1u 1u 1.0 sph-legendre pop
+2u 0u 1.0 sph-legendre pop
+2u 1u 1.0 sph-legendre pop
+2u 2u 1.0 sph-legendre pop
+true  (sph-legendre: 6 evaluations ok) rt-ok  clear
+
+% ====================================================================
+% Done
+% ====================================================================
+
+(Math operator tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

@@ -1,0 +1,197 @@
+% ====================================================================
+% test_bind_into_dict.trx -- atomic batch bind into an arbitrary dict
+% ====================================================================
+% bind-into-dict takes N values, a keys-array, and a dict (on top) and
+% writes N bindings into the dict.  Keys may be any non-Null type (same
+% rule as def/put).  Pre-validates type, dup, capacity, stack arity
+% atomically: any error leaves the dict unchanged.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Happy path -- Name keys
+% ====================================================================
+
+/d1 16 dict def
+1 2 3 [/x /y /z] d1 bind-into-dict
+d1 length 3 eq                                  (s1: bind 3 names into 16-cap dict)            rt-ok
+
+d1 /x get 1 eq                                  (s1: leftmost name -> bottommost value)        rt-ok
+d1 /y get 2 eq                                  (s1: middle binding)                           rt-ok
+d1 /z get 3 eq                                  (s1: rightmost name -> top value)              rt-ok
+
+% Bind 1 element (smallest case).
+/d2 8 dict def
+99 [/only] d2 bind-into-dict
+d2 /only get 99 eq                              (s1: bind single name)                         rt-ok
+
+% ====================================================================
+% SECTION 2: Non-Name keys (integer / string)
+% ====================================================================
+
+/d3 16 dict def
+(hello) (world) [10 20] d3 bind-into-dict
+d3 10 get (hello) eq                            (s2: integer key 10)                           rt-ok
+d3 20 get (world) eq                            (s2: integer key 20)                           rt-ok
+
+/d4 16 dict def
+1 2 [(alpha) (beta)] d4 bind-into-dict
+d4 (alpha) get 1 eq                             (s2: string key (alpha))                       rt-ok
+d4 (beta) get 2 eq                              (s2: string key (beta))                        rt-ok
+
+% Mixed key types in one call.
+/d5 16 dict def
+10 20 30 [/name 42 (string)] d5 bind-into-dict
+d5 /name get 10 eq                              (s2: mixed-key Name)                           rt-ok
+d5 42 get 20 eq                                 (s2: mixed-key Integer)                        rt-ok
+d5 (string) get 30 eq                           (s2: mixed-key String)                         rt-ok
+
+% ====================================================================
+% SECTION 3: Update vs insert -- net-new capacity check
+% ====================================================================
+
+% Pre-populate dict; bind-into-dict updates existing keys without
+% growing the dict.  Capacity 4, 4 keys preexisting -> rebinding the
+% same keys must succeed.
+/d6 4 dict def
+d6 /a 0 put  d6 /b 0 put  d6 /c 0 put  d6 /d 0 put
+d6 length 4 eq                                  (s3: dict pre-filled to capacity)              rt-ok
+
+% Re-bind same 4 keys -- net-new = 0, fits.
+1 2 3 4 [/a /b /c /d] d6 bind-into-dict
+d6 length 4 eq                                  (s3: rebind preserves length)                  rt-ok
+d6 /a get 1 eq                                  (s3: rebind updated /a)                        rt-ok
+d6 /d get 4 eq                                  (s3: rebind updated /d)                        rt-ok
+
+% Capacity at limit, adding a NEW key fails.
+{ 99 [/new] d6 bind-into-dict } try
+/limit-check eq                                 (s3: net-new at limit -> limit-check)          rt-ok clear
+
+% Mix of new + update.  Cap 5, 4 entries already, adding 2 keys
+% (1 update, 1 new) -> net-new 1, fits.
+/d7 5 dict def
+d7 /a 1 put  d7 /b 2 put  d7 /c 3 put  d7 /d 4 put
+10 20 [/a /e] d7 bind-into-dict
+d7 /a get 10 eq                                 (s3: mix update)                               rt-ok
+d7 /e get 20 eq                                 (s3: mix new)                                  rt-ok
+d7 length 5 eq                                  (s3: mix length)                               rt-ok
+
+% ====================================================================
+% SECTION 4: Sad path
+% ====================================================================
+
+% Empty keys-array.
+/d8 8 dict def
+{ [ ] d8 bind-into-dict } try /unsupported eq   (s4: empty keys-array)                         rt-ok clear
+
+% Duplicate keys.
+/d9 8 dict def
+{ 1 2 [/a /a] d9 bind-into-dict } try /unsupported eq
+(s4: dup keys)                                                                                 rt-ok clear
+
+% Null in keys-array.
+/d10 8 dict def
+{ 1 2 [/a null] d10 bind-into-dict } try /type-check eq
+(s4: null key)                                                                                 rt-ok clear
+
+% Insufficient stack values.
+/d11 8 dict def
+{ 1 [/a /b /c] d11 bind-into-dict } try /opstack-underflow eq
+(s4: insufficient operands)                                                                    rt-ok clear
+
+% Wrong types: integer instead of dict on top.
+{ 1 [/a] 42 bind-into-dict } try /type-check eq (s4: non-dict on top)                          rt-ok clear
+
+% Wrong types: integer instead of array.
+/d12 8 dict def
+{ 1 99 d12 bind-into-dict } try /type-check eq  (s4: non-array as keys)                        rt-ok clear
+
+% Capacity overflow on a fresh dict.
+/d13 2 dict def
+{ 1 2 3 [/a /b /c] d13 bind-into-dict } try /limit-check eq
+(s4: overflow on small dict)                                                                   rt-ok clear
+
+% ====================================================================
+% SECTION 5: Atomicity -- failures leave the dict unchanged
+% ====================================================================
+
+% Capacity overflow: dict must be unmutated after the failed call.
+/d14 2 dict def
+{ 1 2 3 [/a /b /c] d14 bind-into-dict } try
+/limit-check eq                                 (s5: pre-check capacity)                       rt-ok clear
+
+d14 length 0 eq                                 (s5: dict unchanged after capacity err)        rt-ok
+
+% Type-check mid-array: [/a 42 /c] -- /a is Name, 42 is Integer (legal),
+% but if mixed in a way that fails type-check (Null), nothing should
+% land.
+/d15 8 dict def
+{ 10 20 30 [/a null /c] d15 bind-into-dict } try
+/type-check eq
+d15 length 0 eq
+and                                             (s5: dict unchanged after type-check err)      rt-ok clear
+
+% Duplicate keys: [/a /a] caught at i=1 before any write.
+/d16 8 dict def
+{ 10 20 [/a /a] d16 bind-into-dict } try
+/unsupported eq
+d16 length 0 eq
+and                                             (s5: dict unchanged after dup-check err)       rt-ok clear
+
+% ====================================================================
+% SECTION 6: Save/restore journaling
+% ====================================================================
+
+/d17 16 dict def
+d17 /pre 100 put
+save
+1 2 [/a /b] d17 bind-into-dict
+d17 length 3 eq                                 (s6: bindings visible inside save)             rt-ok
+restore
+
+% After restore: only /pre remains.
+d17 length 1 eq                                 (s6: post-restore length 1)                    rt-ok
+d17 /pre get 100 eq                             (s6: pre-save binding survives)                rt-ok
+{ d17 /a get } try /undefined eq                (s6: post-restore /a gone)                     rt-ok clear
+
+% ====================================================================
+% SECTION 7: Dynamic dicts grow during bind-into-dict
+% ====================================================================
+
+/d18 4 dynamic-dict def
+1 2 3 4 5 6 [/a /b /c /d /e /f] d18 bind-into-dict
+d18 length 6 eq                                 (s7: dynamic dict grew to fit)                 rt-ok
+d18 /a get 1 eq                                 (s7: dynamic dict has /a)                      rt-ok
+d18 /f get 6 eq                                 (s7: dynamic dict has /f)                      rt-ok
+
+% ====================================================================
+% SECTION 8: ReadOnly dict rejected
+% ====================================================================
+
+/d19 8 dict def
+d19 /x 1 put
+d19 make-readonly pop  % flip access
+{ 1 [/y] d19 bind-into-dict } try /read-only eq
+(s8: read-only dict rejected)                                                                  rt-ok clear
+
+% ====================================================================
+% SECTION 9: Eqarray keys
+% ====================================================================
+
+/d20 8 dict def
+1 2 3 [/p /q /r]#= d20 bind-into-dict
+d20 /p get 1 eq                                 (s9: eqarray keys-array)                       rt-ok
+d20 /q get 2 eq                                 (s9: eqarray q binding)                        rt-ok
+d20 /r get 3 eq                                 (s9: eqarray r binding)                        rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_bind_into_dict: ALL TESTS PASSED) =
+(__test_ok__) =

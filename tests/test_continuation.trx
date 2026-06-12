@@ -1,0 +1,1099 @@
+% ====================================================================
+% test_continuation.trx -- delimited continuation tests
+% ====================================================================
+% Comprehensive test suite for the Continuation type, delimit/capture
+% operators, and execute_continuation (one-shot, callable).
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: HAPPY PATH -- basic delimit/capture
+% ====================================================================
+
+% handler ignores K, returns constant
+{ { pop 42 } capture } delimit
+42 eq (basic: handler ignores K) rt-ok clear
+
+% handler ignores K, body has pending ops (never run)
+{ { pop 42 } capture 10 add } delimit
+42 eq (basic: captured body not executed) rt-ok clear
+
+% resume with value
+{ { 99 exch exec } capture 1 add } delimit
+100 eq (resume: value flows through) rt-ok clear
+
+% handler code after resume
+{ { 42 exch exec 100 add } capture 10 add } delimit
+152 eq (resume: handler continues after exec) rt-ok clear
+
+% resume value is return of capture in body
+{ { (hello) exch exec } capture length } delimit
+5 eq (resume: capture returns resume value) rt-ok clear
+
+% empty capture (capture as last op in body, resume value passthrough)
+{ { 42 exch exec } capture } delimit
+42 eq (empty: zero-element capture, resume value passthrough) rt-ok clear
+
+% K stored in variable, invoked later
+{ { } capture 10 add } delimit
+/k exch def
+99 k
+109 eq (var: K stored and invoked) rt-ok clear
+
+% K passed to another proc
+/invoke-k { 10 exch exec } def
+{ { invoke-k } capture 5 mul } delimit
+50 eq (pass: K invoked by helper proc) rt-ok clear
+
+% multiple sequential delimit/capture (independent)
+{ { pop 1 } capture } delimit
+{ { pop 2 } capture } delimit
+add 3 eq (seq: two independent captures) rt-ok clear
+
+% ====================================================================
+% SECTION 2: TYPE PREDICATE
+% ====================================================================
+
+{ { } capture } delimit
+is-continuation (pred: continuation is true) rt-ok clear
+
+42 is-continuation not (pred: integer is false) rt-ok clear
+{ } is-continuation not (pred: proc is false) rt-ok clear
+null is-continuation not (pred: null is false) rt-ok clear
+
+% ====================================================================
+% SECTION 3: NESTED DELIMIT
+% ====================================================================
+
+% inner capture finds inner barrier
+{
+    { { pop 1 } capture 10 add } delimit
+} delimit
+1 eq (nest: inner capture finds inner barrier) rt-ok clear
+
+% outer delimit unaffected by inner
+{
+    { { pop 1 } capture } delimit pop
+    42
+} delimit
+42 eq (nest: outer delimit returns body result) rt-ok clear
+
+% nested: inner resumes, outer wraps
+{
+    { { 5 exch exec } capture 2 mul } delimit
+} delimit
+10 eq (nest: inner resume, outer passthrough) rt-ok clear
+
+% ====================================================================
+% SECTION 4: DEEP HANDLERS (capture inside resumed body)
+% ====================================================================
+
+% capture inside resumed body finds fresh delimiter
+% K1 captures the rest of the body. When resumed, the body does a second
+% capture, yielding K2. Resuming K2 completes the addition.
+{
+    { } capture       % K1 returned as delimit result (handler no-op)
+    { } capture       % inside K1: K2 returned as resume result
+    add
+} delimit
+/k1 exch def          % K1 from delimit
+10 k1                 % resume K1 with 10 -> second capture fires -> K2
+/k2 exch def          % K2 from resumed K1
+20 k2                 % resume K2 with 20 -> add fires: 10 + 20 = 30
+30 eq (deep: two captures in sequence, both resume) rt-ok clear
+
+% ====================================================================
+% SECTION 5: INTERACTION WITH TRY-CATCH
+% ====================================================================
+
+% error in body propagates past delimit to try
+{ { 1 0 div } delimit } try
+/div-by-zero eq (err: body error propagates past delimit) rt-ok clear
+
+% error before capture propagates past delimit to try
+{ { 1 0 div { pop 42 } capture } delimit } try
+/div-by-zero eq (err: error before capture propagates) rt-ok clear
+
+% try-catch inside body works normally
+{
+    { 1 0 div } try /div-by-zero eq
+} delimit
+true eq (err: try-catch inside body works) rt-ok clear
+
+% error in handler propagates normally
+{ { { 1 0 div } capture } delimit } try
+/div-by-zero eq (err: handler error propagates) rt-ok clear
+
+% error in resumed body propagates past fresh delimiter
+{
+    { { 42 exch exec } capture 1 0 div } delimit
+} try
+/div-by-zero eq (err: resumed body error propagates) rt-ok clear
+
+% ====================================================================
+% SECTION 6: SAD PATH (error cases)
+% ====================================================================
+
+% capture outside delimit
+{ { pop } capture } try
+/unhandled-capture eq (sad: capture without delimit) rt-ok clear
+
+% one-shot: execute K twice
+{
+    { { dup exch exec exec } capture } delimit
+} try
+/invalid-access eq (sad: one-shot double exec) rt-ok clear
+
+% one-shot via dup: shared context prevents double resume
+{
+    { { dup 1 exch exec pop 2 exch exec } capture } delimit
+} try
+/invalid-access eq (sad: one-shot dup exec) rt-ok clear
+
+% non-callable handler
+{ 42 capture } try
+/type-check eq (sad: non-callable handler) rt-ok clear
+
+% ====================================================================
+% SECTION 7: STRESS TESTS
+% ====================================================================
+
+% accumulator via repeated capture/resume
+% Handler increments a counter and resumes with null.
+/acc 0 def
+{
+    { /acc acc 1 add def null exch exec } capture pop
+    { /acc acc 1 add def null exch exec } capture pop
+    { /acc acc 1 add def null exch exec } capture pop
+    { /acc acc 1 add def null exch exec } capture pop
+    { /acc acc 1 add def null exch exec } capture pop
+    { /acc acc 1 add def null exch exec } capture pop
+    { /acc acc 1 add def null exch exec } capture pop
+    { /acc acc 1 add def null exch exec } capture pop
+    { /acc acc 1 add def null exch exec } capture pop
+    { /acc acc 1 add def null exch exec } capture pop
+} delimit
+acc 10 eq (stress: 10 sequential captures) rt-ok
+/acc 0 def
+clear
+
+% large captured segment (50 pending add operations)
+{
+    {
+        0 exch exec
+        1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add
+        1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add
+        1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add
+        1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add
+        1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add 1 add
+    } capture
+} delimit
+exec
+50 eq (stress: large captured segment) rt-ok clear
+
+% continuation stored in array, retrieved and invoked
+{ { } capture } delimit
+[ exch ]   % wrap K in array
+0 get      % retrieve K from array
+42 exch exec
+42 eq (stress: K in array, retrieved, invoked) rt-ok clear
+
+% continuation as curry value
+{ { } capture 10 mul } delimit
+5 exch curry   % curry(5, K) -- when exec'd: pushes 5, exec K with 5
+exec
+50 eq (stress: K in curry, invoked) rt-ok clear
+
+% multiple live continuations simultaneously
+{
+    { } capture 1 add
+} delimit
+/k1 exch def
+{
+    { } capture 2 mul
+} delimit
+/k2 exch def
+10 /k1 load exec
+20 /k2 load exec
+40 eq exch 11 eq and (stress: two live K simultaneous) rt-ok clear
+
+% ====================================================================
+% SECTION 8: FUZZ / BOUNDARY TESTS
+% ====================================================================
+
+% zero-element capture (capture as very last thing)
+{ { 77 exch exec } capture } delimit
+77 eq (fuzz: zero-element capture resumes) rt-ok clear
+
+% single-element capture (body has one pending op)
+{ { 3 exch exec } capture 1 add } delimit
+4 eq (fuzz: single-element capture) rt-ok clear
+
+% capture with inner try-catch barrier (error stack companion)
+{
+    { } capture  % K captures rest including try
+    { 42 } try
+} delimit
+/k exch def
+99 /k load exec
+/no-error eq exch 42 eq and (fuzz: try-catch inside captured segment) rt-ok clear
+
+% delimit inside captured segment
+{
+    { } capture  % K captures rest including inner delimit
+    { 99 } delimit
+    add
+} delimit
+/k exch def
+1 /k load exec
+100 eq (fuzz: delimit inside captured segment) rt-ok clear
+
+% capture with try-catch wrapping delimit
+{
+    { { pop 42 } capture } delimit
+} try
+/no-error eq exch 42 eq and (fuzz: try around delimit+capture) rt-ok clear
+
+% ====================================================================
+% SECTION 9: CAPTURE ACROSS |locals|
+% ====================================================================
+% capture and resume are allowed to span |locals| boundaries.  The
+% matching locals dicts are saved inside the continuation and restored
+% on resume so the resumed body sees the same locals scope.
+%
+% Tests `put` results into userdict directly (instead of `def` which
+% would write into the top-of-stack locals dict and exceed its fixed
+% capacity).
+
+userdict /flag 0 put
+userdict /result 0 put
+userdict /k null put
+
+% capture inside |x| runs without /invalid-access
+{
+    99 {
+        |x|
+        { pop userdict /flag 1 put } capture
+    } exec
+} delimit
+flag 1 eq (locals: capture inside |x| runs cleanly) rt-ok
+userdict /flag 0 put
+clear
+
+% resumed body sees x bound from the locals frame that was captured
+{
+    99 {
+        |x|
+        { userdict /k 3 2 roll put null } capture pop
+        userdict /result x put
+    } exec
+} delimit
+0 /k load exec
+result 99 eq (locals: resumed body sees captured x) rt-ok
+userdict /result 0 put
+clear
+
+% 3-deep |locals| nest all restored in outermost-first order on resume
+{
+    1 2 3 {
+        |a|
+        {
+            |b|
+            {
+                |c|
+                { userdict /k 3 2 roll put null } capture pop
+                userdict /result a b c add add put
+            } exec
+        } exec
+    } exec
+} delimit
+0 /k load exec
+result 6 eq (locals: 3-deep |a|/|b|/|c| all restored on resume) rt-ok
+userdict /result 0 put
+clear
+
+% nested delimit inside |locals|: inner delimit's own barrier delimits
+% the capture.  The @end-locals is OUTSIDE (below) the inner barrier, so
+% the inner continuation does NOT carry the |x| locals frame -- handler
+% still runs inside the locals scope and can see x.
+{
+    7 {
+        |x|
+        { { pop userdict /result x put } capture } delimit
+    } exec
+} delimit
+result 7 eq (locals: nested delimit's capture stays below |x|) rt-ok
+userdict /result 0 put
+clear
+
+% K invoked after handler returns: resumed body sees x
+{
+    42 {
+        |x|
+        { userdict /k 3 2 roll put null } capture pop
+        x
+    } exec
+} delimit
+% handler ran, stashed K; delimit returned nothing extra.
+0 /k load exec
+42 eq (locals: K invoked after handler-return sees x) rt-ok clear
+
+% spent continuation: first resume ok, second errors
+{
+    5 {
+        |x|
+        { userdict /k 3 2 roll put null } capture pop
+        userdict /result x put
+    } exec
+} delimit
+0 /k load exec       % first resume ok
+{ 0 /k load exec } try
+/invalid-access eq (locals: second resume is spent) rt-ok
+userdict /result 0 put
+clear
+
+% try-catch inside locals, inside captured segment (error-stack companion
+% travels with the continuation)
+{
+    10 {
+        |x|
+        { userdict /k 3 2 roll put null } capture pop
+        { userdict /result x put } try pop
+    } exec
+} delimit
+0 /k load exec
+result 10 eq (locals: try-catch inside locals+captured segment) rt-ok
+userdict /result 0 put
+clear
+
+% ====================================================================
+% SECTION 10: OP-STACK CAPTURE (ambient state between delimit and capture)
+% ====================================================================
+% `delimit` records the op-stack depth at entry; `capture` saves the
+% ambient op-slice above that snapshot and trims m_op_ptr so the
+% handler runs on a clean op stack.  `execute_continuation` restores
+% the slice on resume, so the captured body sees its original op
+% layout with the resume value on top.
+
+% ambient push before capture: 42 rides inside the continuation, NOT
+% into the handler.  On resume, the captured body picks up with the
+% restored ambient below and the resume value on top.
+{
+    42 { } capture    % no-op handler; K propagates out as delimit's result
+    add               % captured tail; on resume: 42 + resume-value
+} delimit
+/k exch def
+10 /k load exec
+52 eq (op-slice: ambient captured, resume sees it on op) rt-ok clear
+
+% handler sees a clean op stack (ambient was trimmed into the slice):
+% handler checks dup+is-continuation on its top -- with the op-slice
+% trim, the handler's top IS K (not the ambient 300), and K is the
+% sole item on op.  `dup is-continuation` keeps K intact for the
+% capture's delimit-return.
+userdict /handler-top-is-k false put
+{
+    100 200 300 { dup is-continuation userdict exch /handler-top-is-k exch put } capture
+} delimit
+pop                   % discard K (delimit's result)
+handler-top-is-k true eq (op-slice: handler sees K on top of clean op) rt-ok
+clear
+
+% 3-item ambient preserved on resume: captured body folds the slice
+% plus the resume value with three adds.
+{
+    1 2 3 { } capture
+    add add add       % ((resume + 3) + 2) + 1
+} delimit
+/k exch def
+4 /k load exec
+10 eq (op-slice: 3-item ambient preserved across capture/resume) rt-ok clear
+
+% nested delimit: inner capture's op-depth snapshot is fresh (taken at
+% inner delimit entry when op had just [99]), so inner slice captures
+% only items pushed INSIDE the inner scope, not the outer 99.
+{
+    99 {
+        42 { } capture     % inner slice = [42] only; 99 is OUTER ambient
+        add
+    } delimit              % inner delimit returns K-inner on op (handler was {})
+    3 exch exec            % resume K-inner with 3: captured `add` runs (42+3=45)
+    add                    % outer: 99 + 45 = 144
+} delimit
+144 eq (op-slice: nested delimit, inner snapshot independent of outer) rt-ok clear
+
+% REGRESSION (2026-04-24, caught by fuzz seed continuation_capture_locals):
+% body inside delimit consumes op items from BELOW the op-depth snapshot
+% (|locals|#N binds a pre-delimit item).  capture's op-slice computation
+% must clamp op_count to 0 when m_op_ptr < snapshot -- otherwise the
+% subtraction underflows length_t and memcpy copies 64K Objects from
+% stale op-stack bytes.  ASan memcpy-param-overlap on the underflowed
+% size is the failure mode without the clamp.
+{ 5 { |x|#4 { 42 } capture } delimit } try
+/no-error eq (regression: |locals| consumes pre-delimit op item -- op_count clamped) rt-ok
+clear
+
+% ====================================================================
+% SECTION 11: ABORT-EXEC (trim-then-splice resume semantics)
+% ====================================================================
+% `abort-exec` is the Scheme-call/cc-style pair of `exec`: it trims
+% the resumer's exec/err/dict/op stacks down to K's matching
+% @handler-scope before splicing the captured segment, so any
+% receiver frames between the handler-push point and the abort-exec
+% call are discarded.  See memory/plan_abort_on_resume.md.
+
+% Classic abort-style pattern: handler invokes K via abort-exec with
+% a resume value; the receiver's pending frames (and anything the
+% handler pushed after abort-exec) are discarded; the captured body
+% runs with the resume value as the "result of capture".
+%   10 + delimit-result; handler aborts with 99; captured "5 add"
+%   runs with 99 -> 104; delimit returns 104; outer 10 + 104 = 114.
+10 { { 99 exch abort-exec } capture 5 add } delimit
+add 114 eq (abort-exec: classic abort; captured segment runs with resume) rt-ok clear
+
+% Handler frames AFTER abort-exec are discarded.  Without abort
+% trimming, `1 add` would execute on the way out and change the
+% result.  Abort yields 114 (same as previous test), not 115.
+10 { { 99 exch abort-exec 1 add } capture 5 add } delimit
+add 114 eq (abort-exec: handler frames after call are discarded) rt-ok clear
+
+% Receiver returns normally (doesn't invoke K): handler completes
+% with its return value; capture yields that value to the delimited
+% body -- same happy path as splice, abort semantics are irrelevant
+% when K is never called.
+10 { { pop 42 } capture } delimit
+add 52 eq (abort-exec: receiver returns normally, handler result yielded) rt-ok clear
+
+% Type-check: abort-exec with a non-Continuation second argument.
+{ 0 42 abort-exec } try
+/type-check eq
+(abort-exec: type-check caught non-Continuation) rt-ok clear
+
+% Stale-scope detection: store K in userdict; let the handler return
+% normally so @handler-scope pops.  A subsequent abort-exec on the
+% stored K must raise /invalid-access rather than silently falling
+% back to splice.
+userdict /stale-k null put
+{
+    { userdict exch /stale-k exch put 42 } capture pop
+} delimit pop
+
+{ 0 userdict /stale-k get abort-exec } try
+/invalid-access eq
+(abort-exec: stale-scope rejected with /invalid-access) rt-ok clear
+
+% `exec` on the same stale K still works (splice has no scope
+% requirement).  Captured segment was just the body tail after
+% `capture` -- `pop` -- so resuming with 7 below it pops 7 and
+% leaves op clean.  No error.
+{ 7 userdict /stale-k get exec } try
+/no-error eq
+(abort-exec: exec splice still works on stale K) rt-ok clear
+
+% Cleanup in trim range: |locals| block pushed inside the handler
+% before abort-exec.  Abort must pop the locals dict (and clear its
+% cached name bindings) during the trim -- otherwise subsequent code
+% would run with a dangling locals dict on the dict stack.  Use
+% count-dictstack on each side to verify no net change.
+count-dictstack /before-abort-depth exch def
+10
+{
+    {
+        |k|                       % bind k := K from op (pushes locals dict)
+        99 /k load abort-exec     % load K without executing, then abort-exec
+    } capture
+    5 add
+} delimit pop
+count-dictstack before-abort-depth eq
+(abort-exec: |locals| dict popped during trim -- dictstack net zero) rt-ok clear
+
+% Nested captures, identity matching: inner capture's handler invokes
+% abort-exec on OUTER K.  Inner's @handler-scope is skipped (identity
+% mismatch); outer's @handler-scope is the trim target.  Result:
+% outer captured body (`5 add`) runs with resume; inner captured body
+% (`1 add`) is discarded.
+userdict /outer-k null put
+10
+{
+    {
+        userdict exch /outer-k exch put   % save OUTER K
+        % Inside outer handler: nested delimit+capture
+        {
+            {
+                99 userdict /outer-k get abort-exec
+            } capture
+            1 add   % captured by inner but never runs (abort skipped inner)
+        } delimit
+        pop   % unreachable: outer K abort skipped inner's delimit-return
+    } capture
+    5 add     % captured by outer; runs on resume from abort-exec
+} delimit
+add 114 eq (abort-exec: nested capture, identity matching trims outer scope) rt-ok clear
+
+% ====================================================================
+% SECTION 12: ABORT-EXEC CLEANUP IN TRIM RANGE
+% ====================================================================
+% unwind_exec_to walks each barrier/operator in the trim range and
+% runs its companion-pop / stream-close / dict-pop cleanup.  These
+% tests place various barrier kinds inside the handler body before
+% abort-exec fires, so the trim must cross them with state intact.
+
+% try-catch barrier in trim range: err companion popped during unwind.
+% The try-catch handler never runs because abort-exec discards the
+% try-catch's body before any error could be raised.
+10
+{
+    {
+        << /any { pop 0 } >> { 99 exch abort-exec } try-catch
+        pop   % discarded under abort
+    } capture
+    5 add
+} delimit
+add 114 eq (cleanup: try-catch barrier in trim range -- err companion popped) rt-ok clear
+
+% finally barrier in trim range: err companion popped.  Finally block
+% is DISCARDED (not run) under abort, matching exit/stop semantics --
+% unwind_exec_to pops the err companion without scheduling execution.
+% If the cleanup block ran we'd print (finally-unreachable) as a side
+% effect; its absence confirms the trim walked finally as a pass-
+% through barrier.
+10
+{
+    {
+        { (finally-unreachable) print } { 99 exch abort-exec } finally
+        pop
+    } capture
+    5 add
+} delimit
+add 114 eq (cleanup: finally barrier in trim range -- companion popped, block skipped) rt-ok clear
+
+% handle-effect in trim range: effect barrier + handler-dict companion
+% popped.  Handler-dict is discarded; captured body runs.
+10
+{
+    {
+        << /ev { pop 0 } >>
+        { 99 exch abort-exec }
+        handle-effect
+        pop
+    } capture
+    5 add
+} delimit
+add 114 eq (cleanup: handle-effect barrier in trim range -- handler-dict popped) rt-ok clear
+
+% Inner delimit in trim range: inner @delimit-barrier + op-depth
+% companion popped during unwind.  Outer capture's K has its
+% @handler-scope below the inner delimit, so abort-exec trims through
+% the inner barrier.
+10
+{
+    {
+        |outer-k|
+        {
+            99 /outer-k load abort-exec
+        } delimit   % inner delimit's barrier sits in the trim range
+        pop
+    } capture
+    5 add
+} delimit
+add 114 eq (cleanup: inner delimit in trim range -- op-depth companion popped) rt-ok clear
+
+% Multiple |locals| frames stacked in the trim range.  Each @end-locals
+% must pop its dict from the dict stack; mis-ordered cleanup would
+% leave stale bindings or dangling dicts.  Outer |outer-k| + inner
+% |inner| both live when abort-exec fires.
+count-dictstack /depth0 exch def
+10
+{
+    {
+        |outer-k|
+        42 { |inner| 99 /outer-k load abort-exec } exec
+    } capture
+    5 add
+} delimit pop
+count-dictstack depth0 eq
+(cleanup: nested |locals| in trim range -- dict stack restored) rt-ok clear
+
+% ====================================================================
+% SECTION 13: ERROR UNWIND ACROSS @HANDLER-SCOPE
+% ====================================================================
+% An error inside a handler body propagates through @handler-scope to
+% whichever outer try/try-catch catches it.  try_catch_handler treats
+% @handler-scope as a non-catching barrier -- pops its 2 err companions
+% and keeps searching for a try/try-catch.  Without the scan-site
+% update this would corrupt the err stack on the way up.
+
+% Error inside handler, caught by outer try: @handler-scope companions
+% must be popped during the error unwind so err stack stays coherent.
+{
+    { { 1 0 div } capture } delimit
+} try
+/div-by-zero eq (err: handler body error crosses @handler-scope to outer try) rt-ok clear
+
+% Error inside handler, caught by try-catch INSIDE the handler:
+% @handler-scope companions stay put (we unwind ABOVE handler-scope to
+% reach the try-catch; barrier is not in the unwind range).  Handler
+% still completes cleanly afterward.
+{
+    {
+        pop   % discard K
+        << /div-by-zero { pop 42 } >> { 1 0 div } try-catch
+    } capture
+} delimit
+42 eq (err: try-catch INSIDE handler catches; @handler-scope untouched) rt-ok clear
+
+% ====================================================================
+% SECTION 14: ABORT-EXEC STRESS
+% ====================================================================
+
+% 10 sequential abort-exec invocations.  Each delimit installs a fresh
+% capture; the handler aborts with a resume value that the captured
+% tail folds into an accumulator via userdict.
+userdict /acc 0 put
+10 {
+    {
+        { null exch abort-exec } capture
+        pop                                        % discard null resume
+        userdict /acc userdict /acc get 1 add put
+    } delimit
+} repeat
+userdict /acc get 10 eq (stress: 10 sequential abort-exec -- acc accumulates) rt-ok clear
+
+% Deep-nested captures, abort-exec targets the OUTERMOST K.  Four
+% levels deep; inner three handlers' frames all discarded on abort.
+userdict /lvl1-k null put
+1
+{
+    {
+        userdict exch /lvl1-k exch put
+        2
+        {
+            {
+                pop   % discard inner K
+                3
+                {
+                    {
+                        pop   % discard inner K
+                        4
+                        {
+                            {
+                                pop   % discard inner K
+                                99 userdict /lvl1-k get abort-exec
+                            } capture
+                            add       % unreachable
+                        } delimit
+                        add           % unreachable
+                    } capture
+                    add               % unreachable
+                } delimit
+                add                   % unreachable
+            } capture
+            add                       % unreachable
+        } delimit
+        add                           % unreachable
+    } capture
+    add                               % captured by outer; 1 + 99 = 100
+} delimit
+100 eq (stress: 4-level nested capture, abort-exec targets outermost) rt-ok clear
+
+% ====================================================================
+% SECTION 15: ABORT-EXEC BOUNDARY / FUZZ
+% ====================================================================
+
+% Empty captured body (capture is last thing in delimit body).  Abort
+% trims handler; captured body is empty; resume value is the result.
+{ { 42 exch abort-exec } capture } delimit
+42 eq (fuzz: empty captured body + abort-exec -- resume value is result) rt-ok clear
+
+% Abort with null resume value: captured body sees null on top of op.
+{ { null exch abort-exec } capture } delimit
+is-null (fuzz: null resume value propagates through abort-exec) rt-ok clear
+
+% Abort with string resume value.
+{ { (hello) exch abort-exec } capture } delimit
+(hello) eq (fuzz: string resume propagates through abort-exec splice) rt-ok clear
+
+% Abort from inside a curry-embedded handler.  The handler closure
+% can still find its @handler-scope by K identity.
+10
+{
+    99
+    { exch abort-exec } curry   % curried handler: [99, K] body does exch abort-exec
+    capture
+    5 add
+} delimit
+add 114 eq (fuzz: abort-exec inside curry-embedded handler) rt-ok clear
+
+% Interaction test: exec K then abort-exec on same K -- second call is
+% spent (execute_continuation's is_spent check fires before handler-
+% scope scan, so the error is /invalid-access "spent", not stale-scope).
+userdict /reuse-k null put
+{ { userdict exch /reuse-k exch put 42 } capture pop } delimit pop
+7 userdict /reuse-k get exec   % first use: splice with 7 as resume
+{ 8 userdict /reuse-k get abort-exec } try
+/invalid-access eq (fuzz: abort-exec on already-spent K rejected) rt-ok clear
+
+% =================================================================
+% Frame-dict allocator Phase 5 interaction: capture inside |locals|#N
+% must still work, and save/restore around a capture must not corrupt
+% the frame pool.  Phase 3 routes frame dicts through a save-level-
+% free pool; on resume, the captured frame dict is pushed back onto
+% the dict stack from inside the ctx and must compose cleanly with
+% the subsequent end-locals recycle.
+% =================================================================
+
+% Phase-5 A: capture inside |locals|, handler resumes with a value,
+% body continues and sees the frame dict's bound variable.  Same
+% pattern as the basic resume test above, but inside |x|#3.
+{
+    10 { |x|#3
+        { 32 exch exec } capture   % handler resumes K with 32
+        x add                      % body: 32 + x(10) = 42
+    } exec
+} delimit
+42 eq (phase5: capture+resume inside |locals| produces 42) rt-ok clear
+
+% Phase-5 B: save, capture inside |locals| at level 1, handler resumes
+% at level 1 (current_save_level >= capture_save_level so not stale),
+% then restore to level 0.  Heap integrity preserved.
+save
+{
+    100 { |x|#3
+        { 50 exch exec } capture
+        x add                      % 50 + 100 = 150
+    } exec
+} delimit
+150 eq (phase5: capture+resume inside save level) rt-ok
+restore
+/vm-validate query-status true eq
+(phase5: heap integrity after capture+save/restore) rt-ok clear
+
+% Phase-5 C: capture+resume inside |locals|, then save/restore
+% roundtrip, then another capture+|locals|.  Frame pool must bridge
+% the cycle without confusion from the ctx-stored frame dict.
+{ 10 { |x|#3 { 5 exch exec } capture x add } exec } delimit
+15 eq (phase5: first capture+resume cycle) rt-ok clear
+save /dummy 1 def restore
+{ 20 { |y|#3 { 3 exch exec } capture y add } exec } delimit
+23 eq (phase5: second capture+resume post save/restore) rt-ok clear
+/vm-validate query-status true eq
+(phase5: heap integrity after second cycle) rt-ok clear
+
+% ====================================================================
+% SECTION 16: STALE-K PROTECTION AT PUT SITE
+% ====================================================================
+% The hazard: a root-EqArray slot is not journaled across save/restore
+% (see put_op's is_eqarray branch, ops_array.inl).  Storing a K (or any
+% other Object with post-barrier VM storage) would leave a dangling
+% reference once the matching restore reclaims the ctx.  Save::reject_
+% stale_value_into_eqref rejects the put at the write site, matching
+% the no-silent-footguns policy.  Continuation's own save_level-stamp
+% defense at execute_continuation / abort_exec_op (interpreter.inl:654,
+% ops_continuation.inl:324) is the belt to this put-site braces.
+%
+% Run inside { ... } exec + 8 dict begin/end so the helper names don't
+% consume userdict slots (test_all.trx chains ~60 files without per-
+% file save/restore isolation at this point in the suite).
+
+{ 8 dict begin
+  /stash [null]#= def
+
+  % Put a live Continuation into an eqarray during save scope -- the
+  % put-site guard (Save::reject_stale_value_into_eqref) rejects it
+  % because K's ctx offset is above the save barrier; were this put
+  % to succeed, the subsequent restore would reclaim ctx and leave
+  % the eqref slot holding a dangling pointer.
+  /sv16 save def
+  { { { stash 0 3 -1 roll put 99 } capture 42 } delimit pop } try
+    /invalid-restore eq
+    (phase5: put of K into eqarray during save scope rejected) rt-ok clear
+  sv16 restore
+  /vm-validate query-status true eq
+    (phase5: put-rejection path leaves heap intact) rt-ok clear
+end } exec
+
+% ====================================================================
+% IN-H1 regression: capture across @end-in-global boundary
+% ====================================================================
+% Two-part bug fixed in the IN-H1 commit:
+%
+% (A) Counting: capture_op's err_count loop must count @end-in-global
+%     entries.  Without it, matched_op_depth reads the in_global Boolean
+%     as an integer -- integer_value() asserts in debug, memory
+%     corruption in release.  Trigger: ${} between @delimit-barrier and
+%     capture point.
+%
+% (B) Resume state: m_curr_alloc_global must be restored to its
+%     capture-time value on resume.  Without it, a handler that mutates
+%     the flag (set-global, exit through outer ${}, etc) leaks the new
+%     value into the captured body when it resumes -- allocations route
+%     to the wrong heap.
+
+% Part A: assert capture doesn't crash and produces the right result
+% when ${} wraps a delimit/capture block.
+{
+    ${
+        7
+        { 1 exch exec } capture
+        10 add
+    }
+} delimit
+11 eq                                  % 1 (resume) + 10 = 11
+    (IN-H1: capture inside dollar-block returns expected value) rt-ok clear
+
+% Part B: handler flips the flag between capture and resume.
+% The body MUST resume with the capture-time value (true), not the
+% handler's mutated value (false).
+{
+    ${
+        { /handler-saw current-global def
+          false set-global
+          1 exch exec }
+        capture
+        /body-saw-after-resume current-global def
+    }
+} delimit clear
+/post-block-flag current-global def
+
+handler-saw true eq
+    (IN-H1: handler sees capture-time flag=true) rt-ok clear
+body-saw-after-resume true eq
+    (IN-H1: body resumes with capture-time flag=true despite handler mutation) rt-ok clear
+post-block-flag false eq
+    (IN-H1: outer flag restored after dollar-block exits) rt-ok clear
+
+% ====================================================================
+% SECTION: op-depth rewrite at resume (regression for stale-depth bug)
+% ====================================================================
+% A perform-captured K rides an inner @delimit-barrier in its captured
+% segment.  Before the rewrite-table fix the inner barrier's op-depth
+% stayed at its capturer-time absolute value (e.g. 0); on resume in a
+% frame with markers below, a subsequent capture inside the resumed
+% body would consult that stale depth and trim the live op stack to
+% it, silently eating below-frame operands.  The fix collapses every
+% captured inner op-depth to fresh_op_depth (the segment-start floor
+% in the resumer's frame) at restore time.
+%
+% This block exercises the @delimit-barrier-rides-along path; see
+% control variant below for the no-inner-delimit case (must continue
+% to pass unchanged).
+
+/saved-k1 null def
+/saved-k2 null def
+<< /eff { /saved-k1 exch def 0 } >>
+{
+    {
+        /eff perform
+        { /saved-k2 exch def 99 } capture
+    } delimit
+} handle-effect
+clear
+
+% 3 markers below resume value.  After K1 resume the inner capture's
+% slice should leave them intact.  Expected (fix): count=4,
+% stack=[10 20 30 99] (top is 99).  Pre-fix: count=1, stack=[99]
+% (markers silently trimmed away).
+10 20 30
+77 saved-k1 exec
+
+% count consumes nothing; check it first.
+count 4 eq
+    (rewrite: live op stack survives inner capture after K resume)   rt-ok
+
+% Peel and verify each slot top-down.  Each `<n> eq` consumes the
+% top operand and the literal we push, leaving a boolean for rt-ok
+% to consume.
+99 eq (rewrite: capture-handler result on top)                       rt-ok
+30 eq (rewrite: marker 30 below)                                     rt-ok
+20 eq (rewrite: marker 20 below)                                     rt-ok
+10 eq (rewrite: marker 10 at bottom)                                 rt-ok
+clear
+
+% Control: same shape but no inner delimit -- no stale barrier to
+% rewrite.  Confirms the fix doesn't regress the non-buggy path.
+/saved-k1b null def
+<< /eff { /saved-k1b exch def 0 } >>
+{ /eff perform } handle-effect
+clear
+100 200 300
+77 saved-k1b exec
+count 4 eq
+    (rewrite-control: no inner delimit, markers preserved as before) rt-ok
+77 eq (rewrite-control: resume value on top)                         rt-ok
+300 eq (rewrite-control: marker 300)                                 rt-ok
+200 eq (rewrite-control: marker 200)                                 rt-ok
+100 eq (rewrite-control: marker 100)                                 rt-ok
+clear
+
+% ====================================================================
+% SECTION: @try-rollback saved-depth rewrite (exec-side rewrite)
+% ====================================================================
+% try { ... } stores its saved-depth Integer on the EXEC stack one
+% slot below @try-rollback (ops_flow.inl:try_op).  If a try block
+% sits inside handle-effect's body and the body performs an effect,
+% the captured K's exec segment contains both @try-rollback and the
+% saved-depth Integer.  Without an exec-segment rewrite, resuming K
+% in a different frame and then erroring INSIDE the try would have
+% the @try-rollback error path trim m_op_ptr back to the stale
+% capturer-frame saved-depth, eating below-frame operands.
+
+/saved-k null def
+<< /eff { /saved-k exch def 0 } >>
+{
+    {
+        /eff perform
+        1 0 div    % deliberate error after resume; drives @try-rollback's
+                   % error path
+    } try
+} handle-effect
+clear
+
+% Resume in a frame with 3 markers; the resumed body errors inside the
+% try, which fires @try-rollback's error path.  The rollback should trim
+% to the RESUMER's try-entry floor (just below the 3 markers + resume
+% value), leaving the markers intact.  Pre-fix the trim used the stale
+% saved-depth=0 (from capturer's frame) and ate the markers.
+10 20 30
+77 saved-k exec
+
+count 4 eq
+    (try-rewrite: try-rollback error path honours resumer frame) rt-ok
+% Top is /div-by-zero (the error name that try pushes); markers below.
+/div-by-zero eq (try-rewrite: error name on top)               rt-ok
+30 eq (try-rewrite: marker 30 below)                           rt-ok
+20 eq (try-rewrite: marker 20 below)                           rt-ok
+10 eq (try-rewrite: marker 10 at bottom)                       rt-ok
+clear
+
+% ====================================================================
+% SECTION: @try-result-complete saved-depth rewrite (exec-side)
+% ====================================================================
+% try-result has the same layout as try: [saved-depth][@try-result-
+% complete][@try-barrier][proc] on the exec stack.  On error,
+% @try-result-complete rolls m_op_ptr back to m_op_base + saved-depth.
+% Stale saved-depth from a perform-captured K would silently trim the
+% resumer's frame -- same bug shape as @try-rollback, same fix.
+
+/saved-k-tr null def
+<< /eff { /saved-k-tr exch def 0 } >>
+{
+    { /eff perform 1 0 div } try-result
+} handle-effect
+clear
+
+10 20 30
+77 saved-k-tr exec
+
+count 4 eq
+    (try-result-rewrite: error path honours resumer frame)  rt-ok
+% Top is a Tagged /err with /div-by-zero name; check via tag-value.
+tag-value /div-by-zero eq (try-result-rewrite: /err tag holds /div-by-zero) rt-ok
+30 eq (try-result-rewrite: marker 30)                       rt-ok
+20 eq (try-result-rewrite: marker 20)                       rt-ok
+10 eq (try-result-rewrite: marker 10)                       rt-ok
+clear
+
+% ====================================================================
+% SECTION: logic-barrier family op_depth rewrite (exec-side)
+% ====================================================================
+% @naf-barrier (and its siblings @choice-count-barrier, @for-each-
+% solution-barrier, @aggregate-barrier, @aggregate-reduce-barrier)
+% push [op_depth][save_obj][barrier] onto exec.  If captured inside
+% a perform K with operands below the originating logic op in the
+% capturer's frame, the op_depth Integer is stale on resume -- the
+% trim path inside the barrier would silently eat below-frame items.
+% Probe via naf as the representative.
+
+/saved-k-naf null def
+<< /eff { /saved-k-naf exch def 0 } >>
+{
+    % 3 markers BELOW naf in the capturer's frame.  op_depth captured = 2.
+    111 222 333
+    { /eff perform } naf
+} handle-effect
+clear
+
+% Resume with markers below.  Without the rewrite, @naf-barrier's
+% trim would target capturer's depth=2; with the rewrite it targets
+% the resumer's segment-start floor.
+1000 2000 3000 4000 5000
+77 saved-k-naf exec
+
+% naf's @naf-barrier trims the proc's results above the rewritten
+% op_depth, then pushes false.  Markers below the K-invocation site
+% must survive.
+count 6 eq
+    (naf-rewrite: live op stack survives @naf-barrier after K resume) rt-ok
+% Top is /false (naf returns false because the body succeeded -- perform
+% counts as success in this context, since handle-effect captured K and
+% the handler returned a value).
+false eq (naf-rewrite: naf returns false)                   rt-ok
+5000 eq (naf-rewrite: marker 5000)                          rt-ok
+4000 eq (naf-rewrite: marker 4000)                          rt-ok
+3000 eq (naf-rewrite: marker 3000)                          rt-ok
+2000 eq (naf-rewrite: marker 2000)                          rt-ok
+1000 eq (naf-rewrite: marker 1000)                          rt-ok
+clear
+
+% Negative-op_depth path: @naf-barrier formerly cast saved_op_depth to
+% length_t (uint16_t).  When fresh_op_depth at restore was -1 (resumer's
+% op stack empty after popping K + resume_value), the rewrite injected
+% -1 into the captured slot; the buggy cast wrapped it to 65535, target
+% overflowed above m_op_ptr, the trim no-op'd, and the resume value
+% lingered.  Now the read uses integer_t directly.
+
+/saved-k-neg null def
+<< /eff { /saved-k-neg exch def 0 } >>
+{ { /eff perform } naf } handle-effect
+clear
+77 saved-k-neg exec
+% After resume: rewrite sets op_depth = -1.  @naf-barrier trims to
+% m_op_base + (-1) = below m_op_base; eats 77.  Pushes save_obj,
+% Save::restore_token pops it, pushes false.  Final stack: [false].
+count 1 eq
+    (naf-rewrite: negative-depth path)                      rt-ok
+false eq (naf-rewrite: negative-depth false on top)         rt-ok
+clear
+
+% ====================================================================
+% SECTION: for-all family saved-depth rewrite (exec-side)
+% ====================================================================
+% Six iteration barriers share the [proc][container][saved-depth]
+% [<barrier>] exec layout: @array/@packed/@string/@dict/@set/@record-
+% for-all.  Each barrier's W07 stack-effect check reads saved_depth and
+% compares against current_depth at every iteration; a stale capturer-
+% time value would raise /range-check on the wrong frame after K
+% resume.  Probe via array-for-all as the representative -- the other
+% five share the fix mechanism via operator_is_forall_family().
+
+/saved-k-fa null def
+<< /eff { /saved-k-fa exch def 0 } >>
+{
+    % 3 markers below for-all so saved_depth captured = 2 in capturer.
+    111 222 333
+    [ 1 2 3 ] { /eff perform pop } for-all
+} handle-effect
+clear
+
+% Resume in a 3-marker frame; the for-all iteration continues without
+% triggering W07 /range-check (which it would without the rewrite).
+1000 2000 3000
+77 saved-k-fa exec
+
+% The test passing without raising /range-check is itself the
+% regression assertion.  Tally what's on top: depends on iteration
+% bookkeeping but the resumer's markers must survive.
+count 0 gt
+    (forall-rewrite: for-all iteration progresses without /range-check) rt-ok
+clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

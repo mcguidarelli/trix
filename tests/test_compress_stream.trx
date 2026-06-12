@@ -1,0 +1,243 @@
+% ====================================================================
+% test_compress_stream.trx -- C-side deflate-stream / deflate-stream-
+% level / inflate-stream ops
+% ====================================================================
+% Streaming counterparts to the one-shot string variants in
+% test_compress.trx.  These ops read input until EOF and write raw
+% RFC 1951 output to the destination stream incrementally, so the
+% input and output are bounded only by the underlying streams (file
+% streams are effectively unbounded).
+%
+%   deflate-stream         (in-stream out-stream -- )       level 6
+%   deflate-stream-level   (in-stream out-stream int -- )   level 0..9
+%   inflate-stream         (in-stream out-stream -- )
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- helpers ----------------------------------------------------------
+
+% (path data) -write-file --
+/-write-file {
+    /data exch def
+    /path exch def
+    /fs path (w)#b stream def
+    fs data write-string
+    fs close-stream
+} def
+
+% (path) -read-file -- str
+/-read-file {
+    /path exch def
+    /fs path (r)#b stream def
+    /data fs read-all def
+    fs close-stream
+    data
+} def
+
+% (in-path out-path) -deflate-files --
+/-deflate-files {
+    /out-path exch def
+    /in-path exch def
+    /fs-in in-path (r)#b stream def
+    /fs-out out-path (w)#b stream def
+    fs-in fs-out deflate-stream
+    fs-in close-stream
+    fs-out close-stream
+} def
+
+% (in-path out-path level) -deflate-files-level --
+/-deflate-files-level {
+    /level exch def
+    /out-path exch def
+    /in-path exch def
+    /fs-in in-path (r)#b stream def
+    /fs-out out-path (w)#b stream def
+    fs-in fs-out level deflate-stream-level
+    fs-in close-stream
+    fs-out close-stream
+} def
+
+% (in-path out-path) -inflate-files --
+/-inflate-files {
+    /out-path exch def
+    /in-path exch def
+    /fs-in in-path (r)#b stream def
+    /fs-out out-path (w)#b stream def
+    fs-in fs-out inflate-stream
+    fs-in close-stream
+    fs-out close-stream
+} def
+
+% Working-set paths (kept on /tmp; tests do not clean up).
+/p-raw  (/tmp/trix_compress_stream_raw.bin)  def
+/p-comp (/tmp/trix_compress_stream_comp.bin) def
+/p-back (/tmp/trix_compress_stream_back.bin) def
+
+% ====================================================================
+% SECTION 1: small round-trips through file streams
+% ====================================================================
+
+% Empty round-trip.
+p-raw () -write-file
+p-raw p-comp -deflate-files
+p-comp p-back -inflate-files
+p-back -read-file () eq                    (s1: empty round-trip)              rt-ok
+
+% Short ASCII round-trip.
+p-raw (hello world) -write-file
+p-raw p-comp -deflate-files
+p-comp p-back -inflate-files
+p-back -read-file (hello world) eq         (s1: short ASCII round-trip)        rt-ok
+
+% Binary payload: every byte 0x00..0xFF.
+/full-byte-range 256 string def
+0 1 255 {|i| full-byte-range i i /byte-type cast put} for
+p-raw full-byte-range -write-file
+p-raw p-comp -deflate-files
+p-comp p-back -inflate-files
+p-back -read-file full-byte-range eq       (s1: 256-byte all-bytes round-trip) rt-ok
+
+% ====================================================================
+% SECTION 2: large payload that exceeds MaxStringLength=65535
+% (the entire reason the streaming ops exist)
+% ====================================================================
+
+% 250 000 bytes of repeated text -- 4x past the one-shot string cap.
+% repeat-string itself caps at MaxStringLength so we build the source
+% by streaming multiple chunks of a sub-cap repeated string into the
+% file -- the *file* legitimately exceeds MaxStringLength even though
+% no single Trix string ever holds the full payload.
+/chunk (the quick brown fox jumps over the lazy dog ) 1000 repeat-string def
+                                                      % 44 000 bytes per chunk
+chunk length /chunk-len exch def
+/total-chunks 6 def                                   % 6 * 44 000 = 264 000 bytes
+
+/fs p-raw (w)#b stream def
+0 1 total-chunks 1 sub {|i| fs chunk write-string} for
+fs close-stream
+
+p-raw file-size  total-chunks chunk-len mul /long-type cast  eq
+                                           (s2: source file > 250 KiB)         rt-ok
+
+p-raw p-comp -deflate-files
+
+% Compressed file should be a tiny fraction of the input -- this
+% payload is highly redundant.
+p-comp file-size  p-raw file-size  100l div  lt
+                                           (s2: compressed < 1% of input)      rt-ok
+
+p-comp p-back -inflate-files
+
+p-back file-size  p-raw file-size  eq      (s2: round-trip preserves length)   rt-ok
+
+% Byte-level head-bytes equality after the round-trip.  Pull the first
+% chunk's worth of bytes back out -- those still fit in a Trix string.
+/back-fs p-back (r)#b stream def
+/buf chunk-len string def
+back-fs buf read-string pop                % drop the eof?-bool
+/back-head exch def
+back-fs close-stream
+back-head chunk eq                         (s2: round-trip head bytes match)   rt-ok
+
+% ====================================================================
+% SECTION 3: compression level semantics at stream level
+% ====================================================================
+
+p-raw (abcdefghij) 6000 repeat-string -write-file
+p-raw file-size /raw-len exch def
+
+p-raw p-comp 0 -deflate-files-level
+p-comp file-size /sz0 exch def
+
+p-raw p-comp 9 -deflate-files-level
+p-comp file-size /sz9 exch def
+
+sz0 raw-len gt                             (s3: level 0 > input size)          rt-ok
+sz9 raw-len 100l div lt                    (s3: level 9 < input/100)           rt-ok
+sz9 sz0 lt                                 (s3: level 9 < level 0)             rt-ok
+
+% Round-trip at level 0 (stored only) and level 9.
+p-raw p-comp 0 -deflate-files-level
+p-comp p-back -inflate-files
+p-back -read-file p-raw -read-file eq      (s3: level 0 round-trip)            rt-ok
+
+p-raw p-comp 9 -deflate-files-level
+p-comp p-back -inflate-files
+p-back -read-file p-raw -read-file eq      (s3: level 9 round-trip)            rt-ok
+
+% ====================================================================
+% SECTION 4: cross-compatibility with the one-shot string ops
+% ====================================================================
+
+% deflate (one-shot) -> inflate-stream (file) round-trip.
+/sample (Cross compatibility test payload.) def
+/comp-str sample deflate def
+p-comp comp-str -write-file
+p-comp p-back -inflate-files
+p-back -read-file sample eq                (s4: deflate -> inflate-stream)     rt-ok
+
+% deflate-stream (file) -> inflate (one-shot) round-trip.
+p-raw sample -write-file
+p-raw p-comp -deflate-files
+/comp-str2 p-comp -read-file def
+comp-str2 inflate sample eq                (s4: deflate-stream -> inflate)     rt-ok
+
+% ====================================================================
+% SECTION 5: error paths
+% ====================================================================
+
+% Level out of range.
+{ /fs1 p-raw (r)#b stream def
+  /fs2 p-comp (w)#b stream def
+  fs1 fs2 -1 deflate-stream-level
+  fs1 close-stream  fs2 close-stream } try /range-check eq
+                                           (s5: level -1 -> range-check)       rt-ok clear
+
+{ /fs1 p-raw (r)#b stream def
+  /fs2 p-comp (w)#b stream def
+  fs1 fs2 10 deflate-stream-level
+  fs1 close-stream  fs2 close-stream } try /range-check eq
+                                           (s5: level 10 -> range-check)       rt-ok clear
+
+% Malformed input -> range-check.
+p-comp (this is not a deflate stream at all) -write-file
+{ p-comp p-back -inflate-files } try /range-check eq
+                                           (s5: garbage -> range-check)        rt-ok clear
+
+% Truncated deflate -> range-check.
+p-raw (a long enough payload to compress with multiple bytes of output) -write-file
+p-raw p-comp -deflate-files
+/full-comp p-comp -read-file def
+p-comp full-comp 0 full-comp length 1 sub get-interval -write-file
+{ p-comp p-back -inflate-files } try /range-check eq
+                                           (s5: truncated -> range-check)      rt-ok clear
+
+% Empty input to inflate-stream -> range-check (deflate streams need
+% at least one block-header byte).
+p-comp () -write-file
+{ p-comp p-back -inflate-files } try /range-check eq
+                                           (s5: empty inflate -> range-check)  rt-ok clear
+
+% Type checks: non-stream operands.
+{ 42 (x) deflate-stream } try /type-check eq
+                                           (s5: deflate-stream(int,*) -> type) rt-ok clear
+
+{ /fs p-raw (r)#b stream def
+  fs 42 deflate-stream
+  fs close-stream } try /type-check eq      (s5: deflate-stream(*,int) -> type) rt-ok clear
+
+% Stack underflow.
+{ deflate-stream } try /opstack-underflow eq
+                                           (s5: deflate-stream empty stack)    rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_compress_stream: ALL TESTS PASSED) =
+(__test_ok__) =

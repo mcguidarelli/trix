@@ -1,0 +1,2 @@
+16 alloc dup /addr exch def
+1ul addr poke addr free

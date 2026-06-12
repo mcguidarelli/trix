@@ -1,0 +1,102 @@
+% ====================================================================
+% test_b6_lazy_region.trx -- B6 group 2 (lazy GC-rooting + region match)
+% ====================================================================
+% lazy:2-1  lazy-seq / lazy-cycle built their chains in a C local across the
+%           per-node global allocations (GC sweep window).
+% lazy:3-0  lazy-zip allocated the [h1,h2] head pair in LOCAL VM (vm_alloc_n) and
+%           held it unrooted across the tail-thunk chain -> swept mid-build AND a
+%           local pair embedded in a global node dangles after restore.
+% lazy:3-1  lazy-to-array allocated the result in LOCAL VM and filled it with
+%           GC-capable element clones while unrooted (+ local-result-in-global
+%           restore hazard).
+% lazy:3-2  lazy-chunked allocated the head chunk in LOCAL VM; the n==1 path held
+%           it unrooted across the tail-thunk chain (+ restore hazard).
+% lazy:3-3  lazy-intersperse held the head clone + inner chain unrooted across the
+%           node construction.
+% Fix: region-aware allocation (vm_alloc_dispatch_n) + on-stack rooting of every
+% in-flight global handle (helpers from B6 group 1b-3), gated on m_curr_alloc_global.
+%
+% SECTION 1 is non-vacuous for the REGION-MISMATCH part: a head pair / chunk /
+% result built inside ${...} must live in GLOBAL VM so it survives a restore
+% taken below its save level (pre-fix the LOCAL allocation is reclaimed by the
+% restore and overwritten by the clobber).  SECTION 2 guards the chain-rooting /
+% reorder against breaking normal operation in the global region; the precise
+% mid-op GC sweep is code-inspection-covered (per test_b6_gc.trx).
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: built-in-global head survives a restore below its level
+% (op stack survives restore; a LOCAL allocation does not)
+% ====================================================================
+% lazy-zip head pair [10,20]
+save
+${ 10 lazy-from 20 lazy-from lazy-zip lazy-head }
+exch restore
+[ 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 ] pop
+/zp exch def
+zp 0 get 10 eq (lazy-zip: head pair[0] survives restore) rt-ok
+zp 1 get 20 eq (lazy-zip: head pair[1] survives restore) rt-ok
+
+% lazy-chunked n>1 head chunk [1,2,3]
+save
+${ 1 lazy-from 3 lazy-chunked lazy-head }
+exch restore
+[ 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 ] pop
+/ck exch def
+ck length 3 eq (lazy-chunked n>1: chunk length survives restore) rt-ok
+0  0 1 2 { ck exch get add } for  6 eq (lazy-chunked n>1: chunk values survive restore) rt-ok
+
+% lazy-chunked n==1 head chunk [5]
+save
+${ 5 lazy-from 1 lazy-chunked lazy-head }
+exch restore
+[ 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 ] pop
+/c1 exch def
+c1 0 get 5 eq (lazy-chunked n==1: chunk[0] survives restore) rt-ok
+
+% lazy-to-array result [1..5]
+save
+${ 1 lazy-from 5 lazy-take lazy-to-array }
+exch restore
+[ 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 ] pop
+/ta exch def
+ta length 5 eq (lazy-to-array: result length survives restore) rt-ok
+0  0 1 4 { ta exch get add } for  15 eq (lazy-to-array: result values survive restore) rt-ok
+
+% ====================================================================
+% SECTION 2: each rewritten builder is correct in the global region
+% ====================================================================
+${ [ 7 8 9 ] lazy-seq lazy-to-array } /s exch def
+s length 3 eq (lazy-seq: length, global) rt-ok
+0  0 1 2 { s exch get add } for  24 eq (lazy-seq: values, global) rt-ok
+
+${ [ 1 2 ] lazy-cycle 5 lazy-take lazy-to-array } /cy exch def
+cy length 5 eq (lazy-cycle: length, global) rt-ok
+0  0 1 4 { cy exch get add } for  7 eq (lazy-cycle: values [1,2,1,2,1], global) rt-ok
+
+${ [ 1 2 3 ] lazy-seq 0 lazy-intersperse lazy-to-array } /it exch def
+it length 5 eq (lazy-intersperse: length, global) rt-ok
+0  0 1 4 { it exch get add } for  6 eq (lazy-intersperse: values [1,0,2,0,3], global) rt-ok
+
+${ [ 1 2 3 ] lazy-seq [ 4 5 6 ] lazy-seq lazy-zip lazy-to-array } /zv exch def
+zv length 3 eq (lazy-zip: length, global) rt-ok
+zv 0 get 0 get 1 eq (lazy-zip: pair[0][0], global) rt-ok
+zv 2 get 1 get 6 eq (lazy-zip: pair[2][1], global) rt-ok
+
+${ [ 1 2 3 4 5 ] lazy-seq 2 lazy-chunked lazy-to-array } /cv exch def
+cv length 3 eq (lazy-chunked: chunk count, global) rt-ok
+cv 2 get length 1 eq (lazy-chunked: last (short) chunk length, global) rt-ok
+cv 0 get 1 get 2 eq (lazy-chunked: chunk[0][1], global) rt-ok
+
+(test_b6_lazy_region.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

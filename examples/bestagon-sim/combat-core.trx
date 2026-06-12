@@ -1,0 +1,1091 @@
+% =====================================================================
+% combat-core.trx -- Bestagon Wars shared combat resolver (Phase 0.5A)
+% =====================================================================
+%
+% Source of truth: examples/bestagon-design.md (the GDD).  Specifically:
+%   §4   terrain defense stars
+%   §6   unit costs + movement classes
+%   §7.1 combat formula:  actual = ((base + luck_pp) x atk_CO_mult)
+%                                  x def_factor x (atk_HP / 10)
+%                         def_total  = sum_def_pct + def_terrain_stars
+%                                                    x def_HP
+%                         def_factor = 1 - def_total / 100
+%   §7.5 damage table (sparse 17x17)
+%   §7.8 veterancy thresholds: 3/5/8 kills -> tier 1/2/3 (+5/+10/+15 atk)
+%   §8.3 CO roster (6 COs: bishop / hammer / hawk / boots / veil / talon)
+%   §8.4 resolver order:
+%        1. vet bonus (vet-tier * 5 -> sum_atk_pct)
+%        2. CO passives
+%        3. Power-OR-Super (mutually exclusive; never stacked)
+%        4. weather modifiers
+%        5. terrain stars (HP-scaled at step 7)
+%        6. HP scaling (atk_HP/10 and def_HP/10 both folded into formula)
+%        7. luck (luck_pp added to base BEFORE multiplications)
+%   §9.3 worked example -- canonical regression target.
+%
+% Public API (this file is the resolver imported by every sim AND by
+% Phase 6 production code in bestagon.trx):
+%
+%   compute-vet-tier  kills -- tier             (§7.8)
+%   resolve-modifiers atk-spec def-spec ctx --
+%                     sum-atk-pct sum-def-pct def-terrain-stars
+%   lookup-base-damage atk-type def-type --
+%                     base-pct true | false
+%   predict-damage    atk-spec def-spec ctx --
+%                     min-damage max-damage     (range under luck mode)
+%   resolve-attack    atk-spec def-spec ctx luck-pp --
+%                     damage counter-damage     (single exchange)
+%
+% Spec shape (`atk-spec` / `def-spec` mirror §17.4 Unit Dict subset):
+%   << /type          Name (/infantry, /tank, ...)
+%      /hp            integer 1-10
+%      /vet-tier      integer 0-3
+%      /co            Name (/bishop, /hammer, ...)
+%      /power-active  bool
+%      /super-active  bool
+%      /terrain       Name (/plain, /forest, ...)
+%   >>
+%
+% Context:
+%   << /luck-mode                     /on | /off
+%      /weather-current               Name (/clear by default)
+%      /attacker-can-see-defender     bool (true by default;
+%                                          gates /vs-revealed-atk)
+%   >>
+%
+% Run self-test:
+%   ./trix.opt examples/bestagon-sim/combat-core.trx --self-test
+% =====================================================================
+
+
+% ====================================================================
+% Section 1: static data (immutable Dicts, ReadOnly via #r suffix)
+% ====================================================================
+
+% Unit costs -- §6 dict literal.  Used for star_gain (§9.1) funds math.
+/unit-costs <<
+    /infantry      1000    /mech         3000    /recon        4000
+    /apc           5000    /tank         7000    /heavy-tank  16000
+    /anti-air      8000    /artillery    6000    /rocket      15000
+    /fighter      20000    /bomber      22000    /battle-copter 9000
+    /lander       12000    /destroyer   18000    /submarine   20000
+    /battleship   28000    /carrier     30000
+>>#r def
+
+% Base terrain defense stars -- §4 table (non-inf column).
+/terrain-defense-stars <<
+    /plain     1
+    /road      0
+    /forest    2
+    /mountain  4       % impassable for non-inf but stat is 4 inf-only
+    /river     0
+    /bridge    0
+    /sea       0
+    /reef      1
+    /beach     0
+>>#r def
+
+% Infantry-bonus terrain defense stars -- §4 inf-only column.
+/terrain-defense-stars-inf <<
+    /plain     2
+    /road      0
+    /forest    3
+    /mountain  4
+    /river     0
+    /bridge    0
+    /sea       0
+    /reef      1
+    /beach     0
+>>#r def
+
+% Veterancy threshold table -- §7.8.  kills >= N -> tier T; tier T bonus
+% folds into sum_atk_pct as `vet-tier * 5`.  Cap at tier 3.
+/vet-threshold-kills <<
+    /tier-0  0    /tier-1  3    /tier-2  5    /tier-3  8
+>>#r def
+
+% Class lookups -- §6 movement classes plus §7.1 firing-class.  Used by
+% the modifier-applicability filter (§8.4 key reader column).
+
+% Movement class per unit -- foot | wheel | tread | air | sea.
+/unit-move-class <<
+    /infantry      /foot       /mech          /foot
+    /recon         /wheel      /apc           /wheel
+    /anti-air      /wheel      /artillery     /wheel      /rocket /wheel
+    /tank          /tread      /heavy-tank    /tread
+    /fighter       /air        /bomber        /air        /battle-copter /air
+    /lander        /sea        /destroyer     /sea        /submarine     /sea
+    /battleship    /sea        /carrier       /sea
+>>#r def
+
+% Firing kind per unit -- /direct | /indirect | /none.  /none = no
+% attack (APC, Lander, Carrier).
+/unit-fire-kind <<
+    /infantry      /direct     /mech          /direct
+    /recon         /direct     /apc           /none
+    /tank          /direct     /heavy-tank    /direct
+    /anti-air      /direct     /artillery     /indirect   /rocket        /indirect
+    /fighter       /direct     /bomber        /direct     /battle-copter /direct
+    /lander        /none       /destroyer     /direct     /submarine     /direct
+    /battleship    /indirect   /carrier       /none
+>>#r def
+
+% "Direct-ground" set -- §8.4 narrow definition: Inf/Mech/Recon/Tank/
+% HTank/AA.  /direct-atk and /direct-move modifiers apply ONLY to these
+% six.  Does NOT include Fighter/Bomber/BCop/Destroyer/Submarine.
+/direct-ground-units {{
+    /infantry  /mech  /recon  /tank  /heavy-tank  /anti-air
+}}#r def
+
+% Damage table -- §7.5.  Sparse: missing keys = attack illegal.  Top-
+% level keys are attackers; second-level keys are defenders; values are
+% base damage percentages.
+/damage-table <<
+    /infantry <<
+        /infantry 55  /mech 45  /recon 12  /apc 14  /tank 5  /heavy-tank 1
+        /anti-air 5   /artillery 15  /rocket 25   /battle-copter 7
+        /lander 14    /destroyer 5   /submarine 1 /battleship 1   /carrier 1
+    >>
+    /mech <<
+        /infantry 65  /mech 55  /recon 85  /apc 75  /tank 55 /heavy-tank 15
+        /anti-air 65  /artillery 70  /rocket 85   /battle-copter 9
+        /lander 75    /destroyer 55  /submarine 15 /battleship 15 /carrier 15
+    >>
+    /recon <<
+        /infantry 70  /mech 65  /recon 35  /apc 45  /tank 8  /heavy-tank 1
+        /anti-air 4   /artillery 45  /rocket 55   /battle-copter 10
+        /lander 55    /destroyer 8   /submarine 1 /battleship 1   /carrier 1
+    >>
+    % /apc has no attack
+    /tank <<
+        /infantry 75  /mech 70  /recon 85  /apc 75  /tank 55  /heavy-tank 15
+        /anti-air 65  /artillery 70  /rocket 85   /battle-copter 10
+        /lander 75
+    >>
+    /heavy-tank <<
+        /infantry 105 /mech 95  /recon 105 /apc 105 /tank 85  /heavy-tank 55
+        /anti-air 105 /artillery 105 /rocket 105  /battle-copter 12
+        /lander 105
+    >>
+    /anti-air <<
+        /infantry 105 /mech 105 /recon 60  /apc 50  /tank 25  /heavy-tank 10
+        /anti-air 45  /artillery 50  /rocket 55
+        /fighter 65   /bomber 75    /battle-copter 120
+    >>
+    /artillery <<
+        /infantry 90  /mech 85  /recon 80  /apc 70  /tank 70  /heavy-tank 45
+        /anti-air 75  /artillery 75  /rocket 80
+        /lander 55    /destroyer 65 /submarine 60 /battleship 40 /carrier 45
+    >>
+    /rocket <<
+        /infantry 95  /mech 90  /recon 90  /apc 80  /tank 80  /heavy-tank 55
+        /anti-air 85  /artillery 85 /rocket 85
+        /lander 60    /destroyer 75 /submarine 85 /battleship 55 /carrier 60
+    >>
+    /fighter <<
+        /fighter 55   /bomber 100  /battle-copter 100
+    >>
+    /bomber <<
+        /infantry 110 /mech 110 /recon 105 /apc 105 /tank 105 /heavy-tank 95
+        /anti-air 95  /artillery 105 /rocket 105
+        /lander 95    /destroyer 95 /submarine 95 /battleship 75 /carrier 75
+    >>
+    /battle-copter <<
+        /infantry 75  /mech 75  /recon 55  /apc 60  /tank 55  /heavy-tank 25
+        /anti-air 25  /artillery 65 /rocket 65   /battle-copter 65
+        /lander 25    /destroyer 25 /submarine 25 /battleship 25 /carrier 25
+    >>
+    % /lander has no attack
+    /destroyer <<
+        /infantry 30  /mech 30  /recon 28  /apc 50  /tank 18  /heavy-tank 10
+        /anti-air 18  /artillery 55 /rocket 55
+        /fighter 100  /bomber 100 /battle-copter 100
+        /lander 95    /destroyer 25 /submarine 55 /battleship 10 /carrier 50
+    >>
+    /submarine <<
+        /lander 95    /destroyer 55 /submarine 55 /battleship 55 /carrier 75
+    >>
+    /battleship <<
+        /infantry 95  /mech 90  /recon 90  /apc 80  /tank 80  /heavy-tank 55
+        /anti-air 85  /artillery 80 /rocket 80
+        /lander 95    /destroyer 95 /submarine 95 /battleship 50 /carrier 60
+    >>
+    % /carrier has no attack
+>>#r def
+
+% CO roster -- §8.3.  charge-rate stored as integer percent (100 = 1.0x).
+/co-roster <<
+    /bishop <<
+        /callsign    (Bishop)
+        /color       /white
+        /passives    << /all-atk +5  /all-def +5 >>
+        /power-name  (Air Support)
+        /power-cost  5
+        /power       << /all-hp +2  /all-atk +15 >>
+        /super-name  (Air Crusade)
+        /super-cost  9
+        /super       << /all-hp +4  /all-atk +35  /all-move +1 >>
+        /charge-rate 100
+    >>
+    /hammer <<
+        /callsign    (Hammer)
+        /color       /red
+        /passives    << /direct-atk +20  /indirect-atk -20  /indirect-range -1 >>
+        /power-name  (Max Force)
+        /power-cost  6
+        /power       << /direct-atk +30  /direct-move +1 >>
+        /super-name  (Maximum Force)
+        /super-cost  10
+        /super       << /direct-atk +50  /direct-move +1  /indirect-range +1 >>
+        /charge-rate 100
+    >>
+    /hawk <<
+        /callsign    (Hawk)
+        /color       /yellow
+        /passives    << /indirect-range +1  /indirect-atk +20  /direct-atk -20 >>
+        /power-name  (Long Watch)
+        /power-cost  5
+        /power       << /indirect-range +1  /indirect-atk +30  /all-vision +1 >>
+        /super-name  (Total Watch)
+        /super-cost  9
+        /super       << /indirect-range +1  /indirect-atk +50  /all-vision +2  /indirect-extra-action true >>
+        /charge-rate 100
+    >>
+    /boots <<
+        /callsign    (Boots)
+        /color       /green
+        /passives    << /foot-atk +30  /foot-move +1  /capture-speed +50  /vehicle-atk -10 >>
+        /power-name  (Forced March)
+        /power-cost  4
+        /power       << /foot-move +3  /capture-finish-now true  /capture-speed +50 >>
+        /super-name  (Victory March)
+        /super-cost  8
+        /super       << /foot-move +5  /capture-finish-now true  /foot-hp +5  /auto-start-captures true >>
+        /charge-rate 120
+    >>
+    /veil <<
+        /callsign    (Veil)
+        /color       /purple
+        /passives    <<
+            /all-vision        +1
+            /vs-revealed-atk  +15
+            /forest-def        +1
+            /reef-def          +1
+        >>
+        /power-name  (Eclipse)
+        /power-cost  5
+        /power       <<
+            /reveal-radius-around-own       3
+            /adjacent-revealed-move-penalty 1
+        >>
+        /super-name  (Total Eclipse)
+        /super-cost  9
+        /super       <<
+            /reveal-radius-around-own       5
+            /adjacent-revealed-move-penalty 2
+            /all-def                        +2
+        >>
+        /charge-rate 90
+    >>
+    /talon <<
+        /callsign    (Talon)
+        /color       /cyan
+        /passives    << /air-atk +15  /air-move +1  /ground-atk -10 >>
+        /power-name  (Air Superiority)
+        /power-cost  6
+        /power       << /air-atk +30  /air-extra-action true >>
+        /super-name  (Lightning Drive)
+        /super-cost  10
+        /super       << /air-atk +50  /air-extra-action true  /air-restock true >>
+        /charge-rate 100
+    >>
+>>#r def
+
+% Weather table -- §11.5.  /clear is empty (no modifiers); engine
+% default.
+/weather-table <<
+    /clear     << >>
+    /rain      << /all-vision -1   /all-atk -5 >>
+    /snow      << /tread-move -1   /wheel-move -1   /foot-move -1 >>
+    /sandstorm << /all-vision -2   /indirect-atk -10 >>
+>>#r def
+
+% Meter config -- §9.4.  Hoisted so star_gain math stays defined here.
+/co-meter-config <<
+    /threshold-funds-per-star  5000
+    /received-weight-num         50    % percent (0.50)
+    /received-weight-den        100
+    /cap-stars                   12
+>>#r def
+
+
+% ====================================================================
+% Section 2: classification helpers
+% ====================================================================
+
+% unit-type -- /foot | /wheel | /tread | /air | /sea
+/move-class-of {
+    unit-move-class exch get
+} def
+
+% unit-type -- /direct | /indirect | /none
+/fire-kind-of {
+    unit-fire-kind exch get
+} def
+
+% unit-type -- bool ("ground" = non-air AND non-sea, per §8.4 row
+% /ground-atk: "foot + wheel + tread classes")
+/ground? {|t|#+1
+    /klass t move-class-of local-def
+    klass /foot eq klass /wheel eq or  klass /tread eq or
+} def
+
+% unit-type -- bool ("vehicle" = wheel + tread, per §8.4 row
+% /vehicle-atk: "Recon/APC/AA/Arty/Rocket/Tank/HTank")
+/vehicle? {|t|#+1
+    /klass t move-class-of local-def
+    klass /wheel eq  klass /tread eq  or
+} def
+
+% unit-type -- bool (Inf/Mech only)
+/foot? {
+    move-class-of /foot eq
+} def
+
+% unit-type -- bool (Fighter/Bomber/BCop)
+/air? {
+    move-class-of /air eq
+} def
+
+% unit-type -- bool (Lander/Destroyer/Sub/Battleship/Carrier)
+/sea? {
+    move-class-of /sea eq
+} def
+
+% unit-type -- bool (Arty/Rocket/Battleship)
+/indirect? {
+    fire-kind-of /indirect eq
+} def
+
+% unit-type -- bool.  §8.4 narrow direct-ground: the six units listed
+% in the direct-ground-units Set above.  /direct-atk and /direct-move
+% modifiers apply ONLY to these.
+/direct-ground? {
+    direct-ground-units exch set-member?
+} def
+
+
+% ====================================================================
+% Section 3: vet tier (§7.8)
+% ====================================================================
+
+% kills -- tier (0..3); thresholds 3/5/8.  Tier never decreases.
+/compute-vet-tier {|kills|
+    kills vet-threshold-kills /tier-3 get ge { 3 } {
+    kills vet-threshold-kills /tier-2 get ge { 2 } {
+    kills vet-threshold-kills /tier-1 get ge { 1 } {
+        0
+    } if-else } if-else } if-else
+} def
+
+
+% ====================================================================
+% Section 4: modifier classification + accumulator
+% ====================================================================
+%
+% A "modifier source" is one of:  CO passives Dict, CO power Dict, CO
+% super Dict, weather modifier Dict.  Each may carry both atk-side and
+% def-side keys.  Scanners walk a source and accumulate into the
+% running sum_atk_pct / sum_def_pct / terrain_stars_bonus.
+%
+% Atk-side keys (contribute to sum_atk_pct when applicable to attacker):
+%   /all-atk          always
+%   /direct-atk       attacker is direct-ground (§8.4 narrow set)
+%   /indirect-atk     attacker is indirect (Arty/Rocket/Battleship)
+%   /foot-atk         attacker is foot
+%   /vehicle-atk      attacker is wheel+tread
+%   /air-atk          attacker is air
+%   /ground-atk       attacker is foot+wheel+tread (non-air, non-sea)
+%   /vs-revealed-atk  attacker can see defender (Veil's passive)
+%
+% Def-side keys (contribute to sum_def_pct when applicable to defender):
+%   /all-def          always
+%
+% Def-side keys that fold into def_terrain_stars (NOT sum_def_pct):
+%   /forest-def       defender terrain = /forest
+%   /reef-def         defender terrain = /reef
+%
+% Movement / vision / capture / HP-heal / extra-action keys -- ignored
+% by combat-core (not relevant to atk/def computation).
+
+% key val atk-type can-see? -- atk-pct-delta
+% Returns the percent contribution of (key, val) to atk side, given the
+% attacker's unit-type and the can-see flag.  0 if (key, val) doesn't
+% apply.
+/atk-key-applies {|key val atk-type can-see?|
+    key /all-atk eq { val } {
+    key /direct-atk eq { atk-type direct-ground? { val } { 0 } if-else } {
+    key /indirect-atk eq { atk-type indirect? { val } { 0 } if-else } {
+    key /foot-atk eq { atk-type foot? { val } { 0 } if-else } {
+    key /vehicle-atk eq { atk-type vehicle? { val } { 0 } if-else } {
+    key /air-atk eq { atk-type air? { val } { 0 } if-else } {
+    key /ground-atk eq { atk-type ground? { val } { 0 } if-else } {
+    key /vs-revealed-atk eq { can-see? { val } { 0 } if-else } {
+        0
+    } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else
+} def
+
+% key val -- def-pct-delta
+% Atomic flat def-pct: only /all-def matches.
+/def-key-applies {|key val|
+    key /all-def eq { val } { 0 } if-else
+} def
+
+% key val def-terrain -- terrain-stars-delta
+% Folds /forest-def / /reef-def into terrain_stars_bonus when terrain
+% matches.
+/terrain-key-applies {|key val def-terrain|
+    key /forest-def eq def-terrain /forest eq and { val } {
+    key /reef-def eq def-terrain /reef eq and { val } {
+        0
+    } if-else } if-else
+} def
+
+% source-dict atk-type can-see?  -- sum-pct
+% Sum atk-side contributions from one modifier source.
+/scan-atk-source {|source atk-type can-see?|#+1
+    /accum 0 local-def
+    source { |k v|
+        /accum  accum  k v atk-type can-see? atk-key-applies  add  store
+    } for-all
+    accum
+} def
+
+% source-dict -- sum-pct
+% Sum def-side contributions (sum_def_pct only) from one modifier
+% source.
+/scan-def-source {|source|#+1
+    /accum 0 local-def
+    source { |k v|
+        /accum  accum  k v def-key-applies  add  store
+    } for-all
+    accum
+} def
+
+% source-dict def-terrain -- terrain-stars-bonus
+% Sum terrain-star deltas (/forest-def, /reef-def) from one source.
+/scan-terrain-source {|source def-terrain|#+1
+    /accum 0 local-def
+    source { |k v|
+        /accum  accum  k v def-terrain terrain-key-applies  add  store
+    } for-all
+    accum
+} def
+
+
+% ====================================================================
+% Section 5: resolver -- atk-spec def-spec ctx --
+%                        sum_atk_pct sum_def_pct def_terrain_stars
+% ====================================================================
+%
+% Resolver order per §8.4:
+%   1. vet bonus (atk side only)         vet-tier * 5
+%   2. CO passives                       both sides
+%   3. Power-OR-Super (exactly one)      both sides
+%   4. weather modifiers                 both sides equally
+%   5. terrain stars (HP-scaled later by formula)
+%
+% The mutually-exclusive Power/Super rule (§9.1: Super replaces Power)
+% is enforced here -- if /super-active is true, we scan the super
+% modifier Dict and SKIP the power modifier Dict entirely.
+
+/resolve-modifiers {|atk-spec def-spec ctx|#+20
+    /atk-type     atk-spec /type get local-def
+    /def-type     def-spec /type get local-def
+    /atk-co-name  atk-spec /co get local-def
+    /def-co-name  def-spec /co get local-def
+    /atk-super?   atk-spec /super-active get local-def
+    /atk-power?   atk-spec /power-active get local-def
+    /def-super?   def-spec /super-active get local-def
+    /def-power?   def-spec /power-active get local-def
+    /def-terrain  def-spec /terrain get local-def
+    /weather-name ctx /weather-current get local-def
+    /can-see?     ctx /attacker-can-see-defender get local-def
+
+    /atk-co  co-roster atk-co-name get local-def
+    /def-co  co-roster def-co-name get local-def
+
+    % Step 1: vet bonus (atk side only) -- atk_vet_pct.
+    /sum-atk  atk-spec /vet-tier get  5 mul  local-def
+
+    % Step 2 + 3: atk-side passives + (super OR power), each gated on
+    % attacker unit-type + can-see.
+    /sum-atk  sum-atk  atk-co /passives get  atk-type can-see? scan-atk-source  add  store
+    atk-super? {
+        /sum-atk  sum-atk  atk-co /super get  atk-type can-see? scan-atk-source  add  store
+    } { atk-power? {
+        /sum-atk  sum-atk  atk-co /power get  atk-type can-see? scan-atk-source  add  store
+    } if } if-else
+
+    % Step 2 + 3 (def side): def-co passives + (super OR power) flat def
+    % pct + terrain-star bonus.  can-see is meaningless on def side
+    % (defender doesn't roll vs-revealed-atk against itself).
+    /sum-def       def-co /passives get  scan-def-source  local-def
+    /stars-bonus   def-co /passives get  def-terrain scan-terrain-source  local-def
+    def-super? {
+        /sum-def      sum-def      def-co /super get  scan-def-source                add  store
+        /stars-bonus  stars-bonus  def-co /super get  def-terrain scan-terrain-source add  store
+    } { def-power? {
+        /sum-def      sum-def      def-co /power get  scan-def-source                add  store
+        /stars-bonus  stars-bonus  def-co /power get  def-terrain scan-terrain-source add  store
+    } if } if-else
+
+    % Step 4: weather modifiers (apply to both sides).  Weather Dicts
+    % may carry /all-atk + /all-def + /indirect-atk etc keys.
+    /weather  weather-table weather-name get local-def
+    /sum-atk      sum-atk      weather  atk-type can-see? scan-atk-source        add  store
+    /sum-def      sum-def      weather  scan-def-source                          add  store
+    /stars-bonus  stars-bonus  weather  def-terrain scan-terrain-source          add  store
+
+    % Step 5: terrain stars base (§4).  Use inf-only column when
+    % defender is foot.
+    /base-stars  def-type foot? {
+        terrain-defense-stars-inf def-terrain get
+    } {
+        terrain-defense-stars def-terrain get
+    } if-else local-def
+
+    /terrain-stars  base-stars stars-bonus add local-def
+
+    sum-atk sum-def terrain-stars
+} def
+
+
+% ====================================================================
+% Section 6: base damage lookup (§7.5 sparse table)
+% ====================================================================
+
+% atk-type def-type -- base-pct true   (when defined)
+% atk-type def-type -- false           (when illegal -- missing key)
+%
+% Two-level sparse lookup: damage-table[atk] missing -> illegal;
+% damage-table[atk][def] missing -> illegal.
+/lookup-base-damage {|atk-type def-type|
+    damage-table atk-type known-get {
+        /row exch def
+        row def-type known-get
+    } {
+        false
+    } if-else
+} def
+
+
+% ====================================================================
+% Section 7: damage application (§7.1)
+% ====================================================================
+%
+% Applies the AW combat formula given pre-resolved modifier sums:
+%   actual = ((base + luck_pp) x (1 + sum_atk_pct/100))
+%             x (1 - (sum_def_pct + def_terrain_stars * def_HP) / 100)
+%             x (atk_HP / 10)
+%   then floor to integer; floor at 0.
+%
+% Implementation: use $[ ] auto-promote infix so Int/Real mixed math
+% widens to Real automatically.  `actual` from the formula is in
+% percentage-of-max-HP (max HP = 10 in v1); HP damage =
+% floor(actual / 10).
+/apply-formula {|base luck-pp sum-atk-pct sum-def-pct def-terrain-stars atk-hp def-hp|#+6
+    /raw         $[ base + luck-pp ]                                 local-def
+    /atk-mult    $[ (100 + sum-atk-pct) / 100.0 ]                    local-def
+    /def-total   $[ sum-def-pct + def-terrain-stars * def-hp ]       local-def
+    /def-factor  $[ (100 - def-total) / 100.0 ]                      local-def
+    /hp-factor   $[ atk-hp / 10.0 ]                                  local-def
+    /actual-pp   $[ raw * atk-mult * def-factor * hp-factor ]        local-def
+    actual-pp 0.0 lt { 0 } {
+        actual-pp 10.0 div floor /integer-type cast
+    } if-else
+} def
+
+
+% ====================================================================
+% Section 8: full attack resolution (§7.6 sequence)
+% ====================================================================
+%
+%   1. lookup damage-table[atk][def] -- if missing, attack illegal:
+%      raise /undefined.
+%   2. compute attacker's actual damage via apply-formula.
+%   3. apply damage to defender's HP (caller does the unit mutation;
+%      we return the damage).
+%   4. if attacker is indirect-fire -- no counter; return 0 counter.
+%   5. if defender survives AND damage-table[def][atk] exists --
+%      compute counter using defender's POST-damage HP.
+%   6. return (damage, counter-damage).
+
+% atk-spec def-spec ctx luck-pp -- damage counter-damage
+/resolve-attack {|atk-spec def-spec ctx luck-pp|#+17
+    /atk-type  atk-spec /type get local-def
+    /def-type  def-spec /type get local-def
+
+    % Step 1: base damage lookup; missing -> illegal attack.
+    atk-type def-type lookup-base-damage
+    {
+        /base exch local-def
+    } {
+        /undefined throw
+    } if-else
+
+    % Step 2: resolve modifiers + apply formula for attacker's damage.
+    atk-spec def-spec ctx resolve-modifiers
+    /terrain-stars exch local-def
+    /sum-def-pct   exch local-def
+    /sum-atk-pct   exch local-def
+
+    /atk-hp  atk-spec /hp get local-def
+    /def-hp  def-spec /hp get local-def
+    /damage  base luck-pp sum-atk-pct sum-def-pct terrain-stars atk-hp def-hp
+              apply-formula  local-def
+
+    % Step 3: defender's post-damage HP.  Floor at 0.
+    /def-hp-post  def-hp damage sub  dup 0 lt { pop 0 } if local-def
+
+    % Step 4-5: counter-attack iff attacker is direct AND defender
+    % survives AND damage-table[def][atk] is defined.
+    /counter  atk-type indirect? def-hp-post 0 le or {
+        0
+    } {
+        def-type atk-type lookup-base-damage
+        {
+            /counter-base exch local-def
+
+            % Counter uses def-spec as attacker, atk-spec as defender.
+            % Counter does NOT roll luck per AW canon (luck rolls only
+            % on the initial attack); we pass luck-pp=0 for the counter.
+            % Build counter-spec Dicts -- the "attacker" for the counter
+            % is the defender with HP updated to def-hp-post; the
+            % "defender" for the counter is the original attacker.
+            /counter-atk-spec  <<
+                /type          def-type
+                /hp            def-hp-post
+                /vet-tier      def-spec /vet-tier get
+                /co            def-spec /co get
+                /power-active  def-spec /power-active get
+                /super-active  def-spec /super-active get
+                /terrain       def-spec /terrain get
+            >>#r local-def
+            /counter-def-spec  <<
+                /type          atk-type
+                /hp            atk-hp
+                /vet-tier      atk-spec /vet-tier get
+                /co            atk-spec /co get
+                /power-active  atk-spec /power-active get
+                /super-active  atk-spec /super-active get
+                /terrain       atk-spec /terrain get
+            >>#r local-def
+
+            counter-atk-spec counter-def-spec ctx resolve-modifiers
+            /c-terrain-stars exch local-def
+            /c-sum-def-pct   exch local-def
+            /c-sum-atk-pct   exch local-def
+            counter-base 0 c-sum-atk-pct c-sum-def-pct c-terrain-stars
+                def-hp-post atk-hp apply-formula
+        } {
+            0   % no counter row -- defender can't counter-attack
+        } if-else
+    } if-else local-def
+
+    damage counter
+} def
+
+
+% ====================================================================
+% Section 9: predicted damage range (§7.3 luck mode)
+% ====================================================================
+%
+% atk-spec def-spec ctx -- min-damage max-damage
+%
+% Returns the (min, max) damage range the resolver would produce given
+% the current luck-mode in ctx.  When luck-mode is /off, min == max.
+% When luck-mode is /on, min is at luck=0 and max is at luck=9 (per
+% §7.3 the roll is uniform_int(0, 9) -- monotonic in luck).
+/predict-damage {|atk-spec def-spec ctx|#+10
+    /atk-type  atk-spec /type get local-def
+    /def-type  def-spec /type get local-def
+    atk-type def-type lookup-base-damage
+    {
+        /base exch local-def
+        atk-spec def-spec ctx resolve-modifiers
+        /terrain-stars exch local-def
+        /sum-def-pct   exch local-def
+        /sum-atk-pct   exch local-def
+        /atk-hp  atk-spec /hp get local-def
+        /def-hp  def-spec /hp get local-def
+        /min-d  base 0 sum-atk-pct sum-def-pct terrain-stars atk-hp def-hp
+                 apply-formula  local-def
+        /max-d  ctx /luck-mode get /on eq {
+            base 9 sum-atk-pct sum-def-pct terrain-stars atk-hp def-hp apply-formula
+        } {
+            min-d
+        } if-else local-def
+        min-d max-d
+    } {
+        0 0  % illegal attack: both zero
+    } if-else
+} def
+
+
+% ====================================================================
+% Section 10: star-gain helper (§9.1)
+% ====================================================================
+%
+% atk-co-name def-co-name dealt-hp received-hp atk-unit-type
+%   def-unit-type -- atk-star-gain  def-star-gain  (both Reals)
+%
+% Per §9.1:
+%   star_gain = (dealt_funds + received_funds * 0.5) / 5000
+%               * (charge_rate / 100)
+%   dealt_funds    = dealt_HP    * target_unit_cost / 10
+%   received_funds = received_HP * own_unit_cost    / 10
+%
+% Each combat exchange awards a star_gain to BOTH sides (each side has
+% its own dealt + received perspective AND its own charge_rate).
+/compute-star-gains {|atk-co-name def-co-name dealt-hp received-hp atk-unit-type def-unit-type|#+8
+    /atk-rate  co-roster atk-co-name get /charge-rate get local-def
+    /def-rate  co-roster def-co-name get /charge-rate get local-def
+
+    /atk-unit-cost  unit-costs atk-unit-type get local-def
+    /def-unit-cost  unit-costs def-unit-type get local-def
+
+    /atk-dealt-funds     $[ dealt-hp    * def-unit-cost / 10 ]  local-def
+    /atk-received-funds  $[ received-hp * atk-unit-cost / 10 ]  local-def
+
+    /atk-star  $[ (atk-dealt-funds + atk-received-funds / 2.0)
+                  / 5000.0 * atk-rate / 100.0 ]  local-def
+    /def-star  $[ (atk-received-funds + atk-dealt-funds / 2.0)
+                  / 5000.0 * def-rate / 100.0 ]  local-def
+
+    atk-star def-star
+} def
+
+
+% ====================================================================
+% Section 11: self-test (--self-test entry point)
+% ====================================================================
+%
+% Validates:
+%   §7.8 vet-tier boundary cases
+%   §7.5 damage-table lookup (defined + missing)
+%   §9.3 worked example: Hammer Tank attacks Boots Tank on Plain,
+%        full HP, luck off -> 5 / 2 / 0.84 / 0.756
+%   classification predicates (foot?, vehicle?, ground?,
+%        direct-ground?, indirect?, air?, sea?)
+%   smoke: all 6x6 CO matchups produce non-negative damage on Tank-vs-
+%        Tank Plain, no Power, no vet
+%   weather modifier folds through resolver
+%   illegal attacks raise /undefined
+
+/test-pass-count 0 def
+/test-fail-count 0 def
+
+/expect {|label cond|
+    cond {
+        (  ok: ) print label =
+        /test-pass-count test-pass-count 1 add store
+    } {
+        (  FAIL: ) print label =
+        /test-fail-count test-fail-count 1 add store
+    } if-else
+} def
+
+% Real-comparison helper: |a - b| < epsilon
+/expect-near {|label actual expected eps|
+    label  actual expected sub abs eps lt  expect
+} def
+
+% ----- §7.8 vet tier boundaries -----
+/test-vet-tier {
+    (vet: 0 kills -> tier 0)   0  compute-vet-tier  0 eq  expect
+    (vet: 2 kills -> tier 0)   2  compute-vet-tier  0 eq  expect
+    (vet: 3 kills -> tier 1)   3  compute-vet-tier  1 eq  expect
+    (vet: 4 kills -> tier 1)   4  compute-vet-tier  1 eq  expect
+    (vet: 5 kills -> tier 2)   5  compute-vet-tier  2 eq  expect
+    (vet: 7 kills -> tier 2)   7  compute-vet-tier  2 eq  expect
+    (vet: 8 kills -> tier 3)   8  compute-vet-tier  3 eq  expect
+    (vet: 99 kills -> tier 3) 99  compute-vet-tier  3 eq  expect
+} def
+
+% ----- classification predicates -----
+/test-classification {
+    (class: infantry foot?)         /infantry      foot?           expect
+    (class: tank not foot?)         /tank          foot?  not      expect
+    (class: tank vehicle?)          /tank          vehicle?        expect
+    (class: tank tread)             /tank          move-class-of  /tread eq  expect
+    (class: recon wheel)            /recon         move-class-of  /wheel eq  expect
+    (class: tank direct-ground?)    /tank          direct-ground?  expect
+    (class: bcop not direct-ground?) /battle-copter direct-ground? not  expect
+    (class: artillery indirect?)    /artillery     indirect?       expect
+    (class: battleship indirect?)   /battleship    indirect?       expect
+    (class: tank not indirect?)     /tank          indirect?  not  expect
+    (class: fighter air?)           /fighter       air?            expect
+    (class: destroyer sea?)         /destroyer     sea?            expect
+    (class: tank ground?)           /tank          ground?         expect
+    (class: fighter not ground?)    /fighter       ground?  not    expect
+    (class: destroyer not ground?)  /destroyer     ground?  not    expect
+} def
+
+% ----- §7.5 sparse table lookup -----
+/test-damage-table {
+    (damage: tank vs tank = 55)
+        /tank /tank lookup-base-damage
+        { 55 eq } { false } if-else  expect
+
+    (damage: heavy-tank vs infantry = 105)
+        /heavy-tank /infantry lookup-base-damage
+        { 105 eq } { false } if-else  expect
+
+    (damage: bomber vs heavy-tank = 95)
+        /bomber /heavy-tank lookup-base-damage
+        { 95 eq } { false } if-else  expect
+
+    (damage: apc has no row -- illegal)
+        /apc /tank lookup-base-damage  not  expect
+
+    (damage: tank vs fighter -- illegal (missing column))
+        /tank /fighter lookup-base-damage  not  expect
+
+    (damage: submarine vs infantry -- illegal)
+        /submarine /infantry lookup-base-damage  not  expect
+
+    (damage: anti-air vs battle-copter = 120 (merger bite))
+        /anti-air /battle-copter lookup-base-damage
+        { 120 eq } { false } if-else  expect
+} def
+
+% ----- §9.3 worked example -----
+% Build spec Dicts as plain ReadOnly VM-heap dicts.  Test specs are
+% short-lived; tiny.  Plain = 1 star, no Powers, no vet.  Hammer Tank
+% attacks Boots Tank.
+/test-section-9-3 {||#+12
+    /hammer-tank  <<
+        /type /tank  /hp 10  /vet-tier 0  /co /hammer
+        /power-active false  /super-active false  /terrain /plain
+    >>#r local-def
+    /boots-tank  <<
+        /type /tank  /hp 10  /vet-tier 0  /co /boots
+        /power-active false  /super-active false  /terrain /plain
+    >>#r local-def
+    /ctx <<
+        /luck-mode /off  /weather-current /clear
+        /attacker-can-see-defender true
+    >>#r local-def
+
+    % resolve-modifiers sanity: Hammer atk-side = +20 (direct-atk applies
+    % to direct-ground Tank).  Def-side = 0 (Boots has no def keys).
+    % Terrain stars = 1 (Plain, non-inf).
+    hammer-tank boots-tank ctx resolve-modifiers
+    /ts exch local-def  /sd exch local-def  /sa exch local-def
+    (§9.3 sum_atk_pct = +20)    sa  20 eq  expect
+    (§9.3 sum_def_pct = 0)       sd   0 eq  expect
+    (§9.3 def_terrain_stars = 1) ts   1 eq  expect
+
+    % resolve-attack atomic: damage = 5, counter = 2.
+    hammer-tank boots-tank ctx 0 resolve-attack
+    /counter exch local-def  /dmg exch local-def
+    (§9.3 Hammer deals 5 HP)  dmg     5 eq  expect
+    (§9.3 Boots counter 2 HP) counter 2 eq  expect
+
+    % star_gain math: Hammer 0.84, Boots 0.756.
+    /hammer /boots dmg counter /tank /tank compute-star-gains
+    /boots-star exch local-def  /hammer-star exch local-def
+    (§9.3 Hammer star_gain ≈ 0.84)   hammer-star  0.84   0.001  expect-near
+    (§9.3 Boots star_gain  ≈ 0.756)  boots-star   0.756  0.001  expect-near
+} def
+
+% ----- predict-damage min/max under luck modes -----
+/test-predict-damage {||#+6
+    /hammer-tank  <<
+        /type /tank  /hp 10  /vet-tier 0  /co /hammer
+        /power-active false  /super-active false  /terrain /plain
+    >>#r local-def
+    /boots-tank  <<
+        /type /tank  /hp 10  /vet-tier 0  /co /boots
+        /power-active false  /super-active false  /terrain /plain
+    >>#r local-def
+    /ctx-off  << /luck-mode /off  /weather-current /clear
+                  /attacker-can-see-defender true >>#r local-def
+    hammer-tank boots-tank ctx-off predict-damage
+    /pmax exch local-def  /pmin exch local-def
+    (predict luck-off: min = max = 5)
+        pmin 5 eq pmax 5 eq and  expect
+
+    /ctx-on  << /luck-mode /on  /weather-current /clear
+                /attacker-can-see-defender true >>#r local-def
+    hammer-tank boots-tank ctx-on predict-damage
+    /pmax exch store  /pmin exch store
+    % min at luck=0: 5; max at luck=9: ((55+9)*1.20)*0.90*1.0 = 64*1.20*0.90 = 69.12 -> 6
+    (predict luck-on: min = 5)  pmin 5 eq  expect
+    (predict luck-on: max = 6)  pmax 6 eq  expect
+} def
+
+% ----- weather effects -----
+% /rain has /all-atk -5; in a Tank-vs-Tank Plain Hammer-attack-Boots
+% scenario, Hammer's resolved atk pct shifts from +20 to +20-5 = +15.
+% Expected damage: ((55)*1.15)*0.90*1.0 = 56.925 -> 5 HP (same integer!
+% well, 49.5 baseline rounds to 4 and now 56.925 still rounds to 5 --
+% with +20 passive we go from 59.4 (no weather) to 56.925 (rain) ->
+% both floor to 5).  We assert that the resolved atk pct sees the
+% weather contribution.
+/test-weather {||#+7
+    /hammer-tank  <<
+        /type /tank  /hp 10  /vet-tier 0  /co /hammer
+        /power-active false  /super-active false  /terrain /plain
+    >>#r local-def
+    /boots-tank  <<
+        /type /tank  /hp 10  /vet-tier 0  /co /boots
+        /power-active false  /super-active false  /terrain /plain
+    >>#r local-def
+    /ctx-rain  << /luck-mode /off  /weather-current /rain
+                  /attacker-can-see-defender true >>#r local-def
+    hammer-tank boots-tank ctx-rain resolve-modifiers
+    /ts exch local-def  /sd exch local-def  /sa exch local-def
+    (weather rain: sum_atk_pct = +20 - 5 = +15)  sa 15 eq  expect
+
+    /ctx-sandstorm  << /luck-mode /off  /weather-current /sandstorm
+                       /attacker-can-see-defender true >>#r local-def
+    hammer-tank boots-tank ctx-sandstorm resolve-modifiers
+    /ts exch store  /sd exch store  /sa exch store
+    (weather sandstorm: no indirect-atk impact on direct attacker)
+        sa 20 eq  expect
+} def
+
+% ----- 6x6 CO matchup smoke (Tank-vs-Tank Plain, no Power, no vet) -----
+% Each pairing must produce non-negative damage.  Doesn't validate
+% specific values; just exercises every co-passives Dict through the
+% resolver.
+/test-co-matchup-smoke {||#+2
+    /cos  [ /bishop /hammer /hawk /boots /veil /talon ] local-def
+    /ctx <<
+        /luck-mode /off  /weather-current /clear
+        /attacker-can-see-defender true
+    >>#r local-def
+
+    cos { |atk-co|
+        cos { |def-co|#+4
+            /a  <<
+                /type /tank  /hp 10  /vet-tier 0  /co atk-co
+                /power-active false  /super-active false  /terrain /plain
+            >>#r local-def
+            /d  <<
+                /type /tank  /hp 10  /vet-tier 0  /co def-co
+                /power-active false  /super-active false  /terrain /plain
+            >>#r local-def
+            a d ctx 0 resolve-attack
+            /counter exch local-def  /dmg exch local-def
+            (smoke: tank-vs-tank dmg >= 0)      dmg 0 ge      expect
+            (smoke: tank-vs-tank counter >= 0)  counter 0 ge  expect
+        } for-all
+    } for-all
+} def
+
+% ----- illegal attack raises -----
+/test-illegal-attack {||#+3
+    /attacker <<
+        /type /tank  /hp 10  /vet-tier 0  /co /bishop
+        /power-active false  /super-active false  /terrain /plain
+    >>#r local-def
+    /defender <<
+        /type /fighter  /hp 10  /vet-tier 0  /co /bishop
+        /power-active false  /super-active false  /terrain /plain
+    >>#r local-def
+    /ctx <<
+        /luck-mode /off  /weather-current /clear
+        /attacker-can-see-defender true
+    >>#r local-def
+
+    % Tank cannot attack Fighter -- damage-table[tank][fighter] missing.
+    (illegal: tank attacks fighter raises /undefined)
+        { attacker defender ctx 0 resolve-attack } try
+        /undefined eq  expect
+} def
+
+% ----- veterancy folds in -----
+/test-vet-fold {||#+10
+    /atk-vet0  <<
+        /type /tank  /hp 10  /vet-tier 0  /co /bishop
+        /power-active false  /super-active false  /terrain /plain
+    >>#r local-def
+    /atk-vet3  <<
+        /type /tank  /hp 10  /vet-tier 3  /co /bishop
+        /power-active false  /super-active false  /terrain /plain
+    >>#r local-def
+    /def-spec  <<
+        /type /tank  /hp 10  /vet-tier 0  /co /bishop
+        /power-active false  /super-active false  /terrain /plain
+    >>#r local-def
+    /ctx  << /luck-mode /off  /weather-current /clear
+             /attacker-can-see-defender true >>#r local-def
+
+    atk-vet0 def-spec ctx resolve-modifiers
+    /ts0 exch local-def  /sd0 exch local-def  /sa0 exch local-def
+    atk-vet3 def-spec ctx resolve-modifiers
+    /ts3 exch local-def  /sd3 exch local-def  /sa3 exch local-def
+
+    (vet: tier-3 - tier-0 = +15 pp delta)  sa3 sa0 sub 15 eq  expect
+} def
+
+% ----- CO roster: locked values (GDD 8.3, locked 2026-05-16) ----------
+% Pins the three roster values that drifted from the locked spec once
+% already (caught by the 2026-06-05 Phase-4 examples audit): Bishop's
+% Power attack bonus, Boots' Power capture-speed, and the air-only
+% Talon Super re-scope.
+/test-co-roster-locked {||#+4
+    /bishop-power  co-roster /bishop get /power get  local-def
+    (CO roster: bishop power /all-atk locked at +15)
+        bishop-power /all-atk get 15 eq  expect
+    /boots-power   co-roster /boots get /power get   local-def
+    (CO roster: boots power /capture-speed locked at +50)
+        boots-power /capture-speed get 50 eq  expect
+    /talon-super   co-roster /talon get /super get   local-def
+    (CO roster: talon super /air-atk locked at +50)
+        talon-super /air-atk get 50 eq  expect
+    (CO roster: talon super /air-restock locked true)
+        talon-super /air-restock get  expect
+    (CO roster: talon super is air-only -- no /all-extra-action key)
+        talon-super /all-extra-action known? not  expect
+} def
+
+% ----- run all tests --------------------------------------------------
+/run-self-test {
+    (===== combat-core self-test =====) =
+    test-vet-tier
+    test-classification
+    test-damage-table
+    test-section-9-3
+    test-predict-damage
+    test-weather
+    test-co-matchup-smoke
+    test-co-roster-locked
+    test-illegal-attack
+    test-vet-fold
+    () =
+    (=== summary: {0} passed, {1} failed ===\n)
+        mark test-pass-count test-fail-count print-fmt pop pop
+    (combat-core self-test failed)  test-fail-count 0 eq  assert
+} def
+
+
+% ====================================================================
+% Section 12: CLI dispatch
+% ====================================================================
+%
+% --self-test    run all assertions
+% (no args)      load module; no side effects (useful for `require`)
+
+/dispatch-cli {||#+1
+    /found-self-test? false local-def
+    command-line-args { |a|
+        a (--self-test) eq { /found-self-test? true store } if
+    } for-all
+    found-self-test? { run-self-test } if
+} def
+
+dispatch-cli

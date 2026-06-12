@@ -1,0 +1,2 @@
+[ { 42 cut } { 0 } ] choice
+[ { false guard } { 99 } ] choice

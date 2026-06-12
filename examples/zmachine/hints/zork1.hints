@@ -1,0 +1,17 @@
+# Zork I -- progressive hints for the opening puzzles.
+# Lines starting with '#' are comments.
+
+[Q] What's in the mailbox?
+- Try opening it.
+- A leaflet -- read it.
+
+[Q] How do I get into the white house?
+- The front door is boarded up; circle around.
+- Look for a window on another side.
+- Behind the house, the kitchen window is slightly ajar.
+- east, then "open window", then "enter" or "go in".
+
+[Q] How do I find the underground entrance?
+- The trophy case in the living room is the goal, but you need to come at the basement another way.
+- Look at the rug.
+- Move the rug, open the trap door, climb down.

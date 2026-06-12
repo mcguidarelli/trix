@@ -1,0 +1,5 @@
+% interleave every err-companion control op, then unwind through them.
+<< /e { 1 exch exec } >>
+{ { ${ << /any { pop pop 0 } >> { /e perform } try-catch } } delimit pop }
+handle-effect
+{ ${ { (x) throw } try pop } } delimit

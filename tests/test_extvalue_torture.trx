@@ -1,0 +1,499 @@
+% ====================================================================
+% ExtValue Torture Test Suite
+% ====================================================================
+% Stress tests for the ExtValue (64-bit heap-allocated values) system.
+% Validates correct allocation, free-list recycling, save/restore
+% interactions, callback operator lifecycle, error path cleanup, and
+% deep nesting — all using Long, ULong, Double, and Address types
+% that exercise the ExtValue code paths.
+%
+% Leak detection uses vm-used delta inside save/restore: if ExtValues
+% are leaked, vm-used grows more than expected for the visible results.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Free-list recycling stability
+% ====================================================================
+% Overwrite a variable N times with Long — the free list should stay
+% bounded (recycling freed ExtValues for new allocations).
+
+save
+/x 0l def
+//:status:extvalue-free
+1 1 200 { /long-type cast /x exch def } for
+//:status:extvalue-free
+exch sub abs 2 lt
+(evt: 200 Long def cycles — free list stable) rt-ok
+restore clear
+
+% Save/restore reclaims all ExtValues from arrays
+save
+//:status:vm-used
+save [1 1 100 { /long-type cast } for] pop restore
+//:status:vm-used
+exch sub 0 eq
+(evt: save/restore reclaims 100 Long array with zero net growth) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 2: Callback operators — vm-used delta with Long inputs
+% ====================================================================
+% Each operator should produce zero unexpected ExtValue waste.
+% Delta is measured inside save/restore to detect leaks.
+
+% map: Long -> Long
+save
+[100l 200l 300l] { 1l add } map pop
+[100l 200l 300l] { 1l add } map pop
+//:status:vm-used
+[100l 200l 300l] { 1l add } map pop
+//:status:vm-used
+exch sub
+exch restore
+dup 0 gt exch 200 lt and
+(evt: map Long delta < 200 [no leaked ExtValues]) rt-ok
+
+% filter: Long -> subset
+save
+[100l 200l 300l 400l] { 250l gt } filter pop
+[100l 200l 300l 400l] { 250l gt } filter pop
+//:status:vm-used
+[100l 200l 300l 400l] { 250l gt } filter pop
+//:status:vm-used
+exch sub
+exch restore
+dup 0 gt exch 200 lt and
+(evt: filter Long delta < 200 [no leaked ExtValues]) rt-ok
+
+% for-all: consumes Long elements, no result
+save
+/sum 0l def
+[100l 200l 300l] { sum add /sum exch def } for-all
+sum 600l eq
+(evt: for-all Long sum correct) rt-ok
+restore clear
+
+% reduce: Long accumulator
+save
+[1l 2l 3l 4l 5l] 0l { add } reduce
+15l eq
+(evt: reduce Long correct) rt-ok
+restore clear
+
+% any with Long
+save
+[100l 200l 300l] { 150l gt } any
+(evt: any Long found) rt-ok
+restore clear
+
+% all with Long
+save
+[100l 200l 300l] { 50l gt } all
+(evt: all Long true) rt-ok
+restore clear
+
+% count-if with Double
+save
+[1.0d 2.0d 3.0d 4.0d 5.0d] { 3.0d gt } count-if
+2 eq
+(evt: count-if Double correct) rt-ok
+restore clear
+
+% find with Long
+save
+[100l 200l 300l] { 200l eq } find
+(evt: find Long found) rt-ok
+200l eq
+(evt: find Long value) rt-ok
+restore clear
+
+% take-while with Long
+save
+[100l 200l 300l 400l] { 250l lt } take-while
+dup length 2 eq                              (evt: take-while Long length) rt-ok
+dup 0 get 100l eq                            (evt: take-while Long first) rt-ok
+pop
+restore clear
+
+% drop-while with Long
+save
+[100l 200l 300l 400l] { 250l lt } drop-while
+dup length 2 eq                              (evt: drop-while Long length) rt-ok
+dup 0 get 300l eq                            (evt: drop-while Long first) rt-ok
+pop
+restore clear
+
+% partition with Double
+save
+[1.0d 2.0d 3.0d 4.0d] { 2.5d gt } partition
+dup length 2 eq                              (evt: partition Double fail length) rt-ok
+pop
+dup length 2 eq                              (evt: partition Double pass length) rt-ok
+dup 0 get 3.0d eq                            (evt: partition Double pass first) rt-ok
+pop
+restore clear
+
+% sort-by with Long keys
+save
+[300l 100l 200l] { } sort-by
+dup 0 get 100l eq                            (evt: sort-by Long first) rt-ok
+dup 2 get 300l eq                            (evt: sort-by Long last) rt-ok
+pop
+restore clear
+
+% sort-by single Long element
+save
+[42l] { } sort-by
+dup 0 get 42l eq                             (evt: sort-by single Long) rt-ok
+pop
+restore clear
+
+% group-by with Long keys
+save
+[10l 20l 10l 30l 20l 10l] { } group-by
+dup length 3 eq                              (evt: group-by Long key count) rt-ok
+dup 10l get length 3 eq                      (evt: group-by Long group size) rt-ok
+pop
+restore clear
+
+% min-by / max-by with Long
+save
+[300l 100l 200l] { } min-by
+100l eq                                      (evt: min-by Long) rt-ok
+[300l 100l 200l] { } max-by
+300l eq                                      (evt: max-by Long) rt-ok
+restore clear
+
+% min-by / max-by single Long element
+save
+[42l] { } min-by
+42l eq                                       (evt: min-by single Long) rt-ok
+[99l] { } max-by
+99l eq                                       (evt: max-by single Long) rt-ok
+restore clear
+
+% scan with Long accumulator
+save
+[1l 2l 3l] 0l { add } scan
+dup length 4 eq                              (evt: scan Long length) rt-ok
+dup 3 get 6l eq                              (evt: scan Long final) rt-ok
+pop
+restore clear
+
+% ====================================================================
+% SECTION 3: Callback operators — vm-used delta with Double inputs
+% ====================================================================
+
+% map Double delta
+save
+[1.0d 2.0d 3.0d] { 10.0d mul } map pop
+[1.0d 2.0d 3.0d] { 10.0d mul } map pop
+//:status:vm-used
+[1.0d 2.0d 3.0d] { 10.0d mul } map pop
+//:status:vm-used
+exch sub
+exch restore
+dup 0 gt exch 200 lt and
+(evt: map Double delta < 200 [no leaked ExtValues]) rt-ok
+
+% filter Double delta
+save
+[1.0d 2.0d 3.0d 4.0d] { 2.5d gt } filter pop
+[1.0d 2.0d 3.0d 4.0d] { 2.5d gt } filter pop
+//:status:vm-used
+[1.0d 2.0d 3.0d 4.0d] { 2.5d gt } filter pop
+//:status:vm-used
+exch sub
+exch restore
+dup 0 gt exch 200 lt and
+(evt: filter Double delta < 200 [no leaked ExtValues]) rt-ok
+
+% sort-by Double delta
+save
+[3.0d 1.0d 2.0d] { } sort-by pop
+[3.0d 1.0d 2.0d] { } sort-by pop
+//:status:vm-used
+[3.0d 1.0d 2.0d] { } sort-by pop
+//:status:vm-used
+exch sub
+exch restore
+dup 0 gt exch 200 lt and
+(evt: sort-by Double delta < 200 [no leaked ExtValues]) rt-ok
+
+% ====================================================================
+% SECTION 4: Error path cleanup
+% ====================================================================
+% When an error occurs inside a callback, in-flight ExtValues should
+% not corrupt the VM (verified by save/restore reclaiming cleanly).
+
+% Error tests use /err-save to hold the save token (clear would discard it)
+/err-save save def
+{ [1l 2l 3l 4l] { dup 3l eq { /undefined-name-xyzzy } if } map } try
+pop clear  % pop error code, clear residual
+err-save restore
+(evt: map error with Long no crash) =
+
+/err-save save def
+{ [1l 2l 3l] { dup 2l eq { /undefined-name-xyzzy } if 0l gt } filter } try
+pop clear
+err-save restore
+(evt: filter error with Long no crash) =
+
+/err-save save def
+{ [3l 1l 2l] { dup 1l eq { /undefined-name-xyzzy } if } sort-by } try
+pop clear
+err-save restore
+(evt: sort-by error with Long no crash) =
+
+% ====================================================================
+% SECTION 5: Save/restore interactions with ExtValues
+% ====================================================================
+
+% ExtValues created before save, modified after restore
+save
+/a 42l def
+/b 99.9d def
+save
+/a 100l def
+/b 200.0d def
+a 100l eq (evt: save inner Long correct) rt-ok
+restore
+a 42l eq (evt: restore outer Long correct) rt-ok
+b 99.9d eq (evt: restore outer Double correct) rt-ok
+restore clear
+
+% Nested saves with ExtValue arrays
+save
+[1l 2l 3l] /arr exch def
+save
+arr { 10l mul } map /arr2 exch def
+arr2 0 get 10l eq (evt: nested save map Long elem) rt-ok
+restore
+arr 0 get 1l eq (evt: nested restore original Long intact) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 6: Deep nesting chains with ExtValues
+% ====================================================================
+
+save
+% map -> filter -> sort-by -> reduce chain
+[5l 3l 1l 4l 2l]
+{ 10l mul } map
+{ 25l gt } filter
+{ } sort-by
+0l { add } reduce
+120l eq
+(evt: deep chain map-filter-sort-reduce Long) rt-ok
+restore clear
+
+save
+% partition -> map both halves
+[1.0d 2.0d 3.0d 4.0d 5.0d] { 3.0d gt } partition
+{ 100.0d mul } map
+dup 0 get 100.0d eq    (evt: deep partition-map fail first) rt-ok
+pop
+{ 100.0d mul } map
+dup 0 get 400.0d eq    (evt: deep partition-map pass first) rt-ok
+pop
+restore clear
+
+save
+% group-by then map a group
+[10l 20l 10l 20l 10l] { } group-by
+dup 10l get { 2l mul } map
+dup 0 get 20l eq       (evt: deep group-map first) rt-ok
+dup length 3 eq        (evt: deep group-map length) rt-ok
+pop pop
+restore clear
+
+% ====================================================================
+% SECTION 7: Packed inputs with ExtValue types
+% ====================================================================
+
+save
+{ 100l 200l 300l } { 150l gt } filter
+dup length 2 eq                              (evt: packed Long filter length) rt-ok
+dup 0 get 200l eq                            (evt: packed Long filter first) rt-ok
+pop
+//:status:vm-temp-used 0 eq
+(evt: vm-temp-used 0 after packed Long filter) rt-ok
+restore clear
+
+save
+{ 1.0d 2.0d 3.0d } { 10.0d mul } map
+dup 0 get 10.0d eq                           (evt: packed Double map first) rt-ok
+dup 2 get 30.0d eq                           (evt: packed Double map last) rt-ok
+pop
+//:status:vm-temp-used 0 eq
+(evt: vm-temp-used 0 after packed Double map) rt-ok
+restore clear
+
+save
+{ 3l 1l 2l } { } sort-by
+dup 0 get 1l eq                              (evt: packed Long sort-by first) rt-ok
+dup 2 get 3l eq                              (evt: packed Long sort-by last) rt-ok
+pop
+//:status:vm-temp-used 0 eq
+(evt: vm-temp-used 0 after packed Long sort-by) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 8: Set operations with ExtValue types
+% ====================================================================
+
+save
+[100l 200l 300l 400l] [200l 400l 500l] intersect
+dup length 2 eq                              (evt: intersect Long length) rt-ok
+dup 0 get 200l eq                            (evt: intersect Long first) rt-ok
+pop
+restore clear
+
+save
+[1.0d 2.0d] [2.0d 3.0d] union
+dup length 3 eq                              (evt: union Double length) rt-ok
+pop
+restore clear
+
+save
+[100l 200l 300l] [200l] difference
+dup length 2 eq                              (evt: difference Long length) rt-ok
+dup 0 get 100l eq                            (evt: difference Long first) rt-ok
+pop
+restore clear
+
+% ====================================================================
+% SECTION 9: Large-scale ExtValue stress
+% ====================================================================
+
+save
+% 500-element Long array through map
+[1 1 500 { /long-type cast } for] { 1l add } map
+dup length 500 eq                            (evt: 500 Long map length) rt-ok
+dup 0 get 2l eq                              (evt: 500 Long map first) rt-ok
+dup 499 get 501l eq                          (evt: 500 Long map last) rt-ok
+pop
+restore clear
+
+save
+% 500-element Long filter (keep ~half)
+[1 1 500 { /long-type cast } for] { 250l gt } filter
+dup length 250 eq                            (evt: 500 Long filter length) rt-ok
+dup 0 get 251l eq                            (evt: 500 Long filter first) rt-ok
+pop
+restore clear
+
+save
+% 200-element Long sort-by
+[1 1 200 { /long-type cast } for] { neg } sort-by
+dup 0 get 200l eq                            (evt: 200 Long sort-by first) rt-ok
+dup 199 get 1l eq                            (evt: 200 Long sort-by last) rt-ok
+pop
+restore clear
+
+save
+% 100-element Double partition
+[1 1 100 { /double-type cast } for] { 50.0d gt } partition
+dup length 50 eq                             (evt: 100 Double partition fail length) rt-ok
+pop
+dup length 50 eq                             (evt: 100 Double partition pass length) rt-ok
+pop
+restore clear
+
+save
+% 100-element Long reduce
+[1 1 100 { /long-type cast } for] 0l { add } reduce
+5050l eq                                     (evt: 100 Long reduce sum) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 10: Source-array integrity under save/restore with ExtValues
+% ====================================================================
+% Verify that collection operators with ExtValue arithmetic do not
+% create dangling ExtValue references in source arrays, and that
+% save/restore correctly recovers source array elements.
+
+% map + save/restore with Long arithmetic
+save
+[100l 200l 300l] /src exch def
+save
+src { 2l mul } map pop
+src 0 get 100l eq (evt: srcguard map Long[0] inside inner save) rt-ok
+restore
+src 0 get 100l eq (evt: srcguard map Long[0] after inner restore) rt-ok
+restore clear
+
+% filter + save/restore with Double predicate
+save
+[1.5d 2.5d 3.5d] /src exch def
+save
+src { 2.0d gt } filter pop
+restore
+src 0 get 1.5d eq (evt: srcguard filter Double[0] after restore) rt-ok
+src 2 get 3.5d eq (evt: srcguard filter Double[2] after restore) rt-ok
+restore clear
+
+% chained map+filter with Long -- source survives both
+save
+[10l 20l 30l 40l 50l] /src exch def
+src { 2l mul } map { 50l gt } filter pop
+src 0 get 10l eq  (evt: srcguard chain Long[0] after map+filter) rt-ok
+src 4 get 50l eq  (evt: srcguard chain Long[4] after map+filter) rt-ok
+restore clear
+
+% reduce with Long accumulation -- source intact
+save
+[1l 2l 3l 4l 5l] /src exch def
+src 0l { add } reduce pop
+src 0 get 1l eq   (evt: srcguard reduce Long[0] intact) rt-ok
+src 4 get 5l eq   (evt: srcguard reduce Long[4] intact) rt-ok
+restore clear
+
+% Result independence: modifying map result must not affect source
+save
+[1l 2l 3l] /src exch def
+src { 0l add } map /result exch def
+result 0 999l put
+src 0 get 1l eq   (evt: srcguard result put does not affect source) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 11: status invariant check
+% ====================================================================
+
+//:status:vm-temp-used 0 eq
+(evt: vm-temp-used 0 at end) rt-ok
+
+//:status:extvalue-validate
+(evt: extvalue free-list integrity at end) rt-ok
+
+//:status:vm-validate
+(evt: vm heap integrity at end) rt-ok
+
+//:status:save-journal-validate
+(evt: save journal integrity at end) rt-ok
+
+% Pre-warm /add and /eq: a prior `restore` cleared main's per-coroutine
+% binding cache, so their first lookup here would allocate 12-byte cache
+% entries mid-expression and drift the invariant.
+0 0 add 0 eq pop
+
+//:status:vm-temp-used
+//:status:vm-used add
+//:status:vm-global-used add
+//:status:vm-free add
+//:status:vm-total eq
+(evt: final invariant temp + used + global + free = total) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_extvalue_torture: ALL TESTS PASSED) =
+(__test_ok__) =

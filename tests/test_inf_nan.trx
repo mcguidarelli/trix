@@ -1,0 +1,101 @@
+% ====================================================================
+% test_inf_nan.trx -- inf, nan, inf#d, nan#d top-level systemdict tests
+% ====================================================================
+% Validates that the IEEE 754 special value names resolve to the
+% correct types and values, and behave correctly in arithmetic,
+% classification, and cross-type operations.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Types
+% ====================================================================
+
+inf type /real-type eq                        (in: inf is real) rt-ok clear
+nan type /real-type eq                        (in: nan is real) rt-ok clear
+inf#d type /double-type eq                     (in: inf#d is double) rt-ok clear
+nan#d type /double-type eq                     (in: nan#d is double) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Match nested systemdict paths
+% ====================================================================
+
+% inf/inf#d can use eq (infinity == infinity)
+inf //:systemdict:numbers:real-type:infinity eq
+                                              (in: inf matches real-type path) rt-ok clear
+inf#d //:systemdict:numbers:double-type:infinity eq
+                                              (in: inf#d matches double-type path) rt-ok clear
+
+% NaN != NaN by IEEE 754, so verify both are NaN instead of using eq
+nan nan?
+//:systemdict:numbers:real-type:quiet-NaN nan?
+and                                           (in: nan and path both are NaN) rt-ok clear
+nan#d nan?
+//:systemdict:numbers:double-type:quiet-NaN nan?
+and                                           (in: nan#d and path both are NaN) rt-ok clear
+
+% ====================================================================
+% SECTION 3: IEEE 754 classification
+% ====================================================================
+
+inf inf?                                    (in: inf inf?) rt-ok clear
+inf#d inf?                                   (in: inf#d inf?) rt-ok clear
+inf finite? not                             (in: inf is not finite) rt-ok clear
+inf#d finite? not                            (in: inf#d is not finite) rt-ok clear
+
+nan nan?                                    (in: nan nan?) rt-ok clear
+nan#d nan?                                   (in: nan#d nan?) rt-ok clear
+nan finite? not                             (in: nan is not finite) rt-ok clear
+nan#d finite? not                            (in: nan#d is not finite) rt-ok clear
+
+% ====================================================================
+% SECTION 4: NaN != NaN (IEEE 754)
+% ====================================================================
+
+nan nan eq not                                (in: nan != nan) rt-ok clear
+nan#d nan#d eq not                              (in: nan#d != nan#d) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Negation and comparison (arithmetic rejects non-finite)
+% ====================================================================
+
+inf neg inf?                                (in: neg inf is inf) rt-ok clear
+inf neg 0.0 gt not                            (in: neg inf is negative) rt-ok clear
+inf#d neg inf?                               (in: neg inf#d is inf) rt-ok clear
+
+% Arithmetic with inf/nan raises numerical-inf error (strict by design)
+{ inf 1.0 add } try /numerical-inf eq         (in: inf + 1 raises numerical-inf) rt-ok clear
+{ nan 1.0 add } try /numerical-inf eq         (in: nan + 1 raises numerical-inf) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Cross-type consistency
+% ====================================================================
+
+inf /double-type cast inf#d eq                      (in: inf cast to double = inf#d) rt-ok clear
+nan /double-type cast nan?                       (in: nan cast to double is nan) rt-ok clear
+inf#d /real-type cast inf eq                        (in: inf#d cast to real = inf) rt-ok clear
+nan#d /real-type cast nan?                        (in: nan#d cast to real is nan) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Shadowing
+% ====================================================================
+
+/s1 save def
+/inf 42 def
+inf 42 eq                                     (in: user can shadow inf) rt-ok
+s1 restore
+
+% After restore, inf reverts to systemdict value
+inf inf?                                    (in: inf reverts after restore) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_inf_nan: ALL TESTS PASSED) =
+(__test_ok__) =

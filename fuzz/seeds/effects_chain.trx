@@ -1,0 +1,1 @@
+<< /inner { (X) exch exec } >> { << /outer { /k exch def /inner perform /k load exec } >> { /outer perform } handle-effect } handle-effect

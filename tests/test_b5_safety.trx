@@ -1,0 +1,64 @@
+% ====================================================================
+% test_b5_safety.trx -- B5 review group-1 memory-safety regressions
+% ====================================================================
+% Heap-overflow guards (narrow-type count/length truncated BEFORE the
+% bound check), filter-dict use-after-free, and regex NUL-termination.
+% Runs with a large --vm-size (registered in run_all.sh) so the
+% 65535-element trigger arrays can be built before each op rejects them.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% Valid, in-range cases still work (guards must not false-positive)
+% ====================================================================
+100 range length 100 eq                    (range: 100 ok) rt-ok clear
+0 10 range-from length 10 eq                (range-from: 0..10 ok) rt-ok clear
+0 10 2 step-range length 5 eq               (step-range: 0..10 by 2 ok) rt-ok clear
+[ 1 2 3 ] 4 append length 4 eq              (append: ok) rt-ok clear
+[ 1 2 ] [ 3 4 ] union length 4 eq           (union: ok) rt-ok clear
+[ 1 2 3 ] 0 interpose length 5 eq           (interpose: ok) rt-ok clear
+[ 1 2 3 ] 0 { add } scan length 4 eq        (scan: ok) rt-ok clear
+[ [ 1 2 ] [ 3 4 ] ] flatten length 4 eq     (flatten: ok) rt-ok clear
+(ab) 3 repeat-string length 6 eq            (repeat-string: ok) rt-ok clear
+
+% ====================================================================
+% Heap-overflow guards: each must raise a catchable /limit-check,
+% never narrow a count/length to a small value and then over-write.
+% ====================================================================
+{ 100000 range } try /limit-check eq                          (range: > max rejected) rt-ok clear
+{ -2000000000 2000000000 range-from } try /limit-check eq     (range-from: span overflow rejected) rt-ok clear
+{ -2000000000 2000000000 1 step-range } try /limit-check eq   (step-range: int32 span overflow rejected) rt-ok clear
+{ 65535 array 0 append } try /limit-check eq                  (append: 65535+1 rejected) rt-ok clear
+{ 65535 range [ 65535 ] union } try /limit-check eq           (union: len1+len2 rejected) rt-ok clear
+{ 40000 array 0 interpose } try /limit-check eq               (interpose: count*2-1 rejected) rt-ok clear
+{ 65535 array 0 { add } scan } try /limit-check eq            (scan: count+1 rejected) rt-ok clear
+{ [ 32768 array 32768 array ] flatten } try /limit-check eq   (flatten: 65536 leaves rejected) rt-ok clear
+{ (x) 65535 repeat-string 65538 repeat-string } try /limit-check eq  (repeat-string: src*n overflow rejected) rt-ok clear
+
+% ====================================================================
+% filter-dict use-after-free: the borrowed saved key/value must NOT be
+% freed -- the SOURCE dict's ExtValues must survive the filter.
+% ====================================================================
+<< /a 10000000000l /b 20000000000l >> dup { pop pop true } filter-dict pop /a get 10000000000l eq
+  (filter-dict: source ExtValue intact after filter) rt-ok clear
+
+% ====================================================================
+% regex NUL-termination: a non-terminated substring (bytes continue
+% past its end) must match/replace against only its own bytes.
+% ====================================================================
+(abcXYZ) 0 3 get-interval (^abc$) regex-match true eq
+  (regex-match: NUL-terminated substring honors anchors) rt-ok clear
+(abcXYZ) 0 3 get-interval (c$) (!) regex-replace (ab!) eq
+  (regex-replace: $ anchors at the substring end) rt-ok clear
+
+(test_b5_safety.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

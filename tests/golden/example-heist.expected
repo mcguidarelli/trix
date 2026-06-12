@@ -1,0 +1,65 @@
+
+=========================================================
+   The Bellagio Vault
+=========================================================
+Required: {{/distraction /demolitions /hacker /transportation /casino-floor /lockpick /leadership (cardistry)#lr}}
+Roster:   11 operatives
+
+---- GREEDY (min team size)         ----
+    (size 6, fee $26):
+  specialist  Linus        $2
+    {{/lockpick /pickpocket}}
+  specialist  Turk         $2
+    {{/mechanic /transportation}}
+  specialist  Livingston   $4
+    {{(retina-spoof-card)#lr /hacker /electronics}}
+  specialist  Danny        $5
+    {{/planning /leadership /distraction /charm}}
+  anchor      Oscar        $9
+    {{/distraction /casino-floor (cardistry)#lr}}
+  specialist  Basher       $4
+    {{/electronics /demolitions}}
+
+---- OPTIMAL (min team size)        ----
+    (size 6, fee $26):
+  specialist  Linus        $2
+    {{/lockpick /pickpocket}}
+  specialist  Turk         $2
+    {{/mechanic /transportation}}
+  specialist  Livingston   $4
+    {{(retina-spoof-card)#lr /hacker /electronics}}
+  specialist  Danny        $5
+    {{/planning /leadership /distraction /charm}}
+  anchor      Oscar        $9
+    {{/distraction /casino-floor (cardistry)#lr}}
+  specialist  Basher       $4
+    {{/electronics /demolitions}}
+    visited 2^N = 2048 subsets
+
+---- OPTIMAL (min total fee)        ----
+    (size 7, fee $21):
+  specialist  Linus        $2
+    {{/lockpick /pickpocket}}
+  specialist  Turk         $2
+    {{/mechanic /transportation}}
+  specialist  Livingston   $4
+    {{(retina-spoof-card)#lr /hacker /electronics}}
+  redundant   Danny        $5
+    {{/planning /leadership /distraction /charm}}
+  specialist  Mike         $1
+    {{(cardistry)#lr}}
+  specialist  Basher       $4
+    {{/electronics /demolitions}}
+  specialist  Rusty        $3
+    {{/planning (silver-tongue)#lr /casino-floor}}
+    visited 2^N = 2048 subsets
+
+---- DIFFERENCES (greedy vs min-fee) ----
+    greedy − optimal-fee : {{/Oscar}}
+    optimal-fee − greedy : {{/Mike /Rusty}}
+    symmetric-difference : {{/Oscar /Rusty /Mike}}
+
+
+Try `--analyze Linus` to see substitutability / redundancy / uniqueness;
+    `--budget 18` for a fee-capped optimal; `--no-pair Virgil,Turk`
+    for an antipathy-constrained optimal; `--all-jobs` for a sweep.

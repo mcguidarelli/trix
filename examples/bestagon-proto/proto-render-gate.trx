@@ -1,0 +1,311 @@
+% =====================================================================
+% proto-render-gate.trx -- Phase 0.6B hex render readability gate
+% =====================================================================
+%
+% Tier P0 of plan_bestagon_derisk_prototyping.md.  Validates the
+% 5-line x 9-char-wide flat-top hex renderer against GDD section A.7's
+% byte-for-byte canonical interlocking grid gallery.
+%
+% Public API (graduates to Phase 12 production renderer):
+%   render-empty-hex  buf w col0 row0 --                % blit 5-line empty hex shape
+%   render-hex        buf w hex --                      % shape + optional line-3 glyph
+%   render-grid       w h hexes -- str                  % rstripped lines joined by \n
+%
+% Hex spec format (per element of `hexes` Array): [col0 row0 line3-glyph]
+%   line3-glyph = byte to draw at line 3 col 4 of the hex bbox; 0 = none.
+%
+% Self-test asserts:
+%   - section A.7.1 empty 7-hex diamond -- byte-for-byte
+%   - section A.7.2 terrain mix         -- byte-for-byte
+%   - section A.7.3 unit formation      -- byte-for-byte
+%   - the 23x13 canvas dimension matches section A.7.0 prose
+%
+% GDD section 18.4 and Appendix A.7 agree on screen_col = q x 7
+% (stride 7 per q step) -- the 2026-05-15 prose drift was fixed in the
+% GDD; this prototype renders at stride 7 to match.
+% =====================================================================
+
+
+% ====================================================================
+% Section 1: empty-hex template
+% ====================================================================
+%
+% Per GDD section A.1, an empty hex on Plain is a 5-line x 9-char-wide
+% shape.  All 5 lines are exactly 9 chars (trailing spaces included).
+
+/empty-hex-lines [
+    <(  _____  )>
+    <( /     \ )>
+    <(/       \)>
+    <(\       /)>
+    <( \_____/ )>
+] def
+
+
+% ====================================================================
+% Section 2: rendering primitives
+% ====================================================================
+
+% buf w line col0 row --
+% Blit a 9-char template line into buf (width w) at (col0, row).  Only
+% non-space chars overwrite buf -- spaces preserve any existing content
+% from a previous hex (relevant where adjacent hex bounding boxes
+% overlap, e.g. the shared diagonals between two columns).
+/blit-line {|buf w line col0 row|#+3
+    /base  $[ row * w + col0 ]  local-def
+    /n     line length          local-def
+    0 1 $[ n - 1 ] { |i|#+1
+        /ch  line i get  local-def
+        ch 32b ne {
+            buf $[ base + i ] ch put
+        } if
+    } for
+} def
+
+% buf w col0 row0 --
+% Render the 5 template lines of an empty hex at (col0, row0).
+/render-empty-hex {|buf w col0 row0|
+    0 1 4 { |line-i|
+        buf w
+        empty-hex-lines line-i get
+        col0 $[ row0 + line-i ]
+        blit-line
+    } for
+} def
+
+% buf w hex --
+% Render one hex spec.  hex = [col0 row0 line3-glyph].  If line3-glyph
+% is 0, leave the line-3 center as the default empty-hex space; otherwise
+% overwrite (col0+4, row0+2) with the glyph byte.
+/render-hex {|buf w hex|#+3
+    /col0  hex 0 get  local-def
+    /row0  hex 1 get  local-def
+    /glyph hex 2 get  local-def
+    buf w col0 row0 render-empty-hex
+    glyph 0b ne {
+        buf  $[ (row0 + 2) * w + col0 + 4 ]  glyph  put
+    } if
+} def
+
+% str -- str'
+% Strip trailing 0x20 (space) bytes.  Returns a fresh substring.
+/rstrip-spaces {|s|#+1
+    /n  s length  local-def
+    {
+        n 0 le { exit } if
+        s $[ n - 1 ] get 32b ne { exit } if
+        /n n 1 sub store
+    } loop
+    s 0 n get-interval
+} def
+
+% buf w h -- str
+% Convert the 2D byte buffer (row-major, w columns) to a multi-line
+% string: each row is rstripped and rows are joined by \n.
+/buf-to-string {|buf w h|#+4
+    /cap  $[ (w + 1) * h ]  local-def
+    /s    cap make-string-stream  local-def
+    0 1 $[ h - 1 ] { |r|#+2
+        /raw   buf  $[ r * w ]  w  get-interval  local-def
+        /trim  raw rstrip-spaces  local-def
+        s trim write-string
+        r $[ h - 1 ] lt {
+            s 10b write
+        } if
+    } for
+    s get-string-stream
+} def
+
+
+% ====================================================================
+% Section 3: public renderer
+% ====================================================================
+
+% w h hexes -- str
+% Render a grid of empty hexes at the (col0, row0) positions listed in
+% the hexes Array.  Each hex spec is [col0 row0] (2-element Array of
+% Integer).  Width w must be >= max(col0+9); height h >= max(row0+5).
+% Returns rstripped lines joined by \n (matches GDD section A.7 byte
+% format).
+/render-grid {|w h hexes|#+3
+    /n    $[ w * h ]  local-def
+    /buf  n string    local-def
+
+    % Init buffer to spaces (string-of-len-N is zero-filled by default).
+    0 1 $[ n - 1 ] { |i|
+        buf i 32b put
+    } for
+
+    % Render each hex at its (col0, row0) with its line-3 glyph.
+    hexes { |hex|
+        buf w hex render-hex
+    } for-all
+
+    buf w h buf-to-string
+} def
+
+
+% ====================================================================
+% Section 4: section A.7 canonical fixtures
+% ====================================================================
+
+% A.7 diamond -- 7 hex positions per section A.7.0 layout table.
+% Stride 7 per q-step (verified empirically from section A.7.1 char dump,
+% NOT the 6 stated in section 18.4).
+%
+% Each fixture supplies its own line-3 glyph per hex.  The position
+% slots (col0, row0) are shared across A.7.1 / A.7.2 / A.7.3.
+
+% A.7.1: empty (glyph = 0b = leave as space)
+/diamond-empty-hexes [
+    [  7  0    0b ]   % A (0,0)  even-q high
+    [  0  2    0b ]   % B (-1,0) odd-q  low
+    [ 14  2    0b ]   % C (1,0)  odd-q  low
+    [  7  4    0b ]   % D (0,1)  even-q high
+    [  0  6    0b ]   % E (-1,1) odd-q  low
+    [ 14  6    0b ]   % F (1,1)  odd-q  low
+    [  7  8    0b ]   % G (0,2)  even-q high
+] def
+
+% A.7.2: terrain mix.  Glyph bytes:  . 46  * 42  ^ 94  = 61  ~ 126  _ 95
+/diamond-terrain-hexes [
+    [  7  0   46b ]   % A Plain     .
+    [  0  2   42b ]   % B Forest    *
+    [ 14  2   94b ]   % C Mountain  ^
+    [  7  4   61b ]   % D Road      =
+    [  0  6  126b ]   % E River     ~
+    [ 14  6  126b ]   % F Sea       ~
+    [  7  8   95b ]   % G Beach     _
+] def
+
+% A.7.3: Bishop unit formation (all on Plain).  i t a r m h u
+/diamond-unit-hexes [
+    [  7  0  105b ]   % A Infantry  i
+    [  0  2  116b ]   % B Tank      t
+    [ 14  2   97b ]   % C Artillery a
+    [  7  4  114b ]   % D Recon     r
+    [  0  6  109b ]   % E Mech      m
+    [ 14  6  104b ]   % F Bcopter   h
+    [  7  8  117b ]   % G APC       u
+] def
+
+% Expected output from section A.7.1 (empty diamond).
+/expected-empty
+    (         _____\n)
+    (        /     \\\n)               concat
+    (  _____/       \\_____\n)         concat
+    ( /     \\       /     \\\n)       concat
+    (/       \\_____/       \\\n)      concat
+    (\\       /     \\       /\n)      concat
+    ( \\_____/       \\_____/\n)       concat
+    ( /     \\       /     \\\n)       concat
+    (/       \\_____/       \\\n)      concat
+    (\\       /     \\       /\n)      concat
+    ( \\_____/       \\_____/\n)       concat
+    (       \\       /\n)              concat
+    (        \\_____/)                 concat
+def
+
+% Expected output from section A.7.2 (terrain mix).
+/expected-terrain
+    (         _____\n)
+    (        /     \\\n)                       concat
+    (  _____/   .   \\_____\n)                 concat
+    ( /     \\       /     \\\n)               concat
+    (/   *   \\_____/   ^   \\\n)              concat
+    (\\       /     \\       /\n)              concat
+    ( \\_____/   =   \\_____/\n)               concat
+    ( /     \\       /     \\\n)               concat
+    (/   ~   \\_____/   ~   \\\n)              concat
+    (\\       /     \\       /\n)              concat
+    ( \\_____/   _   \\_____/\n)               concat
+    (       \\       /\n)                      concat
+    (        \\_____/)                         concat
+def
+
+% Expected output from section A.7.3 (Bishop unit formation).
+/expected-units
+    (         _____\n)
+    (        /     \\\n)                       concat
+    (  _____/   i   \\_____\n)                 concat
+    ( /     \\       /     \\\n)               concat
+    (/   t   \\_____/   a   \\\n)              concat
+    (\\       /     \\       /\n)              concat
+    ( \\_____/   r   \\_____/\n)               concat
+    ( /     \\       /     \\\n)               concat
+    (/   m   \\_____/   h   \\\n)              concat
+    (\\       /     \\       /\n)              concat
+    ( \\_____/   u   \\_____/\n)               concat
+    (       \\       /\n)                      concat
+    (        \\_____/)                         concat
+def
+
+
+% ====================================================================
+% Section 5: self-test
+% ====================================================================
+
+% expected actual label --
+% Assert actual eq expected; print PASS with byte count, or FAIL with
+% diff dump and throw.
+/assert-byte-for-byte {|expected actual label|
+    actual expected eq {
+        (  PASS: {0} reproduces byte-for-byte ({1} bytes)\n)
+            mark label actual length
+            print-fmt pop pop
+    } {
+        (  FAIL: {0} mismatch\n) mark label print-fmt pop pop
+        (  expected ({0} bytes):\n) mark expected length print-fmt pop pop
+        expected print
+        (\n  actual ({0} bytes):\n) mark actual length print-fmt pop pop
+        actual print
+        (\n) print
+        /byte-mismatch throw
+    } if-else
+} def
+
+/run-self-test {
+    (proto-render-gate: starting self-test...\n) print
+
+    % --- Section A: A.7.1 empty diamond ---
+    (\n[A] section A.7.1 empty 7-hex diamond byte-for-byte\n) print
+    expected-empty
+    23 13 diamond-empty-hexes render-grid
+    (section A.7.1 empty)
+    assert-byte-for-byte
+
+    % --- Section B: A.7.2 terrain mix ---
+    (\n[B] section A.7.2 terrain mix byte-for-byte\n) print
+    expected-terrain
+    23 13 diamond-terrain-hexes render-grid
+    (section A.7.2 terrain)
+    assert-byte-for-byte
+
+    % --- Section C: A.7.3 unit formation ---
+    (\n[C] section A.7.3 unit formation byte-for-byte\n) print
+    expected-units
+    23 13 diamond-unit-hexes render-grid
+    (section A.7.3 units)
+    assert-byte-for-byte
+
+    % --- Section D: canvas dimension matches A.7.0 prose (23x13) ---
+    (\n[D] canvas dimension: section A.7.0 says 23 wide x 13 tall\n) print
+    /actual  23 13 diamond-empty-hexes render-grid def
+    /lines   actual (\n) split  def
+    /max-w   0  def
+    lines { |line|
+        line length max-w gt { /max-w line length store } if
+    } for-all
+    /line-count lines length def
+    max-w 23 eq line-count 13 eq and {
+        (  PASS: 23 wide x 13 tall\n) print
+    } {
+        (  FAIL: max-width={0} (expected 23), line-count={1} (expected 13)\n)
+            mark max-w line-count print-fmt pop pop
+        /dim-mismatch throw
+    } if-else
+
+    (\nproto-render-gate: SELF-TEST PASS\n) print
+} def
+
+run-self-test

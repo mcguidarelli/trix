@@ -1,0 +1,75 @@
+% ====================================================================
+% test_count_overflow.trx -- integer-width overflow regression tests
+% ====================================================================
+% Operators that accept an integer count and then call require_op_count
+% or require_*_capacity with an expression derived from that count
+% (n+1, n+2, 2*n).  Before the fix, require_op_count's parameter was
+% stack_depth_t (uint16_t); a user-supplied int32_t n could make (n+1)
+% truncate to a small uint16_t that bypassed the bounds check.
+% Afterwards m_op_ptr - n read far below the operand-stack base and
+% SEGV'd.  Fix: widen require_op_count/capacity parameter to integer_t
+% and add explicit upper-bound checks on n for operators where the
+% arithmetic itself could overflow signed int32_t.
+%
+% Fuzz-found: fuzz/crashes/crash-863cf6... (import n=INT32_MAX).
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- import: requires module + N entry names -----------------------
+{ 65536 import } try /opstack-underflow eq
+(import: n=65536 underflow, no truncation bypass) rt-ok clear
+
+{ 2147483647 import } try /range-check eq
+(import: n=INT32_MAX rejected before n+1 overflow) rt-ok clear
+
+{ -1 import } try /range-check eq
+(import: n=-1 rejected) rt-ok clear
+
+% --- packed: requires N operands + count --------------------------
+1 2 3
+{ 65535 packed } try /opstack-underflow eq
+(packed: n=65535 underflow, no truncation bypass) rt-ok clear
+
+{ 2147483647 packed } try /limit-check eq
+(packed: n=INT32_MAX rejected by integer_value bound) rt-ok clear
+
+% --- begin-locals: 2*K must not overflow --------------------------
+% Stack layout is now: val1..valK name1..nameK K N {body} begin-locals.
+% K is the declared name count, N is the dict capacity (N >= K).
+{ 32768 32768 { } begin-locals } try /opstack-underflow eq
+(begin-locals: K=32768 underflow, no 2*K truncation bypass) rt-ok clear
+
+{ 2147483647 2147483647 { } begin-locals } try /range-check eq
+(begin-locals: K=INT32_MAX rejected before 2*K overflow) rt-ok clear
+
+% K=0 N>=1 is the ||#N form (valid); K=0 N=0 is still rejected as useless.
+{ 0 0 { } begin-locals } try /range-check eq
+(begin-locals: K=0 N=0 zero-capacity rejected) rt-ok clear
+
+{ 0 4 { } begin-locals count 0 eq } exec
+(begin-locals: K=0 N=4 accepted as ||#N scratch form) rt-ok clear
+
+{ -5 -5 { } begin-locals } try /range-check eq
+(begin-locals: K=-5 rejected) rt-ok clear
+
+% --- begin-locals: N bounds -----------------------------------------
+{ 2 1 { } begin-locals } try /range-check eq
+(begin-locals: N<K rejected) rt-ok clear
+
+{ 1 65536 { } begin-locals } try /range-check eq
+(begin-locals: N>65535 rejected) rt-ok clear
+
+{ 1 -1 { } begin-locals } try /range-check eq
+(begin-locals: N=-1 rejected) rt-ok clear
+
+(test_count_overflow: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

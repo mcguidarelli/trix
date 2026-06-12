@@ -1,0 +1,6 @@
+% loop.trx -- bounded busy loop for the --max-ops execution-limit case.
+% Without a limit it terminates quickly (prints 1001); with --max-ops=50
+% the ExecutionLimit error fires first and the process exits 53.
+/i 0 def
+{ /i i 1 add def i 1000 gt { exit } if } loop
+i =

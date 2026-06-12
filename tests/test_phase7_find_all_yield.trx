@@ -1,0 +1,120 @@
+% ====================================================================
+% test_phase7_find_all_yield.trx -- VM Redux Phase 7 invariants
+% ====================================================================
+% Phase 7 migrated find-all + find-n from the shared persist region to
+% the running coroutine's per-coroutine scratch arena (Phase 6).  This
+% closes the original VM Redux motivation: yielding mid-find-all is
+% safe; another coroutine's find-all does not corrupt the first.
+%
+% Five invariants:
+%   I1. Yielding inside a find-all body preserves the find-all results.
+%       The body sleeps every alternative; main yields back to a peer.
+%   I2. Two coroutines running find-all concurrently get independent
+%       results (no cross-contamination of accumulator state).
+%   I3. find-all wrapped in save/restore: the result Array (allocated
+%       in caller's local VM) rolls back; the persist semantic that
+%       previously survived restore goes with the persist region.
+%   I4. Non-Fail error inside a find-all body cleans up the scratch
+%       arena (error() runs scratch_free); a subsequent find-all on
+%       the same coroutine finds the arena idle.
+%   I5. find-all collect order matches push order (regression check
+%       that the persist->scratch swap preserves first-found..last
+%       semantics, since persist reversed and scratch doesn't).
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- SECTION 1 (I1): yielding inside find-all body preserves results ---
+% Each alternative sleeps zero ticks (yield to scheduler) before returning
+% its value.  A worker coroutine consumes scheduler quanta in parallel.
+[ {
+    % worker just yields forever; main's find-all does its own thing
+    { 0 coroutine-sleep } loop
+} coroutine-launch /worker exch def
+
+[
+    { 0 coroutine-sleep 10 }
+    { 0 coroutine-sleep 20 }
+    { 0 coroutine-sleep 30 }
+    { 0 coroutine-sleep 40 }
+] find-all /r1 exch def
+
+worker coroutine-kill                       % stop the worker
+
+r1 length 4 eq                              (s1: yield-mid-find-all length)        rt-ok
+r1 0 get 10 eq                              (s1: r1[0] = 10)                       rt-ok
+r1 1 get 20 eq                              (s1: r1[1] = 20)                       rt-ok
+r1 2 get 30 eq                              (s1: r1[2] = 30)                       rt-ok
+r1 3 get 40 eq                              (s1: r1[3] = 40)                       rt-ok
+
+% --- SECTION 2 (I2): peer scratch independent from find-all scratch ---
+% Pre-Phase-7, find-all used a process-shared persist region: a peer's
+% scratch-push during a yielded find-all body would have leaked into the
+% find-all's accumulated results.  Post-Phase-7, scratch is per-coroutine,
+% so child's pushes go into child's arena and main's find-all sees only
+% its own pushed clones.
+%
+% Note: process-wide save level forbids two coroutines doing concurrent
+% find-all (each find-all attempt save/restores; tokens belong to the
+% issuing coroutine).  This test exercises the cleaner case: peer uses
+% scratch-push directly while main runs find-all.
+[ {
+    999 scratch-push
+    0 coroutine-sleep                       % yield mid-fill
+    888 scratch-push
+    scratch-collect
+} coroutine-launch /child exch def
+
+[ { 11 } { 22 } { 33 } ] find-all /main-r exch def
+child coroutine-await /child-r exch def
+
+main-r length 3 eq                          (s2: main find-all len 3)              rt-ok
+main-r 0 get 11 eq                          (s2: main[0] = 11 (no peer leak))      rt-ok
+main-r 1 get 22 eq                          (s2: main[1] = 22)                     rt-ok
+main-r 2 get 33 eq                          (s2: main[2] = 33)                     rt-ok
+child-r length 2 eq                         (s2: child scratch len 2)              rt-ok
+child-r 0 get 999 eq                        (s2: child[0] = 999)                   rt-ok
+child-r 1 get 888 eq                        (s2: child[1] = 888)                   rt-ok
+
+% --- SECTION 3 (I3): find-all under save/restore ---
+% find-all wraps its alternatives in per-attempt save/restore; verify
+% an outer save scope is also clean (no /invalid-restore from unbalanced
+% scratch state) and the inner find-all returns the right results.
+save /s exch def
+[ { 1 } { 2 } { 3 } ] find-all
+dup length 3 eq                             (s3: find-all under save len 3)        rt-ok
+2 get 3 eq                                  (s3: find-all under save last)         rt-ok
+s restore
+
+% --- SECTION 4 (I4): non-Fail error in find-all body cleans scratch ---
+% First find-all: alternative throws after pushing one success.
+% After the error is caught, scratch must be idle so the next find-all
+% works normally.
+{ [ { 1 } { /boom throw } { 3 } ] find-all } try
+/boom eq                                    (s4: caught the boom)                  rt-ok  clear
+
+% Subsequent find-all should succeed: scratch was cleaned by error().
+[ { 7 } { 8 } { 9 } ] find-all /r4 exch def
+r4 length 3 eq                              (s4: post-error find-all len 3)        rt-ok
+r4 0 get 7 eq                               (s4: post-error r4[0] = 7)             rt-ok
+r4 2 get 9 eq                               (s4: post-error r4[2] = 9)             rt-ok
+
+% --- SECTION 5 (I5): collect preserves push order (first-found first) ---
+[ { 100 } { 200 } { 300 } { 400 } { 500 } ] find-all /r5 exch def
+r5 0 get 100 eq                             (s5: oldest first (push order))        rt-ok
+r5 1 get 200 eq                             (s5: r5[1])                            rt-ok
+r5 2 get 300 eq                             (s5: r5[2])                            rt-ok
+r5 3 get 400 eq                             (s5: r5[3])                            rt-ok
+r5 4 get 500 eq                             (s5: newest last)                      rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_phase7_find_all_yield: ALL TESTS PASSED) =
+(__test_ok__) =

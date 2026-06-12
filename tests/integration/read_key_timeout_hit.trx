@@ -1,0 +1,23 @@
+% read_key_timeout_hit.trx -- exercises atReadKeyTimeoutRetry, byte
+% arrives before the timer.
+%
+% read-key-byte-timeout with 1000 ms.  No byte ready -> EAGAIN ->
+% coroutine_block_on_stdin pushes atReadKeyTimeoutRetry, scheduler
+% sleeps the coroutine with a wake-time of now+1000ms.  Harness sends
+% a byte after ~100ms; poll() wakes the coroutine; atReadKeyTimeoutRetry
+% retries the read, sees the byte, pushes byte+true.
+%
+% Output:
+%   READY
+%   BYTE: <code>
+
+raw-mode
+(READY\n) print flush
+
+1000 read-key-byte-timeout
+{ (BYTE: ) print /integer-type cast = }
+{ (TIMEOUT\n) print flush }
+if-else
+
+cooked-mode
+flush

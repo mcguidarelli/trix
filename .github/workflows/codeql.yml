@@ -1,0 +1,70 @@
+name: CodeQL
+
+# CodeQL static analysis on every push to master and every PR.
+# (Weekly schedule dropped 2026-06-11 to avoid recurring idle runs; re-add
+# a `schedule:` cron later to catch issues from upstream Action/tooling
+# updates that land between pushes.)
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze C++
+    # Code scanning (SARIF upload) needs GitHub Advanced Security on a PRIVATE
+    # repo, which a personal-account private repo doesn't get -- so the upload
+    # step 403s ("code scanning is not enabled") and the run fails.  Skip while
+    # private; this auto-activates (and uploads, free) the moment the repo is
+    # made public, with no launch-day edit.
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ['cpp']
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install gcc-15 (toolchain PPA)
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install -y gcc-15 g++-15
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get install -y libreadline-dev cmake ninja-build
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      - name: Build
+        env:
+          CC: gcc-15
+          CXX: g++-15
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DTRIX_SANITIZERS=OFF
+          cmake --build build
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"

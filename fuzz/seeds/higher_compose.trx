@@ -1,0 +1,2 @@
+{ 1 add } { 2 mul } compose /f exch def
+3 f exec

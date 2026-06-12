@@ -1,0 +1,7 @@
+% fuzz seed: unclosed '{' -- EOF inside a procedure body.  Scanner must
+% surface a syntax-error (not silently accept), and token in string form
+% must return false rather than loop.
+({ body) token not pop
+({ { 42 } def) token not pop
+({ /a { /b { /c ) token not pop
+({ |x|#2 /y 1 def) token not pop

@@ -1,0 +1,117 @@
+% ====================================================================
+% test_b5_record_gc.trx -- B5 review group-2b regressions (record cluster)
+% ====================================================================
+% GC-rooting + region correctness for the record ops:
+%   C13  record-fields keeps the source record rooted while exploding it
+%   C14  make_record / record_clone_replacing_field root the in-flight
+%        instance across schema-build / per-field make_clone allocations
+%        (a global-VM GC fired by gvm_alloc would otherwise sweep it)
+%   C15  record-group-by honors m_curr_alloc_global (result dict global
+%        inside ${...}, like the per-group arrays and record-to-dict)
+%
+% The fixes are correctness-preserving in every context; the functional
+% checks (normal + ${...}) guard against the rooting/reorder breaking
+% normal operation, and the heavy ${...} record-update loop exercises the
+% per-field clone path under global-allocation/GC pressure (runs with a
+% reduced --vm-size, registered in run_all.sh, to provoke GCs).
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% C13 record-fields: explode order + heap-cell (Double) fields preserved
+% ====================================================================
+/pt3 [ /x /y /z ] record-type def
+1.5d 2.5d 3.5d pt3 record-fields    % -- 1.5d 2.5d 3.5d  (x deepest, z on top)
+3.5d eq (record-fields: z on top) rt-ok
+2.5d eq (record-fields: y) rt-ok
+1.5d eq (record-fields: x deepest) rt-ok clear
+
+[ ] record-type /empty-rt exch def
+empty-rt record-fields count 0 eq (record-fields: empty record pushes nothing) rt-ok clear
+
+% single-field record (boundary: field 0 is the only field)
+5.5d [ /only ] record record-fields 5.5d eq (record-fields: single field) rt-ok clear
+
+% ====================================================================
+% C14 make_record: the `record` op builds correct fields, incl. Double
+% ====================================================================
+42l 3.14d [ /a /b ] record    % -- record
+dup /a get 42l eq (make_record: field /a = 42l) rt-ok
+/b get 3.14d eq (make_record: field /b = 3.14d) rt-ok clear
+
+% C14 record-update (record_clone_replacing_field): replace one field,
+% other fields cloned intact, original record unchanged.
+/orig 10 20.5d 30 [ /a /b /c ] record def
+orig /b 99.5d record-update    % new record {a:10 b:99.5d c:30}
+dup /a get 10 eq (record-update: /a cloned) rt-ok
+dup /b get 99.5d eq (record-update: /b replaced) rt-ok
+/c get 30 eq (record-update: /c cloned) rt-ok clear
+orig /b get 20.5d eq (record-update: original record unchanged) rt-ok clear
+
+% C14 record-map-field (same helper via @record-map-field-complete)
+1.0d 2.0d [ /p /q ] record
+/p { 5.0d add } record-map-field   % p: 1.0 + 5.0 = 6.0
+dup /p get 6.0d eq (record-map-field: /p mapped) rt-ok
+/q get 2.0d eq (record-map-field: /q intact) rt-ok clear
+
+% ====================================================================
+% Same ops inside ${...} (global allocation path -- where the GC window
+% is real: gvm_alloc auto-collects when the global region is near-full).
+% ====================================================================
+${ 7l 8l [ /m /n ] record /m 70l record-update } /gr exch def
+gr /m get 70l eq (global ${}: record-update /m replaced) rt-ok
+gr /n get 8l eq  (global ${}: record-update /n cloned) rt-ok clear
+
+${ 100 200 300 [ /a /b /c ] record record-fields }   % leaves 100 200 300
+300 eq (global ${}: record-fields c on top) rt-ok
+200 eq (global ${}: record-fields b) rt-ok
+100 eq (global ${}: record-fields a) rt-ok clear
+
+% ====================================================================
+% C15 record-group-by inside ${...}: result dict + per-group arrays
+% (record-type schema defined outside ${} -> local schema, global instances)
+% ====================================================================
+/emp [ /name /dept ] record-type def
+${ [ (Alice) /eng emp (Bob) /sales emp (Carol) /eng emp ] /dept record-group-by } /gbd exch def
+gbd /eng get length 2 eq   (global ${}: group-by /eng count 2) rt-ok
+gbd /sales get length 1 eq (global ${}: group-by /sales count 1) rt-ok clear
+% the grouped records survived (a record from the /eng group reads back)
+gbd /eng get 0 get /name get (Alice) eq (global ${}: grouped record field intact) rt-ok clear
+
+% empty group-by in ${} still yields a usable dict
+${ [ ] /dept record-group-by } length 0 eq (global ${}: empty group-by length 0) rt-ok clear
+
+% ====================================================================
+% GC stress: a record-update chain inside ${...} with an explicit full GC
+% after every update.  Each update builds a fresh global record (cloning
+% several Double/ExtValue fields) and the superseded record becomes garbage;
+% the forced vm-global-gc reclaims it while the live record /r -- and its
+% shared schema -- must survive.  Broken rooting / obj-count stamping / schema
+% reachability would corrupt or lose fields across the GCs.
+% (The auto-GC-mid-clone-loop window itself is covered by code inspection:
+% provoking it deterministically needs shared-region tuning that is fragile
+% across environments.)
+% ====================================================================
+${
+    /r 1.0d 2.0d 3.0d 4.0d 5.0d 6.0d 7.0d 8.0d [ /a /b /c /d /e /f /g /h ] record def
+    0 1 199 {
+        pop
+        r /a  r /a get 1.0d add  record-update  /r exch def
+        vm-global-gc pop
+    } for
+    r /a get  r /h get
+}
+8.0d eq (record GC stress: untouched field /h intact across 200 GCs) rt-ok
+201.0d eq (record GC stress: accumulated field /a = 1 + 200) rt-ok clear
+
+(test_b5_record_gc.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

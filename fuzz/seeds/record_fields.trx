@@ -1,0 +1,4 @@
+[ /r /g /b ] record-type /rgb exch def
+255 128 0 rgb /p exch def
+p is-record
+p record-fields

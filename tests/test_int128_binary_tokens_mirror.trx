@@ -1,0 +1,112 @@
+% ====================================================================
+% Mirror of test_binary_tokens.trx long/ulong cases for Int128/UInt128.
+%
+% test_binary_tokens.trx round-trips every long/ulong bit-width
+% boundary through `to-binary-token -> make-executable -> exec`.
+% This file mirrors that discipline for Int128/UInt128: encoding/
+% decoding a 128-bit literal must preserve value and type exactly.
+% Critical because the binary-token format for 128-bit uses a distinct
+% opcode path from Long/ULong and is easy to skip when extending a
+% type system.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% Round-trip helper: value -- bool
+/bt-rt { dup to-binary-token make-executable exec deep-eq } def
+
+% ====================================================================
+% SECTION 1: Int128 small-magnitude values
+% ====================================================================
+
+-1q bt-rt                  (bt: int128 -1) rt-ok clear
+ 0q bt-rt                  (bt: int128 0) rt-ok clear
+ 1q bt-rt                  (bt: int128 1) rt-ok clear
+
+% ====================================================================
+% SECTION 2: 8-bit-representable int128 boundaries
+% ====================================================================
+
+-128q bt-rt                (bt: int128 -128 [8-bit min]) rt-ok clear
+-100q bt-rt                (bt: int128 -100) rt-ok clear
+  2q bt-rt                 (bt: int128 2) rt-ok clear
+100q bt-rt                 (bt: int128 100) rt-ok clear
+127q bt-rt                 (bt: int128 127 [8-bit max]) rt-ok clear
+
+% ====================================================================
+% SECTION 3: 16-bit-representable int128 boundaries
+% ====================================================================
+
+-129q bt-rt                (bt: int128 -129 [first 16-bit]) rt-ok clear
+ 128q bt-rt                (bt: int128 128 [first 16-bit]) rt-ok clear
+-32768q bt-rt              (bt: int128 -32768 [16-bit min]) rt-ok clear
+ 32767q bt-rt              (bt: int128 32767 [16-bit max]) rt-ok clear
+
+% ====================================================================
+% SECTION 4: 32-bit-representable int128 boundaries
+% ====================================================================
+
+-32769q bt-rt              (bt: int128 -32769 [first 32-bit]) rt-ok clear
+ 32768q bt-rt              (bt: int128 32768 [first 32-bit]) rt-ok clear
+-2147483648q bt-rt         (bt: int128 -2147483648 [32-bit min]) rt-ok clear
+ 2147483647q bt-rt         (bt: int128 2147483647 [32-bit max]) rt-ok clear
+
+% ====================================================================
+% SECTION 5: 64-bit-representable int128 boundaries
+% ====================================================================
+
+-2147483649q bt-rt         (bt: int128 -2147483649 [first 64-bit]) rt-ok clear
+ 2147483648q bt-rt         (bt: int128 2147483648 [first 64-bit]) rt-ok clear
+-9223372036854775808q bt-rt (bt: int128 -9223372036854775808 [64-bit min]) rt-ok clear
+ 9223372036854775807q bt-rt (bt: int128 9223372036854775807 [64-bit max]) rt-ok clear
+
+% ====================================================================
+% SECTION 6: 128-bit-only values (beyond 64-bit range)
+% ====================================================================
+
+ 9223372036854775808q bt-rt  (bt: int128 2^63 [first 128-bit]) rt-ok clear
+-9223372036854775809q bt-rt  (bt: int128 -2^63-1 [first 128-bit neg]) rt-ok clear
+ 170141183460469231731687303715884105727q bt-rt (bt: INT128_MAX) rt-ok clear
+-170141183460469231731687303715884105728q bt-rt (bt: INT128_MIN) rt-ok clear
+
+% High/low bit pattern payload preservation
+ 16#DEADBEEFCAFEBABE0123456789ABCDEF#uq bt-rt (bt: uint128 payload all-128-bits) rt-ok clear
+ 16#80000000000000000000000000000001#uq bt-rt (bt: uint128 MSB+LSB payload) rt-ok clear
+
+% ====================================================================
+% SECTION 7: UInt128 boundaries
+% ====================================================================
+
+0uq bt-rt                  (bt: uint128 0 [min]) rt-ok clear
+1uq bt-rt                  (bt: uint128 1) rt-ok clear
+255uq bt-rt                (bt: uint128 255 [8-bit max]) rt-ok clear
+256uq bt-rt                (bt: uint128 256 [first 16-bit]) rt-ok clear
+65535uq bt-rt              (bt: uint128 65535 [16-bit max]) rt-ok clear
+65536uq bt-rt              (bt: uint128 65536 [first 32-bit]) rt-ok clear
+4294967295uq bt-rt         (bt: uint128 4294967295 [32-bit max]) rt-ok clear
+4294967296uq bt-rt         (bt: uint128 4294967296 [first 64-bit]) rt-ok clear
+18446744073709551615uq bt-rt (bt: uint128 18446744073709551615 [64-bit max]) rt-ok clear
+18446744073709551616uq bt-rt (bt: uint128 2^64 [first 128-bit]) rt-ok clear
+340282366920938463463374607431768211455uq bt-rt (bt: UINT128_MAX) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Type preservation via round-trip
+% ====================================================================
+
+42q dup to-binary-token make-executable exec type /int128-type eq
+    (bt: int128 type preserved) rt-ok clear
+
+42uq dup to-binary-token make-executable exec type /uint128-type eq
+    (bt: uint128 type preserved) rt-ok clear
+
+(test_int128_binary_tokens_mirror.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

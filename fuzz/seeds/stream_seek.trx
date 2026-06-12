@@ -1,0 +1,3 @@
+(abcdefgh) make-memory-stream /s exch def
+s 4l set-stream-position
+s stream-position pop

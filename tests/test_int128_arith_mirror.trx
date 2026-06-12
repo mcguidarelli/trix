@@ -1,0 +1,388 @@
+% ====================================================================
+% Mirror of test_arithmetic.trx long/ulong cases for Int128/UInt128.
+%
+% Every test case here pairs one-for-one with a long or ulong test in
+% test_arithmetic.trx, substituting the int128/uint128 suffixes and
+% boundary constants:
+%   LONG_MAX  =  9223372036854775807l          INT128_MAX  =  170141183460469231731687303715884105727q
+%   LONG_MIN  = -9223372036854775808l          INT128_MIN  = -170141183460469231731687303715884105728q
+%   ULONG_MAX = 18446744073709551615ul         UINT128_MAX = 340282366920938463463374607431768211455uq
+%
+% Purpose: the feature sprint that added Int128/UInt128 left many
+% switch-on-type sites unhandled, and the existing int128 tests did
+% not exercise enough happy-path/overflow/boundary cases to surface
+% the regressions. Mirroring every long/ulong case forces future
+% type-dispatch additions to be audited against the full matrix.
+%
+% Notes:
+%   * 128-bit arithmetic results compare with deep-eq (values live in
+%     the VM WideValue heap; eq is pointer-identity).
+%   * Boolean/integer returns (lt, gt, sign) use plain eq.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: add - happy path and overflow
+% ====================================================================
+
+1q 2q add 3q deep-eq               (add-int128-happy) rt-ok clear
+1uq 2uq add 3uq deep-eq            (add-uint128-happy) rt-ok clear
+
+% --- add: int128 overflow ---
+{ 170141183460469231731687303715884105727q 1q add } try
+    /numerical-overflow eq (add-int128-overflow-max+1) rt-ok clear
+{ -170141183460469231731687303715884105728q -1q add } try
+    /numerical-overflow eq (add-int128-underflow-min+-1) rt-ok clear
+170141183460469231731687303715884105726q 1q add
+    170141183460469231731687303715884105727q deep-eq (add-int128-near-max) rt-ok clear
+
+% --- add: uint128 overflow ---
+{ 340282366920938463463374607431768211455uq 1uq add } try
+    /numerical-overflow eq (add-uint128-overflow-max+1) rt-ok clear
+340282366920938463463374607431768211454uq 1uq add
+    340282366920938463463374607431768211455uq deep-eq (add-uint128-near-max) rt-ok clear
+0uq 0uq add 0uq deep-eq            (add-uint128-zero) rt-ok clear
+
+% ====================================================================
+% SECTION 2: sub - happy path and underflow/overflow
+% ====================================================================
+
+5q 3q sub 2q deep-eq               (sub-int128-happy) rt-ok clear
+5uq 3uq sub 2uq deep-eq            (sub-uint128-happy) rt-ok clear
+
+% --- sub: int128 overflow ---
+{ -170141183460469231731687303715884105728q 1q sub } try
+    /numerical-overflow eq (sub-int128-underflow-min-1) rt-ok clear
+{ 170141183460469231731687303715884105727q -1q sub } try
+    /numerical-overflow eq (sub-int128-overflow-max-neg1) rt-ok clear
+
+% --- sub: uint128 underflow ---
+{ 0uq 1uq sub } try /numerical-overflow eq (sub-uint128-underflow-0-1) rt-ok clear
+1uq 1uq sub 0uq deep-eq            (sub-uint128-to-zero) rt-ok clear
+
+% ====================================================================
+% SECTION 3: mul - happy path and overflow
+% ====================================================================
+
+3q 4q mul 12q deep-eq              (mul-int128-happy) rt-ok clear
+3uq 4uq mul 12uq deep-eq           (mul-uint128-happy) rt-ok clear
+
+% --- mul: int128 overflow ---
+{ 170141183460469231731687303715884105727q 2q mul } try
+    /numerical-overflow eq (mul-int128-overflow-max*2) rt-ok clear
+{ -170141183460469231731687303715884105728q -1q mul } try
+    /numerical-overflow eq (mul-int128-overflow-min*neg1) rt-ok clear
+{ -170141183460469231731687303715884105728q 2q mul } try
+    /numerical-overflow eq (mul-int128-overflow-min*2) rt-ok clear
+170141183460469231731687303715884105727q 1q mul
+    170141183460469231731687303715884105727q deep-eq (mul-int128-max*1) rt-ok clear
+0q 170141183460469231731687303715884105727q mul 0q deep-eq (mul-int128-zero) rt-ok clear
+
+% --- mul: uint128 overflow ---
+{ 340282366920938463463374607431768211455uq 2uq mul } try
+    /numerical-overflow eq (mul-uint128-overflow-max*2) rt-ok clear
+340282366920938463463374607431768211455uq 1uq mul
+    340282366920938463463374607431768211455uq deep-eq (mul-uint128-max*1) rt-ok clear
+
+% ====================================================================
+% SECTION 4: div - happy, div-by-zero, signed overflow
+% ====================================================================
+
+12q 4q div 3q deep-eq              (div-int128-happy) rt-ok clear
+12uq 4uq div 3uq deep-eq           (div-uint128-happy) rt-ok clear
+
+% --- div by zero ---
+{ 1q 0q div } try /div-by-zero eq     (div-int128-by-zero) rt-ok clear
+{ 1uq 0uq div } try /div-by-zero eq   (div-uint128-by-zero) rt-ok clear
+
+% --- div: signed overflow (INT128_MIN / -1) ---
+{ -170141183460469231731687303715884105728q -1q div } try
+    /numerical-overflow eq (div-int128-overflow-min/neg1) rt-ok clear
+
+% --- div: int128 truncation and sign rules (match long behaviour) ---
+7q 2q div 3q deep-eq               (div-int128-truncation) rt-ok clear
+-7q 2q div -3q deep-eq             (div-int128-neg-truncation) rt-ok clear
+7q -2q div -3q deep-eq             (div-int128-neg-divisor-truncation) rt-ok clear
+
+% ====================================================================
+% SECTION 5: mod - happy, by-zero, signed overflow
+% ====================================================================
+
+7q 3q mod 1q deep-eq               (mod-int128-happy) rt-ok clear
+7uq 3uq mod 1uq deep-eq            (mod-uint128-happy) rt-ok clear
+
+% --- mod by zero ---
+{ 7q 0q mod } try /div-by-zero eq     (mod-int128-by-zero) rt-ok clear
+{ 7uq 0uq mod } try /div-by-zero eq   (mod-uint128-by-zero) rt-ok clear
+
+% --- mod: signed overflow (INT128_MIN % -1) ---
+{ -170141183460469231731687303715884105728q -1q mod } try
+    /numerical-overflow eq (mod-int128-overflow-min%-1) rt-ok clear
+
+% --- mod: negative arguments ---
+-7q 3q mod -1q deep-eq             (mod-int128-neg-dividend) rt-ok clear
+7q -3q mod 1q deep-eq              (mod-int128-neg-divisor) rt-ok clear
+-7q -3q mod -1q deep-eq            (mod-int128-neg-both) rt-ok clear
+
+% --- mod: zero dividend ---
+0q 3q mod 0q deep-eq               (mod-int128-zero-dividend) rt-ok clear
+0uq 5uq mod 0uq deep-eq            (mod-uint128-zero-dividend) rt-ok clear
+
+% --- mod: divisor = 1 ---
+7q 1q mod 0q deep-eq               (mod-int128-by-1) rt-ok clear
+
+% ====================================================================
+% SECTION 6: neg - edge cases
+% ====================================================================
+
+-5q neg 5q deep-eq                 (neg-int128-basic) rt-ok clear
+5q neg -5q deep-eq                 (neg-int128-pos-to-neg) rt-ok clear
+0q neg 0q deep-eq                  (neg-int128-zero) rt-ok clear
+
+% --- neg: overflow at INT128_MIN ---
+{ -170141183460469231731687303715884105728q neg } try
+    /numerical-overflow eq (neg-int128-min-overflow) rt-ok clear
+
+% --- neg: max signed value ---
+170141183460469231731687303715884105727q neg
+    -170141183460469231731687303715884105727q deep-eq (neg-int128-max) rt-ok clear
+
+% --- neg: unsigned not allowed ---
+{ 5uq neg } try /type-check eq     (neg-uint128-type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 7: abs - edge cases
+% ====================================================================
+
+-5q abs 5q deep-eq                 (abs-int128-basic) rt-ok clear
+5q abs 5q deep-eq                  (abs-int128-positive) rt-ok clear
+0q abs 0q deep-eq                  (abs-int128-zero) rt-ok clear
+
+% --- abs: overflow at INT128_MIN ---
+{ -170141183460469231731687303715884105728q abs } try
+    /numerical-overflow eq (abs-int128-min-overflow) rt-ok clear
+
+% --- abs: max signed value ---
+-170141183460469231731687303715884105727q abs
+    170141183460469231731687303715884105727q deep-eq (abs-int128-near-min) rt-ok clear
+
+% --- abs: unsigned not allowed (not signed) ---
+{ 5uq abs } try /type-check eq     (abs-uint128-type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 8: quot-rem - signed-integer edge cases
+% ====================================================================
+
+7q 3q quot-rem 1q deep-eq          (quot-rem-int128-remainder) rt-ok
+                 2q deep-eq          (quot-rem-int128-quotient)  rt-ok clear
+
+% --- quot-rem: by zero ---
+{ 7q 0q quot-rem } try /div-by-zero eq  (quot-rem-int128-by-zero) rt-ok clear
+
+% --- quot-rem: signed overflow (INT128_MIN / -1) ---
+{ -170141183460469231731687303715884105728q -1q quot-rem } try
+    /numerical-overflow eq (quot-rem-int128-overflow) rt-ok clear
+
+% --- quot-rem: negative arguments ---
+-7q 3q quot-rem -1q deep-eq        (quot-rem-int128-neg-dividend-rem) rt-ok
+                 -2q deep-eq        (quot-rem-int128-neg-dividend-quot) rt-ok clear
+
+7q -3q quot-rem 1q deep-eq         (quot-rem-int128-neg-divisor-rem) rt-ok
+                 -2q deep-eq        (quot-rem-int128-neg-divisor-quot) rt-ok clear
+
+-7q -3q quot-rem -1q deep-eq       (quot-rem-int128-neg-both-rem) rt-ok
+                  2q deep-eq        (quot-rem-int128-neg-both-quot) rt-ok clear
+
+% --- quot-rem: zero dividend ---
+0q 5q quot-rem 0q deep-eq          (quot-rem-int128-zero-dividend-rem) rt-ok
+                0q deep-eq          (quot-rem-int128-zero-dividend-quot) rt-ok clear
+
+% --- quot-rem: exact division ---
+6q 3q quot-rem 0q deep-eq          (quot-rem-int128-exact-rem) rt-ok
+                2q deep-eq          (quot-rem-int128-exact-quot) rt-ok clear
+
+% ====================================================================
+% SECTION 9: gcd - edge cases
+% ====================================================================
+
+12q 8q gcd 4q deep-eq              (gcd-int128-basic) rt-ok clear
+0q 0q gcd 0q deep-eq               (gcd-int128-zero-zero) rt-ok clear
+7q 0q gcd 7q deep-eq               (gcd-int128-n-zero) rt-ok clear
+0q 7q gcd 7q deep-eq               (gcd-int128-zero-n) rt-ok clear
+1q 7q gcd 1q deep-eq               (gcd-int128-one-n) rt-ok clear
+7q 7q gcd 7q deep-eq               (gcd-int128-same) rt-ok clear
+-12q 8q gcd 4q deep-eq             (gcd-int128-neg-pos) rt-ok clear
+12q -8q gcd 4q deep-eq             (gcd-int128-pos-neg) rt-ok clear
+-12q -8q gcd 4q deep-eq            (gcd-int128-neg-neg) rt-ok clear
+
+12uq 8uq gcd 4uq deep-eq           (gcd-uint128-basic) rt-ok clear
+0uq 0uq gcd 0uq deep-eq            (gcd-uint128-zero-zero) rt-ok clear
+
+% --- gcd: overflow at INT128_MIN ---
+{ -170141183460469231731687303715884105728q 1q gcd } try
+    /numerical-overflow eq (gcd-int128-min-overflow) rt-ok clear
+{ 1q -170141183460469231731687303715884105728q gcd } try
+    /numerical-overflow eq (gcd-int128-min-overflow-y) rt-ok clear
+
+% ====================================================================
+% SECTION 10: lcm - edge cases
+% ====================================================================
+
+4q 6q lcm 12q deep-eq              (lcm-int128-basic) rt-ok clear
+1q 7q lcm 7q deep-eq               (lcm-int128-one-n) rt-ok clear
+7q 1q lcm 7q deep-eq               (lcm-int128-n-one) rt-ok clear
+0q 7q lcm 0q deep-eq               (lcm-int128-zero-n) rt-ok clear
+7q 0q lcm 0q deep-eq               (lcm-int128-n-zero) rt-ok clear
+0q 0q lcm 0q deep-eq               (lcm-int128-zero-zero) rt-ok clear
+
+4uq 6uq lcm 12uq deep-eq           (lcm-uint128-basic) rt-ok clear
+
+% --- lcm: overflow at INT128_MIN ---
+{ -170141183460469231731687303715884105728q 1q lcm } try
+    /numerical-overflow eq (lcm-int128-min-overflow) rt-ok clear
+{ 1q -170141183460469231731687303715884105728q lcm } try
+    /numerical-overflow eq (lcm-int128-min-overflow-y) rt-ok clear
+
+% ====================================================================
+% SECTION 11: min/max boundary coverage
+% ====================================================================
+
+3q 5q min 3q deep-eq               (min-int128-basic) rt-ok clear
+5q 3q min 3q deep-eq               (min-int128-reversed) rt-ok clear
+3q 3q min 3q deep-eq               (min-int128-equal) rt-ok clear
+-5q 3q min -5q deep-eq             (min-int128-neg) rt-ok clear
+3uq 5uq min 3uq deep-eq            (min-uint128-basic) rt-ok clear
+
+3q 5q max 5q deep-eq               (max-int128-basic) rt-ok clear
+5q 3q max 5q deep-eq               (max-int128-reversed) rt-ok clear
+3q 3q max 3q deep-eq               (max-int128-equal) rt-ok clear
+-5q 3q max 3q deep-eq              (max-int128-neg) rt-ok clear
+3uq 5uq max 5uq deep-eq            (max-uint128-basic) rt-ok clear
+
+% --- min/max at type extremes ---
+170141183460469231731687303715884105727q -170141183460469231731687303715884105728q min
+    -170141183460469231731687303715884105728q deep-eq (min-int128-extremes) rt-ok clear
+170141183460469231731687303715884105727q -170141183460469231731687303715884105728q max
+    170141183460469231731687303715884105727q deep-eq (max-int128-extremes) rt-ok clear
+0uq 340282366920938463463374607431768211455uq min 0uq deep-eq (min-uint128-extremes) rt-ok clear
+0uq 340282366920938463463374607431768211455uq max
+    340282366920938463463374607431768211455uq deep-eq (max-uint128-extremes) rt-ok clear
+
+% ====================================================================
+% SECTION 12: bitwise (uint128 only; int128 rejected)
+% ====================================================================
+
+16#FF#uq 16#0F#uq and 16#0F#uq deep-eq (and-uint128-basic) rt-ok clear
+16#FF#uq 16#00#uq and 0uq deep-eq      (and-uint128-zero) rt-ok clear
+16#FF#uq 16#FF#uq and 16#FF#uq deep-eq (and-uint128-all-ones) rt-ok clear
+0uq 340282366920938463463374607431768211455uq and 0uq deep-eq (and-uint128-zero-mask) rt-ok clear
+
+16#F0#uq 16#0F#uq or 16#FF#uq deep-eq  (or-uint128-basic) rt-ok clear
+0uq 0uq or 0uq deep-eq                 (or-uint128-zeros) rt-ok clear
+
+16#FF#uq 16#FF#uq xor 0uq deep-eq      (xor-uint128-self) rt-ok clear
+16#F0#uq 16#0F#uq xor 16#FF#uq deep-eq (xor-uint128-basic) rt-ok clear
+0uq 0uq xor 0uq deep-eq                (xor-uint128-zeros) rt-ok clear
+
+0uq not 340282366920938463463374607431768211455uq deep-eq (not-uint128-zero) rt-ok clear
+340282366920938463463374607431768211455uq not 0uq deep-eq (not-uint128-all-ones) rt-ok clear
+
+% --- signed 128-bit rejected for bitwise ---
+{ 5q 5q and } try /type-check eq (and-int128-type-check) rt-ok clear
+{ 5q 5q or  } try /type-check eq (or-int128-type-check)  rt-ok clear
+{ 5q 5q xor } try /type-check eq (xor-int128-type-check) rt-ok clear
+{ 5q not    } try /type-check eq (not-int128-type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 13: shift and rotate (uint128)
+% ====================================================================
+
+1uq 0 shift-left 1uq deep-eq           (shl-uint128-by-0) rt-ok clear
+1uq 1 shift-left 2uq deep-eq           (shl-uint128-by-1) rt-ok clear
+1uq 63 shift-left 9223372036854775808uq deep-eq (shl-uint128-by-63) rt-ok clear
+1uq 127 shift-left 170141183460469231731687303715884105728uq deep-eq
+                                       (shl-uint128-by-127) rt-ok clear
+
+% shift by exactly the bit width -> modulo gives 0, identity
+1uq 128 shift-left 1uq deep-eq         (shl-uint128-by-128-mod) rt-ok clear
+1uq 129 shift-left 2uq deep-eq         (shl-uint128-by-129-mod) rt-ok clear
+
+256uq 0 shift-right 256uq deep-eq      (shr-uint128-by-0) rt-ok clear
+256uq 1 shift-right 128uq deep-eq      (shr-uint128-by-1) rt-ok clear
+256uq 8 shift-right 1uq deep-eq        (shr-uint128-by-8) rt-ok clear
+
+% negative shift counts reverse direction
+16uq -1 shift-left 8uq deep-eq         (shl-uint128-neg-count) rt-ok clear
+1uq -1 shift-right 2uq deep-eq         (shr-uint128-neg-count) rt-ok clear
+
+% ====================================================================
+% SECTION 14: sign
+% ====================================================================
+
+5q sign 1 eq                           (sign-int128-positive) rt-ok clear
+-5q sign -1 eq                         (sign-int128-negative) rt-ok clear
+0q sign 0 eq                           (sign-int128-zero) rt-ok clear
+5uq sign 1 eq                          (sign-uint128-positive) rt-ok clear
+0uq sign 0 eq                          (sign-uint128-zero) rt-ok clear
+
+% --- sign: extreme values ---
+170141183460469231731687303715884105727q sign 1 eq (sign-int128-max) rt-ok clear
+-170141183460469231731687303715884105728q sign -1 eq (sign-int128-min) rt-ok clear
+340282366920938463463374607431768211455uq sign 1 eq (sign-uint128-max) rt-ok clear
+
+% ====================================================================
+% SECTION 17: midpoint
+% ====================================================================
+
+0q 10q midpoint 5q deep-eq             (midpoint-int128-basic) rt-ok clear
+0uq 10uq midpoint 5uq deep-eq          (midpoint-uint128-basic) rt-ok clear
+-10q -20q midpoint -15q deep-eq        (midpoint-int128-neg) rt-ok clear
+
+% midpoint at extremes - no overflow, matches std::midpoint semantics
+170141183460469231731687303715884105727q -170141183460469231731687303715884105728q midpoint
+    0q deep-eq                         (midpoint-int128-extremes-pos-to-neg) rt-ok clear
+-170141183460469231731687303715884105728q 170141183460469231731687303715884105727q midpoint
+    -1q deep-eq                        (midpoint-int128-extremes-neg-to-pos) rt-ok clear
+0uq 340282366920938463463374607431768211455uq midpoint
+    170141183460469231731687303715884105727uq deep-eq (midpoint-uint128-extremes) rt-ok clear
+
+% ====================================================================
+% SECTION 20: identity operations
+% ====================================================================
+
+5q 1q mul 5q deep-eq                   (mul-int128-identity-1) rt-ok clear
+5uq 1uq mul 5uq deep-eq                (mul-uint128-identity-1) rt-ok clear
+5q 0q add 5q deep-eq                   (add-int128-identity-0) rt-ok clear
+5uq 0uq add 5uq deep-eq                (add-uint128-identity-0) rt-ok clear
+5q 0q sub 5q deep-eq                   (sub-int128-identity-0) rt-ok clear
+5uq 0uq sub 5uq deep-eq                (sub-uint128-identity-0) rt-ok clear
+5q 1q div 5q deep-eq                   (div-int128-identity-1) rt-ok clear
+5uq 1uq div 5uq deep-eq                (div-uint128-identity-1) rt-ok clear
+
+% ====================================================================
+% SECTION: numbers dict exposes int128/uint128 limits
+% ====================================================================
+
+//:systemdict:numbers:int128-type:is-signed  true eq (int128-type is-signed) rt-ok clear
+//:systemdict:numbers:int128-type:min
+    -170141183460469231731687303715884105728q deep-eq (int128-type min) rt-ok clear
+//:systemdict:numbers:int128-type:max
+    170141183460469231731687303715884105727q deep-eq (int128-type max) rt-ok clear
+
+//:systemdict:numbers:uint128-type:is-signed false eq (uint128-type is-signed) rt-ok clear
+//:systemdict:numbers:uint128-type:min 0uq deep-eq    (uint128-type min) rt-ok clear
+//:systemdict:numbers:uint128-type:max
+    340282366920938463463374607431768211455uq deep-eq (uint128-type max) rt-ok clear
+
+(test_int128_arith_mirror.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

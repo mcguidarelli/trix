@@ -1,0 +1,180 @@
+% ====================================================================
+% Phase 3 arithmetic + comparison tests for Int128 / UInt128.
+%
+% Covers add, sub, mul, div, mod, neg, abs, min, max, sign, midpoint
+% and lt, le, gt, ge, eq, ne for both signed and unsigned 128-bit
+% types, including boundary values, overflow detection, divide-by-zero
+% handling, mixed-type rejection, and WideValue accounting across
+% save/restore.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ---------- basic arithmetic (signed) ----------
+1q 2q add        3q deep-eq                 (int128 add: 1 + 2)   rt-ok
+10q 3q sub       7q deep-eq                 (int128 sub: 10 - 3)  rt-ok
+-5q 3q add      -2q deep-eq                 (int128 add: -5 + 3)  rt-ok
+5q 6q mul       30q deep-eq                 (int128 mul: 5 * 6)   rt-ok
+100q 7q div     14q deep-eq                 (int128 div: 100/7)   rt-ok
+100q 7q mod      2q deep-eq                 (int128 mod: 100%7)   rt-ok
+42q neg        -42q deep-eq                 (int128 neg: 42)      rt-ok
+-42q abs        42q deep-eq                 (int128 abs: -42)     rt-ok
+42q abs         42q deep-eq                 (int128 abs: 42)      rt-ok
+
+% ---------- basic arithmetic (unsigned) ----------
+1uq 2uq add     3uq deep-eq                 (uint128 add: 1 + 2)  rt-ok
+10uq 3uq sub    7uq deep-eq                 (uint128 sub: 10 - 3) rt-ok
+5uq 6uq mul    30uq deep-eq                 (uint128 mul: 5 * 6)  rt-ok
+100uq 7uq div  14uq deep-eq                 (uint128 div: 100/7)  rt-ok
+100uq 7uq mod   2uq deep-eq                 (uint128 mod: 100%7)  rt-ok
+
+% ---------- large-value arithmetic ----------
+1000000000000000000q 1000000000000000000q add
+2000000000000000000q deep-eq                (int128 large add) rt-ok
+
+18446744073709551615uq 18446744073709551615uq mul
+340282366920938463426481119284349108225uq deep-eq
+(uint128 mul of two 2^64-1 values) rt-ok
+
+% ---------- boundary values ----------
+170141183460469231731687303715884105726q 1q add
+170141183460469231731687303715884105727q deep-eq
+(int128 add reaches INT128_MAX) rt-ok
+
+-170141183460469231731687303715884105727q 1q sub
+-170141183460469231731687303715884105728q deep-eq
+(int128 sub reaches INT128_MIN) rt-ok
+
+340282366920938463463374607431768211454uq 1uq add
+340282366920938463463374607431768211455uq deep-eq
+(uint128 add reaches UINT128_MAX) rt-ok
+
+% ---------- overflow detection ----------
+% NB: Int128/UInt128 literals cannot appear inside a packed { } proc body
+% until Phase 5 delivers the PackedExt subcode scheme; push values outside
+% the proc.
+170141183460469231731687303715884105727q 1q { add } try
+/numerical-overflow eq (int128 add overflow raises)   rt-ok clear
+
+-170141183460469231731687303715884105728q 1q { sub } try
+/numerical-overflow eq (int128 sub overflow raises)   rt-ok clear
+
+170141183460469231731687303715884105727q 2q { mul } try
+/numerical-overflow eq (int128 mul overflow raises)   rt-ok clear
+
+340282366920938463463374607431768211455uq 1uq { add } try
+/numerical-overflow eq (uint128 add overflow raises)  rt-ok clear
+
+0uq 1uq { sub } try
+/numerical-overflow eq (uint128 sub underflow raises) rt-ok clear
+
+340282366920938463463374607431768211455uq 2uq { mul } try
+/numerical-overflow eq (uint128 mul overflow raises)  rt-ok clear
+
+% INT128_MIN / -1 overflow
+-170141183460469231731687303715884105728q -1q { div } try
+/numerical-overflow eq (int128 INT128_MIN / -1)       rt-ok clear
+
+-170141183460469231731687303715884105728q -1q { mod } try
+/numerical-overflow eq (int128 INT128_MIN mod -1)     rt-ok clear
+
+% neg / abs of INT128_MIN
+-170141183460469231731687303715884105728q { neg } try
+/numerical-overflow eq (int128 neg INT128_MIN raises) rt-ok clear
+
+-170141183460469231731687303715884105728q { abs } try
+/numerical-overflow eq (int128 abs INT128_MIN raises) rt-ok clear
+
+% ---------- divide / mod by zero ----------
+5q 0q { div } try /div-by-zero eq (int128 div by zero)   rt-ok clear
+5q 0q { mod } try /div-by-zero eq (int128 mod by zero)   rt-ok clear
+5uq 0uq { div } try /div-by-zero eq (uint128 div by zero) rt-ok clear
+5uq 0uq { mod } try /div-by-zero eq (uint128 mod by zero) rt-ok clear
+
+% ---------- min / max ----------
+5q 3q min    3q deep-eq                  (int128 min: 5,3)       rt-ok
+5q 3q max    5q deep-eq                  (int128 max: 5,3)       rt-ok
+-5q 3q min  -5q deep-eq                  (int128 min: -5,3)      rt-ok
+5uq 3uq min  3uq deep-eq                 (uint128 min: 5,3)      rt-ok
+5uq 3uq max  5uq deep-eq                 (uint128 max: 5,3)      rt-ok
+
+% ---------- midpoint ----------
+2q 8q midpoint    5q deep-eq             (int128 midpoint: 2,8)  rt-ok
+2uq 8uq midpoint  5uq deep-eq            (uint128 midpoint 2,8)  rt-ok
+
+% ---------- comparison (signed) ----------
+3q 5q lt          (int128 lt: 3 < 5)      rt-ok
+5q 3q lt not      (int128 !lt: 5 < 3)     rt-ok
+3q 5q le          (int128 le: 3 <= 5)     rt-ok
+5q 5q le          (int128 le: 5 <= 5)     rt-ok
+5q 3q gt          (int128 gt: 5 > 3)      rt-ok
+5q 5q ge          (int128 ge: 5 >= 5)     rt-ok
+-5q 3q lt         (int128 lt: -5 < 3)     rt-ok
+
+% ---------- comparison (unsigned) ----------
+3uq 5uq lt        (uint128 lt: 3 < 5)     rt-ok
+5uq 3uq gt        (uint128 gt: 5 > 3)     rt-ok
+5uq 5uq ge        (uint128 ge: 5 >= 5)    rt-ok
+
+% ---------- equality ----------
+42q 42q eq                               (int128 eq: 42 == 42)   rt-ok
+42q 43q eq not                           (int128 eq: 42 != 43)   rt-ok
+42q 43q ne                               (int128 ne: 42 != 43)   rt-ok
+42uq 42uq eq                             (uint128 eq: 42 == 42)  rt-ok
+% Cross-type equality: Int128 vs UInt128 -- different types => not equal
+42q 42uq eq not                          (int128 vs uint128 ne)  rt-ok
+
+% ---------- sign ----------
+0q sign 0 eq                             (int128 sign: 0 -> 0)   rt-ok
+-5q sign -1 eq                           (int128 sign: -5 -> -1) rt-ok
+5q sign 1 eq                             (int128 sign: 5 -> 1)   rt-ok
+0uq sign 0 eq                            (uint128 sign: 0 -> 0)  rt-ok
+5uq sign 1 eq                            (uint128 sign: 5 -> 1)  rt-ok
+
+% ---------- mixed-type rejection ----------
+42q 5 { add } try /type-check eq (int128 + integer rejected)   rt-ok clear
+42q 5l { add } try /type-check eq (int128 + long rejected)      rt-ok clear
+42q 5uq { add } try /type-check eq (int128 + uint128 rejected)   rt-ok clear
+42q 1.5 { add } try /type-check eq (int128 + double rejected)    rt-ok clear
+42uq 5u { add } try /type-check eq (uint128 + uinteger rejected) rt-ok clear
+42q 5 { lt } try /type-check eq (int128 < integer rejected)   rt-ok clear
+
+% ---------- WideValue heap accounting across arithmetic ----------
+/before //:status:widevalue-active def
+/s save def
+
+1q 2q add pop                             % alloc + op + free, net 0
+//:status:widevalue-active before eq
+(arith leaves active count at baseline) rt-ok
+
+10q 3q sub 4q mul pop                     % chained arithmetic
+//:status:widevalue-active before eq
+(chained arith returns to baseline)     rt-ok
+
+42q 43q lt pop                            % lt frees both widevalues
+//:status:widevalue-active before eq
+(comparison reclaims widevalues)        rt-ok
+
+s restore
+//:status:widevalue-active before eq
+(restore returns to baseline)           rt-ok
+
+% ---------- free-list integrity after arith churn ----------
+//:status:widevalue-validate
+(widevalue free-list integrity OK)      rt-ok
+//:status:vm-validate
+(vm heap integrity OK)                  rt-ok
+//:status:extvalue-validate
+(extvalue free-list integrity OK)       rt-ok
+
+(test_int128_arith.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

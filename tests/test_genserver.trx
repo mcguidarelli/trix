@@ -1,0 +1,631 @@
+% ====================================================================
+% test_genserver.trx -- gen-server, gen-call, gen-cast, gen-stop
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% =================================================================
+% SECTION 1: HAPPY PATH -- basic gen-server spawn + cast
+% =================================================================
+
+<< /init { 0 } /handle-cast { pop 1 add } >> gen-server /srv exch def
+srv coroutine-status /ready eq              (spawn: server is ready) rt-ok  clear
+
+srv 42 gen-cast
+srv 42 gen-cast
+100 coroutine-sleep
+true                                        (cast: 2 casts sent ok) rt-ok  clear
+
+% =================================================================
+% SECTION 2: HAPPY PATH -- gen-stop without terminate
+% =================================================================
+
+<< /init { 0 } >> gen-server /srv2 exch def
+srv2 /normal gen-stop
+100 coroutine-sleep
+srv2 coroutine-status /dead eq              (stop: server is dead) rt-ok  clear
+
+% =================================================================
+% SECTION 3: HAPPY PATH -- gen-stop with terminate
+% =================================================================
+
+<< /init { 0 } /terminate { pop pop } >> gen-server /srv3 exch def
+srv3 /normal gen-stop
+100 coroutine-sleep
+srv3 coroutine-status /dead eq              (stop: terminate called, dead) rt-ok  clear
+
+% =================================================================
+% SECTION 4: HAPPY PATH -- handle-info (non-protocol messages)
+% =================================================================
+
+<< /init { 0 } /handle-info { add } >> gen-server /srv4 exch def
+10 srv4 actor-send
+20 srv4 actor-send
+100 coroutine-sleep
+true                                        (info: raw messages handled) rt-ok  clear
+srv4 /done gen-stop
+100 coroutine-sleep clear
+
+% =================================================================
+% SECTION 5: HAPPY PATH -- cast ignored without handler
+% =================================================================
+
+<< /init { 0 } >> gen-server /srv5 exch def
+srv5 42 gen-cast
+100 coroutine-sleep
+true                                        (cast: ignored without handler) rt-ok
+srv5 /done gen-stop
+100 coroutine-sleep clear
+
+% =================================================================
+% SECTION 6: HAPPY PATH -- gen-call (sync request/reply)
+% =================================================================
+
+% Echo server: returns whatever you send
+/echo-spec <<
+  /init { null }
+  /handle-call {
+    [/msg /from /state] let
+      msg msg /reply
+    end
+  }
+>> def
+
+mark {
+  echo-spec gen-server /srv exch def
+
+  srv 42 gen-call
+  42 eq                                     (call: echo 42) rt-ok
+
+  srv (hello) gen-call
+  (hello) eq                                (call: echo hello) rt-ok
+
+  srv true gen-call
+  true eq                                   (call: echo true) rt-ok
+
+  srv /done gen-stop
+  100 coroutine-sleep
+  clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 7: HAPPY PATH -- gen-call with state mutation
+% =================================================================
+
+/counter-call-spec <<
+  /init { 0 }
+  /handle-call {
+    [/msg /from /state] let
+      state 1 add dup dup /reply
+    end
+  }
+>> def
+
+mark {
+  counter-call-spec gen-server /srv exch def
+
+  srv /inc gen-call 1 eq                    (call-state: first inc = 1) rt-ok
+  srv /inc gen-call 2 eq                    (call-state: second inc = 2) rt-ok
+  srv /inc gen-call 3 eq                    (call-state: third inc = 3) rt-ok
+
+  srv /done gen-stop
+  100 coroutine-sleep
+  clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 8: SAD PATH -- gen-server missing /init
+% =================================================================
+
+{ << >> gen-server } try /undefined eq       (sad: missing init) rt-ok  clear
+
+% =================================================================
+% SECTION 9: STRESS -- cast then call (from same actor)
+% =================================================================
+
+mark {
+  << /init { 0 }
+     /handle-cast { add }
+     /handle-call { [/msg /from /state] let state state /reply end }
+  >> gen-server /srv exch def
+
+  % Just call directly (no casts)
+  srv /query gen-call
+  0 eq                                      (stress: initial state is 0) rt-ok
+
+  srv /done gen-stop
+  100 coroutine-sleep
+  clear
+} actor-spawn pop 500 coroutine-sleep clear
+
+% =================================================================
+% SECTION 10: HAPPY PATH -- gen-call with complex return values
+% =================================================================
+
+/complex-spec <<
+  /init { 0 }
+  /handle-call {
+    [/msg /from /state] let
+      msg /array eq {
+        state [1 2 3] /reply
+      } {
+        msg /tagged eq {
+          state 42 /ok tag /reply
+        } {
+          state msg /reply
+        } if-else
+      } if-else
+    end
+  }
+>> def
+
+mark {
+  complex-spec gen-server /srv exch def
+
+  srv /array gen-call
+  [1 2 3] deep-eq                           (call-complex: array reply) rt-ok
+
+  srv /tagged gen-call
+  dup tag-name /ok eq                       (call-complex: tagged name) rt-ok
+  tag-value 42 eq                           (call-complex: tagged value) rt-ok
+
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 11: HAPPY PATH -- multiple sequential gen-calls
+% =================================================================
+
+/accum-spec <<
+  /init { 0 }
+  /handle-call {
+    [/msg /from /state] let
+      state msg add dup dup /reply
+    end
+  }
+>> def
+
+mark {
+  accum-spec gen-server /srv exch def
+
+  srv 10 gen-call 10 eq                     (multi-call: +10 = 10) rt-ok
+  srv 20 gen-call 30 eq                     (multi-call: +20 = 30) rt-ok
+  srv 5 gen-call 35 eq                      (multi-call: +5 = 35) rt-ok
+  srv -35 gen-call 0 eq                     (multi-call: -35 = 0) rt-ok
+
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 12: HAPPY PATH -- cast then call verifies state
+% =================================================================
+
+mark {
+  << /init { 0 }
+     /handle-cast { add }
+     /handle-call { [/msg /from /state] let state state /reply end }
+  >> gen-server /srv exch def
+
+  srv 10 gen-cast
+  srv 20 gen-cast
+  srv 5 gen-cast
+  100 coroutine-sleep
+
+  srv /query gen-call
+  35 eq                                     (cast-then-call: state=35) rt-ok
+
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 13: HAPPY PATH -- two independent gen-servers
+% =================================================================
+
+mark {
+  echo-spec gen-server /srv-a exch def
+  echo-spec gen-server /srv-b exch def
+
+  srv-a 111 gen-call 111 eq                 (two-srv: a echoes 111) rt-ok
+  srv-b 222 gen-call 222 eq                 (two-srv: b echoes 222) rt-ok
+  srv-a 333 gen-call 333 eq                 (two-srv: a echoes 333) rt-ok
+
+  srv-a /done gen-stop
+  srv-b /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 14: SAD PATH -- gen-call to non-coroutine
+% =================================================================
+
+{ 42 /hello gen-call } try /type-check eq   (sad: call non-coroutine) rt-ok  clear
+
+% =================================================================
+% SECTION 15: SAD PATH -- gen-cast to non-coroutine
+% =================================================================
+
+{ 42 /hello gen-cast } try /type-check eq   (sad: cast non-coroutine) rt-ok  clear
+
+% =================================================================
+% SECTION 16: SAD PATH -- gen-stop to non-coroutine
+% =================================================================
+
+{ 42 /hello gen-stop } try /type-check eq   (sad: stop non-coroutine) rt-ok  clear
+
+% =================================================================
+% SECTION 17: gen-call-timeout is now implemented (was stub)
+% =================================================================
+% (tests in SECTION 20-23 below)
+
+% =================================================================
+% SECTION 18: the documented state-query pattern.  There is no
+% gen-state operator BY DESIGN: state queries belong in the handler,
+% so a /query arm in /handle-call returns the state unchanged.
+% =================================================================
+
+mark {
+  << /init { 7 }
+     /handle-call {
+       [/msg /from /state] let
+         msg /query eq { state state } { state 0 } if-else /reply
+       end
+     }
+  >> gen-server /st-srv exch def
+
+  st-srv /query gen-call
+  7 eq                                      (query-pattern: /query arm returns live state) rt-ok
+
+  st-srv /done gen-stop
+  100 coroutine-sleep
+  clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 19: BOUNDARY -- gen-server with no handlers except init
+% =================================================================
+
+<< /init { (started) } >> gen-server /srv-bare exch def
+srv-bare coroutine-status /ready eq         (boundary: bare server alive) rt-ok
+srv-bare /done gen-stop
+100 coroutine-sleep
+srv-bare coroutine-status /dead eq          (boundary: bare server stopped) rt-ok  clear
+
+% =================================================================
+% SECTION 20: STRESS -- rapid calls
+% =================================================================
+
+mark {
+  counter-call-spec gen-server /srv exch def
+
+  /expected 0 def
+  10 {
+    srv /inc gen-call
+    /expected expected 1 add def
+    expected eq { } { (FAILED: rapid-call mismatch) = } if-else
+  } repeat
+  expected 10 eq                            (stress: 10 rapid calls) rt-ok
+
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 20: HAPPY -- gen-call-timeout (reply before timeout)
+% =================================================================
+
+mark {
+  echo-spec gen-server /srv exch def
+
+  srv 42 5000 gen-call-timeout
+  42 eq                                     (call-timeout: echo 42) rt-ok
+
+  srv (hello) 5000 gen-call-timeout
+  (hello) eq                                (call-timeout: echo hello) rt-ok
+
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 21: SAD -- gen-call-timeout (server dead, timeout fires)
+% =================================================================
+
+mark {
+  echo-spec gen-server /srv exch def
+  srv /done gen-stop
+  100 coroutine-sleep
+
+  { srv 99 100 gen-call-timeout } try
+  /limit-check eq                           (call-timeout: dead server timeout) rt-ok
+  clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 22: BOUNDARY -- gen-call-timeout 0ms (immediate)
+% =================================================================
+
+mark {
+  echo-spec gen-server /srv exch def
+
+  % Send a message and give the server time to process and reply
+  srv 77 5000 gen-call-timeout
+  77 eq                                     (call-timeout: immediate reply works) rt-ok
+
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 23: SAD -- gen-call-timeout type errors
+% =================================================================
+
+mark {
+  { 42 99 -1 gen-call-timeout } try
+  /range-check eq                           (call-timeout: negative ms error) rt-ok
+  clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 24: REGRESSION -- init proc executes (not stored as state)
+% =================================================================
+% Bug: pushop_direct caused init proc to be stored as the state
+% instead of being executed.  This test verifies init runs and
+% the state is the correct type (integer, not packed proc).
+
+mark {
+  << /init { 42 }
+     /handle-call { [/msg /from /state] let state state /reply end }
+  >> gen-server /srv exch def
+  srv /query gen-call
+  dup is-integer                            (regression: init state is integer) rt-ok
+  42 eq                                     (regression: init state value correct) rt-ok
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 25: REGRESSION -- gen-call-timeout after gen-cast
+% =================================================================
+% Bug: gen-call after cast was hanging because init state was a packed
+% proc, which caused add to fail.  This exercises all three fixes:
+% init exec, is_callable pred, and gen-call-timeout.
+
+mark {
+  << /init { 0 }
+     /handle-cast { add }
+     /handle-call { [/msg /from /state] let state state /reply end }
+  >> gen-server /srv exch def
+  srv 10 gen-cast
+  srv 20 gen-cast
+  100 coroutine-sleep
+  srv /query 5000 gen-call-timeout
+  30 eq                                     (regression: cast+call-timeout state=30) rt-ok
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 26: FUZZ -- gen-call-timeout with Long (ExtValue) reply
+% =================================================================
+
+mark {
+  << /init { null }
+     /handle-call { [/msg /from /state] let 9999999999l 9999999999l /reply end }
+  >> gen-server /srv exch def
+  srv /query 5000 gen-call-timeout
+  9999999999l eq                            (fuzz: call-timeout long reply) rt-ok
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 27: STRESS -- multiple gen-call-timeout in sequence
+% =================================================================
+
+mark {
+  << /init { 0 }
+     /handle-call { [/msg /from /state] let state msg add dup /reply end }
+  >> gen-server /srv exch def
+  srv 10 5000 gen-call-timeout 10 eq        (stress: call-timeout seq 1) rt-ok
+  srv 20 5000 gen-call-timeout 30 eq        (stress: call-timeout seq 2) rt-ok
+  srv 5 5000 gen-call-timeout 35 eq         (stress: call-timeout seq 3) rt-ok
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 28: HAPPY PATH -- gen-reply basic deferred reply
+% =================================================================
+% Server stores from-token on /noreply, then replies on next cast.
+
+% Deferred reply server: stores {from-token, msg} in state on /noreply,
+% replies with stored value when cast triggers.
+/deferred-spec <<
+  /init { null }
+  /handle-call {
+    [/msg /from /state] let
+      << /pending from /value msg >> /noreply
+    end
+  }
+  /handle-cast {
+    [/msg /state] let
+      state /pending get state /value get gen-reply
+      null
+    end
+  }
+>> def
+
+mark {
+  deferred-spec gen-server /srv exch def
+
+  % Send call (blocks), then cast triggers the reply
+  mark {
+    srv 42 5000 gen-call-timeout
+    42 eq                                     (gen-reply: deferred reply = 42) rt-ok
+  } actor-spawn /caller exch def
+
+  200 coroutine-sleep
+  srv /go gen-cast
+  caller coroutine-join pop
+
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 29: HAPPY PATH -- gen-reply with complex value
+% =================================================================
+
+/deferred-complex-spec <<
+  /init { null }
+  /handle-call {
+    [/msg /from /state] let
+      << /pending from /value [1 2 3] >> /noreply
+    end
+  }
+  /handle-cast {
+    [/msg /state] let
+      state /pending get state /value get gen-reply
+      null
+    end
+  }
+>> def
+
+mark {
+  deferred-complex-spec gen-server /srv exch def
+
+  mark {
+    srv /query 5000 gen-call-timeout
+    [1 2 3] deep-eq                           (gen-reply: complex array reply) rt-ok
+  } actor-spawn /caller exch def
+
+  200 coroutine-sleep
+  srv /trigger gen-cast
+  caller coroutine-join pop
+
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 30: HAPPY PATH -- gen-reply sequential deferred calls
+% =================================================================
+% Two calls deferred one after another.  Verifies frame ref/from
+% are properly cleared after /noreply so the next call works.
+
+mark {
+  deferred-spec gen-server /srv exch def
+
+  % First deferred call
+  mark {
+    srv 42 5000 gen-call-timeout
+    42 eq                                     (gen-reply: seq first = 42) rt-ok
+  } actor-spawn /c1 exch def
+  200 coroutine-sleep
+  srv /go gen-cast
+  c1 coroutine-join pop
+
+  % Second deferred call
+  mark {
+    srv 99 5000 gen-call-timeout
+    99 eq                                     (gen-reply: seq second = 99) rt-ok
+  } actor-spawn /c2 exch def
+  200 coroutine-sleep
+  srv /go gen-cast
+  c2 coroutine-join pop
+
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 31: SAD PATH -- gen-reply type errors
+% =================================================================
+
+mark {
+  { 42 /hello gen-reply } try
+  /type-check eq                              (gen-reply-sad: integer not token) rt-ok
+  clear
+} actor-spawn coroutine-join pop clear
+
+mark {
+  { [1 2 3] /hello gen-reply } try
+  /type-check eq                              (gen-reply-sad: 3-elem array not token) rt-ok
+  clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 32: HAPPY PATH -- gen-reply with /reply still works
+% =================================================================
+% Verify immediate /reply path unchanged after from-token change.
+
+mark {
+  echo-spec gen-server /srv exch def
+  srv 99 gen-call
+  99 eq                                       (gen-reply: immediate /reply still works) rt-ok
+  srv /done gen-stop
+  100 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 33: SAD PATH -- /init leaves extra mark + state on op stack
+% =================================================================
+% Regression for fuzz crash-548843fa: /init pushed an extra mark above
+% its state value, which used to spoof the post-init mark sentinel and
+% leave a mark in the exec frame's spec slot -- the next gen-cast then
+% hit dict_value() on a non-dict Object.  The init check now verifies
+% both the mark position and that the real spec slot is a dict, so
+% this spawns a dead coroutine with exit reason /type-check instead
+% of crashing.
+
+<< /init { mark 0 } /handle-cast { 1 add } >>
+/bad-init-spec exch def
+
+mark {
+  bad-init-spec gen-server /srv exch def
+  srv /msg gen-cast
+  100 coroutine-sleep
+  srv coroutine-status
+  /dead eq                                    (init-extra-mark: coroutine dies cleanly) rt-ok
+  clear
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 34: gen-stop with an ExtValue (Long) reason + terminate
+% =================================================================
+% Regression for at_gen_server_recv_op's Stop branch: `reason` aliases the
+% message spine, and gen_free_message frees each element's ExtValue.  Cloning
+% reason AFTER the free read a freed cell -- and make_clone could reuse that
+% freed cell as the clone's destination -- so the terminate handler got a
+% CORRUPTED reason.  Sections 2-3 use a /normal Name reason (never an ExtValue),
+% so they miss it.  Here terminate stashes the Long reason in a global cell;
+% pre-fix the value comes back wrong (verified non-vacuous).
+${ 0l cell } /stop-reason-cell exch def
+<< /init { 0 } /terminate { pop stop-reason-cell cell-set } >> gen-server /srv34 exch def
+srv34 9876543210l gen-stop
+100 coroutine-sleep
+srv34 coroutine-status /dead eq              (stop: Long-reason terminate -> dead) rt-ok
+stop-reason-cell cell-get 9876543210l eq     (stop: terminate received Long reason intact) rt-ok  clear
+
+% =================================================================
+% INTEGRITY
+% =================================================================
+
+500 coroutine-sleep
+/vm-validate query-status                    (integrity: vm-validate) rt-ok  clear
+/extvalue-validate query-status              (integrity: extvalue-validate) rt-ok  clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_genserver: ALL TESTS PASSED) =
+(__test_ok__) =

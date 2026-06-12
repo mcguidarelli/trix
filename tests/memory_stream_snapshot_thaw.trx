@@ -1,0 +1,6 @@
+% memory_stream_snapshot_thaw.trx -- phase 2: thaw the image produced
+% by tests/test_memory_stream_snapshot.trx.  The image's post-snapshot
+% section re-runs after thaw and re-reads the borrowed memory-stream's
+% unread tail, asserting byte-exact equality with the expected suffix.
+% Run tests/test_memory_stream_snapshot.trx first to produce the image.
+(tests/memory_stream_snapshot.img) thaw

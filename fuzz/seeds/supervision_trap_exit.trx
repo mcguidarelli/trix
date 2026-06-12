@@ -1,0 +1,2 @@
+mark { true actor-trap-exit mark { 42 } spawn-link coroutine-join pop pop } actor-spawn
+coroutine-join pop pop

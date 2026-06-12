@@ -1,0 +1,4 @@
+logic-var /x exch def
+logic-var /y exch def
+x 1 unify pop y 2 unify pop
+x deref y deref add

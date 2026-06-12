@@ -1,0 +1,109 @@
+% ====================================================================
+% test_followon5_record_gc.trx -- Phase-1 follow-on #5 (record cluster)
+% ====================================================================
+% GC-rooting for the two record sites B5 group-2b deferred:
+%
+%   #5a record-map / @record-map-step.  The result instance used to ride
+%       the exec stack as a BARE UINTEGER offset (invisible to
+%       gc_mark_object) across every user-proc execution, and its fields
+%       were never null-initialised.  A global-VM GC fired by a map proc
+%       (between fields) would sweep the half-built instance -> the
+%       collected fields dangle / corrupt.  Fix: carry a real record
+%       Object companion (a GC root) and null-init all fields up front.
+%
+%   #5b record-from-dict.  Same schema-first / instance-last window as
+%       make_record: the schema was held unrooted across the instance
+%       alloc, and the instance was unrooted + uninitialised across the
+%       per-field make_clone calls.  Fix: instance-first + null-init +
+%       on-stack temp-root, schema after (mirrors make_record_op).
+%
+% #5a is exercised deterministically: a map proc that calls vm-global-gc
+% sweeps the unrooted in-flight instance under the OLD code (the loop and
+% the final record read back garbage).  #5b's mid-construction window is
+% code-inspection-covered (deterministic provocation needs fragile
+% near-full-region tuning, as for make_record in test_b5_record_gc); the
+% functional + post-construction-GC-survival checks guard the reorder.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% #5a record-map -- functional (normal / local region)
+% ====================================================================
+1.0d 2.0d 3.0d [ /a /b /c ] record
+{ 10.0d add } record-map
+dup /a get 11.0d eq (record-map: /a mapped) rt-ok
+dup /b get 12.0d eq (record-map: /b mapped) rt-ok
+/c get 13.0d eq (record-map: /c mapped) rt-ok clear
+
+% empty record (field_count == 0 -> the early-out branch): maps to an
+% empty record, proc never runs.
+[ ] record-type /empty-rt exch def
+empty-rt { 1 add } record-map record-fields count 0 eq (record-map: empty record) rt-ok clear
+
+% single-field boundary
+5l [ /only ] record { 5l add } record-map /only get 10l eq (record-map: single field) rt-ok clear
+
+% ====================================================================
+% #5a record-map with a GC fired mid-map, inside ${...} (global region).
+% The map proc forces a FULL vm-global-gc on every field.  The result
+% instance holds field[0..k-1] already; under the old bare-uinteger
+% protocol it is reachable from no root and is swept -> the final record
+% reads garbage.  With the record-Object companion it is rooted and the
+% fields survive.  vm-global-gc is a full mark-sweep, so this provokes the
+% bug WITHOUT needing a near-full region.
+% ====================================================================
+${
+    1.0d 2.0d 3.0d 4.0d [ /a /b /c /d ] record
+    { vm-global-gc pop 100.0d add } record-map
+} /rm exch def
+rm /a get 101.0d eq (record-map ${}+GC: /a survives sweep) rt-ok
+rm /b get 102.0d eq (record-map ${}+GC: /b survives sweep) rt-ok
+rm /c get 103.0d eq (record-map ${}+GC: /c survives sweep) rt-ok
+rm /d get 104.0d eq (record-map ${}+GC: /d survives sweep) rt-ok clear
+
+% schema survives too: the mapped record still answers field-by-name
+rm /a get 101.0d eq (record-map ${}+GC: schema intact after sweep) rt-ok clear
+
+% ====================================================================
+% #5b record-from-dict -- functional (normal + ${...})
+% ====================================================================
+<< /name (Alice) /age 30l >> [ /name /age ] record-from-dict
+dup /name get (Alice) eq (record-from-dict: /name) rt-ok
+/age get 30l eq (record-from-dict: /age) rt-ok clear
+
+% missing key still raises /undefined (op-stack-on-error preserved)
+{ << /x 1 >> [ /x /missing ] record-from-dict } try /undefined eq (record-from-dict: missing key -> /undefined) rt-ok clear
+
+% inside ${...}: the built record is global and field-correct
+${ << /p 7l /q 8.5d >> [ /p /q ] record-from-dict } /rfd exch def
+rfd /p get 7l eq  (record-from-dict ${}: /p) rt-ok
+rfd /q get 8.5d eq (record-from-dict ${}: /q) rt-ok clear
+
+% ====================================================================
+% #5b record-from-dict GC stress inside ${...}: build a record from a dict
+% with heap-cell (Double / bignum) fields, force a full GC, then read the
+% fields back.  The live record + its shared-shape schema + cloned fields
+% must survive each sweep (obj-count stamping + reachability via m_schema).
+% ====================================================================
+${
+    0l
+    0 1 99 {
+        pop
+        << /x 7l /y 8.5d >> [ /x /y ] record-from-dict   % record on op stack
+        vm-global-gc pop                                  % full sweep; record (rooted on op stack) must survive
+        /x get add                                        % accumulate /x = 7
+    } for
+}
+700l eq (record-from-dict ${}+GC stress: 100 * 7l = 700) rt-ok clear
+
+(test_followon5_record_gc.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

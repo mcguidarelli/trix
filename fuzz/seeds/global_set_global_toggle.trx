@@ -1,0 +1,3 @@
+% Explicit set-global true / set-global false toggle.  Allocations
+% between the two land in global VM.
+true set-global 16 string false set-global length

@@ -1,0 +1,238 @@
+% ======================================================================
+% Showcase: Markov-Chain Text Generator (Direct Coroutine)
+% ----------------------------------------------------------------------
+% Demonstrates three Trix features working together:
+%
+%   direct coroutine  -- the generator is a plain `coroutine-launch`ed
+%                        coroutine, NOT wrapped in an actor or a
+%                        pipe-map/pipe-run pipeline.  A bounded
+%                        `pipe-buffer` of capacity 1 acts as the yield
+%                        channel: every `pipe-put` on the generator
+%                        side blocks until the consumer's `pipe-get`
+%                        picks it up -- a synchronous hand-off.
+%
+%   nested dict + record -- the bigram model is
+%                        `prefix-word -> Record{total-count, successors}`
+%                        where the inner `successors` dict is a mutable
+%                        `dict-of-counts`.  Total-count is bumped via
+%                        `record-update`; the inner dict is mutated in
+%                        place so one allocation serves all successor
+%                        bumps for a given prefix.
+%
+%   weighted sampling -- `rand-bounded-uinteger` picks a bucket index
+%                        in `[0, total)`; the choose-successor loop
+%                        walks the inner dict accumulating counts to
+%                        cross the bucket.  A fixed seed
+%                        (`rng-seed rand-seed`) makes the sample text
+%                        bit-for-bit reproducible across runs.
+%
+% Corpus: `examples/markov-corpus/pride-ch1-2.txt` -- the opening two
+% chapters of Pride and Prejudice (Project Gutenberg, public domain).
+% ~8.8 KB, ~1795 tokens after tokenization.
+%
+% Run:
+%     ./trix examples/markov.trx
+% ======================================================================
+
+% ---- Configuration ---------------------------------------------------
+
+/corpus-path       (examples/markov-corpus/pride-ch1-2.txt) def
+/sample-tokens     500u                                     def
+/sentence-stop-min 400u                                     def  % look for a . ? ! to stop on
+/column-wrap       78                                       def
+/rng-seed          42ul                                     def
+
+% --no-timing: suppress the wall-clock report line so byte-exact golden
+% gates (tests/golden/example-markov) stay stable; everything else --
+% including the RNG-seeded sample text -- is deterministic.
+/show-timing true def
+command-line-args { /arg exch def
+    arg (--no-timing) eq { /show-timing false store } if
+} for-all
+
+% ---- Tokenization ----------------------------------------------------
+% raw -> array of lowercase word / punctuation tokens.
+%
+% The sentence-final punctuation (., ?, !) is preserved as a pseudo-
+% token so the model can learn where sentences end.  Strategy: surround
+% each . ? ! with spaces, then split on runs of non-word characters.
+%
+% Abbreviations like "Mr." end up splitting off a trailing "." pseudo-
+% token -- authentic Markov quirk; the generator happily emits "mr ."
+% which reads as a short sentence.
+/tokenize-text {
+    |raw|#8
+    /lower raw lowercase local-def
+    /s1 lower (\\.) ( . ) regex-replace local-def
+    /s2 s1    (\\?) ( ? ) regex-replace local-def
+    /s3 s2    (!)   ( ! ) regex-replace local-def
+    /raw-tokens s3 ([^a-z'.!?]+) regex-split local-def
+    raw-tokens { length 0 gt } filter
+} def
+
+/sentence-final? {
+    |tok|#2
+    tok (.) eq  tok (?) eq or  tok (!) eq or
+} def
+
+% ---- Model construction ---------------------------------------------
+% outer dict:  prefix-word :- Record{total-count, successors}
+% successors:  word        :- count
+%
+% bump-bigram either creates the initial record (and its inner dict)
+% or bumps both counters on an existing entry.  The inner dict is
+% mutated in place; record-update rebuilds the outer record with an
+% incremented total-count.
+/bigram-schema [ /total-count /successors ] def
+
+/bump-bigram {
+    % w1 w2 model --
+    |w1 w2 model|#8
+    /entry model w1 null get-default local-def
+    entry null eq
+        {
+            /succ 8 dynamic-dict local-def
+            succ w2 1u put
+            model w1  1u succ bigram-schema record  put
+        }
+        {
+            /succ entry /successors get local-def
+            succ w2  succ w2 0u get-default 1u add  put
+            /new-total entry /total-count get 1u add local-def
+            model w1  entry /total-count new-total record-update  put
+        }
+    if-else
+} def
+
+/train-bigram {
+    |tokens|#8
+    /model 256 dynamic-dict local-def
+    /i 0 local-def
+    /limit tokens length 1 sub local-def
+    {
+        i limit lt
+            {
+                tokens i get  tokens i 1 add get  model bump-bigram
+                /i i 1 add local-def
+            }
+            { exit }
+        if-else
+    } loop
+    model
+} def
+
+% ---- Weighted sampling ----------------------------------------------
+% Pick a successor from entry.successors with probability
+% proportional to its count.  Draws one uint in [0, total), then walks
+% the inner dict accumulating counts until the bucket is crossed.
+/choose-successor {
+    |entry|#8
+    /total   entry /total-count get       local-def
+    /r       total rand-bounded-uinteger  local-def
+    /acc     0u                           local-def
+    /chosen  null                         local-def
+    entry /successors get {
+        |succ-w succ-c|#4
+        chosen null eq {
+            % `store` walks the dict stack so these updates land in the
+            % OUTER choose-successor locals, not the for-all callback's
+            % frame dict.
+            /acc acc succ-c add store
+            acc r gt { /chosen succ-w store } if
+        } if
+    } for-all
+    chosen
+} def
+
+% ---- Load + train ---------------------------------------------------
+
+(Loading corpus from {0} ...\n) mark corpus-path print-fmt pop pop
+
+/raw-text corpus-path (r)#b stream dup read-all exch close-stream def
+/tokens   raw-text tokenize-text                                       def
+/model    tokens   train-bigram                                        def
+
+(Corpus bytes      : {0}\n) mark raw-text length print-fmt pop pop
+(Tokens            : {0}\n) mark tokens   length print-fmt pop pop
+(Distinct prefixes : {0}\n) mark model    length print-fmt pop pop
+nl
+
+% ---- Generator coroutine --------------------------------------------
+% Direct coroutine, no actor wrapper.  Capacity-1 pipe-buffer makes
+% each pipe-put a synchronous hand-off -- the generator blocks until
+% the main coroutine's next pipe-get.
+%
+% State passed in: buffer + model + starting word.  Everything else
+% (current prefix, RNG pops) is local to the coroutine's stack/locals.
+rng-seed rand-seed
+
+/gen-buf 1 pipe-buffer def
+
+mark gen-buf model  tokens 0 get  {
+    |buf model word|#8
+    {
+        word buf pipe-put                                % yield
+        /entry model word null get-default local-def
+        entry null eq { buf pipe-close exit } if
+        /word entry choose-successor local-def
+        word null eq { buf pipe-close exit } if
+    } loop
+} coroutine-launch /gen-co exch def
+
+% ---- Main consumer --------------------------------------------------
+% Read tokens, wrap output at `column-wrap` columns, stop when the
+% token count has crossed `sentence-stop-min` AND the just-emitted
+% token is sentence-final (. ? !).  Hard cap at `sample-tokens`.
+
+(--- generated text ---\n) print
+
+/col    0  def
+/word-count  0u def
+/start-us clock def
+
+{
+    gen-buf pipe-get { /tok exch def } { exit } if-else
+
+    /is-punct tok sentence-final? def
+
+    % separator (space or newline) between tokens, except:
+    %   - no separator before a punctuation token (glue to previous word)
+    %   - no separator at start of line
+    is-punct not  col 0 gt  and
+        {
+            col 1 add tok length add column-wrap gt
+                { nl /col 0 def }
+                { ( ) print /col col 1 add def }
+            if-else
+        }
+    if
+    tok print
+    /col col tok length add def
+    /word-count word-count 1u add def
+
+    word-count sample-tokens ge
+    word-count sentence-stop-min ge  is-punct  and
+    or
+        { exit }
+    if
+} loop
+
+nl
+/elapsed-us clock start-us sub def
+
+% ---- Cleanup --------------------------------------------------------
+% Generator may still be blocked on pipe-put for the next token; kill
+% it rather than join -- we asked for a bounded sample.
+gen-co coroutine-status /dead ne
+    { gen-co coroutine-kill } if
+gen-buf pipe-close
+
+% ---- Report ---------------------------------------------------------
+
+(\n=== markov bigram done ===\n\n) print
+(Tokens emitted : {0}\n)         mark word-count                           print-fmt pop pop
+(RNG seed       : {0}\n)         mark rng-seed                        print-fmt pop pop
+show-timing
+{ (Elapsed time   : {0:.1f} ms\n\n) mark elapsed-us 1000.0d promote div print-fmt pop pop }
+{ (\n) print }
+if-else

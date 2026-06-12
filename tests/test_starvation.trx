@@ -1,0 +1,111 @@
+% ====================================================================
+% Starvation Detection Tests (Phase 6.2 Scheduler)
+% ====================================================================
+% Tests the coroutine-starved and starvation-threshold status keys.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Baseline (no coroutines, no starvation)
+% ====================================================================
+
+/coroutine-starved query-status 0 eq     (baseline: no starved coroutines) rt-ok
+/starvation-threshold query-status 1000 eq (baseline: default threshold is 1000ms) rt-ok
+
+% ====================================================================
+% SECTION 2: Active coroutines are not starved
+% ====================================================================
+
+% Launch coroutines that yield -- they just ran, so not starved
+/c1 [
+    { 0 coroutine-sleep
+      0 coroutine-sleep
+    }
+    coroutine-launch def
+
+/c2 [
+    { 0 coroutine-sleep
+      0 coroutine-sleep
+    }
+    coroutine-launch def
+
+% Let them run
+0 coroutine-sleep
+
+% They just ran -- should not be starved
+/coroutine-starved query-status 0 eq     (active: recently-run coroutines not starved) rt-ok
+
+c1 coroutine-join pop pop
+c2 coroutine-join pop pop
+
+% ====================================================================
+% SECTION 3: Sleeping coroutine that just ran is not starved
+% ====================================================================
+
+/sleeper [
+    { 5000 coroutine-sleep }
+    coroutine-launch def
+
+0 coroutine-sleep  % let sleeper start and enter its sleep
+
+% Sleeper just ran (set its timer sleep), so last_run_time_ns is recent
+/coroutine-starved query-status 0 eq     (sleeping: recently-run sleeper not starved) rt-ok
+
+sleeper coroutine-kill
+
+% ====================================================================
+% SECTION 4: Suspended coroutine that just ran is not starved
+% ====================================================================
+
+/suspended-c [
+    { 0 coroutine-sleep
+      0 coroutine-sleep
+    }
+    coroutine-launch def
+
+0 coroutine-sleep  % let it run once
+suspended-c coroutine-suspend
+
+% Just ran before suspension -- not starved
+/coroutine-starved query-status 0 eq     (suspended: recently-suspended not starved) rt-ok
+
+suspended-c coroutine-kill
+
+% ====================================================================
+% SECTION 5: Dead coroutines are not counted as starved
+% ====================================================================
+
+/dead-c [
+    { /s5-done true def }
+    coroutine-launch def
+
+dead-c coroutine-join pop pop
+
+/coroutine-starved query-status 0 eq     (dead: dead coroutines not counted) rt-ok
+
+% ====================================================================
+% SECTION 6: Coroutines that never ran (last_run_time_ns == 0) excluded
+% ====================================================================
+
+% Launch a coroutine but don't yield -- it hasn't run yet
+/never-ran [
+    { 0 coroutine-sleep }
+    coroutine-launch def
+
+% It's in the ready queue but hasn't been loaded yet (m_last_run_time_ns == 0)
+/coroutine-starved query-status 0 eq     (never-ran: unscheduled coroutine excluded) rt-ok
+
+never-ran coroutine-join pop pop
+
+clear
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_starvation: ALL TESTS PASSED) =
+(__test_ok__) =

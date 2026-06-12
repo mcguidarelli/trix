@@ -1,0 +1,542 @@
+% =====================================================================
+% proto-pathfind.trx -- Phase 0.6G A* + ZOC + reachable-set prototype
+% =====================================================================
+%
+% Tier P2 of plan_bestagon_derisk_prototyping.md.  Implements GDD
+% section 4 (terrain + movement classes) + section 7.9 (light ZOC) for
+% reachable-set computation, plus section 7.7 indirect-fire range
+% bracket-check.
+%
+% Public API (graduates to Phase 4):
+%   terrain-move-cost  terrain unit-class -- cost-or-impassable
+%   move-reachable-hexes    unit state -- visible-set
+%   indirect-range-ok? attacker-pos target-pos min-range max-range -- bool
+%
+% Reachable-hexes algorithm: BFS-style with re-visit-if-better-remaining-
+% move.  State is (pos-idx, remaining-move).  Three rules per section 7.9:
+%   1. Impassable terrain: never enter
+%   2. Terrain cost: subtract from remaining-move; if insufficient, skip
+%   3. ZOC halt: entering an enemy-adjacent hex ends the turn -- the hex
+%      itself IS reachable, but no further hexes traversed from there.
+%      Air units (Fighter/Bomber/Battle Copter) IGNORE ZOC per section 7.9.
+%      Starting hex already in ZOC has no effect (ZOC triggers on ENTERING).
+%
+% Section 7.9 Phase 5 invariant explicitly tested: "Recon moves into
+% adjacent enemy halts after 1 hex" -- Recon has 8 move; entering an
+% adjacent-to-enemy hex on hex 1 should leave 0 further-movement.
+%
+% Run with debug build (proto is correctness-only):
+%   ./trix examples/bestagon-proto/proto-pathfind.trx
+%
+% Output: stdout PASS/FAIL summary; no markdown verdict file.
+% Default 1 MB VM with no per-iter save/restore needed -- 7x7 fixtures.
+% =====================================================================
+
+
+% ====================================================================
+% Section 0: inlined hex-distance (allocation-free; from 0.6E)
+% ====================================================================
+
+/hex-distance {|p1 p2|#+8
+    /q1  p1 0 get /integer-type cast  local-def
+    /r1  p1 1 get /integer-type cast  local-def
+    /q2  p2 0 get /integer-type cast  local-def
+    /r2  p2 1 get /integer-type cast  local-def
+    /z1  $[ r1 - (q1 - (q1 % 2)) / 2 ]  local-def
+    /z2  $[ r2 - (q2 - (q2 % 2)) / 2 ]  local-def
+    /dx  $[ abs(q1 - q2) ]  local-def
+    /dz  $[ abs(z1 - z2) ]  local-def
+    $[ (dx + dz + abs(q1 + z1 - q2 - z2)) / 2 ]
+} def
+
+
+% ====================================================================
+% Section 1: terrain + movement-class tables (locked from section 4)
+% ====================================================================
+
+% Terrain encoding (Integer for fast Array<Integer> indexing in state)
+/T-PLAIN     0 def
+/T-ROAD      1 def
+/T-FOREST    2 def
+/T-MOUNTAIN  3 def
+/T-RIVER     4 def
+/T-BRIDGE    5 def
+/T-SEA       6 def
+/T-REEF      7 def
+/T-BEACH     8 def
+
+% Movement class encoding
+/M-FOOT   0 def
+/M-WHEEL  1 def
+/M-TREAD  2 def
+/M-AIR    3 def
+/M-SEA    4 def
+
+% Sentinel for impassable
+/IMPASSABLE 99 def
+
+% Move-cost matrix [terrain x movement-class].  -1 for impassable;
+% column order: foot wheel tread air sea.  Mirrors section 4 table:
+%
+%   Plain      1 / 2 / 1 / 1 / —
+%   Road       1 / 1 / 1 / 1 / —
+%   Forest     1 / 3 / 2 / 1 / —
+%   Mountain   2 inf-only / — / — / 1 / —
+%   River      2 inf-only / — / — / 1 / —
+%   Bridge     1 / 1 / 1 / 1 / —
+%   Sea        — / — / — / 1 / 1
+%   Reef       — / — / — / 1 / 2
+%   Beach      1 / 2 / 1 / 1 / 1
+%
+% Stored as flat Array<Integer> of length 9*5 = 45; indexed by
+% terrain*5 + movement-class.
+
+/move-cost-table [
+    1  2  1  1  IMPASSABLE       % Plain
+    1  1  1  1  IMPASSABLE       % Road
+    1  3  2  1  IMPASSABLE       % Forest
+    2  IMPASSABLE  IMPASSABLE  1  IMPASSABLE   % Mountain (inf only)
+    2  IMPASSABLE  IMPASSABLE  1  IMPASSABLE   % River    (inf only)
+    1  1  1  1  IMPASSABLE       % Bridge
+    IMPASSABLE  IMPASSABLE  IMPASSABLE  1  1   % Sea
+    IMPASSABLE  IMPASSABLE  IMPASSABLE  1  2   % Reef
+    1  2  1  1  1                % Beach
+] def
+
+% Per section 6 unit class -> movement-class mapping
+/movement-class-for-unit-class <<
+    /infantry     M-FOOT
+    /mech         M-FOOT
+    /recon        M-WHEEL
+    /apc          M-WHEEL
+    /tank         M-TREAD
+    /heavy-tank   M-TREAD
+    /anti-air     M-WHEEL
+    /artillery    M-WHEEL
+    /rocket       M-WHEEL
+    /fighter      M-AIR
+    /bomber       M-AIR
+    /battle-copter M-AIR
+    /lander       M-SEA
+    /destroyer    M-SEA
+    /submarine    M-SEA
+    /battleship   M-SEA
+    /carrier      M-SEA
+>>#r def
+
+% Per section 6 move budget per unit class
+/move-for-unit-class <<
+    /infantry    3
+    /mech        2
+    /recon       8
+    /apc         6
+    /tank        6
+    /heavy-tank  5
+    /anti-air    6
+    /artillery   5
+    /rocket      5
+    /fighter     9
+    /bomber      7
+    /battle-copter 6
+    /lander      6
+    /destroyer   8
+    /submarine   5
+    /battleship  5
+    /carrier     5
+>>#r def
+
+
+% ====================================================================
+% Section 2: terrain-move-cost
+% ====================================================================
+%
+% terrain unit-class -- cost
+%   returns cost (1..3) for legal entry, or IMPASSABLE for impassable.
+
+/terrain-move-cost {|terrain klass|#+2
+    /mc   movement-class-for-unit-class klass get  local-def
+    /idx  $[ terrain * 5 + mc ]  local-def
+    move-cost-table idx get
+} def
+
+
+% ====================================================================
+% Section 3: state fixture
+% ====================================================================
+%
+% state Dict layout (much smaller than 0.6D/E since fixtures are 7x7):
+%   /w           Integer width
+%   /h           Integer height
+%   /terrain     Array<Integer> length w*h
+%   /enemy-pos   Set of pos-idx where enemies stand
+%
+% Pos encoded as Integer linear idx (q*h + r).  Conversion helpers below.
+
+% q r h -- idx     (Integer)
+/qr-to-idx {|q r h|
+    $[ q * h + r ]
+} def
+
+% idx h -- q r
+/idx-to-qr {|idx h|
+    $[ idx / h ]  $[ idx % h ]
+} def
+
+% idx h -- [q r]     (UInteger pos array; hex-distance signature wants this)
+/idx-to-pos {|idx h|#+2
+    /q  $[ idx / h ]  local-def
+    /r  $[ idx % h ]  local-def
+    [ q /uinteger-type cast  r /uinteger-type cast ]
+} def
+
+% w h -- state    Plain map, no enemies
+/make-plain-state {|w h|#+5
+    /st       8 dict  local-def
+    /cells    $[ w * h ]  local-def
+    /terrain  cells array  local-def
+    /enemies  16 set  local-def
+    0 1 $[ cells - 1 ] {|i|
+        terrain i T-PLAIN put
+    } for
+    st /w w put
+    st /h h put
+    st /terrain terrain put
+    st /enemy-pos enemies put
+    st
+} def
+
+% state q r tt --     overwrite terrain at one cell
+/set-terrain {|st q r tt|#+2
+    /h    st /h get  local-def
+    /idx  q r h qr-to-idx  local-def
+    st /terrain get idx tt put
+} def
+
+% state q r --     mark cell as enemy-occupied
+/add-enemy {|st q r|#+2
+    /h    st /h get  local-def
+    /idx  q r h qr-to-idx  local-def
+    st /enemy-pos get idx set-add pop
+} def
+
+% Tutorial-style 6-direction neighbor enumeration per section 3.2.
+% Returns up to 6 Integer-idx neighbors of (qi, ri) on a (w, h) grid.
+% Adapted from 0.6A pos-neighbors but operates on Integer idx + writes
+% into a caller-supplied buffer to avoid per-call Array alloc.
+% qi ri w h buf -- count
+/idx-neighbors {|qi ri w h buf|#+5
+    /n     0  local-def
+    /odd   $[ qi % 2 ]  local-def   % 0 or 1
+
+    % --- N: (q, r-1) ---
+    ri 1 ge {
+        buf n  qi  $[ ri - 1 ]  h  qr-to-idx  put
+        /n n 1 add  store
+    } if
+
+    % --- W column (q-1) ---
+    qi 1 ge {
+        odd 0 eq {
+            % even-q: NW (q-1, r-1) ; SW (q-1, r)
+            ri 1 ge {
+                buf n  $[ qi - 1 ] $[ ri - 1 ] h qr-to-idx  put
+                /n n 1 add  store
+            } if
+            buf n  $[ qi - 1 ] ri h qr-to-idx  put
+            /n n 1 add  store
+        } {
+            % odd-q: NW (q-1, r) ; SW (q-1, r+1)
+            buf n  $[ qi - 1 ] ri h qr-to-idx  put
+            /n n 1 add  store
+            $[ ri + 1 ] h lt {
+                buf n  $[ qi - 1 ] $[ ri + 1 ] h qr-to-idx  put
+                /n n 1 add  store
+            } if
+        } if-else
+    } if
+
+    % --- E column (q+1) ---
+    $[ qi + 1 ] w lt {
+        odd 0 eq {
+            % NE (q+1, r-1) ; SE (q+1, r)
+            ri 1 ge {
+                buf n  $[ qi + 1 ] $[ ri - 1 ] h qr-to-idx  put
+                /n n 1 add  store
+            } if
+            buf n  $[ qi + 1 ] ri h qr-to-idx  put
+            /n n 1 add  store
+        } {
+            % NE (q+1, r) ; SE (q+1, r+1)
+            buf n  $[ qi + 1 ] ri h qr-to-idx  put
+            /n n 1 add  store
+            $[ ri + 1 ] h lt {
+                buf n  $[ qi + 1 ] $[ ri + 1 ] h qr-to-idx  put
+                /n n 1 add  store
+            } if
+        } if-else
+    } if
+
+    % --- S: (q, r+1) ---
+    $[ ri + 1 ] h lt {
+        buf n  qi  $[ ri + 1 ]  h  qr-to-idx  put
+        /n n 1 add  store
+    } if
+
+    n
+} def
+
+
+% ====================================================================
+% Section 4: ZOC check
+% ====================================================================
+%
+% A pos-idx is "in ZOC" if any of its 6 hex-neighbors contains an enemy
+% AND the moving unit's movement-class is not /air per section 7.9
+% (air ignores ZOC).  Sub-naval interactions are out of scope for this
+% proto stub (Phase 8 fog state needed).
+%
+% qi ri w h enemies mc -- bool
+/in-zoc? {|qi ri w h enemies mc|#+4
+    mc M-AIR eq {
+        false
+    } {
+        /buf  8 array  local-def
+        /n    qi ri w h buf idx-neighbors  local-def
+        /hit  false  local-def
+        0 1 $[ n - 1 ] {|j|
+            hit not {
+                enemies (buf j get) set-member? { /hit true store } if
+            } if
+        } for
+        hit
+    } if-else
+} def
+
+
+% ====================================================================
+% Section 5: move-reachable-hexes
+% ====================================================================
+%
+% Implements modified-BFS.  We use a work queue (Array of [pos-idx
+% remaining-move]) and a "best remaining seen at idx" Array<Integer>
+% sized w*h, initialised to -1 (never seen).  Re-visit a hex when we
+% arrive with strictly more remaining-move than before.  ZOC halts
+% expansion from the entered hex (except the starting hex).
+%
+% unit state -- visible-set (Set of pos-idx Integers)
+/move-reachable-hexes {|unit state|#+25
+    /w        state /w get  local-def
+    /h        state /h get  local-def
+    /terrain  state /terrain get  local-def
+    /enemies  state /enemy-pos get  local-def
+    /klass    unit /class get  local-def
+    /mc       movement-class-for-unit-class klass get  local-def
+    /move     move-for-unit-class klass get  local-def
+    /upos     unit /pos get  local-def
+    /uq       upos 0 get /integer-type cast  local-def
+    /ur       upos 1 get /integer-type cast  local-def
+    /start    uq ur h qr-to-idx /integer-type cast  local-def
+    /cells    $[ w * h ] /integer-type cast  local-def
+
+    % best-rem[idx] = highest remaining-move seen entering idx, or -1 if unseen
+    /best-rem  cells array  local-def
+    0 1 $[ cells - 1 ] {|i|
+        best-rem i -1 put
+    } for
+    best-rem start move put
+
+    % work queue: each entry is [idx rem]
+    /queue  512 array  local-def
+    /qn     1  local-def
+    queue 0 [ start move ] put
+
+    /nbuf  8 array  local-def
+
+    { qn 0 gt } {
+        % pop tail (LIFO; cheap)
+        /qn $[ qn - 1 ] store
+        /entry  queue qn get  local-def
+        /pos    entry 0 get  local-def
+        /rem    entry 1 get  local-def
+
+        % If this hex is in ZOC AND it's not the start, don't expand
+        /zoc-halt false local-def
+        pos start ne {
+            /q  $[ pos / h ]  local-def
+            /r  $[ pos % h ]  local-def
+            q r w h enemies mc in-zoc? {
+                /zoc-halt true store
+            } if
+        } if
+
+        zoc-halt not {
+            /q  $[ pos / h ]  local-def
+            /r  $[ pos % h ]  local-def
+            /nn  q r w h nbuf idx-neighbors  local-def
+            0 1 $[ nn - 1 ] {|j|#+5
+                /npos   nbuf j get  local-def
+                /nterr  terrain npos get  local-def
+                /ncost  nterr klass terrain-move-cost  local-def
+                ncost IMPASSABLE ne {
+                    rem ncost ge {
+                        /nrem  $[ rem - ncost ]  local-def
+                        % Enemies can't be ENTERED -- they occupy hex
+                        enemies npos set-member? not {
+                            best-rem npos get nrem lt {
+                                best-rem npos nrem put
+                                queue qn [ npos nrem ] put
+                                /qn $[ qn + 1 ] store
+                            } if
+                        } if
+                    } if
+                } if
+            } for
+        } if
+    } while
+
+    % Build result set from best-rem entries that are >= 0
+    /result  64 set  local-def
+    0 1 $[ cells - 1 ] {|i|
+        best-rem i get -1 ne {
+            result i set-add pop
+        } if
+    } for
+    result
+} def
+
+
+% ====================================================================
+% Section 6: indirect-range-ok? (section 7.7)
+% ====================================================================
+
+/indirect-range-ok? {|apos tpos rmin rmax|#+1
+    /d  apos tpos hex-distance  local-def
+    d rmin ge  d rmax le  and
+} def
+
+
+% ====================================================================
+% Section 7: assertion helpers
+% ====================================================================
+
+/test-count 0 def
+/fail-count 0 def
+
+% cond label --
+/check {|cond lbl|
+    /test-count $[ test-count + 1 ]  store
+    cond {
+        (  PASS  {0}\n) mark lbl print-fmt pop pop
+    } {
+        (  FAIL  {0}\n) mark lbl print-fmt pop pop
+        /fail-count $[ fail-count + 1 ] store
+    } if-else
+} def
+
+
+% ====================================================================
+% Section 8: tests
+% ====================================================================
+
+(proto-pathfind: Phase 0.6G -- move-reachable-hexes + indirect range\n\n) print
+
+% ----- Test A: clear plain Tank at center reaches every hex within move ---
+(\n[A] clear 7x7 plain, Tank at [3,3] move=6 -- expect all 49 cells reachable\n) print
+/sA  7 7 make-plain-state  def
+/uA  << /class /tank  /pos [ 3u 3u ] >>  def
+/setA  uA sA move-reachable-hexes  def
+% Max hex-distance from [3,3] in a 7x7 grid: corners.  [0,0]-[3,3] = ?
+% Should be <= 6 for sure; check size.
+setA length 49 eq  (reachable set covers all 49 cells)  check
+setA  3 3 7 qr-to-idx  set-member?  (start [3,3] in reachable set)  check
+
+% ----- Test B: ZOC halts a 5-move Tank IN A CORRIDOR ---
+% A "corridor" map with mountains everywhere except row 3 forces a
+% single-path traversal, isolating ZOC's "halt and forfeit remaining
+% move" behavior from "detour around" effects.  Without the corridor,
+% an isolated enemy in the middle of a plain map can be detoured --
+% ZOC blocks only DIRECT-traversal paths.
+(\n[B] corridor map, Tank at [0,3] move=6, enemy at [3,3] -- expect ZOC halt blocks east-of-enemy\n) print
+/sB  7 7 make-plain-state  def
+% Mountain wall: all of rows 0-2 and 4-6.  Only row 3 is plain.
+0 1 6 {|qi|
+    sB qi 0 T-MOUNTAIN set-terrain
+    sB qi 1 T-MOUNTAIN set-terrain
+    sB qi 2 T-MOUNTAIN set-terrain
+    sB qi 4 T-MOUNTAIN set-terrain
+    sB qi 5 T-MOUNTAIN set-terrain
+    sB qi 6 T-MOUNTAIN set-terrain
+} for
+sB 3 3 add-enemy
+/uB  << /class /tank  /pos [ 0u 3u ] >>  def
+/setB  uB sB move-reachable-hexes  def
+% Tank enters [2,3] (adjacent to enemy at [3,3]), halts.
+% [3,3] is enemy -- not reachable (enemies block entry).
+% [4,3], [5,3], [6,3] would need to traverse [3,3] or use a detour,
+% but mountains block all off-corridor paths.
+setB  4 3 7 qr-to-idx  set-member?  not  ([4,3] NOT reachable: ZOC + mountain walls)  check
+setB  5 3 7 qr-to-idx  set-member?  not  ([5,3] NOT reachable: blocked beyond ZOC)  check
+setB  3 3 7 qr-to-idx  set-member?  not  ([3,3] enemy hex NOT reachable)  check
+setB  2 3 7 qr-to-idx  set-member?       ([2,3] adjacent-to-enemy IS reachable -- halt-hex)  check
+
+% ----- Test C: Mountain blocks Tank (impassable for tread) ---
+(\n[C] 7x7 plain with Mountain at [4,3], Tank at [3,3] -- expect [4,3] NOT reachable\n) print
+/sC  7 7 make-plain-state  def
+sC 4 3 T-MOUNTAIN set-terrain
+/uC  << /class /tank  /pos [ 3u 3u ] >>  def
+/setC  uC sC move-reachable-hexes  def
+setC  4 3 7 qr-to-idx  set-member?  not  (Mountain [4,3] blocks Tank)  check
+% But other adjacent hexes should still be reachable
+setC  3 4 7 qr-to-idx  set-member?       ([3,4] still reachable)  check
+
+% ----- Test D: Indirect range bracket ---
+(\n[D] indirect-range-ok? for Artillery 2-3 and Rocket 3-5\n) print
+% Pick two distant positions on a fictional map for distance testing
+% Distance [3,3]->[3,3] = 0  -> out of range (Artillery 2-3)
+% Distance [3,3]->[4,3] = 1  -> out of range
+% Distance [3,3]->[5,3] = 2  -> in range
+% Distance [3,3]->[6,3] = 3  -> in range
+% Distance [3,3]->[7,3] = 4  -> out of range (Artillery 2-3)
+[ 3u 3u ] [ 3u 3u ] 2 3 indirect-range-ok? not  (Artillery 0-dist out of range)  check
+[ 3u 3u ] [ 4u 3u ] 2 3 indirect-range-ok? not  (Artillery 1-dist out of range)  check
+[ 3u 3u ] [ 5u 3u ] 2 3 indirect-range-ok?      (Artillery 2-dist in range)  check
+[ 3u 3u ] [ 6u 3u ] 2 3 indirect-range-ok?      (Artillery 3-dist in range)  check
+[ 3u 3u ] [ 7u 3u ] 2 3 indirect-range-ok? not  (Artillery 4-dist out of range)  check
+% Rocket 3-5: 2 out, 3 in, 5 in, 6 out
+[ 3u 3u ] [ 5u 3u ] 3 5 indirect-range-ok? not  (Rocket 2-dist out of range)  check
+[ 3u 3u ] [ 6u 3u ] 3 5 indirect-range-ok?      (Rocket 3-dist in range)  check
+[ 3u 3u ] [ 8u 3u ] 3 5 indirect-range-ok?      (Rocket 5-dist in range)  check
+[ 3u 3u ] [ 9u 3u ] 3 5 indirect-range-ok? not  (Rocket 6-dist out of range)  check
+
+% ----- Test E: Recon halts after 1 hex into adjacent enemy (section 7.9 Phase 5 invariant) ---
+(\n[E] section 7.9 Phase 5 invariant: Recon enters adjacent-to-enemy hex, halts\n) print
+% Same corridor-map shape as test B to isolate the ZOC-halt-then-forfeit
+% behavior from "Recon detours around isolated enemy".
+/sE  7 7 make-plain-state  def
+0 1 6 {|qi|
+    sE qi 0 T-MOUNTAIN set-terrain
+    sE qi 1 T-MOUNTAIN set-terrain
+    sE qi 2 T-MOUNTAIN set-terrain
+    sE qi 4 T-MOUNTAIN set-terrain
+    sE qi 5 T-MOUNTAIN set-terrain
+    sE qi 6 T-MOUNTAIN set-terrain
+} for
+sE 3 3 add-enemy
+/uE  << /class /recon  /pos [ 1u 3u ] >>  def
+/setE  uE sE move-reachable-hexes  def
+% Recon has move 8.  From [1,3] in the corridor: enters [2,3] (adjacent
+% to enemy at [3,3]), halts.  Without ZOC Recon could reach the east
+% end of the corridor (8 cells of move budget).  With ZOC + mountain
+% walls blocking detour, [4,3] is NOT reachable.
+setE  2 3 7 qr-to-idx  set-member?       (Recon enters [2,3] and halts)  check
+setE  4 3 7 qr-to-idx  set-member?  not  (Recon does NOT pass through ZOC to [4,3])  check
+setE  6 3 7 qr-to-idx  set-member?  not  (Recon's 8-move budget forfeit at halt)  check
+
+
+% ----- summary -----
+(\n--- proto-pathfind summary ---\n) print
+({0} tests run; {1} failed\n) mark test-count fail-count print-fmt pop pop
+fail-count 0 ne {
+    /proto-pathfind-fail throw
+} if
+(proto-pathfind: ALL TESTS PASSED\n) print

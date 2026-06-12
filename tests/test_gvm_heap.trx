@@ -1,0 +1,371 @@
+% ====================================================================
+% test_gvm_heap.trx -- Phase 3a global-VM block headers + introspection
+% ====================================================================
+% Phase 3a wraps every global-VM allocation (Names interned via
+% `set-global true`, $/foo/$\foo, ${...}, <lit>#$) in an 8-byte
+% GvmBlock header tagged with a ChunkKind.  The new `vm-global-info`
+% op walks the global region and reports per-kind counts and sizes.
+%
+% This file exercises the new surface end-to-end:
+%   - the empty global region returns a well-formed dict;
+%   - allocations of each kind (Name, Dict, Set, Array, String) land
+%     in the expected /by-kind bucket;
+%   - the per-block header overhead is exactly 8 bytes;
+%   - vm-global-used == /total-bytes (header + payload + padding);
+%   - the introspection result is build-without-disturbing-the-walk
+%     (calling vm-global-info doesn't perturb its own output).
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: baseline global region -- well-formed histogram
+%
+% VM Redux Phase 5 added the main coroutine context + its operand /
+% execution / error / dict stack block + initial binding cache to
+% global VM at startup, so the baseline is non-zero.  We assert
+% well-formedness (positive counts, payload + header == total) rather
+% than emptiness.
+%
+% Post main-context-local (2026-05-09): main coroutine is now allocated
+% in LOCAL VM, so a fresh program has an EMPTY global region.  Pre-warm
+% with a sample global Dict to populate the heap before measuring.
+% That triggers the lazy GC scratch allocation too.
+% ====================================================================
+
+${ 8 dict } /pre-warm-dict exch def
+
+vm-global-info /info1 exch def
+
+info1 /total-blocks  get  0 gt              (s1: baseline: total-blocks > 0) rt-ok
+info1 /total-bytes   get  0 gt              (s1: baseline: total-bytes  > 0) rt-ok
+info1 /payload-bytes get  0 gt              (s1: baseline: payload-bytes > 0) rt-ok
+info1 /header-bytes  get  0 gt              (s1: baseline: header-bytes > 0) rt-ok
+% header + payload + padding + tail tag == total
+info1 /live-bytes get info1 /total-bytes get eq  (s1: baseline: live-bytes == total-bytes -- no free blocks at startup) rt-ok
+
+info1 /by-kind get /bk1 exch def
+% Schema covers the full Trix Object-type taxonomy that could
+% land in global VM via a future migration -- not just the kinds
+% that have a gvm_alloc caller in Phase 3a.  See ChunkKind enum
+% in src/gvm_heap.inl for the full list.
+bk1 length 31 eq                            (s1: by-kind has 31 entries) rt-ok
+
+% Phase 3a active kinds -- still 0 at baseline (the script hasn't
+% allocated any user-facing globals yet).  Coroutine / BindingBucket /
+% BindingEntry are non-zero because Phase 5 placed the main
+% coroutine + binding cache in global VM at startup.
+bk1 /other  get /count get 0 eq             (s1: other  count = 0)       rt-ok
+bk1 /name   get /count get 0 eq             (s1: name   count = 0)       rt-ok
+% (dict count = 1 from the pre-warm; asserted above)
+bk1 /set    get /count get 0 eq             (s1: set    count = 0)       rt-ok
+bk1 /array  get /count get 0 eq             (s1: array  count = 0)       rt-ok
+bk1 /string get /count get 0 eq             (s1: string count = 0)       rt-ok
+
+% Reserved-for-future kinds -- no caller today, count must be 0.
+% Spot-check one from each group (numeric / composite / control /
+% concurrency / handle) to confirm the schema is well-formed.
+bk1 /long       get /count get 0 eq         (s1: long       count = 0)   rt-ok
+bk1 /int128     get /count get 0 eq         (s1: int128     count = 0)   rt-ok
+bk1 /packed     get /count get 1 eq         (s1: packed     count = 1 -- the ${...} pre-warm body proc) rt-ok
+bk1 /stream     get /count get 0 eq         (s1: stream     count = 0)   rt-ok
+bk1 /thunk      get /count get 0 eq         (s1: thunk      count = 0)   rt-ok
+bk1 /pipebuffer get /count get 0 eq         (s1: pipebuffer count = 0)   rt-ok
+bk1 /screen     get /count get 0 eq         (s1: screen     count = 0)   rt-ok
+
+% VM Redux Phase 5 active kinds.  Main coroutine + stacks always
+% resident.  Binding cache is lazy-allocated on first spawn (single-
+% coroutine mode uses the Name::m_binding fast path instead), so the
+% bindingbucket / bindingentry slots stay at 0 in this no-spawn test.
+bk1 /coroutinecontext get /count get 0 eq   (s1: coroutinecontext count = 0 -- main is local-VM (post 2026-05-09)) rt-ok
+bk1 /coroutinestacks  get /count get 0 eq   (s1: coroutinestacks  count = 0 -- main uses Trix member vars; stacks block lazy-allocated on first spawn) rt-ok
+bk1 /gcscratch        get /count get 1 eq   (s1: gcscratch count = 1 -- pre-warmed by ${ 8 dict }) rt-ok
+bk1 /dict             get /count get 1 eq   (s1: dict count = 1 -- the pre-warm dict) rt-ok
+bk1 /bindingbucket    get /count get 0 eq   (s1: bindingbucket count = 0 -- single-coroutine mode skips per-ctx cache) rt-ok
+bk1 /bindingentry     get /count get 0 eq   (s1: bindingentry  count = 0 -- ditto) rt-ok
+
+% ====================================================================
+% SECTION 2: per-block overhead is 20 bytes (16 header + 4 tail tag)
+% ====================================================================
+% Allocate a known-size global string via #$; verify the block layout:
+% 16-byte header (m_size + m_kind + m_mark_gen + m_obj_count +
+% m_next_in_work + m_magic), payload area (>= 8 to host free-list links
+% if freed), 4-byte tail tag, all rounded up to the 8-byte block alignment.
+
+% Capture baseline before the new allocation; assert deltas afterward
+% (the global region is non-empty at startup -- main coroutine resident).
+vm-global-info /pre2 exch def
+
+(hello)#$ /h2 exch def
+
+vm-global-info /info2 exch def
+info2 /total-blocks  get pre2 /total-blocks  get sub 1 eq  (s2: +1 block after one #$)       rt-ok
+info2 /live-blocks   get pre2 /live-blocks   get sub 1 eq  (s2: live-blocks delta = 1)       rt-ok
+info2 /free-blocks   get pre2 /free-blocks   get eq        (s2: free-blocks unchanged)       rt-ok
+info2 /header-bytes  get pre2 /header-bytes  get sub 20 eq (s2: 1 block overhead = 20 bytes) rt-ok
+
+% String "(hello)" is 5 bytes + 1 nul byte = 6 bytes user payload.
+% Block = 16 header + max(6, 8) payload area + 4 tail tag = 28, rounded
+% to 32 (BlockAlignment = 8).  Reported payload-bytes = 32 - 16 - 4 = 12
+% (the usable payload region; user wrote 6 bytes, rest is slack).
+info2 /total-bytes   get pre2 /total-bytes   get sub 32 eq  (s2: total-bytes delta = 32)     rt-ok
+info2 /payload-bytes get pre2 /payload-bytes get sub 12 eq  (s2: payload region delta = 12)  rt-ok
+
+info2 /by-kind get /string get /count       get
+pre2 /by-kind get /string get /count       get sub 1 eq  (s2: string count delta = 1)        rt-ok
+info2 /by-kind get /string get /total-bytes get
+pre2 /by-kind get /string get /total-bytes get sub 32 eq (s2: string total-bytes delta = 32) rt-ok
+
+% ====================================================================
+% SECTION 3: each kind lands in the expected bucket
+% ====================================================================
+% Allocate one of each kind via the RUNTIME path.  Pre-intern every
+% literal Name that will appear inside the set-global true window
+% LOCALLY first -- otherwise scan-time interleaving would intern
+% them globally and pollute the /name count.  See feedback note in
+% reference_global_name_keys.md.
+
+% Pre-intern (locally) every literal name used inside set-global below.
+/tmp-d3 null def
+/tmp-s3 null def
+/tmp-a3 null def
+/tmp-st3 null def
+
+vm-global-info /pre exch def
+
+true set-global
+(s3-runtime-name) to-name pop                  % Name  -- to-name interns at runtime
+8 dict /tmp-d3 exch def                        % Dict
+8 set  /tmp-s3 exch def                        % Set
+8 array /tmp-a3 exch def                       % Array
+8 string /tmp-st3 exch def                     % String
+false set-global
+
+vm-global-info /post exch def
+
+% Each kind's count should have grown by exactly 1.
+post /by-kind get /name   get /count get
+pre  /by-kind get /name   get /count get sub 1 eq    (s3: name  +1)   rt-ok
+
+post /by-kind get /dict   get /count get
+pre  /by-kind get /dict   get /count get sub 1 eq    (s3: dict  +1)   rt-ok
+
+post /by-kind get /set    get /count get
+pre  /by-kind get /set    get /count get sub 1 eq    (s3: set   +1)   rt-ok
+
+post /by-kind get /array  get /count get
+pre  /by-kind get /array  get /count get sub 1 eq    (s3: array +1)   rt-ok
+
+post /by-kind get /string get /count get
+pre  /by-kind get /string get /count get sub 1 eq    (s3: string +1)  rt-ok
+
+% Other should remain at 0 -- nothing in Phase 3a tags as Other.
+post /by-kind get /other  get /count get 0 eq        (s3: other == 0) rt-ok
+
+% Total blocks should be at least 5 more than pre.
+post /total-blocks get pre /total-blocks get sub 5 ge   (s3: total-blocks >= +5) rt-ok
+
+% ====================================================================
+% SECTION 4: header invariant -- LIVE blocks contribute exactly 20 bytes
+% of overhead each (16-byte GvmBlock header + 4-byte tail tag).
+% ====================================================================
+
+vm-global-info /info4 exch def
+
+% header-bytes = (live-bytes - payload-bytes) which is exactly the
+% per-live-block overhead (header + tail tag = 20 bytes per block).
+info4 /header-bytes get
+info4 /live-blocks get 20 mul eq            (s4: header-bytes == 20 * live-blocks)  rt-ok
+
+% live-bytes - payload-bytes >= 20 * live-blocks (any extra is alignment
+% padding, which here is bundled into the reported payload region).
+info4 /live-bytes get info4 /payload-bytes get sub
+info4 /live-blocks get 20 mul ge            (s4: live-bytes - payload-bytes >= 20 * live-blocks) rt-ok
+
+% ====================================================================
+% SECTION 5: total-bytes matches //:status:vm-global-used
+% ====================================================================
+
+vm-global-info /info5 exch def
+info5 /total-bytes get //:status:vm-global-used eq  (s5: total-bytes == :status:vm-global-used) rt-ok
+
+% ====================================================================
+% SECTION 6: idempotence under the walk -- two back-to-back calls
+% report identical totals (vm-global-info builds its result locally,
+% so the walk should not perturb its own input).
+% ====================================================================
+
+vm-global-info /a6 exch def
+vm-global-info /b6 exch def
+
+a6 /total-blocks  get b6 /total-blocks  get eq      (s6: total-blocks stable)  rt-ok
+a6 /total-bytes   get b6 /total-bytes   get eq      (s6: total-bytes stable)   rt-ok
+a6 /payload-bytes get b6 /payload-bytes get eq      (s6: payload-bytes stable) rt-ok
+
+% ====================================================================
+% SECTION 7: runtime to-name with set-global true increments /name
+% ====================================================================
+% Tests the global Name path through the runtime intern op.  Two
+% fresh strings are interned globally; /name count should grow by 2.
+
+vm-global-info /pre7 exch def
+
+true set-global
+(s7-runtime-name-alpha) to-name pop
+(s7-runtime-name-beta)  to-name pop
+false set-global
+
+vm-global-info /post7 exch def
+
+post7 /by-kind get /name get /count get
+pre7  /by-kind get /name get /count get sub 2 eq    (s7: name +2 from to-name) rt-ok
+
+% ====================================================================
+% SECTION 8: <lit>#$ container suffix routes by literal kind
+% ====================================================================
+
+vm-global-info /pre8 exch def
+
+[1 2 3]#$    /a8 exch def        % Array suffix
+<<1 2>>#$    /d8 exch def        % Dict suffix
+{{1 2 3}}#$  /s8 exch def        % Set suffix
+(payload)#$  /st8 exch def       % String suffix
+
+vm-global-info /post8 exch def
+
+post8 /by-kind get /array  get /count get
+pre8  /by-kind get /array  get /count get sub 1 eq   (s8: [..]#$  -> array  +1)  rt-ok
+
+post8 /by-kind get /dict   get /count get
+pre8  /by-kind get /dict   get /count get sub 1 eq   (s8: <<>>#$ -> dict   +1)  rt-ok
+
+post8 /by-kind get /set    get /count get
+pre8  /by-kind get /set    get /count get sub 1 eq   (s8: {{}}#$ -> set    +1)  rt-ok
+
+post8 /by-kind get /string get /count get
+pre8  /by-kind get /string get /count get sub 1 eq   (s8: (..)#$ -> string +1)  rt-ok
+
+% ====================================================================
+% SECTION 9: GvmMagic four-way validation isn't fooled by user data
+% ====================================================================
+% GvmMagic (0xDEADC0DE) sits at offset +12 of every live GvmBlock
+% header.  Its four bytes were chosen so all are >= 0x80 -- they
+% cannot collide with 7-bit ASCII string content.  But the 0x80-0xFF
+% range IS Trix's binary-token vocabulary, and user-controlled data
+% (hex strings, byte arrays, packed proc bodies) CAN contain
+% 0xDEADC0DE byte sequences at arbitrary positions.
+%
+% The walker (gvm_find_owning_payload, src/gvm_heap.inl) is
+% nevertheless safe because the magic is only ONE of four
+% independent validation fields.  A candidate offset is accepted
+% only when:
+%
+%   1. m_kind  matches the expected_kind passed by the caller.
+%   2. m_size  is positive, 8-aligned, and within the heap.
+%   3. m_magic equals 0xDEADC0DE.
+%   4. The 4 bytes at (candidate + m_size - 4) equal m_size
+%      (the tail-tag invariant).
+%
+% Combined false-positive odds: roughly
+%   (1/256) * (1/2^32) * (1/2^32) ~= 5e-23.
+% Essentially impossible even when user data fully controls bytes
+% at the candidate header position.
+%
+% This section is a regression guard against any future change that
+% would weaken the four-way claim (e.g. removing the tail-tag check
+% as "redundant" or relaxing the kind match).  Construct user data
+% that EMBEDS 0xDEADC0DE sequences in global-VM blocks, then run
+% vm-global-gc -- which walks every block and triggers
+% gvm_find_owning_payload for partially-consumed Packed/String
+% containers.  Verify both the adversarial data and the legit
+% blocks remain intact.
+
+% Build adversarial global-VM payloads containing 0xDEADC0DE bytes
+% at known positions inside the user payload region.  Use hex
+% strings so the exact bytes are predictable.
+<DEADC0DEDEADC0DEDEADC0DEDEADC0DEDEADC0DEDEADC0DEDEADC0DEDEADC0DE>#$ /s9-adversarial exch def
+<DEADC0DE00000000DEADC0DE00000000DEADC0DE00000000>#$ /s9-spread exch def
+
+% Simulate a full fake-header pattern.  Layout (little-endian):
+%   0C 00 00 00  -- m_kind (Packed=12) + padding
+%   40 00 00 00  -- m_size (64)
+%   00 00 00 00  -- m_obj_count placeholder
+%   DE AD C0 DE  -- m_magic
+%   (48 bytes payload + 4-byte tail tag 40 00 00 00 at the end)
+% Total length 64 bytes.  If a Packed walker happened to back-scan
+% from a pointer inside this string AND the kind+size+tail-tag all
+% lined up at exactly the right 8-aligned offset, this is what
+% would fool a single-field check.  The four-way validation makes
+% it harmless.
+<0C0000004000000000000000DEADC0DE00000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000040000000>#$ /s9-fake-header exch def
+
+% Build legit global-VM blocks of every kind so the walker has real
+% work to do during the GC pass.
+${ /s9-good-dict 4 dict def } clear
+${ /s9-good-arr [ 1 2 3 4 5 ] def } clear
+${ /s9-good-str (legitimate string content) def } clear
+${ /s9-good-set {{ /alpha /beta /gamma }} def } clear
+
+% Build a #$ packed proc with a non-trivial body so GC's Packed
+% walker has bytes to traverse.
+${ /s9-good-proc { 1 2 add 3 mul 4 sub 5 div 6 mod } def } clear
+
+% Fire vm-global-gc explicitly.  Walks every global block, runs
+% kind-specific walkers, and frees unreachable blocks.  If the
+% four-way validation were weakened, fake header bytes inside
+% s9-adversarial / s9-fake-header could fool the back-walker into
+% mis-identifying block boundaries -- producing either heap
+% corruption (sweeping a live block as garbage) or a typed-pointer
+% UAF on the fake "block" payload.
+vm-global-gc pop
+
+% Verify the adversarial data is byte-for-byte intact.  String `get`
+% returns a Byte value, so compare against byte literals.
+s9-adversarial length 32 eq                 (s9: adversarial 32-byte length) rt-ok
+s9-adversarial 0  get 222b eq               (s9: byte 0  = 0xDE) rt-ok
+s9-adversarial 1  get 173b eq               (s9: byte 1  = 0xAD) rt-ok
+s9-adversarial 2  get 192b eq               (s9: byte 2  = 0xC0) rt-ok
+s9-adversarial 3  get 222b eq               (s9: byte 3  = 0xDE) rt-ok
+s9-adversarial 28 get 222b eq               (s9: byte 28 = 0xDE) rt-ok
+s9-adversarial 31 get 222b eq               (s9: byte 31 = 0xDE) rt-ok
+
+s9-spread length 24 eq                      (s9: spread 24-byte length) rt-ok
+s9-spread 0  get 222b eq                    (s9: spread byte 0  = 0xDE) rt-ok
+s9-spread 8  get 222b eq                    (s9: spread byte 8  = 0xDE) rt-ok
+s9-spread 16 get 222b eq                    (s9: spread byte 16 = 0xDE) rt-ok
+
+s9-fake-header length 68 eq                 (s9: fake-header 68-byte length) rt-ok
+s9-fake-header 12 get 222b eq               (s9: fake-header magic byte 0 = 0xDE) rt-ok
+s9-fake-header 13 get 173b eq               (s9: fake-header magic byte 1 = 0xAD) rt-ok
+s9-fake-header 14 get 192b eq               (s9: fake-header magic byte 2 = 0xC0) rt-ok
+s9-fake-header 15 get 222b eq               (s9: fake-header magic byte 3 = 0xDE) rt-ok
+
+% Verify the legit blocks are still callable / readable.
+s9-good-arr  length 5 eq                    (s9: good-arr length intact) rt-ok
+s9-good-arr  2 get 3 eq                     (s9: good-arr content intact) rt-ok
+s9-good-str  length 25 eq                   (s9: good-str length intact) rt-ok
+s9-good-set  /alpha set-member?             (s9: good-set membership intact) rt-ok
+
+% Execute the proc.  Its packed body bytes are walked by GC; if any
+% byte sequence inside got misidentified as a header boundary, the
+% proc would mis-decode or crash.
+s9-good-proc                                % stack: result
+% 1 2 add = 3; 3 3 mul = 9; 9 4 sub = 5; 5 5 div = 1; 1 6 mod = 1
+1 eq                                        (s9: good-proc still executes correctly) rt-ok
+
+% Round-trip: vm-global-info still produces a well-formed
+% histogram after the GC pass over adversarial data.
+vm-global-info /info-after exch def
+info-after /total-bytes get 0 gt            (s9: vm-global-info total-bytes > 0 after GC) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_gvm_heap: ALL TESTS PASSED) =
+(__test_ok__) =

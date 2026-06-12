@@ -1,0 +1,1022 @@
+% ======================================================================
+%  Showcase: Genealogy / rule-based reasoning
+%  ----------------------------------------------------------------------
+%  Recommended invocation:
+%
+%      ./trix --vm-size=2M examples/genealogy.trx              # default family
+%      ./trix --vm-size=2M examples/genealogy.trx --grandpa    # the song's cast
+%
+%  The `--grandpa` flag swaps in the cast of Lonzo & Oscar's 1947
+%  song "I'm My Own Grandpa": narrator marries widow, narrator's
+%  father subsequently marries widow's daughter, step-relation chain
+%  closes into a self-loop.  Section G's classifier announces the
+%  punchline -- "jim their own (step-)grandparent! [Lonzo & Oscar
+%  1947]" -- by matching a `unify-match` arm whose two name slots
+%  share a single `logic-var`, forcing a == b.
+%
+%  Sections A-F fit in the default 1 MB VM.  Section G's classifier
+%  computes `cousins-of` per probe pair, whose nested `flat-map`s
+%  briefly push the working set above ~1.2 MB; the per-pair
+%  `save`/`restore` reclaims it between pairs.  2 MB gives
+%  comfortable headroom for either fact base.
+%
+%  ----------------------------------------------------------------------
+%  A small "family knowledge engine" that demonstrates Trix's Prolog
+%  logic primitives in their natural use cases:
+%
+%      logic-var / unify / deref / bound?     variables and binding
+%      guard / fail                            constraint propagation
+%      choice                                  commit-on-first-success disjunction
+%      find-all / find-n                       multi-solution collection
+%      for-each-solution                       streaming solutions to side effects
+%      aggregate                               folding solutions into a scalar
+%      copy-term                               rule reuse with fresh variables
+%      naf                                     negation-as-failure
+%      unify-match                             pattern dispatch on structure
+%      once                                    single-shot search
+%      def-persist                             cache writes that survive `restore`
+%      `(...)#=` / `[...]#=`                   temporary scratch storage
+%      `|args|#+N` + local-def                 frame-scoped working state
+%
+%  Sister showcase: examples/sudoku.trx exercises logic-var / unify /
+%  guard / choice on a single dense constraint problem.  This script
+%  goes wider -- it covers the rest of the logic surface (recursive
+%  rules, multi-solution queries, negation, aggregation, structural
+%  pattern dispatch) on a knowledge base that humans recognize at a
+%  glance.
+%
+%  ----------------------------------------------------------------------
+%  The fact base is a four-generation fictional family of 14 people:
+%
+%    Generation 1     Arthur --- Beatrix
+%                          \\___/
+%             ___________________|___________________
+%            |                                       |
+%    Generation 2  Charles --- Helena       Diana --- Ian
+%                       \\___/                   \\__/
+%                ________|________            ____|____
+%               |                 |          |         |
+%    Generation 3  Eve --- Kyle  Frank --- Nora  Gareth --- Petra  Heidi
+%                  \\__/         \\___/         \\____/
+%               ____|____           |              |
+%              |         |          |              |
+%    Generation 4  Jack  Lily      Mark         Olivia
+%
+%  --- = spousal pair.   "child of" is straight down through a couple.
+%  Heidi is single (used to exercise the "only-child" / "no-spouse" rules).
+%
+%  ----------------------------------------------------------------------
+%  THE CANONICAL "PREDICATE-AS-ALT-ARRAY" IDIOM
+%
+%  In Prolog, a fact like `parent(arthur, charles).` and a query like
+%  `?- parent(arthur, X).` rely on the engine enumerating fact-base
+%  rows and unifying each row against the query.  Trix's `find-all`
+%  and `choice` operators take an array of alternative procs and try
+%  each in turn, restoring bindings between attempts.  The bridge is
+%  this pattern: build, at query time, an array of curry alternatives
+%  -- one per fact -- where each curry has the fact baked in via
+%  `curry`.  Then hand that array to `find-all` (collect every match)
+%  or `choice` (commit on first match).
+%
+%  Each alt receives its per-call context as a small `[query-vars
+%  fact]` array via `curry`'s captured value.  This sidesteps the
+%  closure trap that would arise if alts referenced the loop variable
+%  by name (`fact` would resolve to the LAST iteration's value when
+%  the alts later run, since `def` writes to a shared scope).
+%
+%  Concretely:
+%
+%      /parent-alts { |pa ch|#+1
+%          parent-facts {
+%              /fact exch local-def
+%              [pa ch fact] { /ctx exch def
+%                             ctx 2 get 0 get  ctx 0 get  unify guard
+%                             ctx 2 get 1 get  ctx 1 get  unify guard
+%                             ${ [ ctx 0 get deref  ctx 1 get deref ] }
+%              } curry
+%          } map
+%      } def
+%
+%  Note the proc preamble `|pa ch|#+1` -- a `|...|` locals frame
+%  with capacity for 2 named args + 1 working slot (`fact`).  Inside
+%  the frame, `local-def` writes to the frame dict; plain `def` walks
+%  past frames into userdict and would clobber any caller's same-named
+%  binding, so this convention keeps each call's working state
+%  isolated and lets predicates recurse safely.
+%
+%  Each alt unifies the fact's two slots with the query's pa/ch lvars
+%  and pushes a single global-VM `${[pa ch]}` pair as the solution
+%  result.  find-all collects an Array of pairs; per-direction queries
+%  project (`{ 0 get } map` for parent side, `{ 1 get } map` for
+%  child side).  Pairs are allocated in the journal-skipped global
+%  region so they survive the per-alternative save/restore cycle.
+%
+%  ======================================================================
+
+% ----------------------------------------------------------------------
+%  SECTION 1: Fact base
+% ----------------------------------------------------------------------
+%
+%  Two relations:
+%      parent(P, C)  -- P is a biological parent of C
+%      spouse(A, B)  -- A and B are married  (symmetric: stored once)
+%
+%  Each fact is a 2-element [name name] array.  Names are interned;
+%  unification on Names is identity comparison.
+% ----------------------------------------------------------------------
+
+% Two fact bases ship with the showcase.  The default models a
+% conventional 4-generation tree with no step-relations.  The
+% `--grandpa` alternative is the cast of Lonzo & Oscar's 1947 song
+% "I'm My Own Grandpa": the narrator marries a widow, his father
+% subsequently marries the widow's daughter, and the resulting
+% step-relation chain makes the narrator literally his own
+% step-grandfather.  Section G's classifier sees this purely from
+% the parent / spouse fact base, with no "step" baked into the data.
+
+/default-parent-facts [
+    [/arthur /charles] [/beatrix /charles]
+    [/arthur /diana]   [/beatrix /diana]
+    [/charles /eve]    [/helena /eve]
+    [/charles /frank]  [/helena /frank]
+    [/diana /gareth]   [/ian /gareth]
+    [/diana /heidi]    [/ian /heidi]
+    [/eve /jack]       [/kyle /jack]
+    [/eve /lily]       [/kyle /lily]
+    [/frank /mark]     [/nora /mark]
+    [/gareth /olivia]  [/petra /olivia]
+] def
+
+/default-spouse-facts [
+    [/arthur /beatrix]
+    [/charles /helena]
+    [/diana /ian]
+    [/eve /kyle]
+    [/frank /nora]
+    [/gareth /petra]
+] def
+
+% Lonzo & Oscar (1947) family.  Cast:
+%   /jim     -- the narrator ("me")
+%   /jane    -- jim's deceased mother (jim's biological mom)
+%   /henry   -- jim's father (still living, remarried)
+%   /betty   -- the widow jim marries
+%   /carl    -- betty's deceased first husband (amy's biological dad)
+%   /amy     -- betty's grown daughter, who marries henry
+%   /tim     -- jim + betty's son
+%   /dan     -- henry + amy's son
+%
+% Bio parent edges and current spouses only -- deceased spouses (jane,
+% carl) appear as parents but not in the spouse facts.  This is enough
+% for `step-parents-of` to pick up the comedic chain: betty's daughter
+% amy is jim's step-daughter (via betty) AND jim's step-mother (via
+% henry), making jim his own step-grandfather through the two-step
+% chain jim -> amy -> jim.
+/grandpa-parent-facts [
+    [/henry /jim]    [/jane /jim]
+    [/carl /amy]     [/betty /amy]
+    [/jim /tim]      [/betty /tim]
+    [/henry /dan]    [/amy /dan]
+] def
+
+/grandpa-spouse-facts [
+    [/jim /betty]
+    [/henry /amy]
+] def
+
+% Detect the `--grandpa` flag and bind /parent-facts and /spouse-facts
+% to the selected fact base.  `command-line-args` returns the script's
+% user-level args (Trix's own --vm-size etc. are consumed before this
+% point).
+/use-grandpa false def
+command-line-args { /arg exch def
+    arg (--grandpa) eq { /use-grandpa true store } if
+} for-all
+
+/parent-facts use-grandpa { grandpa-parent-facts } { default-parent-facts } if-else def
+/spouse-facts use-grandpa { grandpa-spouse-facts } { default-spouse-facts } if-else def
+
+% Everyone we know about (used by some queries).  Derived from facts
+% so adding a fact above doesn't desync this list.
+/all-people [
+    [ parent-facts { 0 get } map  parent-facts { 1 get } map ] flatten
+] flatten unique sort def
+
+% ----------------------------------------------------------------------
+%  SECTION 2: Predicate alts builders
+% ----------------------------------------------------------------------
+%
+%  Two alt-array builders -- one per relation.  Both follow the
+%  pattern documented in the file header.  Result alts each push
+%  TWO scalars: the deref of arg 0, then the deref of arg 1.  This
+%  uniform shape lets the same printer/aggregator code drive any
+%  relation regardless of which arg was concrete.
+% ----------------------------------------------------------------------
+
+/parent-alts { |pa ch|#+1
+    parent-facts {
+        /fact exch local-def
+        [pa ch fact] { /ctx exch def
+                       ctx 2 get 0 get  ctx 0 get  unify guard
+                       ctx 2 get 1 get  ctx 1 get  unify guard
+                       ${ [ ctx 0 get deref  ctx 1 get deref ] }
+        } curry
+    } map
+} def
+
+% spouse is symmetric -- emit both [a b] and [b a] alts so a query
+% in either direction works without special-casing the call site.
+/spouse-alts { |a b|#+1
+    spouse-facts {
+        /fact exch local-def
+        [a b fact] {
+            /ctx exch def
+            [
+                { ctx 2 get 0 get  ctx 0 get  unify guard
+                  ctx 2 get 1 get  ctx 1 get  unify guard
+                  ${ [ ctx 0 get deref  ctx 1 get deref ] } }
+                { ctx 2 get 1 get  ctx 0 get  unify guard
+                  ctx 2 get 0 get  ctx 1 get  unify guard
+                  ${ [ ctx 0 get deref  ctx 1 get deref ] } }
+            ] choice
+        } curry
+    } map
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 3: Output helpers
+%
+%  Names print as `arthur` (no leading slash) via `=`.  When we want
+%  formatted multi-arg output we use `print-fmt` which accepts Names
+%  through {0:O}/{0} interpolation.
+% ----------------------------------------------------------------------
+
+% Print a section header.
+/heading { |title|#+1
+    nl
+    (--- ) print title print ( ) print
+    /pad 60 title length sub 5 sub local-def
+    pad 0 gt { pad { (-) print } repeat } if
+    nl
+} def
+
+% Print a query line (indented).
+/q-print { |msg|
+    (    ) print msg =
+} def
+
+% Pretty-print a single name (no slash).  `{0}` on a Name in
+% print-fmt renders the unprefixed text.
+/name-print {
+    ({0}) exch mark exch print-fmt pop pop
+} def
+
+% Pretty-print a Name array as `[a, b, c]`.
+/names-print { |xs|#+2
+    xs length 0 eq
+    {
+        ((none)) print
+    }
+    {
+        /last xs length 1 sub local-def
+        0 1 last {
+            /i exch local-def
+            xs i get name-print
+            i last lt { (, ) print } if
+        } for
+    } if-else
+} def
+
+% Pretty-print an array of [x y] Name pairs as `x->y, x->y`.
+/pairs-print { |xs|#+2
+    xs length 0 eq
+    {
+        ((none)) print
+    }
+    {
+        /last xs length 1 sub local-def
+        0 1 last {
+            /i exch local-def
+            xs i get 0 get name-print
+            (->) print
+            xs i get 1 get name-print
+            i last lt { (, ) print } if
+        } for
+    } if-else
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 4: Single-solution queries via `once` and `choice`
+%
+%  `once` runs a goal proc and returns whatever the goal pushes on
+%  success, or raises /fail if the goal fails.  Wrapped in `try` to
+%  convert failure into a boolean.
+% ----------------------------------------------------------------------
+
+% is-parent?(p, c) -- true iff p is a parent of c
+/is-parent? { |p c|
+    { { p c parent-alts choice  pop  true } once } try
+    /fail eq { false } if
+} def
+
+% is-spouse?(a, b) -- true iff a and b are married
+/is-spouse? { |a b|
+    { { a b spouse-alts choice  pop  true } once } try
+    /fail eq { false } if
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 5: Multi-solution queries via `find-all` / `find-n`
+%
+%  Each query introduces a fresh logic-var for the unknown slot,
+%  builds the alt array via `*-alts`, and uses `find-all` to collect
+%  every solution.  Each alt pushes a single global-VM `${[pa ch]}`
+%  pair; find-all collects them into an Array of pairs, and the
+%  per-direction projection (`{ 0 get } map` for parents, `{ 1 get }
+%  map` for children) extracts the side the caller wants.
+%
+%  Pre-2026-05-10 the alts pushed two scalars and a `keep-side`
+%  curry narrowed each alt's push to one of them, because find-all
+%  rejected non-persistable composite results.  Now that ${...}
+%  composites are accepted (allocated in the journal-skipped global
+%  region, transitively restore-safe), the pair-per-alt design is
+%  the natural shape -- it hands both names to the open-relation
+%  `find-n` / `for-each-solution` queries in the demo without extra
+%  wrapping.
+% ----------------------------------------------------------------------
+
+% Multi-solution helpers -- each returns an array of Names.
+% Note: `*-alts` already returns an array of curries, so we pass it
+% directly to `find-all` without an extra `[ ]` wrapper (which would
+% nest the alts array inside another array).
+/parents-of { |c|#+1
+    /p logic-var local-def
+    p c parent-alts find-all { 0 get } map
+} def
+
+/children-of { |p|#+1
+    /c logic-var local-def
+    p c parent-alts find-all { 1 get } map
+} def
+
+/spouses-of { |a|#+1
+    /b logic-var local-def
+    a b spouse-alts find-all { 1 get } map unique
+} def
+
+% Open query -- BOTH slots unbound -- enumerates the relation itself.
+% `find-n` short-circuits: the search stops after n solutions, so the
+% remaining facts are never tried (find-all would visit every row).
+/first-parent-pairs { |n|#+2
+    /p logic-var local-def
+    /c logic-var local-def
+    n  p c parent-alts  find-n
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 6: Compound queries via flat-map composition
+%
+%  Grandparent / sibling / cousin are all "two parent edges with a
+%  shared waypoint".  Each combines two parent-alts into a single
+%  alt that succeeds iff both edges hold simultaneously.  flat-map
+%  cross-products the parent-fact list with itself.
+% ----------------------------------------------------------------------
+
+% grandparent(g, gc) -- exists mid: parent(g, mid) AND parent(mid, gc)
+/grandparents-of { |gc|#+4
+    /g logic-var local-def
+    /mid logic-var local-def
+    parent-facts {
+        /f1 exch local-def
+        parent-facts {
+            /f2 exch local-def
+            [g mid gc f1 f2] {
+                /gctx exch def
+                gctx 3 get 0 get  gctx 0 get  unify guard    % f1[0] ~ g
+                gctx 3 get 1 get  gctx 1 get  unify guard    % f1[1] ~ mid
+                gctx 4 get 0 get  gctx 1 get  unify guard    % f2[0] ~ mid (same!)
+                gctx 4 get 1 get  gctx 2 get  unify guard    % f2[1] ~ gc
+                gctx 0 get deref
+            } curry
+        } map
+    } flat-map find-all unique
+} def
+
+% sibling(a, b) -- exists p: parent(p, a) AND parent(p, b) AND a != b
+%
+% Note we only ask for ONE shared parent here; full siblings share
+% two.  For this tree both parents always co-occur per child, so
+% one-shared-parent gives the expected sibling set.
+/siblings-of { |target|#+4
+    /sib logic-var local-def
+    /p logic-var local-def
+    parent-facts {
+        /f1 exch local-def
+        parent-facts {
+            /f2 exch local-def
+            [target sib p f1 f2] {
+                /sctx exch def
+                sctx 3 get 0 get  sctx 2 get  unify guard    % f1[0] ~ p
+                sctx 3 get 1 get  sctx 0 get  unify guard    % f1[1] ~ target
+                sctx 4 get 0 get  sctx 2 get  unify guard    % f2[0] ~ p (same parent)
+                sctx 4 get 1 get  sctx 1 get  unify guard    % f2[1] ~ sib
+                sctx 1 get deref sctx 0 get deref ne guard   % sib != target
+                sctx 1 get deref
+            } curry
+        } map
+    } flat-map find-all unique
+} def
+
+% cousin(a, b) -- exists ga, gb, g:
+%       parent(ga, a) AND parent(gb, b) AND
+%       parent(g, ga) AND parent(g, gb) AND
+%       ga != gb AND a != b
+% Cousins via composition: cousin(t) = child(sibling(parent(t))).
+% Cross-producting four parent-facts arrays directly would be 20^4 ~
+% 160K alts -- too many for the demo's VM size.  Composing the three
+% smaller queries gives the same answer in a fraction of the work
+% and keeps the showcase honest about how Trix tools compose.
+/cousins-of { |target|#+4
+    /target-parents target parents-of local-def
+    /aunts-uncles target-parents { siblings-of } flat-map unique local-def
+    /raw-cousins aunts-uncles { children-of } flat-map unique local-def
+    /target-sibs target siblings-of local-def
+    raw-cousins { |c|
+        c target eq not
+        target-sibs { c eq } any not
+        and
+    } filter
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 7: Recursive queries -- ancestors / descendants
+%
+%  Transitive closure of `parent`.  Pure logic-primitive form via
+%  recursion + find-all for the multi-solution case.  Each call peels
+%  one level of indirection: direct parents are collected, then for
+%  each direct parent we recursively gather their ancestors and union
+%  the results.
+% ----------------------------------------------------------------------
+
+% Use a `|...|` locals frame so the recursive call doesn't clobber
+% the outer call's bindings.  Plain `def` writes past `|...|` frames
+% into the topmost non-frame dict (userdict), so a recursive call
+% would otherwise overwrite the caller's `direct` / `transitive`
+% values; `local-def` writes to the frame on top of the dict stack
+% and unwinds on return.
+/ancestors-of { |target|#+2
+    /direct     target parents-of                         local-def
+    /transitive direct { ancestors-of } flat-map          local-def
+    [ direct transitive ] flatten unique sort
+} def
+
+/descendants-of { |target|#+2
+    /direct     target children-of                        local-def
+    /transitive direct { descendants-of } flat-map        local-def
+    [ direct transitive ] flatten unique sort
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 7.4: Step-relations (derived from parent + spouse)
+%
+%  These never fire on the default fact base (everyone has both bio
+%  parents married to each other; no step chains).  They light up the
+%  `--grandpa` family, which is structured around the step-relations
+%  the song depends on.
+%
+%      step-parent(P, C) :- spouse(P, S), parent(S, C), \+ parent(P, C)
+%
+%  `step-ancestors-of` is the transitive closure of `step-parents-of`
+%  AND biological `parents-of` -- a chain like
+%  jim -> amy (step) -> jim (step) is a legitimate step-ancestor walk.
+%  The closure has cycles (jim is amy's step-parent and amy is jim's
+%  step-parent), so the worker carries a visited-set dict and bails
+%  on revisits.
+% ----------------------------------------------------------------------
+
+/step-parents-of { |target|#+1
+    /candidates target parents-of { spouses-of } flat-map unique local-def
+    candidates target parents-of difference
+} def
+
+/step-children-of { |target|#+1
+    /candidates target spouses-of { children-of } flat-map unique local-def
+    candidates target children-of difference
+} def
+
+% Cycle-aware transitive closure.  `visited` is a dict allocated by
+% the public `step-ancestors-of` wrapper; each name is marked on entry
+% and the visited check on top of the proc short-circuits revisits to
+% an empty result -- the only way the recursion terminates on the
+% grandpa family, which has a jim <-> amy step-parent cycle.
+/step-ancestors-of-rec { |target visited|#+4
+    visited target known?
+    { [] }
+    {
+        visited begin target true def end
+        /direct-bio        target parents-of                                 local-def
+        /direct-step       target step-parents-of                            local-def
+        /all-direct        [ direct-bio direct-step ] flatten unique         local-def
+        /transitive        all-direct {
+            /v exch def v visited step-ancestors-of-rec
+        } flat-map                                                           local-def
+        [ all-direct transitive ] flatten unique sort
+    } if-else
+} def
+
+/step-ancestors-of { |target|
+    target 16 dynamic-dict step-ancestors-of-rec
+} def
+
+/step-descendants-of-rec { |target visited|#+4
+    visited target known?
+    { [] }
+    {
+        visited begin target true def end
+        /direct-bio        target children-of                                local-def
+        /direct-step       target step-children-of                           local-def
+        /all-direct        [ direct-bio direct-step ] flatten unique         local-def
+        /transitive        all-direct {
+            /v exch def v visited step-descendants-of-rec
+        } flat-map                                                           local-def
+        [ all-direct transitive ] flatten unique sort
+    } if-else
+} def
+
+/step-descendants-of { |target|
+    target 16 dynamic-dict step-descendants-of-rec
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 7.5: A `def-persist` counter
+%
+%  Section G wraps each probe pair in `save`/`restore` so the alt
+%  arrays / curries `relation-flags` allocates don't pile up.  That
+%  also rolls back any plain `def`s done inside the wrapper.  Use
+%  `def-persist` to update a scalar counter that escapes the rollback
+%  -- a clean, minimal demonstration of the `-persist` family.
+%
+%  (An earlier version of this file also memoized `ancestors-of` /
+%  `cousins-of` etc. into pre-allocated cache dicts.  On a 14-person
+%  fact base with 10 probe pairs the per-pair `save`/`restore`
+%  already bounds the working set, so the cache cost more in
+%  pre-population time and persistent heap than it saved on lookup.
+%  Composite-valued caches need their values allocated before the
+%  save barrier -- Trix's `def-persist` rejects above-barrier values
+%  outright -- so a useful memoization here would also need a richer
+%  structure than the workload warrants.  Lesson: `-persist` is for
+%  scalar state that must outlive a transactional rollback; reach for
+%  it only when that's the actual constraint.)
+% ----------------------------------------------------------------------
+
+/calls-made 0 def
+
+% ----------------------------------------------------------------------
+%  SECTION 8: Negation-as-failure
+%
+%  `naf` runs a goal and inverts the result: if the goal fails, naf
+%  succeeds (returns true); if the goal succeeds, naf returns false
+%  (and rolls back any bindings).
+% ----------------------------------------------------------------------
+
+% childless?(p) -- true iff p has no recorded children
+/childless? { |p|#+1
+    /c logic-var local-def
+    { p c parent-alts choice pop } naf
+} def
+
+% only-child?(c) -- true iff c has no siblings in the fact base
+/only-child? { |c|#+4
+    /sib logic-var local-def
+    /p   logic-var local-def
+    {
+        % "exists a sib != c sharing a parent with c"
+        parent-facts {
+            /f1 exch local-def
+            parent-facts {
+                /f2 exch local-def
+                [c sib p f1 f2] {
+                    /octx exch def
+                    octx 3 get 0 get  octx 2 get  unify guard
+                    octx 3 get 1 get  octx 0 get  unify guard
+                    octx 4 get 0 get  octx 2 get  unify guard
+                    octx 4 get 1 get  octx 1 get  unify guard
+                    octx 1 get deref octx 0 get deref ne guard
+                    true
+                } curry
+            } map
+        } flat-map choice pop
+    } naf
+} def
+
+% unmarried?(p) -- true iff p has no spouse on record
+/unmarried? { |p|#+1
+    /s logic-var local-def
+    { p s spouse-alts choice pop } naf
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 9: Aggregation -- counting and folding
+%
+%  `aggregate` folds over each succeeding alternative with a reducer.
+%  Each alt pushes its solution; the reducer consumes it together with
+%  the running accumulator and produces the next accumulator value.
+%  Same composite-result rules as find-all: scalars or global-VM
+%  composites only (the accumulator likewise -- it persists across
+%  alts via the running fold).
+% ----------------------------------------------------------------------
+
+% count-children(p) -- how many recorded children.  Reducer pops the
+% per-alt [pa ch] pair and increments the running scalar count.
+/count-children { |p|#+1
+    /c logic-var local-def
+    0 { pop 1 add } p c parent-alts aggregate
+} def
+
+% Total recorded couples-with-children pairs (just `parent-facts length`,
+% but expressed via aggregate for the demo).
+/total-parent-edges { ||#2
+    /a logic-var local-def
+    /b logic-var local-def
+    0 { pop 1 add } a b parent-alts aggregate
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 10: Pattern dispatch via `unify-match`
+%
+%  Given two people, classify their relationship.  Each arm is a
+%  `[pattern body]` pair; unify-match tries each arm's pattern
+%  against the input and runs the first body whose unification
+%  succeeds.  Within a body, lvars in the pattern are bound to the
+%  matching pieces of the input.
+%
+%  We feed unify-match a `/relation tag` whose payload is a 9-element
+%  array: 7 /yes-or-/no flags (parent / child / spouse / sibling /
+%  ancestor / descendant / shared-ancestor) followed by the two
+%  Names being classified.  Each pattern arm constrains some flag
+%  slots and leaves the rest as wildcards (fresh `logic-var`s).
+%  First-match wins, so the more specific arms come earlier.
+% ----------------------------------------------------------------------
+
+% Helper: convert a boolean to /yes or /no for the unify-match pattern
+% language (so each arm reads as a small flag pattern).
+/to-yn {
+    { /yes } { /no } if-else
+} def
+
+% Wildcard: an unbound `logic-var` unifies with anything.  Each call
+% produces a FRESH lvar so a single pattern doesn't accidentally
+% constrain two slots to be equal.
+/_ { logic-var } def
+
+% Helper: does `arr` contain `target`?
+/list-contains? { |arr target|
+    false
+    arr { target eq { pop true } if } for-all
+} def
+
+% Build the input tag: 8 /yes-or-/no flags + the two names being
+% classified, all wrapped in a /relation tag.  Each call produces a
+% fresh array so unify-match's per-arm save/restore can roll back
+% bindings cleanly.
+/relation-flags { |a b|#+10
+    /is-p         a b is-parent?                                 to-yn local-def
+    /is-c         b a is-parent?                                 to-yn local-def
+    /is-sp        a b is-spouse?                                 to-yn local-def
+    /is-sib       a siblings-of b list-contains?                      to-yn local-def
+    /is-anc       b ancestors-of a list-contains?                     to-yn local-def
+    /is-desc      b descendants-of a list-contains?                   to-yn local-def
+    /is-cous      a cousins-of b list-contains?                       to-yn local-def
+    /is-shared    a ancestors-of b ancestors-of
+                    intersect length 0 gt                        to-yn local-def
+    /is-step-anc  b step-ancestors-of a list-contains?                to-yn local-def
+    /is-step-desc b step-descendants-of a list-contains?              to-yn local-def
+    % This array is consumed immediately by unify-match and never
+    % retained, so allocate it as an eq-array (`#=` suffix) in
+    % temporary scratch storage rather than persistent heap.
+    [ is-p is-c is-sp is-sib is-anc is-desc is-cous is-shared
+      is-step-anc is-step-desc a b ]#= /relation tag
+} def
+
+% Classify (a, b) by relationship.  unify-match tries each arm in
+% order; the first arm whose pattern unifies with the input wins.
+% Wildcards are fresh logic-vars (`_`); concrete pattern fields
+% (/yes) constrain that slot to /yes.  Order matters: more specific
+% relationships (parent, child, spouse) come before fall-through
+% (kin, none).
+/relation-of { |a b|#+1
+    % `self` is a fresh logic-var used in BOTH name slots of the
+    % punchline pattern below, so unify-match enforces a == b.  Per
+    % call so each invocation gets its own; sharing across calls
+    % would let the bound value from one match leak into the next.
+    /self logic-var local-def
+    a b relation-flags
+    [
+        [ [/yes _    _    _    _    _    _    _    _    _    _    _] /relation tag  { (parent of) } ]
+        [ [_    /yes _    _    _    _    _    _    _    _    _    _] /relation tag  { (child of) } ]
+        [ [_    _    /yes _    _    _    _    _    _    _    _    _] /relation tag  { (married to) } ]
+        [ [_    _    _    /yes _    _    _    _    _    _    _    _] /relation tag  { (sibling of) } ]
+        [ [_    _    _    _    /yes _    _    _    _    _    _    _] /relation tag  { (ancestor of) } ]
+        [ [_    _    _    _    _    /yes _    _    _    _    _    _] /relation tag  { (descendant of) } ]
+        [ [_    _    _    _    _    _    /yes _    _    _    _    _] /relation tag  { (cousin of) } ]
+        % Self-loop punchline: same lvar in slots 10 and 11 forces a == b
+        [ [_    _    _    _    _    _    _    _    /yes _    self self] /relation tag
+                                                                          { (their own (step-)grandparent! [Lonzo & Oscar 1947]) } ]
+        [ [_    _    _    _    _    _    _    _    /yes _    _    _] /relation tag  { (step-ancestor of) } ]
+        [ [_    _    _    _    _    _    _    _    _    /yes _    _] /relation tag  { (step-descendant of) } ]
+        [ [_    _    _    _    _    _    _    /yes _    _    _    _] /relation tag  { (kin of -- shared ancestor) } ]
+        [ _ /relation tag                                                 { (no recorded relation) } ]
+    ] unify-match
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 11: Demo -- one query of each kind
+% ----------------------------------------------------------------------
+
+use-grandpa
+{
+    (\nGenealogy showcase -- "I'm My Own Grandpa" mode (Lonzo & Oscar, 1947).\n) print
+    (Cast: jim (narrator), jane (jim's late mom), henry (jim's dad),\n) print
+    (      betty (the widow jim marries), carl (betty's late husband),\n) print
+    (      amy (betty's daughter, who marries henry),\n) print
+    (      tim (jim+betty's son), dan (henry+amy's son).\n) print
+}
+{
+    (\nGenealogy showcase -- Trix logic primitives over a 14-person family.\n) print
+    (See examples/genealogy.trx header for the family-tree diagram.\n) print
+    (Pass `--grandpa` for the alternative "I'm My Own Grandpa" cast.\n) print
+} if-else
+
+(SECTION A -- single-solution queries (`once` / `choice`)) heading
+
+% Helper: print a query and its yes/no result.
+/yn-print { |label b|
+    (    ) print label print ( -> ) print
+    b { (yes) } { (no) } if-else print nl
+} def
+
+use-grandpa
+{
+    (parent?(henry, jim))        /henry /jim    is-parent? yn-print
+    (parent?(henry, dan))        /henry /dan    is-parent? yn-print
+    (parent?(jim, amy))          /jim /amy      is-parent? yn-print
+    (spouse?(jim, betty))        /jim /betty    is-spouse? yn-print
+    (spouse?(henry, amy))        /henry /amy    is-spouse? yn-print
+    (spouse?(jim, amy))          /jim /amy      is-spouse? yn-print
+}
+{
+    (parent?(arthur, charles))   /arthur /charles is-parent? yn-print
+    (parent?(arthur, eve))       /arthur /eve     is-parent? yn-print
+    (parent?(charles, eve))      /charles /eve    is-parent? yn-print
+    (spouse?(charles, helena))   /charles /helena is-spouse? yn-print
+    (spouse?(helena, charles))   /helena /charles is-spouse? yn-print
+    (spouse?(charles, beatrix)) /charles /beatrix is-spouse? yn-print
+} if-else
+
+(SECTION B -- multi-solution queries (`find-all` / `find-n` / `for-each-solution`)) heading
+
+use-grandpa
+{
+    (Children of henry:                   ) print
+    /henry children-of names-print nl
+    (Children of betty:                   ) print
+    /betty children-of names-print nl
+    (Parents of jim:                      ) print
+    /jim parents-of names-print nl
+    (Parents of dan:                      ) print
+    /dan parents-of names-print nl
+    (Spouses of betty:                    ) print
+    /betty spouses-of names-print nl
+}
+{
+    (Children of arthur:                  ) print
+    /arthur children-of names-print nl
+    (Children of charles:                 ) print
+    /charles children-of names-print nl
+    (Parents of eve:                      ) print
+    /eve parents-of names-print nl
+    (Parents of jack:                     ) print
+    /jack parents-of names-print nl
+    (Spouses of diana:                    ) print
+    /diana spouses-of names-print nl
+} if-else
+
+% Open queries -- both slots left unbound -- enumerate the relation
+% itself, so they read the same for either cast.
+(First 3 parent facts (find-n):       ) print
+3 first-parent-pairs pairs-print nl
+
+% for-each-solution streams each solution to a side effect (here:
+% print) instead of collecting -- the body runs inside the same
+% save/restore cycle find-all uses, so only escaping effects (I/O,
+% send, stream writes) persist.  With both slots unbound, each
+% spouse alt's two-orientation `choice` commits on the stored
+% orientation, so every couple streams exactly once.
+(Spouse links (for-each-solution):    ) print
+/sa logic-var def
+/sb logic-var def
+{ dup 0 get name-print (~) print 1 get name-print ( ) print }
+sa sb spouse-alts for-each-solution
+nl
+
+(SECTION C -- compound queries via `flat-map`) heading
+
+use-grandpa
+{
+    (Grandparents of tim:                 ) print
+    /tim grandparents-of names-print nl
+    (Grandparents of dan:                 ) print
+    /dan grandparents-of names-print nl
+    (Siblings of jim:                     ) print
+    /jim siblings-of names-print nl
+    (Siblings of tim:                     ) print
+    /tim siblings-of names-print nl
+    (Cousins of jim:                      ) print
+    /jim cousins-of names-print nl
+    (Cousins of tim:                      ) print
+    /tim cousins-of names-print nl
+    (\nStep-parents of jim:                 ) print
+    /jim step-parents-of names-print nl
+    (Step-parents of amy:                 ) print
+    /amy step-parents-of names-print nl
+    (Step-children of jim:                ) print
+    /jim step-children-of names-print nl
+}
+{
+    (Grandparents of jack:                ) print
+    /jack grandparents-of names-print nl
+    (Grandparents of olivia:              ) print
+    /olivia grandparents-of names-print nl
+    (Siblings of eve:                     ) print
+    /eve siblings-of names-print nl
+    (Siblings of mark:                    ) print
+    /mark siblings-of names-print nl
+    (Cousins of jack:                     ) print
+    /jack cousins-of names-print nl
+    (Cousins of mark:                     ) print
+    /mark cousins-of names-print nl
+} if-else
+
+(SECTION D -- recursive transitive closure) heading
+
+use-grandpa
+{
+    (All ancestors of tim:                ) print
+    /tim ancestors-of names-print nl
+    (All ancestors of dan:                ) print
+    /dan ancestors-of names-print nl
+    (All descendants of henry:            ) print
+    /henry descendants-of names-print nl
+    (All descendants of betty:            ) print
+    /betty descendants-of names-print nl
+    (\nAll step-ancestors of jim (note the cycle through amy): ) print
+    /jim step-ancestors-of names-print nl
+    (All step-ancestors of amy:           ) print
+    /amy step-ancestors-of names-print nl
+}
+{
+    (All ancestors of jack:               ) print
+    /jack ancestors-of names-print nl
+    (All ancestors of olivia:             ) print
+    /olivia ancestors-of names-print nl
+    (All descendants of arthur:           ) print
+    /arthur descendants-of names-print nl
+    (All descendants of beatrix:          ) print
+    /beatrix descendants-of names-print nl
+} if-else
+
+(SECTION E -- negation-as-failure (`naf`)) heading
+
+(Who has no recorded children?\n)#= print
+all-people {
+    /p exch def
+    p childless?
+    {
+        (    ) print p name-print nl
+    } if
+} for-all
+
+(\nWho is married?\n)#= print
+all-people {
+    /p exch def
+    p unmarried? not
+    {
+        (    ) print p name-print (    spouses: ) print
+        p spouses-of names-print nl
+    } if
+} for-all
+
+(\nWho is an only child?\n)#= print
+% Wrap each iteration in save/restore so the alt arrays / curries
+% allocated inside `only-child?` don't pile up across the sweep.
+all-people {
+    /p exch def
+    save /oc-save exch def
+    /p-has-parents p parents-of length 0 gt def
+    /p-is-only p-has-parents { p only-child? } { false } if-else def
+    p-is-only
+    {
+        (    ) print p name-print nl
+    } if
+    oc-save restore
+} for-all
+
+(SECTION F -- aggregation (`aggregate`)) heading
+
+(Children-count for each parent (via aggregate):\n)#= print
+all-people {
+    /p exch def
+    /n p count-children def
+    n 0 gt
+    {
+        (    ) print p name-print
+        (: ) print
+        ({0}) mark n print-fmt pop pop
+        nl
+    } if
+} for-all
+
+(\nTotal parent-edges in fact base: )#= print
+({0}) mark total-parent-edges print-fmt pop pop
+nl
+
+(SECTION G -- pattern dispatch (`unify-match`)) heading
+
+% A handful of pairs to classify.  Grandpa mode swaps in pairs that
+% exercise the step-relation arms and the self-loop punchline.
+/probe-pairs use-grandpa
+{
+    [
+        [/henry /jim]    [/jim /henry]
+        [/jim /betty]    [/jim /dan]
+        [/dan /jim]      [/jim /amy]
+        [/amy /jim]      [/jim /jim]
+        [/tim /dan]      [/dan /tim]
+        [/jim /tim]      [/tim /jim]
+    ]
+}
+{
+    [
+        [/arthur /charles] [/charles /arthur]
+        [/charles /helena] [/eve /frank]
+        [/jack /mark]      [/arthur /jack]
+        [/jack /arthur]    [/jack /heidi]
+        [/jack /lily]      [/heidi /jack]
+    ]
+} if-else def
+
+probe-pairs {
+    /pair exch def
+    save /pair-save exch def
+    (    ) print
+    pair 0 get name-print
+    ( ) print
+    pair 0 get pair 1 get relation-of print
+    ( ) print
+    pair 1 get name-print
+    nl
+    % Bump a scalar counter via `def-persist` so the increment
+    % survives the per-pair `restore` below.  A plain `def` here
+    % would be rolled back, leaving `calls-made` at 0 at the end.
+    /calls-made calls-made 1 add def-persist
+    pair-save restore
+} for-all
+
+(\nrelation-of calls completed (counter `def-persist`ed across pair-saves): )#= print
+({0}\n) mark calls-made print-fmt pop pop
+
+(SECTION H -- copy-term: rule reuse with fresh variables) heading
+
+% copy-term takes a term containing logic vars and returns a structurally
+% identical term whose variables are FRESH (independent of the originals).
+% This is how Prolog's "rule head renaming" works: each call to a rule
+% gets fresh copies of the rule-body's variables.
+%
+% Demonstration: a "skeleton" goal-template containing two lvars.
+% copy-term lets us instantiate it twice, with the two instantiations
+% being independent.
+
+logic-var /x exch def
+logic-var /y exch def
+/skeleton [x y] def
+
+(skeleton:                            )#= print
+skeleton ==
+
+skeleton copy-term /skel1 exch def
+skeleton copy-term /skel2 exch def
+
+(skel1 (fresh copy):                  )#= print
+skel1 ==
+(skel2 (fresh copy):                  )#= print
+skel2 ==
+
+skel1 0 get /alice unify pop
+skel1 1 get 42 unify pop
+
+(After binding skel1 to [alice, 42]:\n)#= print
+(    skel1: )#= print skel1 ==
+(    skel2: )#= print skel2 ==
+(    original skeleton: )#= print skeleton ==
+
+(\nDone.\n)#= print

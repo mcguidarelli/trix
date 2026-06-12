@@ -1,0 +1,5 @@
+% unify global composites + ExtValues inside ${...} under pressure.
+${ mark 30 { 300 string } repeat array-from-mark } pop
+${ logic-var dup [1 5000000000l 3.5d] unify } pop pop
+{ ${ logic-var 170141183460469231731687303715884105727q unify } pop } try clear
+logic-var [1 [2 [3]]] unify

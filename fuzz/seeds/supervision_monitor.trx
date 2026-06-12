@@ -1,0 +1,4 @@
+mark { actor-recv pop 42 } actor-spawn /b exch def
+mark b { monitor demonitor } actor-spawn coroutine-join pop pop
+/go b actor-send
+b coroutine-join pop pop

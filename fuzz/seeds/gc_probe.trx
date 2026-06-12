@@ -1,0 +1,3 @@
+% Phase 10 GC: mark-only diagnostic pass.  Returns a dict with /live,
+% /dead, /live-bytes, /dead-bytes.  Probe doesn't sweep.
+${ 8 array pop } vm-global-gc-probe /dead get 0 gt

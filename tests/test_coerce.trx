@@ -1,0 +1,431 @@
+% test_coerce.trx -- coerce operator tests
+% coerce: array/packed/dict /type-name -- container'
+% Widens all elements/values to the named type. Narrowing raises type-check.
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+%% === Happy: Array widening to each target type ===
+
+% Byte -> Integer
+[0b 127b 255b] /integer-type coerce
+dup length 3 eq (byte->int: length) rt-ok
+dup 0 get 0 eq (byte->int: elem 0) rt-ok
+dup 1 get 127 eq (byte->int: elem 1) rt-ok
+2 get 255 eq (byte->int: elem 2) rt-ok
+
+% Byte -> UInteger
+[0b 1b 200b] /uinteger-type coerce
+dup 0 get type /uinteger-type eq (byte->uint: type) rt-ok
+2 get 200u eq (byte->uint: value) rt-ok
+
+% Integer -> Long
+[1 -2 3] /long-type coerce
+dup 0 get type /long-type eq (int->long: type) rt-ok
+dup 0 get 1l eq (int->long: elem 0) rt-ok
+1 get -2l eq (int->long: elem 1) rt-ok
+
+% Integer -> Real
+[1 2 3] /real-type coerce
+dup 0 get type /real-type eq (int->real: type) rt-ok
+dup 0 get 1.0 eq (int->real: elem 0) rt-ok
+2 get 3.0 eq (int->real: elem 2) rt-ok
+
+% Integer -> Double
+[1 2 3] /double-type coerce
+dup 0 get type /double-type eq (int->double: type) rt-ok
+0 get 1.0d eq (int->double: elem 0) rt-ok
+
+% UInteger -> Long
+[1u 2u 3u] /long-type coerce
+0 get 1l eq (uint->long: elem 0) rt-ok
+
+% UInteger -> ULong
+[1u 2u] /ulong-type coerce
+0 get type /ulong-type eq (uint->ulong: type) rt-ok
+
+% UInteger -> Real
+[100u] /real-type coerce
+0 get 100.0 eq (uint->real: value) rt-ok
+
+% UInteger -> Double
+[100u] /double-type coerce
+0 get 100.0d eq (uint->double: value) rt-ok
+
+% Long -> Double
+[1000000l] /double-type coerce
+0 get 1000000.0d eq (long->double: value) rt-ok
+
+% ULong -> Double
+[42ul] /double-type coerce
+0 get 42.0d eq (ulong->double: value) rt-ok
+
+% Real -> Double
+[1.5 2.5 3.5] /double-type coerce
+dup 0 get type /double-type eq (real->double: type) rt-ok
+dup 0 get 1.5d eq (real->double: elem 0) rt-ok
+2 get 3.5d eq (real->double: elem 2) rt-ok
+
+% Byte -> Real
+[10b] /real-type coerce
+0 get 10.0 eq (byte->real: value) rt-ok
+
+% Byte -> Double
+[10b] /double-type coerce
+0 get 10.0d eq (byte->double: value) rt-ok
+
+% Byte -> Long
+[42b] /long-type coerce
+0 get 42l eq (byte->long: value) rt-ok
+
+% Byte -> ULong
+[42b] /ulong-type coerce
+0 get 42ul eq (byte->ulong: value) rt-ok
+
+%% === Happy: Boolean conversions (both directions) ===
+
+% Boolean -> Integer
+[true false] /integer-type coerce
+dup 0 get 1 eq (bool->int: true=1) rt-ok
+1 get 0 eq (bool->int: false=0) rt-ok
+
+% Boolean -> Real
+[true false] /real-type coerce
+dup 0 get 1.0 eq (bool->real: true) rt-ok
+1 get 0.0 eq (bool->real: false) rt-ok
+
+% Boolean -> Byte
+[true false] /byte-type coerce
+dup 0 get 1b eq (bool->byte: true) rt-ok
+1 get 0b eq (bool->byte: false) rt-ok
+
+% Boolean -> Long
+[true] /long-type coerce
+0 get 1l eq (bool->long: true) rt-ok
+
+% Boolean -> Double
+[false] /double-type coerce
+0 get 0.0d eq (bool->double: false) rt-ok
+
+% Integer -> Boolean
+[0 1 -1 42] /boolean-type coerce
+dup 0 get false eq (int->bool: 0=false) rt-ok
+dup 1 get true eq (int->bool: 1=true) rt-ok
+dup 2 get true eq (int->bool: -1=true) rt-ok
+3 get true eq (int->bool: 42=true) rt-ok
+
+% Real -> Boolean
+[0.0 1.5 -0.1] /boolean-type coerce
+dup 0 get false eq (real->bool: 0.0=false) rt-ok
+dup 1 get true eq (real->bool: 1.5=true) rt-ok
+2 get true eq (real->bool: -0.1=true) rt-ok
+
+% Byte -> Boolean
+[0b 1b 255b] /boolean-type coerce
+dup 0 get false eq (byte->bool: 0=false) rt-ok
+1 get true eq (byte->bool: 1=true) rt-ok
+
+%% === Happy: Mixed source types ===
+
+[1b 2 3u] /long-type coerce
+dup 0 get 1l eq (mixed->long: byte) rt-ok
+dup 1 get 2l eq (mixed->long: int) rt-ok
+2 get 3l eq (mixed->long: uint) rt-ok
+
+[1b 2 3u 4l 5ul] /double-type coerce
+dup length 5 eq (mixed->double: length) rt-ok
+dup 0 get type /double-type eq (mixed->double: type 0) rt-ok
+4 get 5.0d eq (mixed->double: elem 4) rt-ok
+
+%% === Happy: Edge cases ===
+
+% Empty array
+[] /real-type coerce
+length 0 eq (empty: length=0) rt-ok
+
+% Single element
+[42] /real-type coerce
+dup length 1 eq (single: length=1) rt-ok
+0 get 42.0 eq (single: value) rt-ok
+
+% Already target type (no-op clone)
+[1.0 2.0 3.0] /real-type coerce
+dup 0 get 1.0 eq (noop: already real) rt-ok
+length 3 eq (noop: length) rt-ok
+
+% Packed array input
+{ 1 2 3 } /real-type coerce
+dup type /array-type eq (packed: becomes array) rt-ok
+0 get 1.0 eq (packed: value) rt-ok
+
+%% === Happy: Dict form ===
+
+<< /x 1 /y 2 /z 3 >> /real-type coerce
+dup /x get 1.0 eq (dict: /x real) rt-ok
+dup /y get 2.0 eq (dict: /y real) rt-ok
+/z get 3.0 eq (dict: /z real) rt-ok
+
+<< /a 1b /b 100u >> /long-type coerce
+dup /a get 1l eq (dict: byte->long) rt-ok
+/b get 100l eq (dict: uint->long) rt-ok
+
+% Empty dict
+<< >> /real-type coerce
+length 0 eq (dict: empty length=0) rt-ok
+
+% Dict with booleans
+<< /flag true /other false >> /integer-type coerce
+dup /flag get 1 eq (dict: bool->int true) rt-ok
+/other get 0 eq (dict: bool->int false) rt-ok
+
+%% === Sad: Narrowing errors ===
+
+% Real -> Integer (narrowing)
+<< /type-check { clear true } >> { [1.5] /integer-type coerce } try-catch
+(sad: real->int narrowing) rt-ok
+
+% Double -> Real (narrowing)
+<< /type-check { clear true } >> { [1.0d] /real-type coerce } try-catch
+(sad: double->real narrowing) rt-ok
+
+% Long -> Integer (narrowing)
+<< /type-check { clear true } >> { [1l] /integer-type coerce } try-catch
+(sad: long->int narrowing) rt-ok
+
+% Integer -> Byte (narrowing)
+<< /type-check { clear true } >> { [1] /byte-type coerce } try-catch
+(sad: int->byte narrowing) rt-ok
+
+% ULong -> UInteger (narrowing)
+<< /type-check { clear true } >> { [1ul] /uinteger-type coerce } try-catch
+(sad: ulong->uint narrowing) rt-ok
+
+% Double -> Integer (narrowing)
+<< /type-check { clear true } >> { [1.0d] /integer-type coerce } try-catch
+(sad: double->int narrowing) rt-ok
+
+% Integer -> UInteger (signedness)
+<< /type-check { clear true } >> { [1] /uinteger-type coerce } try-catch
+(sad: int->uint signedness) rt-ok
+
+% UInteger -> Integer (signedness)
+<< /type-check { clear true } >> { [1u] /integer-type coerce } try-catch
+(sad: uint->int signedness) rt-ok
+
+% Long -> ULong (signedness)
+<< /type-check { clear true } >> { [1l] /ulong-type coerce } try-catch
+(sad: long->ulong signedness) rt-ok
+
+% ULong -> Long (signedness)
+<< /type-check { clear true } >> { [1ul] /long-type coerce } try-catch
+(sad: ulong->long signedness) rt-ok
+
+% Real -> Byte (float to small int)
+<< /type-check { clear true } >> { [1.0] /byte-type coerce } try-catch
+(sad: real->byte narrowing) rt-ok
+
+% Double -> Long (float to int)
+<< /type-check { clear true } >> { [1.0d] /long-type coerce } try-catch
+(sad: double->long narrowing) rt-ok
+
+%% === Sad: Type errors ===
+
+% Non-numeric element
+<< /type-check { clear true } >> { [(hello) 2 3] /integer-type coerce } try-catch
+(sad: string element) rt-ok
+
+% Null element
+<< /type-check { clear true } >> { [null 1 2] /integer-type coerce } try-catch
+(sad: null element) rt-ok
+
+% Name element
+<< /type-check { clear true } >> { [/foo 1] /integer-type coerce } try-catch
+(sad: name element) rt-ok
+
+% Array element
+<< /type-check { clear true } >> { [[1 2] 3] /integer-type coerce } try-catch
+(sad: array element) rt-ok
+
+% Non-type-name target
+<< /type-check { clear true } >> { [1 2 3] /hello coerce } try-catch
+(sad: non-type-name) rt-ok
+
+% Non-castable target type
+<< /type-check { clear true } >> { [1 2 3] /string-type coerce } try-catch
+(sad: string-type target) rt-ok
+
+<< /type-check { clear true } >> { [1 2 3] /array-type coerce } try-catch
+(sad: array-type target) rt-ok
+
+<< /type-check { clear true } >> { [1 2 3] /dict-type coerce } try-catch
+(sad: dict-type target) rt-ok
+
+<< /type-check { clear true } >> { [1 2 3] /name-type coerce } try-catch
+(sad: name-type target) rt-ok
+
+% Non-container operand
+<< /type-check { clear true } >> { 42 /real-type coerce } try-catch
+(sad: integer operand) rt-ok
+
+<< /type-check { clear true } >> { (hello) /real-type coerce } try-catch
+(sad: string operand) rt-ok
+
+<< /type-check { clear true } >> { /foo /real-type coerce } try-catch
+(sad: name operand) rt-ok
+
+% Dict with non-numeric value
+<< /type-check { clear true } >> { << /x (hello) >> /real-type coerce } try-catch
+(sad: dict string value) rt-ok
+
+% Dict narrowing
+<< /type-check { clear true } >> { << /x 1.5 >> /integer-type coerce } try-catch
+(sad: dict narrowing) rt-ok
+
+% Dict signedness
+<< /type-check { clear true } >> { << /x 1 >> /uinteger-type coerce } try-catch
+(sad: dict int->uint) rt-ok
+
+%% === Stress ===
+
+% Large array integer -> real
+[ 0 1 999 { } for ]
+/real-type coerce
+dup length 1000 eq (stress: length 1000) rt-ok
+dup 0 get type /real-type eq (stress: type real) rt-ok
+999 get 999.0 eq (stress: last elem) rt-ok
+
+% Large array byte -> double
+[ 0 1 255 { /byte-type cast } for ]
+/double-type coerce
+dup length 256 eq (stress: byte->double length) rt-ok
+dup 0 get 0.0d eq (stress: byte->double first) rt-ok
+255 get 255.0d eq (stress: byte->double last) rt-ok
+
+% Dict with multiple types
+<< /a 1b /b 2 /c 3u >> /long-type coerce
+dup /a get 1l eq (stress: dict mixed byte) rt-ok
+dup /b get 2l eq (stress: dict mixed int) rt-ok
+/c get 3l eq (stress: dict mixed uint) rt-ok
+
+%% === Fuzz: mixed types in one array ===
+
+[0b 1 2u 3l 4ul 5.0 6.0d] /double-type coerce
+dup length 7 eq (fuzz: mixed 7 types length) rt-ok
+dup 0 get 0.0d eq (fuzz: byte->double) rt-ok
+dup 1 get 1.0d eq (fuzz: int->double) rt-ok
+dup 2 get 2.0d eq (fuzz: uint->double) rt-ok
+dup 3 get 3.0d eq (fuzz: long->double) rt-ok
+dup 4 get 4.0d eq (fuzz: ulong->double) rt-ok
+dup 5 get 5.0d eq (fuzz: real->double) rt-ok
+6 get 6.0d eq (fuzz: double->double noop) rt-ok
+
+% All booleans to integer
+[true false true true false] /integer-type coerce
+dup 0 get 1 eq (fuzz: bools->int 0) rt-ok
+dup 1 get 0 eq (fuzz: bools->int 1) rt-ok
+dup 4 get 0 eq (fuzz: bools->int 4) rt-ok
+length 5 eq (fuzz: bools->int length) rt-ok
+
+% Narrowing error at specific index (element 2 fails)
+<< /type-check { clear true } >> { [1b 2b 3] /byte-type coerce } try-catch
+(fuzz: narrowing at index 2) rt-ok
+
+% Mixed valid + invalid types in array
+<< /type-check { clear true } >> { [1 (hello) 3] /real-type coerce } try-catch
+(fuzz: string at index 1) rt-ok
+
+%% === Boundary ===
+
+% Byte max value stays byte
+[255b] /byte-type coerce
+0 get 255b eq (boundary: byte max noop) rt-ok
+
+% Byte 0 stays byte
+[0b] /byte-type coerce
+0 get 0b eq (boundary: byte zero noop) rt-ok
+
+% Integer min/max to long
+[-2147483648 2147483647] /long-type coerce
+dup 0 get -2147483648l eq (boundary: int min->long) rt-ok
+1 get 2147483647l eq (boundary: int max->long) rt-ok
+
+% Single-element packed
+{ 42 } /real-type coerce
+dup length 1 eq (boundary: packed single length) rt-ok
+0 get 42.0 eq (boundary: packed single value) rt-ok
+
+% Boolean -> Boolean (noop)
+[true false] /boolean-type coerce
+dup 0 get true eq (boundary: bool->bool true) rt-ok
+1 get false eq (boundary: bool->bool false) rt-ok
+
+% Repeated coerce (idempotent)
+[1 2 3] /real-type coerce /real-type coerce
+dup 0 get 1.0 eq (boundary: double coerce) rt-ok
+length 3 eq (boundary: double coerce length) rt-ok
+
+% Coerce result is read-write
+[1 2 3] /real-type coerce
+dup 0 10.0 put
+0 get 10.0 eq (boundary: result is writable) rt-ok
+
+%% === ExtValue cleanup ===
+
+% Long source elements freed
+[1000000l 2000000l 3000000l] /double-type coerce
+dup 0 get 1000000.0d eq (extval: long->double 0) rt-ok
+2 get 3000000.0d eq (extval: long->double 2) rt-ok
+
+% Double source already target
+[1.0d 2.0d] /double-type coerce
+0 get 1.0d eq (extval: double noop) rt-ok
+
+% ULong source freed
+[999999999999ul] /double-type coerce
+0 get type /double-type eq (extval: ulong->double type) rt-ok
+
+% Mixed ExtValue + non-ExtValue
+[1 2l 3.0d 4b] /double-type coerce
+dup 1 get 2.0d eq (extval: mixed long->double) rt-ok
+2 get 3.0d eq (extval: mixed double noop) rt-ok
+
+%% === to-name edge cases ===
+
+% to-name rejects the empty string: a zero-length Name is an unwritable
+% shadow value -- the scanner can never produce one (a lone '/' or '\'
+% becomes the one-char name "/" or "\" by delimiter substitution), it
+% prints as "/" yet compares unequal to that name, and the empty-name
+% lookup path needed its own m_data[0] over-read guard in name_search.
+% Rejected at the only user-controlled creation point (2026-06-04).
+{ () to-name } try /range-check eq (to-name: empty string rejected with /range-check) rt-ok
+
+% The executable-string flavor hits the same guard (the reject fires
+% before the attribute pass-through).
+{ () make-executable to-name } try /range-check eq (to-name: empty executable string rejected) rt-ok
+
+% The one-char delimiter names remain first-class and reachable.
+(/) to-name type /name-type eq (to-name: one-char slash name still works) rt-ok
+
+%% === Results ===
+
+failed 0 eq
+{ total (coerce: all tests passed) = = }
+{ (coerce: FAILURES = ) print failed = } if-else
+failed 0 eq { } { /assert-failed throw } if-else
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

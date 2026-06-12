@@ -1,0 +1,6 @@
+% print-fmt nested-arg-id ({N:{...}}) and width fields must reject digit
+% runs longer than 9; regression for the signed-int overflow at
+% src/printfmt.inl:303 surfaced by crash-a037e41d9dfd5dd78e9672eef29d785932b7821f.
+{ ({1:{5555555555}}) mark 1 print-fmt } try clear
+{ ({:5555555555c}) mark 1 print-fmt } try clear
+{ (1) ({5555555555:d}) mark 0 sscan-fmt } try clear

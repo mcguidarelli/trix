@@ -1,0 +1,4 @@
+% copy-term of nested unbound lvars in arrays inside ${...}; deref after.
+${ mark 30 { 300 string } repeat array-from-mark } pop
+${ [ logic-var [ logic-var logic-var ] 5000000000l ] copy-term } dup 0 get is-logic-var
+${ logic-var dup (n) exch pop } copy-term

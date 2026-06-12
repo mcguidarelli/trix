@@ -1,0 +1,8 @@
+% require_helper_b.trx -- test helper for require operator
+% Requires helper_a (tests transitive require), then defines its own counter.
+(tests/require_helper_a.trx) require
+/require-b-count where { pop
+    /require-b-count require-b-count 1 add def
+} {
+    /require-b-count 1 def
+} if-else

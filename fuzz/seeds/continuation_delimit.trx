@@ -1,0 +1,2 @@
+{ { 42 exch exec 100 add } capture 10 add } delimit
+{ { pop 99 } capture } delimit

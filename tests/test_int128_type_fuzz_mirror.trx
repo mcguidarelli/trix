@@ -1,0 +1,143 @@
+% ====================================================================
+% Mirror of test_type_fuzz.trx for Int128/UInt128.
+%
+% test_type_fuzz.trx stress-tests a 7x7 pairwise cast matrix over
+% byte/int/uint/long/ulong/real/double. With Int128 and UInt128 added,
+% the matrix should be 9x9 (= 81 cells). This file covers all
+% missing cells:
+%   * From every existing numeric type TO int128 and uint128 (16 cells)
+%   * From int128 and uint128 TO every numeric type (16 cells)
+%   * int128<->int128, uint128<->uint128, int128<->uint128 (4 cells)
+%   * boolean <-> int128/uint128 (4 cells)
+%   * to-string / to-number round-trips
+%   * type-predicate sanity across all 9 types
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: From every source type TO int128 (value 1)
+% ====================================================================
+
+1b /int128-type cast 1q deep-eq  (matrix: byte -> int128) rt-ok clear
+1 /int128-type cast 1q deep-eq   (matrix: int -> int128) rt-ok clear
+1u /int128-type cast 1q deep-eq  (matrix: uint -> int128) rt-ok clear
+1l /int128-type cast 1q deep-eq  (matrix: long -> int128) rt-ok clear
+1ul /int128-type cast 1q deep-eq (matrix: ulong -> int128) rt-ok clear
+1.0 /int128-type cast 1q deep-eq  (matrix: real -> int128) rt-ok clear
+1.0d /int128-type cast 1q deep-eq (matrix: double -> int128) rt-ok clear
+1uq /int128-type cast 1q deep-eq  (matrix: uint128 -> int128) rt-ok clear
+1q /int128-type cast 1q deep-eq   (matrix: int128 -> int128) rt-ok clear
+
+% ====================================================================
+% SECTION 2: From every source type TO uint128 (value 1)
+% ====================================================================
+
+1b /uint128-type cast 1uq deep-eq  (matrix: byte -> uint128) rt-ok clear
+1 /uint128-type cast 1uq deep-eq   (matrix: int -> uint128) rt-ok clear
+1u /uint128-type cast 1uq deep-eq  (matrix: uint -> uint128) rt-ok clear
+1l /uint128-type cast 1uq deep-eq  (matrix: long -> uint128) rt-ok clear
+1ul /uint128-type cast 1uq deep-eq (matrix: ulong -> uint128) rt-ok clear
+1.0 /uint128-type cast 1uq deep-eq  (matrix: real -> uint128) rt-ok clear
+1.0d /uint128-type cast 1uq deep-eq (matrix: double -> uint128) rt-ok clear
+1q /uint128-type cast 1uq deep-eq   (matrix: int128 -> uint128) rt-ok clear
+1uq /uint128-type cast 1uq deep-eq  (matrix: uint128 -> uint128) rt-ok clear
+
+% ====================================================================
+% SECTION 3: From int128 TO every target type (value 1)
+% ====================================================================
+
+1q /byte-type cast 1b eq          (matrix: int128 -> byte) rt-ok clear
+1q /integer-type cast 1 eq        (matrix: int128 -> int) rt-ok clear
+1q /uinteger-type cast 1u eq      (matrix: int128 -> uint) rt-ok clear
+1q /long-type cast 1l eq          (matrix: int128 -> long) rt-ok clear
+1q /ulong-type cast 1ul eq        (matrix: int128 -> ulong) rt-ok clear
+1q /real-type cast 1.0 eq         (matrix: int128 -> real) rt-ok clear
+1q /double-type cast 1.0d eq      (matrix: int128 -> double) rt-ok clear
+
+% ====================================================================
+% SECTION 4: From uint128 TO every target type (value 1)
+% ====================================================================
+
+1uq /byte-type cast 1b eq         (matrix: uint128 -> byte) rt-ok clear
+1uq /integer-type cast 1 eq       (matrix: uint128 -> int) rt-ok clear
+1uq /uinteger-type cast 1u eq     (matrix: uint128 -> uint) rt-ok clear
+1uq /long-type cast 1l eq         (matrix: uint128 -> long) rt-ok clear
+1uq /ulong-type cast 1ul eq       (matrix: uint128 -> ulong) rt-ok clear
+1uq /real-type cast 1.0 eq        (matrix: uint128 -> real) rt-ok clear
+1uq /double-type cast 1.0d eq     (matrix: uint128 -> double) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Boolean <-> int128/uint128
+% ====================================================================
+
+true /int128-type cast 1q deep-eq   (bool->int128: true) rt-ok clear
+false /int128-type cast 0q deep-eq  (bool->int128: false) rt-ok clear
+true /uint128-type cast 1uq deep-eq (bool->uint128: true) rt-ok clear
+false /uint128-type cast 0uq deep-eq (bool->uint128: false) rt-ok clear
+1q /boolean-type cast true eq       (int128->bool: 1q) rt-ok clear
+0q /boolean-type cast false eq      (int128->bool: 0q) rt-ok clear
+1uq /boolean-type cast true eq      (uint128->bool: 1uq) rt-ok clear
+0uq /boolean-type cast false eq     (uint128->bool: 0uq) rt-ok clear
+
+% ====================================================================
+% SECTION 6: type-predicate sanity (type operator returns int128/uint128 name)
+% ====================================================================
+
+42q type /int128-type eq            (type-op: int128 name) rt-ok clear
+42uq type /uint128-type eq          (type-op: uint128 name) rt-ok clear
+
+% is-X predicates
+42q is-number                       (predicate: is-number int128) rt-ok clear
+42uq is-number                      (predicate: is-number uint128) rt-ok clear
+42q is-int128                       (predicate: is-int128 int128) rt-ok clear
+42uq is-uint128                     (predicate: is-uint128 uint128) rt-ok clear
+42q is-uint128 not                  (predicate: is-uint128 int128 false) rt-ok clear
+42uq is-int128 not                  (predicate: is-int128 uint128 false) rt-ok clear
+42q is-integer not                  (predicate: is-integer int128 false) rt-ok clear
+42q is-long not                     (predicate: is-long int128 false) rt-ok clear
+42uq is-ulong not                   (predicate: is-ulong uint128 false) rt-ok clear
+42q is-signed                       (predicate: is-signed int128) rt-ok clear
+42uq is-signed not                  (predicate: is-signed uint128 false) rt-ok clear
+42uq is-unsigned                    (predicate: is-unsigned uint128) rt-ok clear
+42q is-unsigned not                 (predicate: is-unsigned int128 false) rt-ok clear
+42q is-float not                    (predicate: is-float int128 false) rt-ok clear
+42uq is-float not                   (predicate: is-float uint128 false) rt-ok clear
+
+% ====================================================================
+% SECTION 7: to-string round-trip (value preserved; type may differ)
+% ====================================================================
+
+% default to-string emits bare digits (no suffix); to-number reads as Integer.
+% Round-trip shape: 42q -> "42" -> 42 (Integer), not 42q.
+42q =string to-string to-number 42 eq   (to-string int128 -> int round-trip) rt-ok clear
+42uq =string to-string to-number 42 eq  (to-string uint128 -> int round-trip) rt-ok clear
+% Round-trip with PrintFmt :O (suffix) preserves the int128 type via to-number.
+=string ({:O}) mark 42q sprint-fmt pop to-number 42q deep-eq
+    (to-string via :O int128 -> to-number round-trip) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Cast of representative LARGE int128/uint128 (boundary)
+% ====================================================================
+
+170141183460469231731687303715884105727q /real-type cast
+    dup type /real-type eq                (int128 max -> real: type) rt-ok
+    0.0 gt                                (int128 max -> real: positive) rt-ok clear
+
+-170141183460469231731687303715884105728q /double-type cast type /double-type eq
+    (int128 min -> double: type) rt-ok clear
+
+340282366920938463463374607431768211455uq /double-type cast type /double-type eq
+    (uint128 max -> double: type) rt-ok clear
+
+(test_int128_type_fuzz_mirror.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

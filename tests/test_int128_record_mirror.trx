@@ -1,0 +1,135 @@
+% ====================================================================
+% Mirror of test_record.trx long/ulong cases for Int128/UInt128.
+%
+% test_int128_containers.trx covers basic record creation and
+% record-update with 128-bit fields. This file fills the gap with
+% patterns test_record.trx exercises with `l`/`ul`:
+%   * is-record negative (raw 128-bit not a record)
+%   * mixed-type record (int128 + uint128 + double + string + address)
+%   * record-update on int128 field
+%   * record equality (deep-eq)
+%   * packed array of records with int128 fields
+%   * record-merge / record-select / record-to-dict / map-field
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: is-record negative for raw 128-bit
+% ====================================================================
+
+42q is-record not                        (is-record: int128 false) rt-ok clear
+42uq is-record not                       (is-record: uint128 false) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Record with a single 128-bit field
+% ====================================================================
+
+42q 3.14d [ /a /b ] record /a get 42q deep-eq
+    (record: int128 field /a) rt-ok clear
+
+42uq 3.14d [ /a /b ] record /a get 42uq deep-eq
+    (record: uint128 field /a) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Mixed-type record (128-bit + 64-bit + short + strings/addr)
+% ====================================================================
+
+42q 99uq 3.14d 100a [ /h /uh /d /a ] record
+    dup /h get 42q deep-eq               (boundary: int128 field) rt-ok
+    dup /uh get 99uq deep-eq             (boundary: uint128 field) rt-ok
+    dup /d get 3.14d eq                  (boundary: double field coexists) rt-ok
+    dup /a get 100a eq                   (boundary: address field coexists) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 4: Boundary values (INT128_MIN, INT128_MAX, UINT128_MAX)
+% ====================================================================
+
+-170141183460469231731687303715884105728q
+170141183460469231731687303715884105727q
+340282366920938463463374607431768211455uq
+    [ /min-i /max-i /max-u ] record
+    dup /min-i get -170141183460469231731687303715884105728q deep-eq
+        (fuzz: INT128_MIN field) rt-ok
+    dup /max-i get 170141183460469231731687303715884105727q deep-eq
+        (fuzz: INT128_MAX field) rt-ok
+    dup /max-u get 340282366920938463463374607431768211455uq deep-eq
+        (fuzz: UINT128_MAX field) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 5: record-update on 128-bit field
+% ====================================================================
+
+42q 3.14d [ /a /b ] record
+    /a 99q record-update
+    dup /a get 99q deep-eq               (fuzz: update int128 field) rt-ok
+    /b get 3.14d eq                      (fuzz: update preserves other field) rt-ok clear
+
+42uq 3.14d [ /a /b ] record
+    /a 99uq record-update
+    /a get 99uq deep-eq                  (fuzz: update uint128 field) rt-ok clear
+
+% ====================================================================
+% SECTION 6: record deep-eq (same fields + values -> equal)
+% ====================================================================
+
+42q 3.14d [ /a /b ] record
+42q 3.14d [ /a /b ] record deep-eq       (record deep-eq: same int128) rt-ok clear
+
+42q 3.14d [ /a /b ] record
+43q 3.14d [ /a /b ] record deep-eq not   (record deep-eq: differing int128) rt-ok clear
+
+42uq 3.14d [ /a /b ] record
+42uq 3.14d [ /a /b ] record deep-eq      (record deep-eq: same uint128) rt-ok clear
+
+% ====================================================================
+% SECTION 7: packed array of 128-bit records
+% ====================================================================
+
+42q 3.14d [ /a /b ] record 1 packed
+    0 get
+    dup /a get 42q deep-eq               (fuzz: packed record int128 /a) rt-ok
+    /b get 3.14d eq                      (fuzz: packed record double /b) rt-ok clear
+
+% ====================================================================
+% SECTION 8: record-merge (override with 128-bit field)
+% ====================================================================
+
+42q 3.14d [ /l /d ] record
+99q [ /l ] record record-merge
+    dup /l get 99q deep-eq               (merge: int128 override) rt-ok
+    /d get 3.14d eq                      (merge: preserved double) rt-ok clear
+
+42uq 3.14d [ /l /d ] record
+99uq [ /l ] record record-merge
+    /l get 99uq deep-eq                  (merge: uint128 override) rt-ok clear
+
+% ====================================================================
+% SECTION 9: record-select with 128-bit fields
+% ====================================================================
+
+42q 3.14d (hello) [ /l /d /s ] record [ /d /l ] record-select
+    dup /d get 3.14d eq                  (select: double kept) rt-ok
+    /l get 42q deep-eq                   (select: int128 kept) rt-ok clear
+
+% ====================================================================
+% SECTION 10: record-to-dict with 128-bit field
+% ====================================================================
+
+42q 3.14d [ /l /d ] record record-to-dict
+    dup /l get 42q deep-eq               (to-dict: int128 field) rt-ok
+    /d get 3.14d eq                      (to-dict: double field) rt-ok clear
+
+(test_int128_record_mirror.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

@@ -1,0 +1,5 @@
+<< /strategy /one-for-one /intensity 3 /period 30000
+   /children [ << /id /a /start { { actor-recv pop } loop } /restart /permanent >> ] >>
+supervisor /s exch def
+s supervisor-which-children pop
+s supervisor-stop

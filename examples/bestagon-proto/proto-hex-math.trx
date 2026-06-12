@@ -1,0 +1,323 @@
+% =====================================================================
+% proto-hex-math.trx -- Phase 0.6A hex coord math prototype
+% =====================================================================
+%
+% Tier P0 of plan_bestagon_derisk_prototyping.md.  Implements GDD section
+% 3 hex grid math (flat-top, odd-q offset coordinates) with self-test
+% assertions covering pos<->cube round-trip on all 3 map sizes
+% (Tutorial / Standard / Epic = 450 / 1800 / 4050 cells), adjacency
+% counts (interior = 6, edges <= 5), and hex-distance properties
+% (identity, symmetry, triangle inequality, spec spot-checks).
+%
+% Public API (graduates to Phase 0 production code in bestagon.trx):
+%   pos-to-cube        pos  -- cube                 % [q r] -> [x y z]
+%   cube-to-pos        cube -- pos                  % [x y z] -> [q r]
+%   pos-neighbors    pos w h -- arr               % filtered to in-bounds
+%   hex-distance     pos1 pos2 -- int             % cube formula
+%
+% Run with the prod build (debug is 10-30x slower):
+%   ./trix.opt examples/bestagon-proto/proto-hex-math.trx
+%
+% No --vm-size override needed: pos-neighbors returns a fresh Array per
+% call (intrinsic to the API), but every test loop wraps each iteration
+% in save/restore brackets so the per-cell allocation is reclaimed
+% before the next iteration.  Per-cell allocation budget thus stays
+% bounded regardless of sweep size.
+% =====================================================================
+
+
+% ====================================================================
+% Section 1: public API
+% ====================================================================
+
+% Type discipline:
+%   pos  = [q r]    -- UInteger components (always >= 0; bitwise-friendly)
+%   cube = [x y z]  -- Integer components  (signed; cube coords can be negative)
+%   w, h            -- UInteger (map width/height; matches pos type)
+%
+% UInteger underflow on bounds checks: when q = 0u, `q - 1u` wraps to
+% UInt.max (~4 billion); checking `< w` rejects this correctly.  So we
+% only ever check `< w` / `< h`, never `>= 0u` (always true).
+
+% pos -- [x y z]   (UInteger pos -> Integer cube)
+% Cube conversion for flat-top + odd-q offset per GDD section 3.3:
+%   x = q
+%   z = r - (q - (q & 1u)) / 2
+%   y = -x - z
+/pos-to-cube {|pos|#+7
+    /qu   pos 0 get  local-def                                % UInteger
+    /ru   pos 1 get  local-def                                % UInteger
+    /pq   $[ (qu - (qu & 1u)) / 2u ]  local-def               % UInteger (>=0)
+    /x    qu /integer-type cast  local-def                    % Integer
+    /r-i  ru /integer-type cast  local-def                    % Integer
+    /pq-i pq /integer-type cast  local-def                    % Integer
+    /z    $[ r-i - pq-i ]  local-def                          % Integer (can be neg)
+    [ x  $[ 0 - x - z ]  z ]
+} def
+
+% cube -- pos   (Integer cube -> UInteger pos)
+% Inverse of pos-to-cube.  Uses (x, z) only; (y) is redundant under
+% the cube invariant x + y + z = 0.
+/cube-to-pos {|cube|#+4
+    /x   cube 0 get  local-def                                % Integer
+    /z   cube 2 get  local-def                                % Integer
+    /q   x  /uinteger-type cast  local-def                    % UInteger (x always >= 0 here)
+    /r   $[ z + (x - (x % 2)) / 2 ] /uinteger-type cast  local-def    % UInteger
+    [ q  r ]
+} def
+
+% pos w h -- [pos1 pos2 ... posN]   (all UInteger)
+% Returns Array of in-bounds neighbors (length 2..6) per GDD section 3.2.
+% Brick-stagger: odd-q columns' W/E neighbors shift r by +1 vs even-q.
+%
+% Bounds-check strategy: UInteger throughout.  Trix UInteger sub raises
+% `numerical-overflow` on underflow rather than wrapping, so each
+% subtraction is guarded by an explicit `>= 1u` predicate that runs
+% the body only when the result would be in-range.  Inside the body we
+% then check the upper bound (`< h` / `< w`) for the normal case.
+%
+% Allocation: per-call 6-slot scratch buffer + take(buf, n) for the
+% final fresh Array.  Callers in tight loops should still wrap in
+% save/restore -- the result Array + its [q r] sub-arrays are
+% intrinsic to the API and accumulate per call without cleanup.
+/pos-neighbors {|pos w h|#+5
+    /q     pos 0 get  local-def                               % UInteger
+    /r     pos 1 get  local-def                               % UInteger
+    /odd   $[ q & 1u ]  local-def                             % UInteger 0 or 1
+    /buf   6 array  local-def
+    /n     0  local-def
+
+    % --- N: (q, r-1u) -- needs r >= 1u ---
+    r 0u gt {
+        buf n [ q  $[ r - 1u ] ] put  /n n 1 add store
+    } if
+
+    % --- W column (q-1u) -- needs q >= 1u; r-up/r-dn vary by parity ---
+    q 0u gt {
+        % r-up: even -> r-1u (needs r>=1u); odd -> r
+        % r-dn: even -> r;     odd -> r+1u (always safe; r+1u <= h is checked)
+        odd 0u eq {
+            % even-q column
+            % NW: (q-1u, r-1u) -- needs r >= 1u
+            r 0u gt {
+                buf n [ $[ q - 1u ]  $[ r - 1u ] ] put  /n n 1 add store
+            } if
+            % SW: (q-1u, r)
+            buf n [ $[ q - 1u ]  r ] put  /n n 1 add store
+        } {
+            % odd-q column
+            % NW: (q-1u, r)
+            buf n [ $[ q - 1u ]  r ] put  /n n 1 add store
+            % SW: (q-1u, r+1u) -- in-range iff r+1u < h
+            $[ r + 1u ] h lt {
+                buf n [ $[ q - 1u ]  $[ r + 1u ] ] put  /n n 1 add store
+            } if
+        } if-else
+    } if
+
+    % --- E column (q+1u) -- in-range iff q+1u < w ---
+    $[ q + 1u ] w lt {
+        odd 0u eq {
+            % even-q column
+            % NE: (q+1u, r-1u) -- needs r >= 1u
+            r 0u gt {
+                buf n [ $[ q + 1u ]  $[ r - 1u ] ] put  /n n 1 add store
+            } if
+            % SE: (q+1u, r)
+            buf n [ $[ q + 1u ]  r ] put  /n n 1 add store
+        } {
+            % odd-q column
+            % NE: (q+1u, r)
+            buf n [ $[ q + 1u ]  r ] put  /n n 1 add store
+            % SE: (q+1u, r+1u) -- in-range iff r+1u < h
+            $[ r + 1u ] h lt {
+                buf n [ $[ q + 1u ]  $[ r + 1u ] ] put  /n n 1 add store
+            } if
+        } if-else
+    } if
+
+    % --- S: (q, r+1u) -- in-range iff r+1u < h ---
+    $[ r + 1u ] h lt {
+        buf n [ q  $[ r + 1u ] ] put  /n n 1 add store
+    } if
+
+    buf n take
+} def
+
+% pos1 pos2 -- int    (UInteger pos in; Integer distance out)
+% Cube distance per GDD section 3.3:
+%   d = (|dx| + |dy| + |dz|) / 2
+/hex-distance {|p1 p2|#+8
+    /c1   p1 pos-to-cube  local-def
+    /c2   p2 pos-to-cube  local-def
+    /c1x  c1 0 get      local-def
+    /c1y  c1 1 get      local-def
+    /c1z  c1 2 get      local-def
+    /c2x  c2 0 get      local-def
+    /c2y  c2 1 get      local-def
+    /c2z  c2 2 get      local-def
+    $[ (abs(c1x - c2x) + abs(c1y - c2y) + abs(c1z - c2z)) / 2 ]
+} def
+
+
+% ====================================================================
+% Section 2: self-test helpers
+% ====================================================================
+%
+% All test loops wrap each iteration in save/restore.  This reclaims
+% the per-cell allocation (the fresh [q r] sub-arrays returned by
+% pos-neighbors + the cube intermediates) before the next iteration,
+% keeping VM bounded regardless of sweep size.  Failures throw
+% immediately rather than count, which avoids the need for a counter
+% that survives save/restore.
+
+% w h --
+% Iterate every (qu, ru) in [0u..w-1u] x [0u..h-1u]; assert
+% cube-to-pos(pos-to-cube([qu ru])) == [qu ru].  Throws on first fail.
+/test-roundtrip {|w h|
+    0u 1u $[ w - 1u ] { |qu|
+        0u 1u $[ h - 1u ] { |ru|#+2
+            save pop
+            /pos   [ qu ru ]          local-def
+            /back  pos pos-to-cube cube-to-pos  local-def
+            back 0 get qu ne back 1 get ru ne or {
+                (  FAIL: round-trip [{0} {1}] -> [{2} {3}]\n)
+                    mark qu ru back 0 get back 1 get
+                    print-fmt pop pop
+                /roundtrip-fail throw
+            } if
+            -1 restore
+        } for
+    } for
+} def
+
+% w h --
+% For every interior (qu, ru) -- (1u <= qu <= w-2u, 1u <= ru <= h-2u) --
+% assert (pos-neighbors pos w h) length == 6.  Throws on first fail.
+/test-interior-six {|w h|
+    1u 1u $[ w - 2u ] { |qu|
+        1u 1u $[ h - 2u ] { |ru|#+1
+            save pop
+            /n  [ qu ru ] w h pos-neighbors length  local-def
+            n 6 ne {
+                (  FAIL: interior [{0} {1}] has {2} neighbors\n)
+                    mark qu ru n
+                    print-fmt pop pop
+                /interior-fail throw
+            } if
+            -1 restore
+        } for
+    } for
+} def
+
+% pos w h expected-count --
+% Assert that pos has exactly expected-count neighbors on a (w, h) grid.
+% Throws on mismatch.  Used for corner / edge spot checks.
+/expect-neighbor-count {|pos w h expected|#+1
+    /got  pos w h pos-neighbors length  local-def
+    got expected ne {
+        (  FAIL: pos-neighbors len mismatch (expected {0} got {1}, pos=[{2} {3}])\n)
+            mark expected got pos 0 get pos 1 get
+            print-fmt pop pop
+        /neighbor-count-fail throw
+    } if
+} def
+
+% pos1 pos2 expected --
+% Assert hex-distance(pos1, pos2) == expected.  Throws on mismatch.
+/expect-distance {|p1 p2 expected|#+1
+    /got  p1 p2 hex-distance  local-def
+    got expected ne {
+        (  FAIL: hex-distance mismatch (expected {0} got {1}, [{2} {3}] to [{4} {5}])\n)
+            mark expected got p1 0 get p1 1 get p2 0 get p2 1 get
+            print-fmt pop pop
+        /distance-fail throw
+    } if
+} def
+
+
+% ====================================================================
+% Section 3: self-test entry
+% ====================================================================
+
+/run-self-test {
+    (proto-hex-math: starting self-test...\n) print
+
+    % --- Section A: pos<->cube round-trip on all 3 map sizes ---
+    (\n[A] pos<->cube round-trip\n) print
+    25u 18u test-roundtrip  (  PASS: 25x18 (450 cells)\n)    print
+    50u 36u test-roundtrip  (  PASS: 50x36 (1800 cells)\n)   print
+    75u 54u test-roundtrip  (  PASS: 75x54 (4050 cells)\n)   print
+
+    % --- Section B: pos-neighbors interior count == 6 ---
+    (\n[B] pos-neighbors interior cells have 6 neighbors\n) print
+    25u 18u test-interior-six  (  PASS: 25x18 interior (368 cells)\n)  print
+    50u 36u test-interior-six  (  PASS: 50x36 interior (1632 cells)\n) print
+    75u 54u test-interior-six  (  PASS: 75x54 interior (3796 cells)\n) print
+
+    % --- Section C: pos-neighbors corner + edge spot checks (25x18) ---
+    (\n[C] pos-neighbors corner + edge spot checks on 25x18\n) print
+    [  0u  0u ] 25u 18u 2 expect-neighbor-count
+    [ 24u  0u ] 25u 18u 2 expect-neighbor-count
+    [  0u 17u ] 25u 18u 3 expect-neighbor-count
+    [ 24u 17u ] 25u 18u 3 expect-neighbor-count
+    [  1u  0u ] 25u 18u 5 expect-neighbor-count
+    [  2u  0u ] 25u 18u 3 expect-neighbor-count
+    [  1u 17u ] 25u 18u 3 expect-neighbor-count
+    [  2u 17u ] 25u 18u 5 expect-neighbor-count
+    (  PASS: 8 corner+edge spot checks\n) print
+
+    % --- Section D: hex-distance spec spot checks ---
+    (\n[D] hex-distance spec spot checks\n) print
+    [  0u  0u ] [  0u  0u ]  0 expect-distance
+    [  5u  5u ] [  5u  5u ]  0 expect-distance
+    [ 74u 53u ] [ 74u 53u ]  0 expect-distance
+    [  0u  0u ] [  1u  0u ]  1 expect-distance
+    [  0u  0u ] [  2u  0u ]  2 expect-distance
+    [  0u  0u ] [  0u  1u ]  1 expect-distance
+    [  0u  0u ] [  5u  3u ]  6 expect-distance
+    [  0u  0u ] [ 10u  0u ] 10 expect-distance
+    [  5u  0u ] [  5u  5u ]  5 expect-distance
+    [ 10u  5u ] [ 10u  5u ]  0 expect-distance
+    (  PASS: 10 distance spot checks\n) print
+
+    % --- Section E: hex-distance symmetry on 50 random pairs ---
+    (\n[E] hex-distance symmetry on 50 random (a, b) pairs\n) print
+    1234567890ul rand-seed
+    1 1 50 { |k|#+4
+        save pop
+        /a  [ 25u rand-bounded-uinteger  18u rand-bounded-uinteger ]  local-def
+        /b  [ 25u rand-bounded-uinteger  18u rand-bounded-uinteger ]  local-def
+        /dab  a b hex-distance  local-def
+        /dba  b a hex-distance  local-def
+        dab dba ne {
+            (  FAIL: sym d(a,b)={0} != d(b,a)={1}\n) mark dab dba print-fmt pop pop
+            /symmetry-fail throw
+        } if
+        -1 restore
+    } for
+    (  PASS: 50 symmetry pairs\n) print
+
+    % --- Section F: hex-distance triangle inequality on 30 random triples ---
+    (\n[F] hex-distance triangle inequality on 30 random (a, b, c) triples\n) print
+    1 1 30 { |k|#+6
+        save pop
+        /a  [ 50u rand-bounded-uinteger  36u rand-bounded-uinteger ]  local-def
+        /b  [ 50u rand-bounded-uinteger  36u rand-bounded-uinteger ]  local-def
+        /c  [ 50u rand-bounded-uinteger  36u rand-bounded-uinteger ]  local-def
+        /dab a b hex-distance local-def
+        /dbc b c hex-distance local-def
+        /dac a c hex-distance local-def
+        dac $[ dab + dbc ] gt {
+            (  FAIL: tri ineq d(a,c)={0} > d(a,b)+d(b,c)={1}+{2}\n)
+                mark dac dab dbc print-fmt pop pop
+            /triangle-fail throw
+        } if
+        -1 restore
+    } for
+    (  PASS: 30 triangle inequality triples\n) print
+
+    (\nproto-hex-math: SELF-TEST PASS\n) print
+} def
+
+run-self-test

@@ -1,0 +1,163 @@
+% ====================================================================
+% test_logic_unify_partial_bind.trx
+% ====================================================================
+% Happy-path coverage for Option B (context-aware lvar_bind) from
+% plan_lvar_bind_context_aware.md.
+%
+% Option B replaces the universal-shallow-share semantic of the old
+% lvar_bind with a context-aware split:
+%   - Top-level binds (consumable source): make_copy / transfer.
+%   - Recursive sub-binds + deref-from-bound: make_clone / deep copy.
+%
+% Test convention notes:
+%   - `deref` returns a SHARED m_offset reference into the binding slot.
+%     Any consuming op (`pop`, `eq`, `=`) would call maybe_free_extvalue
+%     on the shared offset, corrupting the binding and tripping double-
+%     free on restore.  So tests of ExtValue-backed bindings (Long etc.)
+%     verify with `bound?` + counter accounting only; tests that want
+%     to verify the read-back VALUE use Integer (inline, no ExtValue).
+%     This matches the convention used in tests/test_logic.trx.
+%   - unify-match success leaves the save scope elevated (no implicit
+%     commit/pop).  Each H3-H7 iter brackets the call in save..restore
+%     so the loop's accounting is deterministic.
+%
+% Run: ./trix tests/test_logic_unify_partial_bind.trx
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- H1: unify_op top-level Long transfer ---
+%       42l x unify  ->  x bound, ExtValue moved into binding storage.
+//:status:extvalue-active /b1 exch def
+save /S1 exch def
+logic-var /x1 exch def
+42l x1 unify pop
+x1 bound?
+    (H1: top-level Long unify binds x) rt-ok
+S1 restore
+//:status:extvalue-active b1 eq
+    (H1: ExtValue reclaimed after restore) rt-ok
+
+% --- H2: unify_op Long-equal-Long no bind ---
+{ 42l 42l unify pop } /h2-iter exch def
+//:status:extvalue-active /b2 exch def
+50 /h2-iter load repeat
+//:status:extvalue-active b2 eq
+    (H2: 50x equal-Long no ExtValue leak) rt-ok
+
+% --- H3: unify_match direct top-level lvar pattern ---
+%        Pattern is a fresh lvar; value (42l) transferred via the
+%        a_consumable=true top-level path.
+{
+    save /S exch def
+    logic-var /xH3 exch def
+    42l [[ xH3 { xH3 bound? pop } ]] unify-match
+    S restore
+} /h3-iter exch def
+//:status:extvalue-active /b3 exch def
+50 /h3-iter load repeat
+//:status:extvalue-active b3 eq
+    (H3: 50x top-level lvar pattern -- no net ExtValue leak) rt-ok
+
+% --- H4: unify_match array pattern with leaf lvar (CANONICAL Option B) ---
+%        Pattern is [xH4 99l]; value is [42l 99l].  Sub-element bind of
+%        xH4 to 42l goes through deep-clone (a_consumable=false on
+%        recursion).  This is the path the audit's UAF would have hit
+%        under the old shallow-share semantics.
+{
+    save /S exch def
+    logic-var /xH4 exch def
+    [ 42l 99l ] [[ [ xH4 99l ] { xH4 bound? pop } ]] unify-match
+    S restore
+} /h4-iter exch def
+//:status:extvalue-active /b4 exch def
+50 /h4-iter load repeat
+//:status:extvalue-active b4 eq
+    (H4: 50x deep-array pattern -- canonical Option B no leak) rt-ok
+
+% --- H5: Record pattern with leaf lvar via unify_op ---
+%        Define R5{n}; value has n=42l, pattern has n=lvar.  unify_op
+%        recurses into record fields with consumable=false on each side.
+/R5-ctor [ /n ] record-type def
+{
+    save /S exch def
+    logic-var /xH5 exch def
+    42l R5-ctor
+    xH5 R5-ctor
+    unify pop
+    xH5 bound? pop
+    S restore
+} /h5-iter exch def
+//:status:extvalue-active /b5 exch def
+50 /h5-iter load repeat
+//:status:extvalue-active b5 eq
+    (H5: 50x record pattern with leaf lvar -- no leak) rt-ok
+
+% --- H6: Tagged pattern with leaf lvar via unify_op ---
+%        unify_impl on Tagged recurses into the payload with
+%        consumable=false on both sides.
+{
+    save /S exch def
+    logic-var /xH6 exch def
+    42l /T6 tag
+    xH6 /T6 tag
+    unify pop
+    xH6 bound? pop
+    S restore
+} /h6-iter exch def
+//:status:extvalue-active /b6 exch def
+50 /h6-iter load repeat
+//:status:extvalue-active b6 eq
+    (H6: 50x tagged pattern with leaf lvar -- no leak) rt-ok
+
+% --- H7: Deep nested array (depth 5) with leaf lvar at the bottom ---
+%        Each level of recursion in unify_impl passes consumable=false,
+%        so the final leaf bind takes the deep-clone path correctly.
+{
+    save /S exch def
+    logic-var /xH7 exch def
+    [[[[[ 42l ]]]]]
+    [[[[[ xH7 ]]]]]
+    unify pop
+    xH7 bound? pop
+    S restore
+} /h7-iter exch def
+//:status:extvalue-active /b7 exch def
+50 /h7-iter load repeat
+//:status:extvalue-active b7 eq
+    (H7: 50x depth-5 nested array -- no leak) rt-ok
+
+% --- H8: Lvar-to-lvar binding chain + deref consumability flip ---
+%        Use Integer (inline) so deref+eq is safe for content check.
+%        x bound to y; then 42 x unify; deref x and y both read 42.
+%        Exercises the pre-deref a_was_bound_lvar/b_was_bound_lvar
+%        flip-to-non-consumable code path in unify_impl.
+//:status:extvalue-active /b8 exch def
+save /S8 exch def
+logic-var /xH8 exch def
+logic-var /yH8 exch def
+xH8 yH8 unify pop
+42 xH8 unify pop
+xH8 deref 42 eq
+    (H8: x->y chain + 42 x unify -- x deref reads 42) rt-ok
+yH8 deref 42 eq
+    (H8: chain propagates -- y deref reads 42) rt-ok
+S8 restore
+//:status:extvalue-active b8 eq
+    (H8: chain ExtValues reclaimed after restore) rt-ok
+
+% --- Final ---
+/vm-validate query-status true eq
+    (vm-validate passes after all happy-path tests) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_logic_unify_partial_bind: ALL TESTS PASSED) =
+(__test_ok__) =

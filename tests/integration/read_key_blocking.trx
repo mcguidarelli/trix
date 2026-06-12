@@ -1,0 +1,24 @@
+% read_key_blocking.trx -- exercises atReadKeyRetry continuation.
+%
+% Enters raw-mode (so stdin gets O_NONBLOCK), prints READY so the test
+% harness knows it's safe to send input, then calls read-key-byte.
+% No byte is available yet, so coroutine_block_on_stdin pushes
+% atReadKeyRetry on the exec stack and the coroutine sleeps.  When the
+% harness writes a byte, the scheduler's poll() reports stdin readable
+% and resumes the coroutine; atReadKeyRetry retries the read and pushes
+% the byte + true.
+%
+% Output (CR-LF translated by the pty's OPOST):
+%   READY
+%   BYTE: <code>
+
+raw-mode
+(READY\n) print flush
+
+read-key-byte
+{ (BYTE: ) print /integer-type cast = }
+{ (EOF\n) print flush }
+if-else
+
+cooked-mode
+flush

@@ -1,0 +1,64 @@
+% test_raw_mode.trx -- raw-mode / cooked-mode / raw-mode? Phase 1 tests
+%
+% Real-tty round-trip (raw-mode actually arming termios) cannot be tested
+% from a piped-stdin harness; without a tty, raw-mode raises /io-read-error.
+% This file covers the non-tty paths: predicate, idempotency, sandbox-block,
+% error-on-non-tty, cooked-mode no-op-when-not-raw.
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+%% === raw-mode? predicate ===
+
+raw-mode? false eq (raw-mode?: false initially) rt-ok
+raw-mode? type /boolean-type eq (raw-mode?: returns boolean) rt-ok
+
+%% === raw-mode without a tty ===
+
+% Test harness pipes stdin from a file, so STDIN_FILENO is not a tty.
+% raw-mode must raise /io-read-error.
+<< /io-read-error { clear true } >> { raw-mode } try-catch
+(raw-mode: errors on non-tty) rt-ok
+
+% raw-mode? still false after the failed attempt
+raw-mode? false eq (raw-mode?: still false after error) rt-ok
+
+%% === cooked-mode no-op when not raw ===
+
+cooked-mode
+raw-mode? false eq (cooked-mode: no-op when not raw) rt-ok
+
+% Multiple cooked-mode calls are still safe
+cooked-mode cooked-mode cooked-mode
+raw-mode? false eq (cooked-mode: idempotent when not raw) rt-ok
+
+%% === terminal-size without a tty ===
+
+% Test harness pipes stdin from a file, so STDIN_FILENO is not a tty.
+% terminal-size must raise /io-read-error.
+<< /io-read-error { clear true } >> { terminal-size } try-catch
+(terminal-size: errors on non-tty) rt-ok
+
+%% === Results ===
+
+failed 0 eq
+{ total (raw-mode: all tests passed) = = }
+{ (raw-mode: FAILURES = ) print failed = } if-else
+failed 0 eq { } { /assert-failed throw } if-else
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

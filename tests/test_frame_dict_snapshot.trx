@@ -1,0 +1,98 @@
+% ====================================================================
+% test_frame_dict_snapshot.trx -- frame-dict pool round-trip through
+% snap-shot / thaw (plan_frame_dict_followups.md item #2)
+% ====================================================================
+% Phase 1: populate m_frame_dict_pool via |locals|#N (proc-return
+% recycles each frame dict onto the pool), snap-shot so the
+% frame_dict_pool_offset field is exercised in the header, then run a
+% post-snap-shot section that also runs in phase 2.
+%
+% Phase 2 (frame_dict_snapshot_thaw.trx): thaws the image and re-runs
+% the post-snap-shot section.  On thaw, std::fill_n invalidates the
+% entire frame-dict pool -- so the pool is empty in phase 2 immediately
+% after thaw.  The assertions below are written so that phase-1 and
+% phase-2 outputs match line-for-line regardless.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- pre-snap-shot setup: populate the frame-dict pool ---
+% Each "args {proc} exec" recycles a cap-N dict onto
+% m_frame_dict_pool[N-1] when the proc returns.  Cover several buckets.
+1 { |a|#2 a } exec pop
+1 2 { |a b|#2 a b add } exec pop
+1 { |a|#3 a } exec pop
+1 2 3 { |a b c|#3 a b c add add } exec pop
+1 { |a|#4 a } exec pop
+
+% Also populate the overflow chain (maxlength > MaxDictPoolSize=16).
+1 { |a|#17 a } exec pop
+1 { |a|#25 a } exec pop
+
+% Sanity in phase 1 only (lines with sfp: prefix are NOT cross-compared
+% against phase 2 because they're phase-1-specific).
+//:status:locals-pool-count dup 3 ge (sfp:pre-snap-pool>=3) rt-ok pop
+//:status:locals-overflow-count dup 2 ge (sfp:pre-snap-overflow>=2) rt-ok pop
+
+(tests/frame_dict_snapshot.img) snap-shot
+
+% ==== post-snap-shot: runs in BOTH phase 1 and phase 2 ====
+% Lines prefixed with "sf:" are diffed between phase 1 and phase 2.
+%
+% In phase 1 the pool still has the entries recycled above, so
+% |locals|#N below reuses pooled dicts.  In phase 2 the pool was wiped
+% by thaw, so |locals|#N fresh-allocates.  Semantics and values must
+% be identical either way.
+
+% Section 1: value round-trip through |locals|#N at several capacities
+42 { |x|#2 x } exec 42 eq (sf:single-cap2) rt-ok
+3 4 { |x y|#2 x y add } exec 7 eq (sf:cap2-two-names) rt-ok
+100 { |p|#3 p } exec 100 eq (sf:single-cap3) rt-ok
+1 2 3 { |a b c|#3 a b c add add } exec 6 eq (sf:cap3-three-names) rt-ok
+
+% Section 2: reuse the same shape to exercise the pool->begin->end
+% cycle after the snapshot boundary
+11 { |r|#2 r } exec pop
+22 { |r|#2 r } exec 22 eq (sf:reuse-cap2-a) rt-ok
+33 { |r|#2 r } exec 33 eq (sf:reuse-cap2-b) rt-ok
+
+% Section 3: different capacity doesn't cross-pollute
+7 { |w|#1 w } exec 7 eq (sf:single-cap1) rt-ok
+1 2 3 4 { |u v w x|#4 u v w x add add add } exec 10 eq (sf:cap4) rt-ok
+
+% Section 4: working-var defs inside |locals|#N after thaw
+5 { |a|#3 /t 10 local-def /u 20 local-def a t u add add } exec 35 eq (sf:work-vars) rt-ok
+
+% Section 5: nested |locals|
+5 { |outer|#2 3 { |inner|#2 outer inner mul } exec } exec 15 eq (sf:nested) rt-ok
+
+% Section 6: pool-count invariant that holds in BOTH phases.  After
+% running many |locals|#N proc returns above, the frame pool has at
+% least one entry (every proc return recycles).
+//:status:locals-pool-count dup 1 ge (sf:post-pool>=1) rt-ok pop
+
+% Section 6b: overflow chain post-thaw.  Thaw nulls m_frame_dict_overflow
+% (matches m_frame_dict_pool's reset), so phase 2 starts at 0; an
+% oversized recycle here pushes one entry, observable in both phases.
+1 { |a|#22 a } exec 1 eq (sf:cap22-recycle) rt-ok
+//:status:locals-overflow-count dup 1 ge (sf:post-overflow>=1) rt-ok pop
+% A second recycle of the same size reuses the chain slot (count stable).
+1 { |a|#22 a } exec 1 eq (sf:cap22-reuse) rt-ok
+//:status:locals-overflow-count dup 1 ge (sf:post-overflow-reuse>=1) rt-ok pop
+
+% Section 7: pool survives additional save/restore cycles post-snap-shot
+/sv save def
+99 { |zz|#2 zz } exec 99 eq (sf:cap2-inside-save) rt-ok
+sv restore
+77 { |zz|#2 zz } exec 77 eq (sf:cap2-after-restore) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_frame_dict_snapshot: ALL TESTS PASSED) =
+(__test_ok__) =

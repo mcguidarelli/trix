@@ -1,0 +1,108 @@
+% examples/birthdays.trx -- showcase for chrono Tier 2 date arithmetic.
+%
+% Run:
+%   ./trix examples/birthdays.trx
+%
+% Demonstrates:
+%   - make-date constructing udates
+%   - date-weekday reading components (day-of-year shows up via the
+%     %j sprint-fmt directive rather than the accessor op)
+%   - date-add-years (with Feb 29 clamp) for next-birthday
+%   - date-diff-days for age / days-until-next-birthday
+%   - leap-year? / days-in-month predicates
+%   - instant-to-date deriving today's udate from epoch-time
+%
+% Output is a small table of historical figures with age, days until
+% next birthday, and the weekday they were born.
+
+% Today's date, derived from the wall clock.
+/today epoch-time instant-to-date def
+
+% Birthday entries: array of [name year month day].
+/people [
+    [(Ada Lovelace)         1815 12 10]
+    [(Grace Hopper)         1906 12  9]
+    [(Donald Knuth)         1938  1 10]
+    [(Alan Turing)          1912  6 23]
+    [(Margaret Hamilton)    1936  8 17]
+] def
+
+% Format helper: pad an int to 2 digits.
+/pad2 {
+    /val exch def
+    256 string ({0:02d}) mark val sprint-fmt pop
+} def
+
+% Print column header.
+(--- birthdays ---) =
+() =
+256 string ({0:<22s}{1:>10s}{2:>10s}{3:>16s})
+mark (Name) (Born) (Age) (Until birthday) sprint-fmt pop =
+256 string ({0:s})
+mark (---------------------- ----------  --------- ---------------) sprint-fmt pop =
+
+people {
+    /entry exch def
+    /name  entry 0 get def
+    /year  entry 1 get def
+    /month entry 2 get def
+    /day   entry 3 get def
+
+    % Birth date as a udate.
+    /born year month day make-date def
+
+    % Compute age in completed years.
+    % date-diff-days returns (right - left), so
+    % `today this-year-birthday date-diff-days` = (birthday - today):
+    %   negative = birthday already happened this year (full age elapsed)
+    %   zero or positive = birthday is today or upcoming (subtract 1)
+    /this-year-birthday today date-year month day make-date def
+    /years-elapsed today date-year year sub def
+    /diff today this-year-birthday date-diff-days def
+    /age
+        diff 0 lt { years-elapsed } { years-elapsed 1 sub } if-else
+    def
+
+    % Next birthday: roll forward to next year if this year's
+    % birthday has already passed; otherwise this year's birthday
+    % is still upcoming.  date-add-years clamps Feb 29 to Feb 28
+    % in non-leap target years.
+    /next-birthday
+        diff 0 lt
+        { this-year-birthday 1 date-add-years }
+        { this-year-birthday }
+        if-else
+    def
+
+    /days-until today next-birthday date-diff-days def
+    /weekday born date-weekday def
+
+    256 string ({0:<22s}{1:>10s}{2:9d}{3:13d}d  {4:s})
+    mark
+        name
+        256 string ({0:d}-{1:s}-{2:s})
+            mark year month pad2 day pad2 sprint-fmt pop
+        age
+        days-until
+        weekday
+    sprint-fmt pop =
+} for-all
+
+() =
+
+% Today's date for context.
+256 string (Today: {0:D%Y-%m-%d (%a, day %j)})
+mark today sprint-fmt pop =
+
+% Calendar facts: derive this-year outside the begin/end block (which
+% would try to def into the ReadOnly /chrono dict), then resolve the
+% predicate names through the dict for the actual lookup.
+/this-year today date-year def
+//:systemdict:chrono begin
+    256 string ({0:s} year length: {1:d} days  (Feb has {2:d}))
+    mark
+        this-year leap-year? { (leap) } { (regular) } if-else
+        this-year leap-year? { 366 } { 365 } if-else
+        this-year 2 days-in-month
+    sprint-fmt pop =
+end

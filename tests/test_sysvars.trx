@@ -1,0 +1,378 @@
+% test_sysvars.trx -- system variables, type conversion, misc operators
+% Uses only printable ASCII (0x20-0x7E)
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% helper: approximate equality for floats
+% usage: val expected tolerance approx-eq -> bool
+/approx-eq {
+  3 1 roll   % tol val expected
+  sub abs    % tol |val - expected|
+  ge         % tol >= |val - expected|
+} def
+
+% ============================================================
+% 1. System variables
+% ============================================================
+
+% stdin
+stdin type /stream-type eq (sysvar-stdin-is-stream) rt-ok clear
+
+% stdout
+stdout type /stream-type eq (sysvar-stdout-is-stream) rt-ok clear
+
+% stderr
+stderr type /stream-type eq (sysvar-stderr-is-stream) rt-ok clear
+
+% ============================================================
+% 2. Math constants (real-type)
+% ============================================================
+
+//:systemdict:numbers:real-type:e type /real-type eq (math-real-e-is-real) rt-ok clear
+//:systemdict:numbers:real-type:e 2.71828 0.001 approx-eq (math-real-e-approx) rt-ok clear
+
+//:systemdict:numbers:real-type:pi type /real-type eq (math-real-pi-is-real) rt-ok clear
+//:systemdict:numbers:real-type:pi 3.14159 0.001 approx-eq (math-real-pi-approx) rt-ok clear
+
+//:systemdict:numbers:real-type:log2e type /real-type eq (math-real-log2e-is-real) rt-ok clear
+//:systemdict:numbers:real-type:log2e 1.4427 0.001 approx-eq (math-real-log2e-approx) rt-ok clear
+
+//:systemdict:numbers:real-type:log10e type /real-type eq (math-real-log10e-is-real) rt-ok clear
+//:systemdict:numbers:real-type:log10e 0.4343 0.001 approx-eq (math-real-log10e-approx) rt-ok clear
+
+//:systemdict:numbers:real-type:ln2 type /real-type eq (math-real-ln2-is-real) rt-ok clear
+//:systemdict:numbers:real-type:ln2 0.6931 0.001 approx-eq (math-real-ln2-approx) rt-ok clear
+
+//:systemdict:numbers:real-type:ln10 type /real-type eq (math-real-ln10-is-real) rt-ok clear
+//:systemdict:numbers:real-type:ln10 2.3026 0.001 approx-eq (math-real-ln10-approx) rt-ok clear
+
+//:systemdict:numbers:real-type:sqrt2 type /real-type eq (math-real-sqrt2-is-real) rt-ok clear
+//:systemdict:numbers:real-type:sqrt2 1.4142 0.001 approx-eq (math-real-sqrt2-approx) rt-ok clear
+
+//:systemdict:numbers:real-type:sqrt3 type /real-type eq (math-real-sqrt3-is-real) rt-ok clear
+//:systemdict:numbers:real-type:sqrt3 1.7321 0.001 approx-eq (math-real-sqrt3-approx) rt-ok clear
+
+//:systemdict:numbers:real-type:phi type /real-type eq (math-real-phi-is-real) rt-ok clear
+//:systemdict:numbers:real-type:phi 1.618 0.001 approx-eq (math-real-phi-approx) rt-ok clear
+
+//:systemdict:numbers:real-type:egamma type /real-type eq (math-real-egamma-is-real) rt-ok clear
+//:systemdict:numbers:real-type:egamma 0.5772 0.001 approx-eq (math-real-egamma-approx) rt-ok clear
+
+% ============================================================
+% 2b. Math constants (double-type)
+% ============================================================
+
+//:systemdict:numbers:double-type:e type /double-type eq (math-double-e-is-double) rt-ok clear
+//:systemdict:numbers:double-type:pi type /double-type eq (math-double-pi-is-double) rt-ok clear
+//:systemdict:numbers:double-type:log2e type /double-type eq (math-double-log2e-is-double) rt-ok clear
+//:systemdict:numbers:double-type:log10e type /double-type eq (math-double-log10e-is-double) rt-ok clear
+//:systemdict:numbers:double-type:ln2 type /double-type eq (math-double-ln2-is-double) rt-ok clear
+//:systemdict:numbers:double-type:ln10 type /double-type eq (math-double-ln10-is-double) rt-ok clear
+//:systemdict:numbers:double-type:sqrt2 type /double-type eq (math-double-sqrt2-is-double) rt-ok clear
+//:systemdict:numbers:double-type:sqrt3 type /double-type eq (math-double-sqrt3-is-double) rt-ok clear
+//:systemdict:numbers:double-type:phi type /double-type eq (math-double-phi-is-double) rt-ok clear
+//:systemdict:numbers:double-type:egamma type /double-type eq (math-double-egamma-is-double) rt-ok clear
+
+% double-type approximate value checks
+//:systemdict:numbers:double-type:e 2.71828d 0.001d approx-eq (math-double-e-approx) rt-ok clear
+//:systemdict:numbers:double-type:pi 3.14159d 0.001d approx-eq (math-double-pi-approx) rt-ok clear
+//:systemdict:numbers:double-type:phi 1.618d 0.001d approx-eq (math-double-phi-approx) rt-ok clear
+//:systemdict:numbers:double-type:egamma 0.5772d 0.001d approx-eq (math-double-egamma-approx) rt-ok clear
+
+% ============================================================
+% 3. Numeric limits
+% ============================================================
+
+//:systemdict:numbers:integer-type:min -2147483648 eq (limits-int-min) rt-ok clear
+//:systemdict:numbers:integer-type:max 2147483647 eq (limits-int-max) rt-ok clear
+//:systemdict:numbers:integer-type:is-signed true eq (limits-int-is-signed) rt-ok clear
+
+//:systemdict:numbers:uinteger-type:min 0u eq (limits-uint-min) rt-ok clear
+//:systemdict:numbers:uinteger-type:max 4294967295u eq (limits-uint-max) rt-ok clear
+//:systemdict:numbers:uinteger-type:is-signed false eq (limits-uint-is-signed) rt-ok clear
+
+//:systemdict:numbers:byte-type:min 0b eq (limits-byte-min) rt-ok clear
+//:systemdict:numbers:byte-type:max 255b eq (limits-byte-max) rt-ok clear
+//:systemdict:numbers:byte-type:is-signed false eq (limits-byte-is-signed) rt-ok clear
+
+//:systemdict:numbers:long-type:is-signed true eq (limits-long-is-signed) rt-ok clear
+//:systemdict:numbers:long-type:min type /long-type eq (limits-long-min-is-long) rt-ok clear
+//:systemdict:numbers:long-type:max type /long-type eq (limits-long-max-is-long) rt-ok clear
+
+//:systemdict:numbers:ulong-type:is-signed false eq (limits-ulong-is-signed) rt-ok clear
+//:systemdict:numbers:ulong-type:min type /ulong-type eq (limits-ulong-min-is-ulong) rt-ok clear
+//:systemdict:numbers:ulong-type:max type /ulong-type eq (limits-ulong-max-is-ulong) rt-ok clear
+
+% float limits - type checks
+//:systemdict:numbers:real-type:min type /real-type eq (limits-real-min-is-real) rt-ok clear
+//:systemdict:numbers:real-type:max type /real-type eq (limits-real-max-is-real) rt-ok clear
+//:systemdict:numbers:real-type:epsilon type /real-type eq (limits-real-epsilon-is-real) rt-ok clear
+//:systemdict:numbers:real-type:is-signed true eq (limits-real-is-signed) rt-ok clear
+//:systemdict:numbers:real-type:is-iec559 true eq (limits-real-is-iec559) rt-ok clear
+
+//:systemdict:numbers:double-type:min type /double-type eq (limits-double-min-is-double) rt-ok clear
+//:systemdict:numbers:double-type:max type /double-type eq (limits-double-max-is-double) rt-ok clear
+//:systemdict:numbers:double-type:epsilon type /double-type eq (limits-double-epsilon-is-double) rt-ok clear
+//:systemdict:numbers:double-type:is-signed true eq (limits-double-is-signed) rt-ok clear
+//:systemdict:numbers:double-type:is-iec559 true eq (limits-double-is-iec559) rt-ok clear
+
+% integer limits - digits metadata
+//:systemdict:numbers:real-type:digits type /integer-type eq (limits-real-digits-is-int) rt-ok clear
+//:systemdict:numbers:real-type:digits10 type /integer-type eq (limits-real-digits10-is-int) rt-ok clear
+//:systemdict:numbers:real-type:radix 2 eq (limits-real-radix-is-2) rt-ok clear
+
+//:systemdict:numbers:double-type:digits type /integer-type eq (limits-double-digits-is-int) rt-ok clear
+//:systemdict:numbers:double-type:digits10 type /integer-type eq (limits-double-digits10-is-int) rt-ok clear
+//:systemdict:numbers:double-type:radix 2 eq (limits-double-radix-is-2) rt-ok clear
+
+% ============================================================
+% 4. Type conversion - to-string
+% ============================================================
+
+/sv save def
+
+42 128 string to-string (42) eq (to-string-int-42) rt-ok clear
+true 128 string to-string (true) eq (to-string-bool-true) rt-ok clear
+false 128 string to-string (false) eq (to-string-bool-false) rt-ok clear
+3.14 128 string to-string (3.14) eq (to-string-real-3.14) rt-ok clear
+(hello) 128 string to-string (hello) eq (to-string-str-hello) rt-ok clear
+0u 128 string to-string (0) eq (to-string-uint-0) rt-ok clear
+65b 128 string to-string (A) eq (to-string-byte-65-as-char) rt-ok clear
+
+sv restore
+
+% ============================================================
+% 5. Type conversion - reinterpret
+% ============================================================
+
+/sv save def
+
+% int -> uint (same 32-bit width)
+42 /uinteger-type reinterpret type /uinteger-type eq (reinterpret-int-to-uint-type) rt-ok clear
+42 /uinteger-type reinterpret 42u eq (reinterpret-int-to-uint-value) rt-ok clear
+
+% uint -> int
+100u /integer-type reinterpret type /integer-type eq (reinterpret-uint-to-int-type) rt-ok clear
+100u /integer-type reinterpret 100 eq (reinterpret-uint-to-int-value) rt-ok clear
+
+% int -> real (same 32-bit width, bit reinterpretation)
+42 /real-type reinterpret type /real-type eq (reinterpret-int-to-real-type) rt-ok clear
+
+% byte -> boolean
+1b /boolean-type reinterpret type /boolean-type eq (reinterpret-byte-to-bool-type) rt-ok clear
+0b /boolean-type reinterpret false eq (reinterpret-byte-0-to-bool-false) rt-ok clear
+
+% boolean -> byte
+true /byte-type reinterpret type /byte-type eq (reinterpret-bool-to-byte-type) rt-ok clear
+
+% long -> ulong (same 64-bit width)
+42l /ulong-type reinterpret type /ulong-type eq (reinterpret-long-to-ulong-type) rt-ok clear
+
+% long -> double (same 64-bit width)
+42l /double-type reinterpret type /double-type eq (reinterpret-long-to-double-type) rt-ok clear
+
+% error: incompatible sizes (8-bit to 32-bit)
+{ 42b /integer-type reinterpret } try /type-check eq (reinterpret-err-size-mismatch) rt-ok clear
+
+% error: non-numeric target
+{ 42 /string-type reinterpret } try /type-check eq (reinterpret-err-non-numeric-target) rt-ok clear
+
+% same type is no-op
+42 /integer-type reinterpret 42 eq (reinterpret-same-type-noop) rt-ok clear
+
+sv restore
+
+% ============================================================
+% 6. Type conversion - cast
+% ============================================================
+
+/sv save def
+
+% int to long
+42 /long-type cast type /long-type eq (cast-int-to-long-type) rt-ok clear
+42 /long-type cast 42l eq (cast-int-to-long-value) rt-ok clear
+
+% int to real
+42 /real-type cast type /real-type eq (cast-int-to-real-type) rt-ok clear
+42 /real-type cast 42.0 eq (cast-int-to-real-value) rt-ok clear
+
+% int to uinteger
+42 /uinteger-type cast type /uinteger-type eq (cast-int-to-uint-type) rt-ok clear
+42 /uinteger-type cast 42u eq (cast-int-to-uint-value) rt-ok clear
+
+% int to byte
+65 /byte-type cast type /byte-type eq (cast-int-to-byte-type) rt-ok clear
+65 /byte-type cast 65b eq (cast-int-to-byte-value) rt-ok clear
+
+% int to double
+42 /double-type cast type /double-type eq (cast-int-to-double-type) rt-ok clear
+
+% long to int
+42l /integer-type cast type /integer-type eq (cast-long-to-int-type) rt-ok clear
+42l /integer-type cast 42 eq (cast-long-to-int-value) rt-ok clear
+
+% real to double
+3.14 /double-type cast type /double-type eq (cast-real-to-double-type) rt-ok clear
+
+% real to int
+3.14 /integer-type cast type /integer-type eq (cast-real-to-int-type) rt-ok clear
+3.14 /integer-type cast 3 eq (cast-real-to-int-value) rt-ok clear
+
+% byte to int
+65b /integer-type cast type /integer-type eq (cast-byte-to-int-type) rt-ok clear
+65b /integer-type cast 65 eq (cast-byte-to-int-value) rt-ok clear
+
+% bool to int
+true /integer-type cast type /integer-type eq (cast-bool-to-int-type) rt-ok clear
+true /integer-type cast 1 eq (cast-bool-to-int-value) rt-ok clear
+false /integer-type cast 0 eq (cast-bool-to-int-false-value) rt-ok clear
+
+% int to bool
+0 /boolean-type cast false eq (cast-int-0-to-bool-false) rt-ok clear
+1 /boolean-type cast true eq (cast-int-1-to-bool-true) rt-ok clear
+42 /boolean-type cast true eq (cast-int-42-to-bool-true) rt-ok clear
+
+% uint to long
+100u /long-type cast type /long-type eq (cast-uint-to-long-type) rt-ok clear
+100u /long-type cast 100l eq (cast-uint-to-long-value) rt-ok clear
+
+% same type is no-op
+42 /integer-type cast 42 eq (cast-same-type-noop) rt-ok clear
+
+% error: incompatible type (string to int)
+{ (hello) /integer-type cast } try /type-check eq (cast-err-string-to-int) rt-ok clear
+
+% error: not a type name
+{ 42 /not-a-type cast } try /type-check eq (cast-err-not-a-type-name) rt-ok clear
+
+sv restore
+
+% ============================================================
+% 7. Mixed-type arithmetic
+% ============================================================
+
+% Trix requires matched types for arithmetic (verify_matched_operands).
+% Confirm that mixing types produces type-check error.
+{ 42 3.14 add } try /type-check eq (mixed-arith-int-real-add-err) rt-ok clear
+{ 42 42l sub } try /type-check eq (mixed-arith-int-long-sub-err) rt-ok clear
+{ 42u 42 mul } try /type-check eq (mixed-arith-uint-int-mul-err) rt-ok clear
+
+% Same types work
+42 8 add 50 eq (same-type-int-add) rt-ok clear
+3.14 1.0 sub 2.14 0.001 approx-eq (same-type-real-sub) rt-ok clear
+10u 3u mul 30u eq (same-type-uint-mul) rt-ok clear
+100l 10l add 110l eq (same-type-long-add) rt-ok clear
+
+% ============================================================
+% 8. (reserved)
+% ============================================================
+
+/sv save def
+
+sv restore
+
+% ============================================================
+% 9. =array, =dict, =string
+% ============================================================
+
+/sv save def
+
+% =array: pushes the temporary array, cleared
+=array type /array-type eq (eqarray-is-array) rt-ok clear
+=array length 0 gt (eqarray-has-capacity) rt-ok clear
+
+% =string: pushes the temporary string, cleared
+=string type /string-type eq (eqstring-is-string) rt-ok clear
+
+% =dict: pushes the temporary dict, cleared
+=dict type /dict-type eq (eqdict-is-dict) rt-ok clear
+=dict length 0 eq (eqdict-is-empty) rt-ok clear
+
+sv restore
+
+% ============================================================
+% 10. Miscellaneous operators
+% ============================================================
+
+% no-op: verify stack is unchanged
+42 no-op 42 eq (noop-stack-unchanged) rt-ok clear
+clear
+count 0 eq (noop-empty-stack) rt-ok clear
+no-op
+count 0 eq (noop-empty-stack-after) rt-ok clear
+
+% array-store: store stack items into array
+/sv save def
+1 2 3 3 array array-store
+dup 0 get 1 eq (array-store-elem-0) rt-ok
+clear
+1 2 3 3 array array-store
+dup 1 get 2 eq (array-store-elem-1) rt-ok
+clear
+1 2 3 3 array array-store
+2 get 3 eq (array-store-elem-2) rt-ok clear
+sv restore
+
+% clear-dictstack: reset dict stack to systemdict + userdict
+/sv save def
+3 dict begin
+count-dictstack 4 eq (clear-dictstack-before) rt-ok clear
+clear-dictstack
+count-dictstack 3 eq (clear-dictstack-after) rt-ok clear
+sv restore
+
+% name table stats via status dict path
+//:status:name-count 0 gt (status:name-count > 0) rt-ok clear
+//:status:name-vm-used 0 gt (status:name-vm-used > 0) rt-ok clear
+//:status:name-max-chain 0 gt (status:name-max-chain > 0) rt-ok clear
+//:status:name-avg-chain type /real-type eq (status:name-avg-chain is real) rt-ok clear
+
+% ============================================================
+% Additional coverage: type operator
+% ============================================================
+
+42 type /integer-type eq (type-op-integer) rt-ok clear
+42u type /uinteger-type eq (type-op-uinteger) rt-ok clear
+42l type /long-type eq (type-op-long) rt-ok clear
+3.14 type /real-type eq (type-op-real) rt-ok clear
+3.14d type /double-type eq (type-op-double) rt-ok clear
+true type /boolean-type eq (type-op-boolean) rt-ok clear
+65b type /byte-type eq (type-op-byte) rt-ok clear
+(hello) type /string-type eq (type-op-string) rt-ok clear
+null type /null-type eq (type-op-null) rt-ok clear
+
+% ============================================================
+% Additional: numeric limits metadata
+% ============================================================
+
+//:systemdict:numbers:real-type:infinity type /real-type eq (limits-real-infinity-is-real) rt-ok clear
+//:systemdict:numbers:real-type:quiet-NaN type /real-type eq (limits-real-quiet-NaN-is-real) rt-ok clear
+//:systemdict:numbers:double-type:infinity type /double-type eq (limits-double-infinity-is-double) rt-ok clear
+//:systemdict:numbers:double-type:quiet-NaN type /double-type eq (limits-double-quiet-NaN-is-double) rt-ok clear
+
+//:systemdict:numbers:real-type:denorm-min type /real-type eq (limits-real-denorm-min-is-real) rt-ok clear
+//:systemdict:numbers:real-type:denorm-min 0.0 gt (limits-real-denorm-min-gt-0) rt-ok clear
+//:systemdict:numbers:double-type:denorm-min type /double-type eq (limits-double-denorm-min-is-double) rt-ok clear
+
+% ============================================================
+% Additional: FP classification constants
+% ============================================================
+
+//:systemdict:numbers:classification:fp-normal type /name-type eq (classification-fp-normal-is-name) rt-ok clear
+//:systemdict:numbers:classification:fp-zero type /name-type eq (classification-fp-zero-is-name) rt-ok clear
+//:systemdict:numbers:classification:fp-infinite type /name-type eq (classification-fp-infinite-is-name) rt-ok clear
+//:systemdict:numbers:classification:fp-nan type /name-type eq (classification-fp-nan-is-name) rt-ok clear
+//:systemdict:numbers:classification:fp-subnormal type /name-type eq (classification-fp-subnormal-is-name) rt-ok clear
+
+(System variables and type conversion tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

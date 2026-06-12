@@ -1,0 +1,1 @@
+{ logic-var /a exch def logic-var /b exch def logic-var /c exch def logic-var /d exch def [ 42l 1.5d 100uq /name ] [[ [ a b c d ] { } ]] unify-match } /Fail { } try

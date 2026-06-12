@@ -1,0 +1,1245 @@
+% =====================================================================
+% proto-mapgen.trx -- Phase 0.7 procedural map generator prototype
+% =====================================================================
+%
+% Out-of-band addition to the de-risk plan (Phase 0.6 closed before
+% this prototype was scoped).  User requested a "best-in-class" random
+% map generator for Bestagon Wars: land masses, bodies of water,
+% forests, mountains, with knobs for tuning.
+%
+% Algorithm: hybrid noise + cellular-automata + cluster-spawn + flood-
+% fill connectedness.  Phases:
+%
+%   1. Random-fill at sea-pct probability (white noise)
+%   2. Cellular-automata smoothing (5 iters of majority rule) ->
+%      organic continent shapes
+%   3. Mountain cluster-spawn (N seeds, random-walk expansion) ->
+%      ranges, not scattered peaks
+%   4. Forest cluster-spawn (M seeds, random-walk; skip mountain) ->
+%      woods, not scattered trees
+%   5. Beach auto-placement (any land adjacent to sea, except mountain)
+%   6. Symmetry transform (/none | /mirror-h | /rotational-180) ->
+%      competitive-map fairness
+%   7. Connectedness flood-fill + small-island prune (assert §19 Phase
+%      1 invariant: every land cell reachable from every other)
+%
+% Knobs (defaults match AW-canon "tactical map" feel):
+%
+%   /seed              ulong   -- RNG seed (deterministic regen)
+%   /sea-pct           int     -- 30 = ~30% sea by area
+%   /mountain-clusters int     -- 3 mountain ranges per Standard map
+%   /forest-clusters   int     -- 5 forest woods per Standard map
+%   /cluster-size      int     -- 8 cells per cluster (radius ~2-3 hexes)
+%   /ca-iters          int     -- 5 cellular-automata smoothing passes
+%   /symmetry          name    -- /none | /mirror-h | /rotational-180
+%
+% Run with prod build:
+%   ./trix.opt examples/bestagon-proto/proto-mapgen.trx
+%
+% Output: stdout summary + 3 example maps printed as ASCII (one per
+% size); ~30 maps total bench (3 sizes x 10 seeds).  Default 1 MB VM
+% with per-iteration save/restore brackets around each map generation.
+% =====================================================================
+
+
+% ====================================================================
+% Section 0: terrain constants (matches 0.6G + tutorial.bw)
+% ====================================================================
+
+/T-PLAIN     0 def
+/T-ROAD      1 def
+/T-FOREST    2 def
+/T-MOUNTAIN  3 def
+/T-RIVER     4 def
+/T-BRIDGE    5 def
+/T-SEA       6 def
+/T-REEF      7 def
+/T-BEACH     8 def
+
+% Terrain glyphs for ASCII output (matches tutorial.bw /terrain-key).
+% Indexed by terrain-code, returns the Byte glyph.
+% (X)#b parses the 1-char string (X) and converts to Byte -- much more
+% readable than 0x.. hex codes.
+/terrain-glyph [
+    (.)#b   % T-PLAIN
+    (R)#b   % T-ROAD
+    (*)#b   % T-FOREST
+    (^)#b   % T-MOUNTAIN
+    (|)#b   % T-RIVER
+    (B)#b   % T-BRIDGE
+    (~)#b   % T-SEA
+    (;)#b   % T-REEF
+    (_)#b   % T-BEACH
+] def
+
+
+% ====================================================================
+% Section 1: idx-helpers + neighbor enumeration
+% ====================================================================
+
+% q r h -- idx (Integer linear)
+/qr-to-idx {|q r h|
+    $[ q * h + r ]
+} def
+
+% Returns up to 6 neighbor indices via brick-stagger per GDD §3.2.
+% Same algorithm as 0.6G's idx-neighbors -- mutates caller's buf.
+% qi ri w h buf -- count
+/idx-neighbors {|qi ri w h buf|#+5
+    /n     0  local-def
+    /odd   $[ qi % 2 ]  local-def
+
+    ri 1 ge {
+        buf n  qi  $[ ri - 1 ]  h  qr-to-idx  put
+        /n n 1 add  store
+    } if
+
+    qi 1 ge {
+        odd 0 eq {
+            ri 1 ge {
+                buf n  $[ qi - 1 ] $[ ri - 1 ] h qr-to-idx  put
+                /n n 1 add  store
+            } if
+            buf n  $[ qi - 1 ] ri h qr-to-idx  put
+            /n n 1 add  store
+        } {
+            buf n  $[ qi - 1 ] ri h qr-to-idx  put
+            /n n 1 add  store
+            $[ ri + 1 ] h lt {
+                buf n  $[ qi - 1 ] $[ ri + 1 ] h qr-to-idx  put
+                /n n 1 add  store
+            } if
+        } if-else
+    } if
+
+    $[ qi + 1 ] w lt {
+        odd 0 eq {
+            ri 1 ge {
+                buf n  $[ qi + 1 ] $[ ri - 1 ] h qr-to-idx  put
+                /n n 1 add  store
+            } if
+            buf n  $[ qi + 1 ] ri h qr-to-idx  put
+            /n n 1 add  store
+        } {
+            buf n  $[ qi + 1 ] ri h qr-to-idx  put
+            /n n 1 add  store
+            $[ ri + 1 ] h lt {
+                buf n  $[ qi + 1 ] $[ ri + 1 ] h qr-to-idx  put
+                /n n 1 add  store
+            } if
+        } if-else
+    } if
+
+    $[ ri + 1 ] h lt {
+        buf n  qi  $[ ri + 1 ]  h  qr-to-idx  put
+        /n n 1 add  store
+    } if
+
+    n
+} def
+
+
+% ====================================================================
+% Section 2: knobs + default options
+% ====================================================================
+
+% Returns a fresh options Dict with all defaults populated.
+% -- options
+/default-options {
+    32 dict
+    dup /seed              42ul                 put
+    dup /sea-pct           30                   put
+    dup /mountain-clusters 3                    put
+    dup /forest-clusters   5                    put
+    dup /cluster-size      8                    put
+    dup /ca-iters          5                    put
+    dup /symmetry          /none                put
+    dup /density-preset    /default             put     % /default | /sparse | /dense
+    dup /n-factions        2                    put
+    dup /hq-edge-buffer    3                    put     % HQ must be >= this many hexes from map edge
+} def
+
+
+% Empire-style building densities (per 1000 LAND hexes -- non-sea cells).
+% Sparse:  19 cities + 6 factories + 4 ports on Standard 50x36
+% Default: 38 cities + 13 factories + 6 ports on Standard
+% Dense:   63 cities + 25 factories + 13 ports on Standard
+/density-city-per-1000 <<
+    /sparse  15  /default 30  /dense  50
+>>#r def
+/density-factory-per-1000 <<
+    /sparse  5   /default 10  /dense  20
+>>#r def
+/density-port-per-1000 <<
+    /sparse  3   /default  5  /dense  10
+>>#r def
+
+
+% ====================================================================
+% Section 3: phase 1 -- random fill (white-noise sea/land)
+% ====================================================================
+%
+% Initializes every cell to T-SEA with probability sea-pct/100, else
+% T-PLAIN.  Internal-only: the CA smoothing pass refines this.
+%
+% terr w h sea-pct --
+/random-fill {|terr w h sea-pct|#+2
+    /cells  $[ w * h ] /integer-type cast  local-def
+    /sea-bound  sea-pct /uinteger-type cast  local-def
+    0 1 $[ cells - 1 ] {|i|#+1
+        /roll  100u rand-bounded-uinteger  local-def
+        roll sea-bound lt {
+            terr i T-SEA put
+        } {
+            terr i T-PLAIN put
+        } if-else
+    } for
+} def
+
+
+% ====================================================================
+% Section 4: phase 2 -- cellular-automata smoothing
+% ====================================================================
+%
+% Majority rule: a cell becomes land if 4+ of its 6 neighbors are land,
+% becomes sea otherwise.  Smooths jagged white-noise edges into organic
+% continent shapes.  Edge cells with < 6 neighbors are treated as if the
+% missing neighbors agree with the current cell (no edge bias).
+%
+% Two-buffer ping-pong: read from terr-a, write to terr-b, then swap.
+%
+% terr-a terr-b w h --   (after call, terr-a holds the final result)
+/ca-smooth-one-pass {|terr-a terr-b w h|#+5
+    /cells  $[ w * h ]  local-def
+    /nbuf   8 array  local-def
+
+    0 1 $[ w - 1 ] {|qi|
+        0 1 $[ h - 1 ] {|ri|#+6
+            /idx qi ri h qr-to-idx  local-def
+            /nn  qi ri w h nbuf idx-neighbors  local-def
+
+            % count land neighbors
+            /land-count  0  local-def
+            0 1 $[ nn - 1 ] {|j|#+2
+                /np  nbuf j get  local-def
+                /nv  terr-a np get  local-def
+                nv T-SEA ne {
+                    /land-count $[ land-count + 1 ] store
+                } if
+            } for
+
+            % Standard hex-CA majority rule: land if land-count >= 4
+            % (independent of nn).  Edge cells with fewer neighbors
+            % bias slightly toward sea -- helpful for coastline cleanup.
+            % A lenient threshold (3 of 6) over-smooths and eliminates
+            % sea entirely on 30% initial; 4 of 6 stabilises near the
+            % target fraction.
+            land-count 4 ge {
+                terr-b idx T-PLAIN put
+            } {
+                terr-b idx T-SEA put
+            } if-else
+        } for
+    } for
+
+    % copy terr-b back to terr-a for next iteration
+    0 1 $[ cells - 1 ] {|i|#+1
+        /v  terr-b i get  local-def
+        terr-a i v put
+    } for
+} def
+
+
+% ====================================================================
+% Section 5: cluster-spawn (mountain + forest)
+% ====================================================================
+%
+% Pick `clusters` random land cells.  Per seed, random-walk for
+% `cluster-size` iterations marking each visited cell as the target
+% terrain.  Walk picks a random neighbor each step; if the picked
+% neighbor is out-of-bounds or sea (for mountain placement) or
+% mountain (for forest placement), skip the step but advance the
+% iteration counter.  Produces organic-looking ranges/woods.
+%
+% terr w h clusters cluster-size target-terrain skip-terrain --
+% (skip-terrain is the terrain we won't overwrite: T-SEA for mountains;
+%  T-MOUNTAIN for forests)
+/cluster-spawn {|terr w h clusters csize target skip|#+10
+    /cells  $[ w * h ]  local-def
+    /nbuf   8 array  local-def
+
+    1 1 clusters {|c|#+8
+        % pick a random land cell (up to 50 attempts)
+        /seed-idx  -1  local-def
+        /attempts  0  local-def
+        { seed-idx -1 eq  attempts 50 lt  and } {
+            /try  $[ cells - 1 ]  /uinteger-type cast  rand-bounded-uinteger
+                  /integer-type cast  local-def
+            terr try get T-SEA ne  terr try get skip ne  and {
+                /seed-idx  try  store
+            } if
+            /attempts  $[ attempts + 1 ]  store
+        } while
+
+        seed-idx 0 ge {
+            % random-walk from seed for csize iterations
+            /cur  seed-idx  local-def
+            terr cur target put
+            1 1 csize {|step|#+10
+                /q   $[ cur / h ]  local-def
+                /r   $[ cur % h ]  local-def
+                /nn  q r w h nbuf idx-neighbors  local-def
+                nn 0 gt {
+                    /nn-u  nn /uinteger-type cast  local-def
+                    /pick  nn-u rand-bounded-uinteger /integer-type cast  local-def
+                    /npos  nbuf pick get  local-def
+                    /tv    terr npos get  local-def
+                    tv T-SEA ne  tv skip ne  and {
+                        terr npos target put
+                        /cur npos store
+                    } if
+                } if
+            } for
+        } if
+    } for
+} def
+
+
+% ====================================================================
+% Section 6: beach auto-placement
+% ====================================================================
+%
+% Any land cell (PLAIN/FOREST -- NOT mountain) adjacent to sea becomes
+% beach.  Done in a single pass over the map.
+%
+% terr w h --
+/place-beaches {|terr w h|#+4
+    /cells  $[ w * h ] /integer-type cast  local-def
+    /nbuf   8 array  local-def
+
+    % First pass: mark cells to convert (don't mutate in-loop -- we'd
+    % cascade beaches across the map otherwise).
+    /to-beach  cells array  local-def
+    0 1 $[ cells - 1 ] {|i|
+        to-beach i 0 put
+    } for
+
+    0 1 $[ w - 1 ] {|qi|
+        0 1 $[ h - 1 ] {|ri|#+6
+            /idx qi ri h qr-to-idx  local-def
+            /tt  terr idx get  local-def
+            tt T-PLAIN eq  tt T-FOREST eq  or {
+                /nn  qi ri w h nbuf idx-neighbors  local-def
+                /any-sea  false  local-def
+                0 1 $[ nn - 1 ] {|j|#+2
+                    any-sea not {
+                        /np  nbuf j get  local-def
+                        terr np get T-SEA eq { /any-sea true store } if
+                    } if
+                } for
+                any-sea { to-beach idx 1 put } if
+            } if
+        } for
+    } for
+
+    % Second pass: apply marks
+    0 1 $[ cells - 1 ] {|i|
+        to-beach i get 1 eq { terr i T-BEACH put } if
+    } for
+} def
+
+
+% ====================================================================
+% Section 7: symmetry transforms
+% ====================================================================
+%
+% /mirror-h: cell (q, r) gets terrain from (W-1-q, r); right half wins.
+% /rotational-180: cell (q, r) gets terrain from (W-1-q, H-1-r); SE-
+% quadrant wins.  Applied after terrain placement, before connectedness.
+%
+% terr w h symmetry --
+/apply-symmetry {|terr w h sym|#+5
+    sym /none eq { } {
+        /cells  $[ w * h ] /integer-type cast  local-def
+        % copy current terrain into a snapshot (so reads are stable
+        % while we mutate)
+        /snap  cells array  local-def
+        0 1 $[ cells - 1 ] {|i|#+1
+            /v  terr i get  local-def
+            snap i v put
+        } for
+
+        sym /mirror-h eq {
+            % Right half mirrors the left half
+            /half  $[ w / 2 ]  /integer-type cast  local-def
+            0 1 $[ w - 1 ] {|qi|
+                0 1 $[ h - 1 ] {|ri|#+5
+                    qi half ge {
+                        % mirror from (W-1-qi, ri)
+                        /src-q  $[ w - 1 - qi ]  local-def
+                        /src-idx  src-q ri h qr-to-idx  local-def
+                        /dst-idx  qi ri h qr-to-idx  local-def
+                        /src-val  snap src-idx get  local-def
+                        terr dst-idx src-val put
+                    } if
+                } for
+            } for
+        } if
+
+        sym /rotational-180 eq {
+            0 1 $[ w - 1 ] {|qi|
+                0 1 $[ h - 1 ] {|ri|#+6
+                    /dst-idx  qi ri h qr-to-idx  local-def
+                    /src-q    $[ w - 1 - qi ]  local-def
+                    /src-r    $[ h - 1 - ri ]  local-def
+                    /src-idx  src-q src-r h qr-to-idx  local-def
+                    % Apply only to "later half" of cells to avoid overwriting before reading
+                    dst-idx src-idx gt {
+                        /src-val  snap src-idx get  local-def
+                        terr dst-idx src-val put
+                    } if
+                } for
+            } for
+        } if
+    } if-else
+} def
+
+
+% ====================================================================
+% Section 8: connectedness flood-fill + island prune
+% ====================================================================
+%
+% Find the largest land connected component via BFS.  Any land cell
+% NOT in the largest component is pruned to sea (small-island artifact).
+% Bridge-instead-of-prune deferred to Phase 1's production loader.
+%
+% Algorithm:
+%   1. Allocate Array<Integer> component-id (length w*h), -1 = unvisited.
+%   2. BFS from each unvisited land cell, assigning component-id.
+%   3. Count cells per component; find largest.
+%   4. Prune cells not in largest to T-SEA.
+%
+% terr w h -- (largest-component-size pruned-count)
+/connectedness-prune {|terr w h|#+12
+    /cells  $[ w * h ] /integer-type cast  local-def
+    /comp   cells array  local-def
+    0 1 $[ cells - 1 ] {|i|
+        comp i -1 put
+    } for
+
+    /queue  cells array  local-def
+    /qhead  0  local-def
+    /qtail  0  local-def
+    /nbuf   8 array  local-def
+    /comp-sizes  64 array  local-def
+    0 1 63 {|i| comp-sizes i 0 put } for
+    /n-comps  0  local-def
+
+    0 1 $[ cells - 1 ] {|start|#+8
+        comp start get -1 eq  terr start get T-SEA ne  and {
+            /cid  n-comps  local-def
+            /sz  0  local-def
+            comp start cid put
+            queue 0 start put
+            /qhead 0 store
+            /qtail 1 store
+            { qhead qtail lt } {
+                /cur  queue qhead get  local-def
+                /qhead $[ qhead + 1 ] store
+                /sz $[ sz + 1 ] store
+                /q  $[ cur / h ]  local-def
+                /r  $[ cur % h ]  local-def
+                /nn  q r w h nbuf idx-neighbors  local-def
+                0 1 $[ nn - 1 ] {|j|#+1
+                    /np  nbuf j get  local-def
+                    comp np get -1 eq  terr np get T-SEA ne  and {
+                        comp np cid put
+                        queue qtail np put
+                        /qtail $[ qtail + 1 ] store
+                    } if
+                } for
+            } while
+            n-comps 64 lt {
+                comp-sizes n-comps sz put
+                /n-comps $[ n-comps + 1 ] store
+            } if
+        } if
+    } for
+
+    % Find largest component
+    /max-cid    0  local-def
+    /max-size   0  local-def
+    0 1 $[ n-comps - 1 ] {|i|
+        comp-sizes i get max-size gt {
+            /max-cid i store
+            /max-size comp-sizes i get store
+        } if
+    } for
+
+    % Prune cells not in largest component
+    /pruned  0  local-def
+    0 1 $[ cells - 1 ] {|i|
+        terr i get T-SEA ne  comp i get max-cid ne  and {
+            terr i T-SEA put
+            /pruned $[ pruned + 1 ] store
+        } if
+    } for
+
+    max-size  pruned
+} def
+
+
+% ====================================================================
+% Section 9: Empire-style building placement
+% ====================================================================
+%
+% After terrain is finalised (connectedness done), place buildings per
+% the density-preset knob.  Buildings:
+%
+%   - 2 HQs (one per faction), max hex-distance apart, edge-buffered
+%   - Neutral cities  (density-preset count, random scatter, no overlap)
+%   - Neutral factories (density-preset count, random scatter)
+%   - Neutral ports   (density-preset count, on Beach cells)
+%
+% Symmetry: if /symmetry is /mirror-h or /rotational-180, place all
+% buildings in the "primary half" (left half / NW quadrant); mirror
+% step appends the symmetric pair.  HQ mirror flips owner (faction 0
+% -> 1); neutrals stay neutral.
+
+% terr cells -- count
+/count-land-cells {|terr cells|#+1
+    /count  0  local-def
+    0 1 $[ cells - 1 ] {|i|#+1
+        /tv  terr i get  local-def
+        tv T-SEA ne { /count $[ count + 1 ] store } if
+    } for
+    count
+} def
+
+% terrain -- bool       (true if HQ/City/Factory can be placed here)
+/is-buildable-land? {|tt|
+    tt T-PLAIN eq  tt T-FOREST eq  or  tt T-BEACH eq  or
+} def
+
+% terrain -- bool       (true if Port can be placed here -- Beach only for v1)
+/is-port-legal? {|tt|
+    tt T-BEACH eq
+} def
+
+% buildings n-built qi ri -- bool      (true if no building at (qi, ri))
+/no-building-at? {|bs n qi ri|#+1
+    /found  false  local-def
+    0 1 $[ n - 1 ] {|i|#+2
+        found not {
+            /b   bs i get  local-def
+            /bp  b /pos get  local-def
+            bp 0 get /integer-type cast qi eq
+            bp 1 get /integer-type cast ri eq
+            and {
+                /found true store
+            } if
+        } if
+    } for
+    found not
+} def
+
+% buildings n-built qi ri -- bool      (any building adjacent to qi,ri?)
+/no-adjacent-building? {|bs n qi ri|#+3
+    /any-adj  false  local-def
+    0 1 $[ n - 1 ] {|i|#+12
+        any-adj not {
+            /b   bs i get  local-def
+            /bp  b /pos get  local-def
+            /bq  bp 0 get /integer-type cast  local-def
+            /br  bp 1 get /integer-type cast  local-def
+            % Use hex-distance via cube formula
+            /dq  $[ abs(qi - bq) ]  local-def
+            /z1  $[ ri - (qi - (qi % 2)) / 2 ]  local-def
+            /z2  $[ br - (bq - (bq % 2)) / 2 ]  local-def
+            /dz  $[ abs(z1 - z2) ]  local-def
+            /d   $[ (dq + dz + abs(qi + z1 - bq - z2)) / 2 ]  local-def
+            d 1 le { /any-adj true store } if
+        } if
+    } for
+    any-adj not
+} def
+
+% qi ri qj rj -- distance     hex-distance from (qi,ri) to (qj,rj)
+/hex-dist-int {|qi ri qj rj|#+3
+    /z1  $[ ri - (qi - (qi % 2)) / 2 ]  local-def
+    /z2  $[ rj - (qj - (qj % 2)) / 2 ]  local-def
+    /dz  $[ abs(z1 - z2) ]  local-def
+    $[ (abs(qi - qj) + dz + abs(qi + z1 - qj - z2)) / 2 ]
+} def
+
+% terr w h buf  -- qi ri    Random buildable-land cell, q in [buf, w-buf), r in [buf, h-buf).
+% Returns -1 -1 if no land found in 100 attempts.
+/random-buildable-cell {|terr w h buf|#+8
+    /attempts  100  local-def
+    /found-qi  -1   local-def
+    /found-ri  -1   local-def
+    /qrange    $[ w - 2 * buf ]  local-def
+    /rrange    $[ h - 2 * buf ]  local-def
+    qrange 1 lt rrange 1 lt or {
+        % map too small for edge buffer; relax
+        /buf 0 store
+        /qrange w store
+        /rrange h store
+    } if
+
+    1 1 attempts {|a|#+8
+        found-qi -1 eq {
+            /qrange-u  qrange /uinteger-type cast  local-def
+            /rrange-u  rrange /uinteger-type cast  local-def
+            /q-rand    qrange-u rand-bounded-uinteger /integer-type cast  local-def
+            /r-rand    rrange-u rand-bounded-uinteger /integer-type cast  local-def
+            /qi   $[ buf + q-rand ]  local-def
+            /ri   $[ buf + r-rand ]  local-def
+            /idx  qi ri h qr-to-idx  local-def
+            /tt   terr idx get  local-def
+            tt is-buildable-land? {
+                /found-qi qi store
+                /found-ri ri store
+            } if
+        } if
+    } for
+    found-qi  found-ri
+} def
+
+% Same but for Port-legal cells (Beach).
+/random-beach-cell {|terr w h|#+8
+    /attempts  100  local-def
+    /found-qi  -1   local-def
+    /found-ri  -1   local-def
+    /w-u       w /uinteger-type cast  local-def
+    /h-u       h /uinteger-type cast  local-def
+    1 1 attempts {|a|#+4
+        found-qi -1 eq {
+            /qi   w-u rand-bounded-uinteger /integer-type cast  local-def
+            /ri   h-u rand-bounded-uinteger /integer-type cast  local-def
+            /idx  qi ri h qr-to-idx  local-def
+            /tt   terr idx get  local-def
+            tt is-port-legal? {
+                /found-qi qi store
+                /found-ri ri store
+            } if
+        } if
+    } for
+    found-qi  found-ri
+} def
+
+% q r -- pos     Build a UInteger [q r] pos Array.
+/qr-to-pos {|qi ri|
+    [ qi /uinteger-type cast  ri /uinteger-type cast ]
+} def
+
+% terr w h opts -- buildings-array
+/place-buildings {|terr w h opts|#+18
+    /cells          $[ w * h ] /integer-type cast  local-def
+    /n-land         terr cells count-land-cells  local-def
+    /preset         opts /density-preset get  local-def
+    /sym            opts /symmetry get  local-def
+    /buf            opts /hq-edge-buffer get  local-def
+
+    % Non-hyphenated names: $[ ] infix re-tokenises a-b-c as `a - b - c`.
+    /cityrate     density-city-per-1000 preset get      local-def
+    /factrate     density-factory-per-1000 preset get   local-def
+    /portrate     density-port-per-1000 preset get      local-def
+    /nland        n-land                                local-def
+
+    /city-target     $[ nland * cityrate / 1000 ]      local-def
+    /factory-target  $[ nland * factrate / 1000 ]     local-def
+    /port-target     $[ nland * portrate / 1000 ]     local-def
+
+    % For symmetric maps, halve placement targets (mirror doubles the count)
+    sym /none ne {
+        /city-target     $[ city-target / 2 ]     store
+        /factory-target  $[ factory-target / 2 ]  store
+        /port-target     $[ port-target / 2 ]     store
+    } if
+
+    /buildings  512 array  local-def
+    /n-built    0  local-def
+
+    % --- HQ placement: 2 HQs at max distance, each >= buf from edges ---
+    terr w h sym buf buildings n-built place-hqs
+    /n-built  exch  store
+
+    % --- Neutral cities ---
+    terr w h sym city-target buildings n-built /city place-neutrals
+    /n-built  exch  store
+
+    % --- Neutral factories ---
+    terr w h sym factory-target buildings n-built /factory place-neutrals
+    /n-built  exch  store
+
+    % --- Neutral ports on Beach cells ---
+    terr w h sym port-target buildings n-built place-ports
+    /n-built  exch  store
+
+    % --- Mirror buildings for symmetric maps ---
+    sym /none ne {
+        w h sym buildings n-built mirror-buildings
+        /n-built  exch  store
+    } if
+
+    buildings n-built take
+} def
+
+
+% terr w h sym buf buildings n-built -- new-n-built
+% Place 2 HQs (for /none) OR 1 HQ in primary half (for symmetric -- mirror
+% fills the second).  Strategy: sample 80 candidate cells (or pairs), keep
+% the highest-hex-distance valid configuration.
+/place-hqs {|terr w h sym buf bs n-built|#+15
+    sym /none eq {
+        % Asymmetric: find the (q0,r0,q1,r1) with max distance and both
+        % HQ-legal.
+        /best-dist  -1  local-def
+        /best-q0  -1  local-def  /best-r0  -1  local-def
+        /best-q1  -1  local-def  /best-r1  -1  local-def
+        1 1 80 {|a|#+6
+            terr w h buf random-buildable-cell
+            % stack: qi0 ri0  (top = ri0)
+            /ri0 exch local-def     % consumes /ri0 + top -> /ri0 = ri0
+            /qi0 exch local-def
+            terr w h buf random-buildable-cell
+            /ri1 exch local-def
+            /qi1 exch local-def
+            qi0 -1 ne  qi1 -1 ne  and {
+                /d  qi0 ri0 qi1 ri1 hex-dist-int  local-def
+                d best-dist gt {
+                    /best-dist d store
+                    /best-q0 qi0 store  /best-r0 ri0 store
+                    /best-q1 qi1 store  /best-r1 ri1 store
+                } if
+            } if
+        } for
+        best-dist 0 gt {
+            /pos0  best-q0 best-r0 qr-to-pos  local-def
+            /pos1  best-q1 best-r1 qr-to-pos  local-def
+            bs n-built  << /pos pos0 /type /hq /owner 0 /capture-progress 0 /capturer-unit-id null >>  put
+            bs $[ n-built + 1 ]  << /pos pos1 /type /hq /owner 1 /capture-progress 0 /capturer-unit-id null >>  put
+            $[ n-built + 2 ]
+        } {
+            n-built
+        } if-else
+    } {
+        % Symmetric: place 1 HQ in the primary half; mirror handles HQ-2.
+        % Primary half for /mirror-h = q < w/2; for /rotational-180 = q*h+r < cells/2.
+        /half-w  $[ w / 2 ]  local-def
+        /best-dist-from-axis  -1  local-def
+        /best-qi  -1  local-def
+        /best-ri  -1  local-def
+        1 1 80 {|a|#+5
+            sym /mirror-h eq {
+                terr half-w h buf random-buildable-cell
+            } {
+                % rotational-180: full width but constrain by idx
+                terr w h buf random-buildable-cell
+            } if-else
+            /ri exch local-def
+            /qi exch local-def
+            qi -1 ne {
+                sym /rotational-180 eq {
+                    /idx qi ri h qr-to-idx  local-def
+                    idx $[ (w * h) / 2 ] lt {
+                        % accept
+                        $[ qi + ri ] best-dist-from-axis gt {
+                            /best-dist-from-axis $[ qi + ri ] store
+                            /best-qi qi store
+                            /best-ri ri store
+                        } if
+                    } if
+                } {
+                    % mirror-h: just pick a low-q cell
+                    qi best-dist-from-axis gt {
+                        /best-dist-from-axis qi store
+                        /best-qi qi store
+                        /best-ri ri store
+                    } if
+                } if-else
+            } if
+        } for
+        best-qi 0 ge {
+            /pos0  best-qi best-ri qr-to-pos  local-def
+            bs n-built  << /pos pos0 /type /hq /owner 0 /capture-progress 0 /capturer-unit-id null >>  put
+            $[ n-built + 1 ]
+        } {
+            n-built
+        } if-else
+    } if-else
+} def
+
+
+% terr w h sym target bs n-built bldg-type -- new-n-built
+% Place up to `target` neutrals of bldg-type. Skip overlapping cells.
+% For symmetric maps, constrain to primary half (mirror handles the rest).
+/place-neutrals {|terr w h sym target bs n-built btype|#+12
+    /placed  0  local-def
+    /attempts  0  local-def
+    /max-attempts  $[ target * 20 + 50 ]  local-def
+    /half-w  $[ w / 2 ]  local-def
+
+    { placed target lt  attempts max-attempts lt  and } {
+        sym /mirror-h eq {
+            terr half-w h 0 random-buildable-cell
+        } {
+            terr w h 0 random-buildable-cell
+        } if-else
+        /ri exch local-def
+        /qi exch local-def
+        qi -1 ne {
+            sym /rotational-180 eq {
+                /idx qi ri h qr-to-idx  local-def
+                idx $[ (w * h) / 2 ] ge { /qi -1 store } if
+            } if
+        } if
+        qi -1 ne  { bs n-built qi ri no-building-at? } and?  { bs n-built qi ri no-adjacent-building? } and? {
+            /bpos  qi ri qr-to-pos  local-def
+            bs n-built
+                << /pos bpos /type btype /owner -1 /capture-progress 0 /capturer-unit-id null >>
+                put
+            /n-built $[ n-built + 1 ] store
+            /placed $[ placed + 1 ] store
+        } if
+        /attempts $[ attempts + 1 ] store
+    } while
+    n-built
+} def
+
+
+% terr w h sym target bs n-built -- new-n-built
+/place-ports {|terr w h sym target bs n-built|#+10
+    /placed  0  local-def
+    /attempts  0  local-def
+    /max-attempts  $[ target * 20 + 50 ]  local-def
+
+    { placed target lt  attempts max-attempts lt  and } {
+        terr w h random-beach-cell
+        /ri exch local-def
+        /qi exch local-def
+        qi -1 ne {
+            sym /mirror-h eq {
+                qi $[ w / 2 ] ge { /qi -1 store } if
+            } if
+            sym /rotational-180 eq {
+                /idx qi ri h qr-to-idx  local-def
+                idx $[ (w * h) / 2 ] ge { /qi -1 store } if
+            } if
+        } if
+        qi -1 ne  { bs n-built qi ri no-building-at? } and? {
+            /bpos  qi ri qr-to-pos  local-def
+            bs n-built
+                << /pos bpos /type /port /owner -1 /capture-progress 0 /capturer-unit-id null >>
+                put
+            /n-built $[ n-built + 1 ] store
+            /placed $[ placed + 1 ] store
+        } if
+        /attempts $[ attempts + 1 ] store
+    } while
+    n-built
+} def
+
+
+% w h sym bs n-built -- new-n-built
+% For each building in [0, n-built), append its mirror at the symmetric
+% position.  HQ flips owner (0 -> 1); neutrals stay -1.  Skip if the
+% mirror position equals the original (midline cells).
+/mirror-buildings {|w h sym bs n-built|#+15
+    /orig-n  n-built  local-def
+    0 1 $[ orig-n - 1 ] {|i|#+10
+        /b   bs i get  local-def
+        /bp  b /pos get  local-def
+        /bq  bp 0 get /integer-type cast  local-def
+        /br  bp 1 get /integer-type cast  local-def
+        /btype   b /type get  local-def
+        /bowner  b /owner get  local-def
+
+        sym /mirror-h eq {
+            /mq  $[ w - 1 - bq ]  local-def
+            /mr  br  local-def
+        } {
+            % rotational-180
+            /mq  $[ w - 1 - bq ]  local-def
+            /mr  $[ h - 1 - br ]  local-def
+        } if-else
+
+        mq bq ne  mr br ne  or {
+            /mowner  btype /hq eq { $[ 1 - bowner ] } { bowner } if-else  local-def
+            /mpos    mq mr qr-to-pos  local-def
+            bs n-built
+                << /pos mpos /type btype /owner mowner /capture-progress 0 /capturer-unit-id null >>
+                put
+            /n-built $[ n-built + 1 ] store
+        } if
+    } for
+    n-built
+} def
+
+
+% ====================================================================
+% Section 9.5: top-level generate-map (returns composite Dict)
+% ====================================================================
+
+% w h opts -- map-dict << /terrain ... /buildings ... /w ... /h ... >>
+/generate-map {|w h opts|#+15
+    /cells   $[ w * h ] /integer-type cast  local-def
+    /terr-a  cells array  local-def
+    /terr-b  cells array  local-def
+
+    opts /seed get rand-seed
+
+    % Bind knobs into locals (postfix grouping; `(opts /k get)` parses
+    % as a literal String not a sub-expression in Trix)
+    /sea-pct        opts /sea-pct get        local-def
+    /iters          opts /ca-iters get       local-def
+    /mclusters      opts /mountain-clusters get  local-def
+    /fclusters      opts /forest-clusters get    local-def
+    /csize          opts /cluster-size get   local-def
+    /sym            opts /symmetry get       local-def
+
+    % Phase 1: random fill
+    terr-a w h sea-pct random-fill
+
+    % Phase 2: CA smoothing
+    1 1 iters {|it|
+        terr-a terr-b w h ca-smooth-one-pass
+    } for
+
+    % Phase 3: mountain cluster-spawn
+    terr-a w h mclusters csize T-MOUNTAIN T-SEA cluster-spawn
+
+    % Phase 4: forest cluster-spawn (skip mountain cells)
+    terr-a w h fclusters csize T-FOREST T-MOUNTAIN cluster-spawn
+
+    % Phase 5: beach auto-placement
+    terr-a w h place-beaches
+
+    % Phase 6: symmetry (terrain)
+    terr-a w h sym apply-symmetry
+
+    % Phase 7: connectedness + prune
+    terr-a w h connectedness-prune
+    pop pop   % discard largest-size + pruned-count
+
+    % Phase 8: Empire-style building placement (HQs + cities + factories + ports)
+    /buildings  terr-a w h opts place-buildings  local-def
+
+    /map-dict   16 dict  local-def
+    map-dict /w        w        put
+    map-dict /h        h        put
+    map-dict /terrain  terr-a   put
+    map-dict /buildings buildings put
+    map-dict
+} def
+
+
+% ====================================================================
+% Section 10: serialize + ASCII print
+% ====================================================================
+
+% Building glyphs per GDD section 5 (Building table).
+/building-glyph <<
+    /hq       (H)#b
+    /city     (c)#b
+    /factory  (F)#b
+    /port     (P)#b
+>>#r def
+
+% buildings q r -- glyph-byte | null   (null if no building at this hex)
+/building-glyph-at {|bs qi ri|#+2
+    /found  null  local-def
+    /n      bs length  local-def
+    0 1 $[ n - 1 ] {|i|#+3
+        found is-null {
+            /b   bs i get  local-def
+            /bp  b /pos get  local-def
+            bp 0 get /integer-type cast qi eq
+            bp 1 get /integer-type cast ri eq
+            and {
+                /btype  b /type get  local-def
+                /found  building-glyph btype get  store
+            } if
+        } if
+    } for
+    found
+} def
+
+% map-dict -- (prints map as ASCII grid; buildings overlaid on terrain)
+% Brick-stagger is purely visual at render time; the ASCII dump uses
+% straight columns for readability.
+/print-map {|map|#+7
+    /w        map /w get  local-def
+    /h        map /h get  local-def
+    /terr     map /terrain get  local-def
+    /bs       map /buildings get  local-def
+    /h-i      h /integer-type cast  local-def
+    /w-i      w /integer-type cast  local-def
+    0 1 $[ h-i - 1 ] {|r|#+5
+        0 1 $[ w-i - 1 ] {|q|#+5
+            /bg   bs q r building-glyph-at  local-def
+            bg is-null {
+                /idx  q r h-i qr-to-idx  local-def
+                /tt   terr idx get  local-def
+                /g    terrain-glyph tt get  local-def
+                g write-byte
+            } {
+                bg write-byte
+            } if-else
+        } for
+        nl
+    } for
+} def
+
+% Write one byte to stdout.
+% byte --
+/write-byte {|b|#+1
+    /s  1 string  local-def
+    s 0 b put
+    s print
+} def
+
+% terr w h -- (returns Array of h Strings each w-char wide, suitable
+% for /map array in a /scenario Dict)
+/serialize-map {|terr w h|#+6
+    /h-i   h /integer-type cast  local-def
+    /w-i   w /integer-type cast  local-def
+    /rows  h-i array  local-def
+    0 1 $[ h-i - 1 ] {|r|#+3
+        /buf  w-i 32b str-from-byte-replicated  local-def
+        0 1 $[ w-i - 1 ] {|q|#+2
+            /idx  q r h-i qr-to-idx  local-def
+            /tt   terr idx get  local-def
+            /g    terrain-glyph tt get  local-def
+            buf q g put
+        } for
+        rows r buf put
+    } for
+    rows
+} def
+
+% n byte -- string-of-n-bytes-each-equal-to-byte
+/str-from-byte-replicated {|n b|#+1
+    /s  n string  local-def
+    0 1 $[ n - 1 ] {|i| s i b put } for
+    s
+} def
+
+
+% ====================================================================
+% Section 11: bench + assertions
+% ====================================================================
+
+/test-count 0 def
+/fail-count 0 def
+
+% cond label --
+/check {|cond lbl|
+    /test-count $[ test-count + 1 ]  store
+    cond {
+        (  PASS  {0}\n) mark lbl print-fmt pop pop
+    } {
+        (  FAIL  {0}\n) mark lbl print-fmt pop pop
+        /fail-count $[ fail-count + 1 ] store
+    } if-else
+} def
+
+% Verify a map-dict's buildings satisfy GDD invariants.
+% Returns true iff:
+%   - Exactly 2 HQs (1 per faction)
+%   - All non-HQ buildings are neutral (owner=-1)
+%   - HQ/City/Factory on land terrain; Port on Beach
+%   - No two buildings at same pos
+% map -- bool
+/check-buildings-valid? {|map|#+12
+    /bs       map /buildings get  local-def
+    /terr     map /terrain get  local-def
+    /h        map /h get  local-def
+    /n        bs length  local-def
+    /hqcount    0  local-def
+    /f0hq       0  local-def
+    /f1hq       0  local-def
+    /duppos      0  local-def
+    /illegalterrain  0  local-def
+
+    0 1 $[ n - 1 ] {|i|#+10
+        /b   bs i get  local-def
+        /bp  b /pos get  local-def
+        /bq  bp 0 get /integer-type cast  local-def
+        /br  bp 1 get /integer-type cast  local-def
+        /idx bq br h qr-to-idx  local-def
+        /tt  terr idx get  local-def
+        /btype  b /type get  local-def
+        /bown   b /owner get  local-def
+
+        btype /hq eq {
+            /hqcount $[ hqcount + 1 ] store
+            bown 0 eq { /f0hq $[ f0hq + 1 ] store } if
+            bown 1 eq { /f1hq $[ f1hq + 1 ] store } if
+        } if
+
+        % Legal-terrain check: HQ/City/Factory on land; Port on Beach
+        btype /port eq {
+            tt is-port-legal? not { /illegalterrain $[ illegalterrain + 1 ] store } if
+        } {
+            tt is-buildable-land? not { /illegalterrain $[ illegalterrain + 1 ] store } if
+        } if-else
+
+        % Dup-pos check: scan forward for duplicates
+        $[ i + 1 ] 1 $[ n - 1 ] {|j|#+4
+            /b2   bs j get  local-def
+            /bp2  b2 /pos get  local-def
+            bp2 0 get /integer-type cast bq eq
+            bp2 1 get /integer-type cast br eq
+            and { /duppos $[ duppos + 1 ] store } if
+        } for
+    } for
+
+    hqcount 2 eq
+    f0hq 1 eq and
+    f1hq 1 eq and
+    duppos 0 eq and
+    illegalterrain 0 eq and
+} def
+
+
+% w h size-label --
+% Bench note: per-iter save/restore reverts in-frame stores back to
+% the pre-bracket value, so timing + failure counters cannot be
+% accumulated via plain `store` inside the bracket.  The pattern is:
+%   1. Compute per-iter values inside the bracket
+%   2. Push them onto the operand stack just before `-1 restore`
+%   3. Immediates (ULong/Integer) survive the restore on the stack
+%   4. Pop + accumulate into outer-frame slots AFTER the restore
+% (Same idiom as 0.6D's time-via-restore pattern.)
+/bench-size {|w h size-label|#+18
+    /cells  $[ w * h ] /integer-type cast  local-def
+    /total-us            0ul  local-def
+    /conn-failures       0    local-def
+    /det-failures        0    local-def
+    /building-failures   0    local-def
+
+    % Print one example map in its own save bracket so the show-terr
+    % allocation (50-200 KB depending on fixture) is reclaimed before
+    % the bench loop starts.  print happens inside the bracket so we
+    % don't need to pass anything out via the operand stack.
+    (\n=== Example {0} {1}x{2} (seed 12345) ===\n)
+        mark size-label w h print-fmt pop pop
+    save pop
+        /opts-show  default-options  local-def
+        opts-show /seed 12345ul put
+        /show-map  w h opts-show generate-map  local-def
+        show-map print-map
+    -1 restore
+
+    1 1 10 {|iter|#+15
+        /opts     default-options  local-def
+        /iter-ul  iter /ulong-type cast  local-def
+        /seed-ul  $[ 1000ul + iter-ul * 7919ul ]  local-def
+        opts /seed seed-ul put
+
+        save pop
+            { w h opts generate-map } time
+            % stack: map-dict us
+            /us    exch  local-def
+            /map   exch  local-def
+            /terr  map /terrain get  local-def
+
+            terr w h connectedness-prune
+            % stack: max-size pruned
+            /pruned    exch  local-def
+            /max-size  exch  local-def
+            /conn-fail-this  0  local-def
+            pruned 0 ne { /conn-fail-this 1 store } if
+
+            /bld-fail-this  0  local-def
+            map check-buildings-valid? not { /bld-fail-this 1 store } if
+
+            /det-fail-this  0  local-def
+            iter 1 eq {
+                /opts2  default-options  local-def
+                opts2 /seed seed-ul put
+                /map2   w h opts2 generate-map  local-def
+                /terr2  map2 /terrain get  local-def
+                /mismatches  0  local-def
+                0 1 $[ cells - 1 ] {|i|#+2
+                    /tv   terr i get  local-def
+                    /tv2  terr2 i get  local-def
+                    tv tv2 ne { /mismatches $[ mismatches + 1 ] store } if
+                } for
+                mismatches 0 ne { /det-fail-this 1 store } if
+            } if
+
+            % Push the four values that need to survive restore
+            us  conn-fail-this  det-fail-this  bld-fail-this
+        -1 restore
+
+        % After restore: stack has [us conn-fail-this det-fail-this bld-fail-this]
+        /bld-pop   exch  local-def
+        /det-pop   exch  local-def
+        /conn-pop  exch  local-def
+        /us-pop    exch  local-def
+
+        % Use postfix add (avoids the $[ a-b-c ] hyphen-tokenisation trap).
+        /total-us            total-us us-pop add                  store
+        /conn-failures       conn-failures conn-pop add           store
+        /det-failures        det-failures det-pop add             store
+        /building-failures   building-failures bld-pop add        store
+    } for
+
+    /mean-us  $[ total-us / 10ul ] /integer-type cast  local-def
+    /mean-ms  $[ mean-us / 1000 ]  local-def
+
+    (\n{0:9s}  {1}x{2}  mean = {3} ms; conn={4} det={5} bld={6}\n)
+        mark size-label w h mean-ms conn-failures det-failures building-failures
+        print-fmt pop pop
+
+    conn-failures 0 eq      (connectedness across 10 seeds)               check
+    det-failures 0 eq       (seed-determinism: same seed = byte-identical) check
+    building-failures 0 eq  (building correctness: 2 HQs + legal terrain + no overlap) check
+} def
+
+
+% ====================================================================
+% Section 12: main
+% ====================================================================
+
+(proto-mapgen: Phase 0.7 -- procedural map generator\n) print
+(  (debug build is 10-30x slower than ./trix.opt -- use prod for perf verdict)\n\n) print
+
+(=== bench summary ===\n) print
+
+25 18 /tutorial  bench-size
+50 36 /standard  bench-size
+75 54 /epic      bench-size
+
+% --- Symmetry showcase: same algorithm with mirror-h + rotational-180 ---
+% Wrap in a small proc so local-def has a |...| frame.
+/show-symmetry-examples {||#+3
+    (\n=== Symmetry: /mirror-h on Standard 50x36 ===\n) print
+    save pop
+        /opts-mh  default-options  local-def
+        opts-mh /seed 99999ul put
+        opts-mh /symmetry /mirror-h put
+        /map-mh   50 36 opts-mh generate-map  local-def
+        map-mh print-map
+    -1 restore
+
+    (\n=== Symmetry: /rotational-180 on Standard 50x36 ===\n) print
+    save pop
+        /opts-r180  default-options  local-def
+        opts-r180 /seed 88888ul put
+        opts-r180 /symmetry /rotational-180 put
+        /map-r180  50 36 opts-r180 generate-map  local-def
+        map-r180 print-map
+    -1 restore
+} def
+show-symmetry-examples
+
+(\n--- proto-mapgen summary ---\n) print
+({0} tests run; {1} failed\n) mark test-count fail-count print-fmt pop pop
+fail-count 0 ne {
+    /proto-mapgen-fail throw
+} if
+(proto-mapgen: ALL TESTS PASSED\n) print

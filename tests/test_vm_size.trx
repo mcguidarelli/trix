@@ -1,0 +1,222 @@
+% ====================================================================
+% test_vm_size.trx -- tests for the vm-size operator
+% ====================================================================
+% vm-size: any :- int
+% Returns VM heap bytes consumed by the operand's data storage.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Inline value types -- all return 0 (no VM allocation)
+% ====================================================================
+
+null vm-size 0 eq                   (vm-size: null = 0) rt-ok clear
+42b vm-size 0 eq                    (vm-size: byte = 0) rt-ok clear
+42 vm-size 0 eq                     (vm-size: integer = 0) rt-ok clear
+42u vm-size 0 eq                    (vm-size: uinteger = 0) rt-ok clear
+3.14 vm-size 0 eq                   (vm-size: real = 0) rt-ok clear
+true vm-size 0 eq                   (vm-size: boolean true = 0) rt-ok clear
+false vm-size 0 eq                  (vm-size: boolean false = 0) rt-ok clear
+mark vm-size 0 eq                   (vm-size: mark = 0) rt-ok clear
+
+% ====================================================================
+% SECTION 2: ExtValue types -- all return 8
+% ====================================================================
+
+42l vm-size 8 eq                    (vm-size: long = 8) rt-ok clear
+42ul vm-size 8 eq                   (vm-size: ulong = 8) rt-ok clear
+3.14d vm-size 8 eq                  (vm-size: double = 8) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Strings -- length + 1 (NUL terminator)
+% ====================================================================
+
+(hello) vm-size 6 eq                (vm-size: string 5 chars = 6) rt-ok clear
+() vm-size 1 eq                     (vm-size: empty string = 1) rt-ok clear
+(a) vm-size 2 eq                    (vm-size: string 1 char = 2) rt-ok clear
+(abcdefghij) vm-size 11 eq         (vm-size: string 10 chars = 11) rt-ok clear
+
+% Verify relationship: vm-size = length + 1
+(hello world) dup vm-size exch length 1 add eq
+                                    (vm-size: string = length + 1) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Arrays -- length * 8
+% ====================================================================
+
+[ ] vm-size 0 eq                    (vm-size: empty array = 0) rt-ok clear
+[1] vm-size 8 eq                    (vm-size: 1-elem array = 8) rt-ok clear
+[1 2 3] vm-size 24 eq              (vm-size: 3-elem array = 24) rt-ok clear
+[1 2 3 4 5] vm-size 40 eq          (vm-size: 5-elem array = 40) rt-ok clear
+
+% Verify relationship: vm-size = length * 8
+[1 2 3 4 5 6 7 8 9 10] dup vm-size exch length 8 mul eq
+                                    (vm-size: array = length * 8) rt-ok clear
+
+% Allocated writable array
+save /sv exch def
+10 array vm-size 80 eq             (vm-size: allocated 10-array = 80) rt-ok clear
+sv restore
+
+% Array element types don't matter -- each element is 8 bytes
+[1 (hello) true 3.14 null] vm-size 40 eq
+                                    (vm-size: heterogeneous 5-elem = 40) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Packed arrays -- variable size, always < array equivalent
+% ====================================================================
+
+save /sv exch def
+
+% Packed should be smaller than equivalent array
+1 2 3 3 packed vm-size
+[1 2 3] vm-size
+lt                                  (vm-size: packed < array for integers) rt-ok clear
+
+% Empty packed
+0 packed vm-size 0 eq              (vm-size: empty packed = 0) rt-ok clear
+
+% Single element packed
+42 1 packed vm-size 0 gt           (vm-size: 1-elem packed > 0) rt-ok clear
+
+% Packed of booleans (compact encoding)
+true false true 3 packed vm-size
+[true false true] vm-size
+lt                                  (vm-size: packed bools < array bools) rt-ok clear
+
+sv restore
+
+% ====================================================================
+% SECTION 6: Dicts -- header + buckets + entry pool
+% ====================================================================
+
+% Dict size depends on capacity, not current content count
+save /sv exch def
+1 dict vm-size 0 gt                (vm-size: 1-cap dict > 0) rt-ok clear
+sv restore
+
+save /sv exch def
+% Larger dict should use more VM
+1 dict vm-size
+10 dict vm-size
+lt                                  (vm-size: 1-cap < 10-cap dict) rt-ok clear
+sv restore
+
+% Dict literal
+<< /a 1 >> vm-size 0 gt           (vm-size: dict literal > 0) rt-ok clear
+
+% Dict with more capacity is larger
+save /sv exch def
+5 dict vm-size
+100 dict vm-size
+lt                                  (vm-size: 5-cap < 100-cap dict) rt-ok clear
+sv restore
+
+% ====================================================================
+% SECTION 7: Names -- 16 + string length
+% ====================================================================
+
+% Name header is 16 bytes + the character bytes
+/a vm-size 17 eq                    (vm-size: name /a = 16+1 = 17) rt-ok clear
+/hello vm-size 21 eq               (vm-size: name /hello = 16+5 = 21) rt-ok clear
+/abcdefghij vm-size 26 eq          (vm-size: name /abcdefghij = 16+10 = 26) rt-ok clear
+
+% Verify relationship: vm-size = 16 + length
+/test-name-length dup vm-size exch length 16 add eq
+                                    (vm-size: name = 16 + length) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Curry -- 16 bytes (2 Objects)
+% ====================================================================
+
+save /sv exch def
+42 { add } curry vm-size 16 eq     (vm-size: curry = 16) rt-ok clear
+(hello) { } curry vm-size 16 eq    (vm-size: curry with string = 16) rt-ok clear
+sv restore
+
+% ====================================================================
+% SECTION 9: Operators and other zero-VM types
+% ====================================================================
+
+% Operator type (get the add operator via immediate lookup)
+//add vm-size 0 eq                  (vm-size: operator = 0) rt-ok clear
+
+% Save token -- vm-size consumes the dup, restore consumes the original
+save dup vm-size 0 eq               (vm-size: save = 0) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 10: Packed vs Array efficiency comparison
+% ====================================================================
+
+save /sv exch def
+
+% Small integers pack very tightly
+1 2 3 4 5 5 packed vm-size /packed-size exch def
+[1 2 3 4 5] vm-size /array-size exch def
+packed-size array-size lt           (efficiency: packed ints < array ints) rt-ok
+array-size packed-size div 2 ge     (efficiency: array >= 2x packed for ints) rt-ok clear
+
+% Booleans pack very tightly (1 byte each)
+true false true false true 5 packed vm-size /pb exch def
+pb 5 le                             (efficiency: packed bools <= 5 bytes for 5 elems) rt-ok clear
+
+% Nulls pack as 1 byte each
+null null null 3 packed vm-size /pn exch def
+pn 3 le                             (efficiency: packed nulls <= 3 bytes for 3 elems) rt-ok clear
+
+sv restore
+
+% ====================================================================
+% SECTION 11: Stress / boundary tests
+% ====================================================================
+
+save /sv exch def
+
+% Large string
+1000 string vm-size 1001 eq        (stress: 1000-char string = 1001) rt-ok clear
+
+% Large array
+1000 array vm-size 8000 eq         (stress: 1000-elem array = 8000) rt-ok clear
+
+% Many packed elements: push 100 integers, pack them
+0 1 99 { } for
+100 packed vm-size /big-packed exch def
+big-packed 0 gt                    (stress: 100-elem packed > 0) rt-ok
+big-packed 800 lt                  (stress: 100-elem packed < 800 = array size) rt-ok clear
+
+sv restore
+
+% ====================================================================
+% SECTION 12: Consistency checks
+% ====================================================================
+
+% vm-size is always non-negative
+null vm-size 0 ge                  (consistency: null >= 0) rt-ok clear
+42 vm-size 0 ge                    (consistency: integer >= 0) rt-ok clear
+(hello) vm-size 0 ge               (consistency: string >= 0) rt-ok clear
+[1 2 3] vm-size 0 ge              (consistency: array >= 0) rt-ok clear
+
+% vm-size returns integer type
+(hello) vm-size type /integer-type eq
+                                    (consistency: vm-size returns integer) rt-ok clear
+42 vm-size type /integer-type eq
+                                    (consistency: vm-size of int returns integer) rt-ok clear
+
+% vm-size does not modify the stack below the operand
+1 2 3 (hello) vm-size pop
+3 eq (consistency: stack preserved below 1) rt-ok
+2 eq (consistency: stack preserved below 2) rt-ok
+1 eq (consistency: stack preserved below 3) rt-ok clear
+
+(vm-size tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

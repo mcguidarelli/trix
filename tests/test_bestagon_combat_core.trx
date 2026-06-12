@@ -1,0 +1,25 @@
+% ====================================================================
+% test_bestagon_combat_core.trx -- run examples/bestagon-sim/combat-core
+% self-test via the standard tests/ harness.
+% ====================================================================
+%
+% Thin wrapper: loads examples/bestagon-sim/combat-core.trx (the shared
+% combat resolver, Phase 0.5A), then explicitly invokes run-self-test.
+% combat-core's own dispatch-cli is a no-op when invoked without
+% --self-test (the flag is only seen when combat-core is the script
+% directly executed by ./trix).
+%
+% Asserts:
+%   - §9.3 worked example reproduces byte-for-byte (5 HP / 2 HP /
+%     0.84 stars / 0.756 stars)
+%   - vet thresholds (0/3/5/8 -> 0/1/2/3)
+%   - sparse damage-table lookup (defined + missing branches)
+%   - all 6 CO classification + 6 unit class predicates
+%   - all 6x6 CO matchup smoke (Tank-vs-Tank Plain)
+%   - illegal attacks raise /undefined
+%   - weather and veterancy fold through the resolver correctly
+% ====================================================================
+
+(examples/bestagon-sim/combat-core.trx) run
+run-self-test
+(__test_ok__) =

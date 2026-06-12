@@ -1,0 +1,221 @@
+% ====================================================================
+% test_bind_locals.trx -- atomic batch bind into the current frame dict
+% ====================================================================
+% bind-locals takes N values + a names-array and writes N bindings into
+% the |...| frame dict on top of the dict stack.  Pre-validates type,
+% dup, capacity, stack arity, frame-on-top atomically: any error leaves
+% zero new bindings landed.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Happy path
+% ====================================================================
+
+/s1a {
+  |x|#5
+  10 20 30 [/a /b /c] bind-locals
+  a b c add add
+} def
+
+0 s1a 60 eq                                     (s1: bind 3 values)                            rt-ok
+
+% Order: leftmost array name <-> bottommost stack value.
+/s1b {
+  |x|#5
+  100 200 300 [/p /q /r] bind-locals
+  p q r 3 array array-store  % expect [100 200 300]
+} def
+
+0 s1b length 3 eq                               (s1: result length)                            rt-ok clear
+
+/s1c {
+  |x|#5
+  100 200 300 [/p /q /r] bind-locals
+  p
+} def
+
+0 s1c 100 eq                                    (s1: leftmost name -> bottommost stack value)  rt-ok
+
+/s1d {
+  |x|#5
+  100 200 300 [/p /q /r] bind-locals
+  r
+} def
+
+0 s1d 300 eq                                    (s1: rightmost name -> top stack value)        rt-ok
+
+% Bind 1 name (smallest case).
+/s1e { |x|#5 99 [/only] bind-locals only } def
+0 s1e 99 eq                                     (s1: bind a single name)                       rt-ok
+
+% Bind into a frame that already holds bindings from |...| header.
+/s1f {
+  |declared|#10
+  /declared 7 local-def
+  1 2 3 [/a /b /c] bind-locals
+  declared a b c add add add
+} def
+
+0 s1f 13 eq                                     (s1: bind into frame with prior bindings)      rt-ok
+
+% Eqarray names: [...]#= still acts as the names-array.
+/s1g {
+  |x|#5
+  4 5 6 [/u /v /w]#= bind-locals
+  u v w add add
+} def
+
+0 s1g 15 eq                                     (s1: eqarray names work)                       rt-ok
+
+% ====================================================================
+% SECTION 2: Sad path -- empty / dup / non-Name / no frame
+% ====================================================================
+
+% Empty names-array.
+/s2a { |x|#5 [ ] bind-locals } def
+{ 0 s2a } try /unsupported eq                   (s2: empty names-array -> unsupported)         rt-ok clear
+
+% Duplicate names.
+/s2b { |x|#5 1 2 [/a /a] bind-locals } def
+{ 0 s2b } try /unsupported eq                   (s2: duplicate name -> unsupported)            rt-ok clear
+
+% Non-Name element.
+/s2c { |x|#5 1 2 [/a (b)] bind-locals } def
+{ 0 s2c } try /type-check eq                    (s2: non-Name element -> type-check)           rt-ok clear
+
+% No frame on top of dict stack.
+{ 1 [/x] bind-locals } try /unsupported eq      (s2: top-level -> unsupported)                 rt-ok clear
+
+% Inside a proc with no |...| header.
+/s2d { 1 [/x] bind-locals } def
+{ s2d } try /unsupported eq                     (s2: no-header proc -> unsupported)            rt-ok clear
+
+% userdict begin -> top is a non-frame dict.
+{ userdict begin 1 [/x] bind-locals end } try /unsupported eq
+(s2: begin userdict + bind-locals -> unsupported)                                              rt-ok clear
+
+% Insufficient stack values below the names-array.
+/s2e { |x|#5 1 [/a /b /c] bind-locals } def
+{ 0 s2e } try /opstack-underflow eq             (s2: insufficient operands -> underflow)       rt-ok clear
+
+% Frame at capacity (|x|#1 has capacity 1; binding 2 names fails).
+/s2f { |x|#1 1 2 [/a /b] bind-locals } def
+{ 0 s2f } try /limit-check eq                   (s2: capacity overflow -> limit-check)         rt-ok clear
+
+% ====================================================================
+% SECTION 3: Atomicity -- failures leave zero new bindings
+% ====================================================================
+
+% Capacity overflow: pre-validation rejects before any binding lands.
+/s3a {
+  |x|#3
+  1 2 3 4 [/a /b /c /d] bind-locals
+} def
+
+{ 0 s3a } try /limit-check eq                   (s3: capacity error before any write)          rt-ok clear
+
+% After the failure, the frame should not have /a or /b.  Verify with a
+% probe proc that catches the error and asks /a from the frame.
+/s3b {
+  |x|#3
+  { 1 2 3 4 [/a /b /c /d] bind-locals } try
+  /limit-check eq
+  % atomic: /a was never bound, so name lookup fails
+  { a } try /undefined eq
+  and
+} def
+
+0 s3b true eq                                   (s3: atomic -- /a not bound after capacity err) rt-ok
+
+% Mid-array type-check: [a /b /c] -- /a is a Name, /b is a Name, but
+% inserting an integer in the middle [/a 42 /c] hits type-check at i=1
+% before any write.
+/s3c {
+  |x|#5
+  { 10 20 30 [/a 42 /c] bind-locals } try
+  /type-check eq
+  { a } try /undefined eq
+  { c } try /undefined eq
+  and and
+} def
+
+0 s3c true eq                                   (s3: atomic -- mid-array type-check)           rt-ok
+
+% Dup-check: [/a /a] hits duplicate at i=1 before any write.
+/s3d {
+  |x|#5
+  { 10 20 [/a /a] bind-locals } try
+  /unsupported eq
+  { a } try /undefined eq
+  and
+} def
+
+0 s3d true eq                                   (s3: atomic -- duplicate-name detected pre-write) rt-ok
+
+% ====================================================================
+% SECTION 4: Save/restore journaling
+% ====================================================================
+
+/s4a {
+  |x|#5
+  /pre 100 local-def
+  save
+  10 20 [/a /b] bind-locals
+  pre a b add add
+  exch restore
+} def
+
+0 s4a 130 eq                                    (s4: pre+post bindings visible inside save)    rt-ok
+
+% Outside the save scope, /a + /b are gone.  Probe inside the proc.
+/s4b {
+  |x|#5
+  /pre 100 local-def
+  save
+  10 20 [/a /b] bind-locals
+  restore                       % consumes the save token on top
+  { a } try /undefined eq
+  { b } try /undefined eq
+  pre 100 eq
+  and and
+} def
+
+0 s4b true eq                                   (s4: post-restore bindings rolled back)        rt-ok
+
+% ====================================================================
+% SECTION 5: Stress -- repeated bind-locals in a loop
+% ====================================================================
+
+/s5a {
+  |scratch|#10
+  /total 0 local-def
+  100 {
+    1 2 3 4 5 [/a /b /c /d /e] bind-locals
+    /total a b c d e add add add add total add store
+  } repeat
+  total
+} def
+
+0 s5a 1500 eq                                   (s5: 100x bind-locals in loop)                 rt-ok
+
+% Larger N: bind 8 names in a 10-cap frame.
+/s5b {
+  |scratch|#10
+  1 2 3 4 5 6 7 8 [/p1 /p2 /p3 /p4 /p5 /p6 /p7 /p8] bind-locals
+  p1 p2 add p3 add p4 add p5 add p6 add p7 add p8 add
+} def
+
+0 s5b 36 eq                                     (s5: bind 8 names in one call)                 rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_bind_locals: ALL TESTS PASSED) =
+(__test_ok__) =

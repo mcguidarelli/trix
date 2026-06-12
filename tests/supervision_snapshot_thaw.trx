@@ -1,0 +1,3 @@
+% supervision_snapshot_thaw.trx -- phase 2: thaw the supervision snapshot.
+% Run test_supervision_snapshot.trx first to produce tests/supervision_snapshot.img.
+(tests/supervision_snapshot.img) thaw

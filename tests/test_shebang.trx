@@ -1,0 +1,124 @@
+% ====================================================================
+% test_shebang.trx -- #! shebang line support tests
+% ====================================================================
+% Validates that #! at byte offset 0 of a file stream is consumed as
+% a comment, and that non-shebang cases are unaffected.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% Helper: write content to a temp file, run it, check result on stack
+% Usage: (content) shebang-test => result-from-script
+/shebang-test {
+    /shebang-content exch def
+    (test_shebang_tmp.trx) (w)#b {
+        shebang-content write-string
+    } with-stream
+    (test_shebang_tmp.trx) run
+} def
+
+% Helper: write content to temp file, run it under try, check error
+% Usage: (content) shebang-error-test => error-name
+/shebang-error-test {
+    /shebang-content exch def
+    (test_shebang_tmp.trx) (w)#b {
+        shebang-content write-string
+    } with-stream
+    { (test_shebang_tmp.trx) run } try
+} def
+
+% ====================================================================
+% SECTION 1: Basic shebang — consumed, code after it runs
+% ====================================================================
+
+(#!/usr/bin/env trix\n42\n) shebang-test
+42 eq                                         (sh: basic shebang, code runs) rt-ok clear
+
+(#!/usr/local/bin/trix\n1 2 add\n) shebang-test
+3 eq                                          (sh: shebang with path, add works) rt-ok clear
+
+(#!trix\n99\n) shebang-test
+99 eq                                         (sh: minimal shebang) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Empty shebang and edge cases
+% ====================================================================
+
+(#!\n42\n) shebang-test
+42 eq                                         (sh: empty shebang path) rt-ok clear
+
+% Shebang with very long path (>127 chars, not subject to MaxNameLength)
+(#!/very/long/path/that/exceeds/the/maximum/name/length/limit/of/one/hundred/and/twenty/seven/characters/to/verify/no/limit/check/applies\n7\n) shebang-test
+7 eq                                          (sh: long shebang path) rt-ok clear
+
+% File with ONLY a shebang line and no code — should be clean EndOfStream
+(#!/usr/bin/env trix\n) shebang-test
+clear                                         % stack may be empty, just clear
+
+% ====================================================================
+% SECTION 3: NOT a shebang — must fail or behave normally
+% ====================================================================
+
+% # without ! is not a shebang — # is a regular character, parses as a name
+(# not-shebang\n42\n) shebang-error-test
+/undefined eq                                 (sh: # without ! is not shebang) rt-ok clear
+
+% Leading whitespace before #! — strict POSIX: NOT a shebang
+( #!/usr/bin/env trix\n42\n) shebang-error-test
+/undefined eq                                 (sh: whitespace before #! is not shebang) rt-ok clear
+
+% #! appearing later in file — NOT a shebang, fails as name
+% W04: try rolls operand stack back to pre-call depth on error, so the
+% 42 the script pushed before the failed lookup is discarded.  Only
+% /undefined lands on top after the catch.
+(42\n#!/fake\n) shebang-error-test
+/undefined eq                                 (sh: #! later in file fails as name) rt-ok clear
+
+% ====================================================================
+% SECTION 4: String streams are NOT affected
+% ====================================================================
+
+% The token operator scans from a string stream — #! should NOT be treated as shebang
+% / is a delimiter, so the first token is the name #! (2 chars)
+(#!/usr/bin/env trix) token
+pop                                           % drop true
+exch pop                                      % drop remaining string, keep the token
+type /name-type eq                            (sh: token on string ignores shebang) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Shebang + subsequent features work
+% ====================================================================
+
+% Shebang followed by comment
+(#!/usr/bin/env trix\n% this is a comment\n42\n) shebang-test
+42 eq                                         (sh: shebang + comment) rt-ok clear
+
+% Shebang followed by raw string
+(#!/usr/bin/env trix\n<(hello)> length\n) shebang-test
+5 eq                                          (sh: shebang + raw string) rt-ok clear
+
+% Shebang followed by hex string
+(#!/usr/bin/env trix\n<4142> length\n) shebang-test
+2 eq                                          (sh: shebang + hex string) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Line number tracking after shebang
+% ====================================================================
+
+% Error on line 2 should report line 2, not line 1
+(#!/usr/bin/env trix\nundefined-name-xyz\n) shebang-error-test
+/undefined eq                                 (sh: error after shebang is correct type) rt-ok clear
+
+% Clean up temp file
+(test_shebang_tmp.trx) delete-file
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_shebang: ALL TESTS PASSED) =
+(__test_ok__) =

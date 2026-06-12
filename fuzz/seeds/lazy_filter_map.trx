@@ -1,0 +1,1 @@
+[1 2 3 4 5] lazy-seq { 2 mul } lazy-map { 4 gt } lazy-filter lazy-to-array

@@ -1,0 +1,122 @@
+% lib/screen.trx -- Layer 1 wrapper over the screen-* C ops.
+%
+% Pairs with lib/ansi.trx (CSI/SGR helpers) and lib/keys.trx
+% (input decoding).  Where the C-side ops let you mutate cells
+% and render diffs, this file glues them together with the terminal-mode
+% setup/teardown that every full-screen TUI ends up writing by hand:
+%
+%   with-fullscreen-screen   alt-screen + cursor-hide + raw-mode +
+%                            screen sized to the terminal.  Crash-safe
+%                            restore on every exit path.
+%   with-screen              allocate a screen, run proc with it on
+%                            stack -- no terminal-mode setup.  Useful
+%                            for non-interactive renders (e.g.
+%                            screen-render-to a string-stream).
+%   screen-fill              fill every cell with one (ch, fg, bg, attrs)
+%                            content -- screen-wide screen-fill-rect.
+%   screen-from-terminal     query terminal-size, allocate matching
+%                            screen.
+%
+% Output ordering note: ansi.trx writes through `ansi-out` (default
+% stdout), which uses Trix's stream buffering, while screen-render
+% writes directly to STDOUT_FILENO.  These two paths share the same
+% kernel fd but different userspace buffers; without an explicit
+% `flush` between them, ansi setup bytes can land AFTER screen
+% bytes on the wire.  with-fullscreen-screen flushes after each
+% ansi block so the proc can call screen-render directly without
+% worrying about ordering.
+%
+% Coordinate convention: 0-based (col, row) -- matches the underlying
+% screen-put-cell C op.  This differs from ansi.trx (1-based, matches
+% the ANSI spec).  Mixing the two libraries means keeping the two
+% conventions straight in your head.
+
+(lib/ansi.trx) require
+
+% --- with-screen --------------------------------------------------------------
+
+% with-screen cols rows proc --
+% Allocate a screen of the given dimensions, push it on the stack, run
+% proc.  No terminal-mode side effects.  Save/restore reclaims the
+% screen's VM allocations on rollback; explicit cleanup is unnecessary.
+/with-screen {
+    make-literal _with-screen-inner
+} def
+
+/_with-screen-inner {|cols rows proc|
+    cols rows make-screen
+    proc make-executable exec
+} def
+
+% --- with-fullscreen-screen ---------------------------------------------------
+
+% with-fullscreen-screen proc --
+% Set up a full-screen TUI: alt-screen-enter + cursor-hide + raw-mode,
+% allocate a screen sized to the terminal, push the screen on the
+% stack, then run proc.  Restore cooked-mode + cursor-show + alt-screen-
+% leave on every exit path (normal completion, caught error, uncaught
+% error).  Errors are rethrown after restore so the caller's outer
+% handler runs against a clean tty.
+%
+% The setup order is alt-screen -> hide cursor -> raw-mode; teardown
+% reverses that order so the user's terminal returns through clean
+% intermediate states.
+/with-fullscreen-screen {
+    make-literal _with-fullscreen-screen-inner
+} def
+
+/_with-fullscreen-screen-inner {|proc|
+    % raw-mode first: if it fails (stdin not a tty) we haven't yet
+    % committed the terminal to alt-screen / hidden cursor, so we can
+    % bubble the error out cleanly without a teardown.
+    raw-mode
+    {
+        % Once raw-mode succeeds, alt-screen-enter + cursor-hide are the
+        % visible setup steps.  Any error from here on must restore them.
+        alt-screen-enter
+        cursor-hide
+        flush                              % ansi setup -> wire before screen-render bytes
+        terminal-size                      % cols rows
+        make-screen
+        proc make-executable exec
+    } try                                  % -- /no-error or /errname
+    % Teardown order matters.  raw-mode set STDIN to O_NONBLOCK, which
+    % on a typical interactive shell ALSO sets STDOUT non-blocking
+    % because stdin/stdout share an open file description.  If we flush
+    % before cooked-mode, ::write can EAGAIN on a still-draining tty
+    % kernel buffer (large screen-render bytes haven't reached the
+    % terminal yet) and Stream::flush surfaces /io-write-error.
+    % cooked-mode restores stdin's fcntl flags -> stdout becomes
+    % blocking again -> the flush blocks instead of EAGAIN'ing.
+    cooked-mode
+    cursor-show
+    alt-screen-leave
+    flush                                  % ansi teardown reaches the terminal (now blocking)
+    dup /no-error eq
+    { pop }
+    { rethrow }
+    if-else
+} def
+
+% --- screen-fill --------------------------------------------------------------
+
+% screen-fill screen ch fg bg attrs -- screen
+% Fill every cell of screen with the given content.  Convenience over
+% screen-fill-rect using the screen's full dimensions.  Returns the
+% same screen handle.
+/screen-fill {|screen ch fg bg attrs|
+    screen 0 0
+    screen screen-cols screen screen-rows
+    ch fg bg attrs screen-fill-rect
+} def
+
+% --- screen-from-terminal -----------------------------------------------------
+
+% screen-from-terminal -- screen
+% Query the controlling terminal's dimensions and allocate a screen
+% matching its current cols/rows.  Useful when you don't want to commit
+% to a fixed canvas at make-screen time.
+/screen-from-terminal {
+    terminal-size                          % cols rows
+    make-screen
+} def

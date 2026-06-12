@@ -1,0 +1,8 @@
+=string ({0:I%Y-%m-%dT%H:%M:%SZ}) mark 1700000000000ul sprint-fmt pop
+=string ({0:D%Y-%m-%d}) mark 2026 4 30 make-date sprint-fmt pop
+=string ({0:Il%H:%M:%S}) mark 0ul sprint-fmt pop
+=string ({0:D%a %b %d, %Y}) mark 2024 2 29 make-date sprint-fmt pop
+=string ({0:I%c}) mark 1700000000000ul sprint-fmt pop
+=string ({0:D%F}) mark 2026 4 30 make-date sprint-fmt pop
+=string ({0:I%R}) mark 1700000000000ul sprint-fmt pop
+=string ({0:I%F %T}) mark 1700000000000ul sprint-fmt pop

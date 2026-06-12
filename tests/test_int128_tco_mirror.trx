@@ -1,0 +1,91 @@
+% ====================================================================
+% Mirror of test_tco.trx long/ulong cases for Int128/UInt128.
+%
+% test_tco.trx verifies tail-call optimization on Long-controlled
+% iterative procs. These mirror tests re-run the same patterns with
+% Int128 counters to confirm that the TCO dispatch loop handles
+% WideValue cells across each tail-call recursion.
+%
+% Iteration counts match test_tco.trx (10000). A previous double-clone
+% leak in execute_proc (packed_pop_clone_head + make_clone) caused
+% ~2 WideValues per iteration to accumulate until save/restore; fixed
+% by switching to packed_pop_head since the caller clones anyway.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: countdown to 0q -- simple tail recursion
+% ====================================================================
+
+/int128-countdown {
+    dup 0q deep-eq { } { 1q sub int128-countdown } if-else
+} def
+
+10000q int128-countdown
+0q deep-eq                               (tco: int128 countdown 10K -> 0q) rt-ok clear
+
+% ====================================================================
+% SECTION 2: accumulator -- sum 1..N with int128 accumulator
+% ====================================================================
+
+/int128-sum-acc {
+    exch dup 0q deep-eq { pop } { dup rot add exch 1q sub exch int128-sum-acc } if-else
+} def
+
+100q 0q int128-sum-acc 5050q deep-eq      (tco: int128 sum 1..100 = 5050q) rt-ok clear
+10000q 0q int128-sum-acc 50005000q deep-eq   (tco: int128 sum 1..10000 = 50005000q) rt-ok clear
+
+% ====================================================================
+% SECTION 3: multiply accumulator (2^N via repeated *2)
+% ====================================================================
+
+/int128-mul-acc {
+    exch dup 0q deep-eq { pop } { exch 2q mul exch 1q sub exch int128-mul-acc } if-else
+} def
+
+10q 1q int128-mul-acc 1024q deep-eq       (tco: int128 2^10 = 1024q) rt-ok clear
+20q 1q int128-mul-acc 1048576q deep-eq    (tco: int128 2^20 = 1048576q) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Mutual tail calls (ping/pong) with int128 counter
+% ====================================================================
+
+/int128-pong { dup 0q le { pop (pong) } { 1q sub int128-ping } if-else } def
+/int128-ping { dup 0q le { pop (ping) } { 1q sub int128-pong } if-else } def
+
+10000q int128-ping (ping) eq             (tco: int128 mutual 500 -> ping) rt-ok clear
+10001q int128-ping (pong) eq             (tco: int128 mutual 501 -> pong) rt-ok clear
+
+% ====================================================================
+% SECTION 5: 4-way cycle (a -> b -> c -> d -> a) with int128 counter
+% ====================================================================
+
+/cycle-a { dup 0q le { pop (a) } { 1q sub cycle-b } if-else } def
+/cycle-b { dup 0q le { pop (b) } { 1q sub cycle-c } if-else } def
+/cycle-c { dup 0q le { pop (c) } { 1q sub cycle-d } if-else } def
+/cycle-d { dup 0q le { pop (d) } { 1q sub cycle-a } if-else } def
+
+10000q cycle-a (a) eq                    (tco: int128 4-way cycle 500 -> a) rt-ok clear
+10001q cycle-a (b) eq                    (tco: int128 4-way cycle 501 -> b) rt-ok clear
+10002q cycle-a (c) eq                    (tco: int128 4-way cycle 502 -> c) rt-ok clear
+10003q cycle-a (d) eq                    (tco: int128 4-way cycle 503 -> d) rt-ok clear
+
+% ====================================================================
+% SECTION 6: WideValue free-list stays healthy after deep TCO
+% ====================================================================
+
+//:status:widevalue-validate (widevalue free-list integrity OK) rt-ok
+//:status:vm-validate (vm heap integrity OK) rt-ok
+
+(test_int128_tco_mirror.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

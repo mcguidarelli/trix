@@ -1,0 +1,501 @@
+% =====================================================================
+% proto-loader.trx -- Phase 0.6F scenario loader prototype
+% =====================================================================
+%
+% Tier P2 of plan_bestagon_derisk_prototyping.md.  Implements GDD
+% section 16 (scenario file format) on `examples/bestagon-scenarios/
+% tutorial.bw`.  Exercises `validate-scenario` per section 16.6 against
+% the canonical tutorial + three deliberately-broken in-memory fixtures
+% that each trip a specific error class.
+%
+% Validation checks implemented (subset of section 16.6; covers the
+% three success-criteria error classes plus a few extras for breadth):
+%   1. /scenario top-level Dict present
+%   2. /scenario contains every required key
+%   3. /map-size is [W H] with positive ints, W,H <= 100
+%   4. /map array length matches H; each string length matches W
+%   5. Every char in /map appears as a key in /terrain-key
+%   6. Every building/unit /pos is in map bounds
+%   7. Every win-condition Name resolves to a callable proc
+%
+% Skipped (would be needed for a Phase 2 production loader but not
+% load-bearing for this de-risk proto):
+%   - Terrain-class movement legality per unit class (section 4)
+%   - Building-terrain placement (HQ/City/Factory on land; Port on Sea/Beach)
+%   - Faction has at least one HQ
+%   - /owner integer or /neutral
+%   - CO Name in /co-roster or /co-roster-extras
+%   - Duplicate /pos across buildings + units
+%   - /objectives required when /objective-locations in /win-conditions
+%   - /ai-difficulty /brutal only with /controller /ai-v3
+%
+% Error format matches section 16.6 verbatim:
+%   /scenario-error in <path>:
+%     [<i>] /error <message-class>: <message>
+%                  at <location-hint>
+%     ...
+%     <N> error(s) total. Loading aborted.
+%
+% Run with debug build (proto is correctness-only, not perf-bound):
+%   ./trix examples/bestagon-proto/proto-loader.trx
+%
+% Output: stdout PASS/FAIL summary; no markdown verdict file.
+% =====================================================================
+
+
+% ====================================================================
+% Section 1: built-in win-condition registry (stubs for resolvability)
+% ====================================================================
+%
+% Section 16.3 lists 5 built-in win-conditions.  Each is a proc with
+% signature `state faction -- bool`.  For the validator's "resolves
+% to callable proc" check, stubs that just return /stub-result are
+% sufficient -- the validator only inspects type, not behavior.
+
+/capture-hq             { /stub-result } def
+/eliminate-all-enemies  { /stub-result } def
+/turn-limit-funds       { /stub-result } def
+/turn-limit-territory   { /stub-result } def
+/objective-locations    { /stub-result } def
+
+
+% ====================================================================
+% Section 2: validation infrastructure
+% ====================================================================
+%
+% Errors accumulate in a top-level Array.  Each error is a Dict with
+% /class (Name from section 16.6 message-class set), /location (any --
+% usually [col row] or /faction-id N or null), /message (String).
+%
+% Pre-intern at sl=0 so the persist-family check works cleanly if we
+% later switch to def-persist.
+
+/errors-buf  64 array  def
+/n-errors    0  def
+
+% class location msg --
+/report-error {|class location msg|
+    errors-buf n-errors
+        << /class class /location location /message msg >>
+        put
+    /n-errors $[ n-errors + 1 ]  store
+} def
+
+/reset-errors {
+    /n-errors 0 store
+} def
+
+
+% ====================================================================
+% Section 3: validate-scenario
+% ====================================================================
+%
+% No args; reads /scenario + the §16.1 top-level Names from userdict.
+% Accumulates errors via report-error.  Caller invokes after `run`-
+% loading the scenario file.
+
+% Returns true if `userdict` knows key /scen-key.
+% This indirection is here so we can swap in scen-key shadowing for
+% in-memory fixtures (see Section 5).
+
+/scenario-defined? {
+    userdict /scenario known?
+} def
+
+/scenario-dict { userdict /scenario get } def
+
+% sc key -- bool
+/sc-has-key? {|sc k|
+    sc k known?
+} def
+
+% Validate top-level /scenario presence + required keys.  Returns true
+% if /scenario is present + is a Dict (and we can continue with more
+% specific checks).  Reports any missing required keys.
+/check-scenario-shape {||#+1
+    scenario-defined? not {
+        /missing-key  null  (top-level /scenario Dict is not defined)
+            report-error
+        false
+        % exit -- can't continue
+    } {
+        scenario-dict type /dict-type ne {
+            /wrong-type  /scenario  (top-level /scenario must be a Dict)
+                report-error
+            false
+        } {
+            % required keys per section 16.2
+            /sc scenario-dict local-def
+            [ /name /map-size /map /terrain-key /factions /buildings /starting-units /win-conditions ]
+            {|k|
+                sc k sc-has-key? not {
+                    /missing-key  k  (required key absent from /scenario)
+                        report-error
+                } if
+            } for-all
+            true
+        } if-else
+    } if-else
+} def
+
+
+% Validate /map-size shape + bounds.  Returns true iff /map-size is
+% well-formed (so callers can use it).  Reports errors otherwise.
+% Returns the W and H below the boolean if valid.
+/check-map-size {||#+4
+    /sc scenario-dict local-def
+    sc /map-size sc-has-key? not {
+        false
+    } {
+        /ms  sc /map-size get  local-def
+        ms type /array-type ne {
+            /wrong-type  /map-size  (/map-size must be an Array)
+                report-error
+            false
+        } {
+            ms length 2 ne {
+                /wrong-type  /map-size  (/map-size must be [W H] -- 2-element Array)
+                    report-error
+                false
+            } {
+                /w  ms 0 get  local-def
+                /h  ms 1 get  local-def
+                w type /integer-type ne  h type /integer-type ne  or {
+                    /wrong-type  /map-size  (/map-size components must be Integer)
+                        report-error
+                    false
+                } {
+                    w 1 lt  w 100 gt  or  h 1 lt  h 100 gt  or  or {
+                        /out-of-bounds  /map-size  (/map-size W and H must be 1..100)
+                            report-error
+                        false
+                    } {
+                        true
+                    } if-else
+                } if-else
+            } if-else
+        } if-else
+    } if-else
+} def
+
+% Validate /map array length matches /map-size[1]; each string length
+% matches /map-size[0].
+/check-map-strings {||#+5
+    /sc scenario-dict local-def
+    sc /map sc-has-key? sc /map-size sc-has-key? and not { } {
+        /m   sc /map get  local-def
+        /ms  sc /map-size get  local-def
+        ms type /array-type eq { ms length 2 eq } and? {
+            /w  ms 0 get  local-def
+            /h  ms 1 get  local-def
+            m type /array-type eq {
+                m length h ne {
+                    /wrong-type  /map  (/map array length must equal /map-size H)
+                        report-error
+                } if
+                % each row must be a String of length W
+                0 1  m length 1 sub  {|i|#+2
+                    /row  m i get  local-def
+                    row type /string-type ne {
+                        /wrong-type  i  (/map row must be a String)
+                            report-error
+                    } {
+                        row length w ne {
+                            /wrong-type  i  (/map row length must equal /map-size W)
+                                report-error
+                        } if
+                    } if-else
+                } for
+            } {
+                /wrong-type  /map  (/map must be an Array of Strings)
+                    report-error
+            } if-else
+        } if
+    } if-else
+} def
+
+% Validate every character in /map appears as a key in /terrain-key.
+% Builds the set of declared terrain-chars from /terrain-key keys --
+% each key Name's first char is the map char (e.g. /. -> '.').
+/check-terrain-coverage {||#+4
+    /sc scenario-dict local-def
+    sc /map sc-has-key? sc /terrain-key sc-has-key? and not { } {
+        /m   sc /map get  local-def
+        /tk  sc /terrain-key get  local-def
+        % Build allowed-set from terrain-key keys.  Section 16.7 originally
+        % spec'd Name keys (e.g. /. /plain) but Trix's field-access sugar
+        % makes /. an invalid Name literal -- this proto switches the
+        % convention to 1-char Strings.  Validator accepts either form
+        % for forward-compatibility with a future GDD spec amendment.
+        /allowed  64 set  local-def
+        tk {|k v|#+1
+            /ch  null  local-def
+            k type /string-type eq  { k length 1 ge } and? {
+                /ch  k 0 get  store
+            } if
+            ch is-null not { allowed ch set-add pop } if
+        } for-all
+        % scan /map for any byte not in allowed
+        m {|row|#+1
+            /len  row length  local-def
+            0 1 $[ len - 1 ] {|c|#+1
+                /b  row c get  local-def
+                allowed b set-member? not {
+                    /unknown-name  b  (/map character has no /terrain-key entry)
+                        report-error
+                } if
+            } for
+        } for-all
+    } if-else
+} def
+
+% Validate every building.pos and starting-unit.pos is in map bounds.
+/check-pos-in-bounds {||#+6
+    /sc scenario-dict local-def
+    sc /map-size sc-has-key? not { } {
+        /ms  sc /map-size get  local-def
+        ms type /array-type ne ms length 2 ne or { } {
+            /w  ms 0 get  local-def
+            /h  ms 1 get  local-def
+
+            % Buildings
+            sc /buildings sc-has-key? {
+                /bs  sc /buildings get  local-def
+                bs {|b|#+3
+                    b type /dict-type eq { b /pos known? } and? {
+                        /p  b /pos get  local-def
+                        p type /array-type eq { p length 2 eq } and? {
+                            /pc  p 0 get  local-def
+                            /pr  p 1 get  local-def
+                            pc 0 lt  pc w ge or  pr 0 lt or  pr h ge or {
+                                /out-of-bounds  p  (building /pos outside map bounds)
+                                    report-error
+                            } if
+                        } {
+                            /wrong-type  /buildings  (building /pos must be [col row] 2-Integer Array)
+                                report-error
+                        } if-else
+                    } if
+                } for-all
+            } if
+
+            % Starting units
+            sc /starting-units sc-has-key? {
+                /us  sc /starting-units get  local-def
+                us {|u|#+3
+                    u type /dict-type eq { u /pos known? } and? {
+                        /p  u /pos get  local-def
+                        p type /array-type eq { p length 2 eq } and? {
+                            /pc  p 0 get  local-def
+                            /pr  p 1 get  local-def
+                            pc 0 lt  pc w ge or  pr 0 lt or  pr h ge or {
+                                /out-of-bounds  p  (starting-unit /pos outside map bounds)
+                                    report-error
+                            } if
+                        } {
+                            /wrong-type  /starting-units  (starting-unit /pos must be [col row] 2-Integer Array)
+                                report-error
+                        } if-else
+                    } if
+                } for-all
+            } if
+        } if-else
+    } if-else
+} def
+
+% Validate every entry in /win-conditions resolves to a callable proc.
+/check-win-conditions {||#+2
+    /sc scenario-dict local-def
+    sc /win-conditions sc-has-key? not { } {
+        /wcs  sc /win-conditions get  local-def
+        wcs {|wc|#+2
+            wc type /name-type eq {
+                wc dup where {
+                    exch get is-packed not {
+                        /unknown-name  wc  (/win-conditions entry is defined but not a callable proc)
+                            report-error
+                    } if
+                } {
+                    pop
+                    /unknown-name  wc  (/win-conditions Name does not resolve to any value)
+                        report-error
+                } if-else
+            } {
+                % Tagged inline form per section 16.3 case 4: proc /name Tagged
+                wc type /tagged-type eq {
+                    % accept; further validation deferred
+                } {
+                    /wrong-type  wc  (/win-conditions entry must be a Name or Tagged proc)
+                        report-error
+                } if-else
+            } if-else
+        } for-all
+    } if-else
+} def
+
+
+% Top-level validator.  Resets errors, runs all enabled checks, returns
+% the count of errors found.
+/validate-scenario {
+    reset-errors
+
+    check-scenario-shape {
+        check-map-size pop      % drop the bool; map-size errors already reported
+        check-map-strings
+        check-terrain-coverage
+        check-pos-in-bounds
+        check-win-conditions
+    } if
+
+    n-errors
+} def
+
+
+% ====================================================================
+% Section 4: error formatter (per section 16.6)
+% ====================================================================
+%
+% scenario-path -- (prints the error block to stdout)
+/format-errors {|path|#+1
+    n-errors 0 eq {
+        % nothing to format
+    } {
+        (\n/scenario-error in {0}:\n) mark path print-fmt pop pop
+        0 1 $[ n-errors - 1 ] {|i|#+5
+            /e  errors-buf i get  local-def
+            /cls  e /class get  local-def
+            /loc  e /location get  local-def
+            /msg  e /message get  local-def
+            (  [{0}] /error {1}: {2}\n) mark i cls msg print-fmt pop pop
+            loc is-null not {
+                loc type /array-type eq  { loc length 2 eq } and? {
+                    (                  at [{0} {1}]\n)
+                        mark loc 0 get loc 1 get
+                        print-fmt pop pop
+                } {
+                    (                  at {0}\n)
+                        mark loc
+                        print-fmt pop pop
+                } if-else
+            } if
+        } for
+        (  {0} error(s) total. Loading aborted.\n) mark n-errors print-fmt pop pop
+    } if-else
+} def
+
+
+% ====================================================================
+% Section 5: tests
+% ====================================================================
+%
+% Test 1: load tutorial.bw, validate, assert PASS (n-errors == 0).
+% Tests 2-4: build broken /scenario inline by mutating after load,
+% re-validate, assert specific error class is present.
+
+% expected-class -- bool   (true if errors-buf 0..n-errors contains it)
+/has-error-class? {|cls|#+1
+    /found false local-def
+    0 1 $[ n-errors - 1 ] {|i|
+        found not {
+            errors-buf i get /class get cls eq { /found true store } if
+        } if
+    } for
+    found
+} def
+
+% expected-class label --
+/assert-has-class {|cls lbl|
+    cls has-error-class? not {
+        ({0}: FAIL -- expected /class {1} not found among {2} errors\n)
+            mark lbl cls n-errors print-fmt pop pop
+        /assertion-fail throw
+    } if
+    ({0}: PASS -- /class {1} present\n) mark lbl cls print-fmt pop pop
+} def
+
+% expected label --
+/assert-pass {|lbl|#+1
+    n-errors 0 ne {
+        ({0}: FAIL -- expected zero errors, got {1}\n)
+            mark lbl n-errors print-fmt pop pop
+        /assertion-fail throw
+    } if
+    ({0}: PASS -- 0 errors\n) mark lbl print-fmt pop pop
+} def
+
+
+% ====================================================================
+% Section 6: main
+% ====================================================================
+
+(proto-loader: Phase 0.6F -- scenario loader + validate-scenario\n\n) print
+
+% --- Test 1: load tutorial.bw + validate ---
+(Test 1: tutorial.bw round-trip\n) print
+(examples/bestagon-scenarios/tutorial.bw) run
+validate-scenario pop
+n-errors 0 ne {
+    (examples/bestagon-scenarios/tutorial.bw) format-errors
+} if
+(tutorial.bw) assert-pass
+
+
+% --- Test 2: missing required key (/map-size) ---
+% Re-build /scenario locally without /map-size, write to userdict
+(\nTest 2: missing /map-size -> /missing-key\n) print
+/scenario <<
+    /name (Bad-1: no map-size)
+    % /map-size omitted
+    /map [ (.....) ]
+    /terrain-key << (.) /plain >>
+    /factions [ << /id 0 /co /bishop >> ]
+    /buildings []
+    /starting-units []
+    /win-conditions [/capture-hq]
+>>#r def
+validate-scenario pop
+(in-memory bad-1) format-errors
+/missing-key (bad-1 missing /map-size) assert-has-class
+
+
+% --- Test 3: building /pos out-of-bounds ---
+(\nTest 3: building /pos [200 0] -> /out-of-bounds\n) print
+/scenario <<
+    /name (Bad-2: oob building)
+    /map-size [10 10]
+    /map [
+        (..........) (..........) (..........) (..........) (..........)
+        (..........) (..........) (..........) (..........) (..........)
+    ]
+    /terrain-key << (.) /plain >>
+    /factions [ << /id 0 /co /bishop >> ]
+    /buildings [ << /pos [200 0] /type /hq /owner 0 >> ]
+    /starting-units []
+    /win-conditions [/capture-hq]
+>>#r def
+validate-scenario pop
+(in-memory bad-2) format-errors
+/out-of-bounds (bad-2 oob building pos) assert-has-class
+
+
+% --- Test 4: win-conditions Name doesn't resolve to a proc ---
+(\nTest 4: /win-conditions [/not-a-real-name] -> /unknown-name\n) print
+/scenario <<
+    /name (Bad-3: bogus win-condition)
+    /map-size [10 10]
+    /map [
+        (..........) (..........) (..........) (..........) (..........)
+        (..........) (..........) (..........) (..........) (..........)
+    ]
+    /terrain-key << (.) /plain >>
+    /factions [ << /id 0 /co /bishop >> ]
+    /buildings [ << /pos [5 5] /type /hq /owner 0 >> ]
+    /starting-units []
+    /win-conditions [/not-a-real-name]
+>>#r def
+validate-scenario pop
+(in-memory bad-3) format-errors
+/unknown-name (bad-3 bogus win-condition) assert-has-class
+
+
+(\nproto-loader: ALL TESTS PASSED\n) print

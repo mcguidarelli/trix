@@ -1,0 +1,7 @@
+% $/, $\, $$/, $$\ do not accept doubled (immediate-lookup) forms.
+% Each line is a separately scanned snippet; every line raises
+% /syntax-error from scan_name's $-prefix dispatch.
+{ <($//foo)>#x exec } try clear
+{ <($\\foo)>#x exec } try clear
+{ <($$//foo)>#x exec } try clear
+{ <($$\\foo)>#x exec } try clear

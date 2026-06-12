@@ -1,0 +1,13 @@
+% backtrace_sourceloc.trx
+% Demonstrates Type::SourceLoc call-site locations in the backtrace.
+%
+% 'outer' is called directly from the stream on line 11 — that call is
+% a direct stream execution so m_last_scan_location is exact.  'inner'
+% is called from inside outer's proc body, so its SourceLoc records the
+% current stream position (outer's call site) rather than the exact
+% position of 'inner' inside the proc definition; this is the known
+% approximation for proc-body calls.
+
+/inner { 1 0 div } def
+/outer { inner } def
+outer
