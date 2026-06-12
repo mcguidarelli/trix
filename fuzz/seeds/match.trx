@@ -1,0 +1,1 @@
+42 [ { is-integer } { pop (int) } { pop true } { pop (other) } ] match

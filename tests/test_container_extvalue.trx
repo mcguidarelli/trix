@@ -1,0 +1,371 @@
+% ====================================================================
+% test_container_extvalue.trx -- every container exercised with
+% ExtValue (Long/ULong/Address/Double) and WideValue (Int128/UInt128)
+% payloads, in BOTH local VM and global VM (${...} + save/restore).
+% ====================================================================
+% WHY: immediate payloads (Name/Integer/Byte) make make_clone and
+% maybe_free_extvalue NO-OPS, which masks an entire class of GC/region
+% bugs in container ops that clone/free keys/values/elements.  The
+% @set-filter source-key UAF (it freed a BORROWED ExtValue source key)
+% slipped past the suite for exactly this reason -- every set-filter
+% test used Name members.  ExtValue/WideValue payloads arm those paths.
+%
+% This file is the FUNCTIONAL + REGION-SURVIVAL guard (run by run_all.sh).
+% The deterministic GC-UAF guard for the same matrix lives in
+% test_gc_stress_container_extvalue.trx (run under vm-gc-stress+poison).
+%
+% Payload palette: Long 1l  ULong 1ul  Address 1a  Double 1.0d (ExtValue);
+%                  Int128 1q  UInt128 1uq (WideValue).
+% Global/restore idiom: inputs built BEFORE `save` (base-local, not
+% restore-fragile); op runs under `true set-global` + ${...} so its result
+% is region-aware; result stored into a global dict; verified post-restore.
+% A LOCAL result would R6-reject at `put` -> the section is non-vacuous.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: ARRAY -- Long (ExtValue) elements, local VM
+% ====================================================================
+[ 10l 20l 30l 40l ] /aL exch def
+aL length 4 eq                       (arr-L: length 4)         rt-ok
+aL 1 get 20l eq                      (arr-L: get[1]=20l)       rt-ok
+aL { 1l add } map 0 get 11l eq       (arr-L: map[0]=11l)       rt-ok
+aL { pop } map-indexed 1 get 20l eq  (arr-L: map-indexed[1]=20l) rt-ok
+aL { 25l gt } filter length 2 eq     (arr-L: filter len 2)     rt-ok
+aL { 25l gt } filter 0 get 30l eq    (arr-L: filter[0]=30l)    rt-ok
+aL 0l { add } reduce 100l eq         (arr-L: reduce sum 100l)  rt-ok
+aL 0l { add } scan length 5 eq       (arr-L: scan len 5)       rt-ok
+aL 0l { add } scan 4 get 100l eq     (arr-L: scan[4]=100l)     rt-ok
+aL reverse 0 get 40l eq              (arr-L: reverse[0]=40l)   rt-ok
+aL sort 0 get 10l eq                 (arr-L: sort[0]=10l)      rt-ok
+[ 10l 20l 20l 30l 10l ] unique length 3 eq (arr-L: unique len 3) rt-ok
+[ 10l 20l 20l 30l 10l ] dedupe length 4 eq (arr-L: dedupe len 4) rt-ok
+aL 50l append length 5 eq            (arr-L: append len 5)     rt-ok
+aL length 4 eq                       (arr-L: append non-destructive) rt-ok
+aL 2 take length 2 eq                (arr-L: take 2)           rt-ok
+aL 2 drop 0 get 30l eq               (arr-L: drop 2 [0]=30l)   rt-ok
+aL 1 2 get-interval 0 get 20l eq     (arr-L: get-interval[0]=20l) rt-ok
+aL enumerate 1 get 1 get 20l eq      (arr-L: enumerate[1][1]=20l) rt-ok
+aL sum 100l eq                       (arr-L: sum 100l)         rt-ok
+aL min-of 10l eq                     (arr-L: min-of 10l)       rt-ok
+aL max-of 40l eq                     (arr-L: max-of 40l)       rt-ok
+aL { 25l gt } find pop 30l eq        (arr-L: find>25 = 30l)    rt-ok
+aL { 35l gt } any                    (arr-L: any>35 true)      rt-ok
+aL { 5l gt } all                     (arr-L: all>5 true)       rt-ok
+aL { 25l gt } count-if 2 eq          (arr-L: count-if>25 = 2)  rt-ok
+
+% ====================================================================
+% SECTION 2: ARRAY -- Int128 (WideValue) elements, local VM
+% ====================================================================
+[ 10q 20q 30q 40q ] /aQ exch def
+aQ 2 get 30q eq                      (arr-Q: get[2]=30q)       rt-ok
+aQ { 1q add } map 0 get 11q eq       (arr-Q: map[0]=11q)       rt-ok
+aQ { 25q gt } filter length 2 eq     (arr-Q: filter len 2)     rt-ok
+aQ 0q { add } reduce 100q eq         (arr-Q: reduce sum 100q)  rt-ok
+aQ reverse 0 get 40q eq              (arr-Q: reverse[0]=40q)   rt-ok
+aQ sort 0 get 10q eq                 (arr-Q: sort[0]=10q)      rt-ok
+aQ 0q { add } scan 4 get 100q eq     (arr-Q: scan[4]=100q)     rt-ok
+[ 10q 20q 20q 30q ] unique length 3 eq (arr-Q: unique len 3)  rt-ok
+
+% ====================================================================
+% SECTION 3: ARRAY -- ULong / Double / Address / UInt128 spot checks
+% ====================================================================
+[ 10ul 20ul 30ul ] { 1ul add } map 0 get 11ul eq   (arr-UL: map[0]=11ul)  rt-ok
+[ 10ul 20ul 30ul ] reverse 0 get 30ul eq            (arr-UL: reverse[0])   rt-ok
+[ 1.5d 2.5d 3.0d ] 0.0d { add } reduce 7.0d eq      (arr-D: reduce 7.0d)   rt-ok
+[ 1.5d 2.5d 3.0d ] sort 0 get 1.5d eq               (arr-D: sort[0]=1.5d)  rt-ok
+[ 10a 20a 30a ] 1 get 20a eq                        (arr-A: get[1]=20a)    rt-ok
+[ 10a 20a 30a ] reverse 0 get 30a eq                (arr-A: reverse[0])    rt-ok
+[ 10uq 20uq 30uq ] { 1uq add } map 2 get 31uq eq    (arr-UQ: map[2]=31uq)  rt-ok
+[ 10uq 20uq 30uq ] 0uq { add } reduce 60uq eq       (arr-UQ: reduce 60uq)  rt-ok
+
+% ====================================================================
+% SECTION 4: ARRAY -- region survival (${...} + save/restore)
+% ====================================================================
+${ 16 dict } /g4 exch def
+[ 10l 20l 30l 40l ] /in4L exch def
+[ 10q 20q 30q 40q ] /in4Q exch def
+save /sv4 exch def
+true set-global
+${ g4 /mapL    in4L { 1l add } map         put }
+${ g4 /filterL in4L { 25l gt } filter      put }
+${ g4 /sortL   in4L reverse sort           put }
+${ g4 /mapQ    in4Q { 1q add } map         put }
+false set-global
+sv4 restore
+g4 /mapL    get 0 get 11l eq   (s4: post map-L[0]=11l)     rt-ok
+g4 /mapL    get length 4 eq    (s4: post map-L len 4)      rt-ok
+g4 /filterL get length 2 eq    (s4: post filter-L len 2)   rt-ok
+g4 /sortL   get 0 get 10l eq   (s4: post sort-L[0]=10l)    rt-ok
+g4 /mapQ    get 3 get 41q eq   (s4: post map-Q[3]=41q)     rt-ok
+
+% ====================================================================
+% SECTION 5: PACKED -- Long / Double, local VM
+% ====================================================================
+1l 2l 3l 4l 4 packed /pkL exch def
+pkL length 4 eq               (pk-L: length 4)          rt-ok
+pkL 2 get 3l eq               (pk-L: get[2]=3l)         rt-ok
+pkL 0l { add } reduce 10l eq  (pk-L: reduce sum 10l)    rt-ok
+pkL reverse 0 get 4l eq       (pk-L: reverse[0]=4l)     rt-ok
+pkL { 1l add } map 0 get 2l eq (pk-L: map[0]=2l)        rt-ok
+1.5d 2.5d 3.0d 3 packed /pkD exch def
+pkD 0.0d { add } reduce 7.0d eq (pk-D: reduce 7.0d)     rt-ok
+pkD 1 get 2.5d eq             (pk-D: get[1]=2.5d)       rt-ok
+
+% ====================================================================
+% SECTION 6: DICT -- Long keys/values, then Int128, local VM
+% ====================================================================
+<< 100l 11l 200l 22l 300l 33l >> /dL exch def
+dL 100l get 11l eq                       (dict-L: get[100l]=11l)   rt-ok
+dL keys length 3 eq                      (dict-L: keys len 3)      rt-ok
+dL values length 3 eq                    (dict-L: values len 3)    rt-ok
+dL 100l known?                           (dict-L: known? 100l)     rt-ok
+dL 999l 0l get-default 0l eq             (dict-L: get-default miss) rt-ok
+dL { 1l add } map-dict 100l get 12l eq   (dict-L: map-dict[100l]=12l) rt-ok
+dL { exch pop 20l gt } filter-dict length 2 eq (dict-L: filter-dict len 2) rt-ok
+dL << 400l 44l >> merge length 4 eq      (dict-L: merge len 4)     rt-ok
+dL << 400l 44l >> merge 400l get 44l eq  (dict-L: merge[400l]=44l) rt-ok
+<< 100l 11 200l 22 >> /long-type coerce 100l get 11l eq (dict-L: coerce[100l]=11l) rt-ok
+dL { pop pop } for-all dL length 3 eq    (dict-L: for-all src intact) rt-ok
+<< 100q 11q 200q 22q >> /dQ exch def
+dQ 100q get 11q eq                       (dict-Q: get[100q]=11q)   rt-ok
+dQ { 1q add } map-dict 200q get 23q eq   (dict-Q: map-dict[200q]=23q) rt-ok
+dQ keys length 2 eq                      (dict-Q: keys len 2)      rt-ok
+dQ { pop pop } for-all dQ length 2 eq    (dict-Q: for-all src intact) rt-ok
+
+% ====================================================================
+% SECTION 7: DICT -- region survival (${...} + save/restore)
+% ====================================================================
+${ 16 dict } /g7 exch def
+<< 100l 11l 200l 22l 300l 33l >> /in7L exch def
+<< 400l 44l >>                   /in7L2 exch def
+<< 100l 11 200l 22 >>            /in7C exch def
+<< 100q 11q 200q 22q >>          /in7Q exch def
+save /sv7 exch def
+true set-global
+${ g7 /keysL   in7L keys                          put }
+${ g7 /valsL   in7L values                        put }
+${ g7 /mapdL   in7L { 1l add } map-dict           put }
+${ g7 /filtdL  in7L { exch pop 20l gt } filter-dict put }
+${ g7 /mergeL  in7L in7L2 merge                   put }
+${ g7 /coerceL in7C /long-type coerce             put }
+${ g7 /mapdQ   in7Q { 1q add } map-dict           put }
+false set-global
+sv7 restore
+g7 /keysL   get length 3 eq          (s7: post keys-L len 3)      rt-ok
+g7 /valsL   get length 3 eq          (s7: post values-L len 3)    rt-ok
+g7 /mapdL   get 100l get 12l eq      (s7: post map-dict-L[100l]=12l) rt-ok
+g7 /filtdL  get length 2 eq          (s7: post filter-dict-L len 2) rt-ok
+g7 /mergeL  get length 4 eq          (s7: post merge-L len 4)     rt-ok
+g7 /mergeL  get 400l get 44l eq      (s7: post merge-L[400l]=44l) rt-ok
+g7 /coerceL get 100l get 11l eq      (s7: post coerce-L[100l]=11l) rt-ok
+g7 /mapdQ   get 200q get 23q eq      (s7: post map-dict-Q[200q]=23q) rt-ok
+
+% ====================================================================
+% SECTION 8: SET -- Long members, then Int128, local VM
+% ====================================================================
+[ 10l 20l 30l 40l ] set-from-array /sL exch def
+sL length 4 eq                              (set-L: length 4)        rt-ok
+sL 20l set-member?                          (set-L: member? 20l)     rt-ok
+sL 99l set-member? not                      (set-L: not member 99l)  rt-ok
+sL members length 4 eq                      (set-L: members len 4)   rt-ok
+sL { 25l gt } set-filter length 2 eq        (set-L: set-filter len 2) rt-ok
+sL { 25l gt } set-filter 30l set-member?    (set-L: set-filter has 30l) rt-ok
+sL { pop } for-all sL length 4 eq           (set-L: for-all src intact) rt-ok
+[ 10l 20l ] set-from-array 30l set-add length 3 eq (set-L: set-add len 3) rt-ok
+[ 10l 20l 30l ] set-from-array 20l set-remove length 2 eq (set-L: set-remove len 2) rt-ok
+[ 10l 20l 30l ] set-from-array [ 20l 30l 40l ] set-from-array set-union length 4 eq (set-L: union len 4) rt-ok
+[ 10l 20l 30l ] set-from-array [ 20l 30l 40l ] set-from-array set-intersection length 2 eq (set-L: intersection len 2) rt-ok
+[ 10l 20l 30l ] set-from-array [ 20l 30l 40l ] set-from-array set-difference length 1 eq (set-L: difference len 1) rt-ok
+[ 10l 20l 30l ] set-from-array [ 20l 30l 40l ] set-from-array symmetric-difference length 2 eq (set-L: sym-diff len 2) rt-ok
+[ 10l 20l ] set-from-array [ 10l 20l 30l ] set-from-array subset?  (set-L: subset? true) rt-ok
+[ 10l 20l ] set-from-array [ 90l 91l ] set-from-array disjoint?    (set-L: disjoint? true) rt-ok
+[ 10q 20q 30q ] set-from-array /sQ exch def
+sQ 20q set-member?                          (set-Q: member? 20q)     rt-ok
+sQ { 15q gt } set-filter length 2 eq        (set-Q: set-filter len 2) rt-ok
+sQ members length 3 eq                      (set-Q: members len 3)   rt-ok
+sQ { pop } for-all sQ length 3 eq           (set-Q: for-all src intact) rt-ok
+[ 10q 20q 30q ] set-from-array [ 20q 30q 40q ] set-from-array set-intersection length 2 eq (set-Q: intersection len 2) rt-ok
+
+% ====================================================================
+% SECTION 9: SET -- region survival (${...} + save/restore)
+% ====================================================================
+% set-from-array / members / set-filter AND the set-algebra ops
+% (union/intersection/difference/symmetric-difference) are all region-aware
+% (#46 Cat 4): the set-algebra ops build the result directly via set_put over
+% the op-stack-rooted sources (NO temp scratch dict), so they are NOT the
+% deferred Cat-3 promote-at-end case and survive restore once rooted.
+${ 16 dict } /g9 exch def
+[ 10l 20l 30l 40l ] /in9L exch def
+[ 10q 20q 30q 40q ] /in9Q exch def
+[ 10l 20l 30l ] set-from-array /s9a exch def
+[ 20l 30l 40l ] set-from-array /s9b exch def
+save /sv9 exch def
+true set-global
+${ g9 /setL    in9L set-from-array                     put }
+${ g9 /membL   in9L set-from-array members             put }
+${ g9 /filtL   in9L set-from-array { 25l gt } set-filter put }
+${ g9 /setQ    in9Q set-from-array                     put }
+${ g9 /filtQ   in9Q set-from-array { 15q gt } set-filter put }
+${ g9 /unionL  s9a s9b set-union                       put }
+${ g9 /interL  s9a s9b set-intersection                put }
+${ g9 /diffL   s9a s9b set-difference                  put }
+${ g9 /symL    s9a s9b symmetric-difference            put }
+false set-global
+sv9 restore
+g9 /setL   get length 4 eq        (s9: post set-L len 4)        rt-ok
+g9 /setL   get 30l set-member?    (s9: post set-L has 30l)      rt-ok
+g9 /membL  get length 4 eq        (s9: post members-L len 4)    rt-ok
+g9 /filtL  get length 2 eq        (s9: post set-filter-L len 2) rt-ok
+g9 /filtL  get 40l set-member?    (s9: post set-filter-L has 40l) rt-ok
+g9 /setQ   get 20q set-member?    (s9: post set-Q has 20q)      rt-ok
+g9 /filtQ  get length 3 eq        (s9: post set-filter-Q len 3) rt-ok
+g9 /unionL get length 4 eq        (s9: post union-L len 4)      rt-ok
+g9 /unionL get 40l set-member?    (s9: post union-L has 40l)    rt-ok
+g9 /interL get length 2 eq        (s9: post intersection-L len 2) rt-ok
+g9 /interL get 20l set-member?    (s9: post intersection-L has 20l) rt-ok
+g9 /diffL  get length 1 eq        (s9: post difference-L len 1) rt-ok
+g9 /diffL  get 10l set-member?    (s9: post difference-L has 10l) rt-ok
+g9 /symL   get length 2 eq        (s9: post sym-diff-L len 2)   rt-ok
+
+% ====================================================================
+% SECTION 10: RECORD -- Long then Int128 fields, local + global
+% ====================================================================
+1l 2l 3l [ /a /b /c ] record /rL exch def
+rL /b get 2l eq                            (rec-L: get /b=2l)        rt-ok
+rL length 3 eq                             (rec-L: length 3)         rt-ok
+rL record-values length 3 eq               (rec-L: record-values len 3) rt-ok
+rL record-values 0 get 1l eq               (rec-L: record-values[0]=1l) rt-ok
+rL /a 10l record-update /a get 10l eq      (rec-L: record-update /a=10l) rt-ok
+rL /a { 10l add } record-map-field /a get 11l eq (rec-L: record-map-field /a=11l) rt-ok
+rL { 1l add } record-map /c get 4l eq      (rec-L: record-map /c=4l) rt-ok
+rL record-to-dict /b get 2l eq             (rec-L: record-to-dict[/b]=2l) rt-ok
+rL { pop pop } for-all rL length 3 eq      (rec-L: for-all src intact) rt-ok
+1q 2q 3q [ /a /b /c ] record /rQ exch def
+rQ /b get 2q eq                            (rec-Q: get /b=2q)        rt-ok
+rQ /a { 10q add } record-map-field /a get 11q eq (rec-Q: record-map-field /a=11q) rt-ok
+rQ record-values 2 get 3q eq               (rec-Q: record-values[2]=3q) rt-ok
+
+${ 8 dict } /g10 exch def
+save /sv10 exch def
+true set-global
+${ g10 /recL  1l 2l 3l [ /a /b /c ] record               put }
+${ g10 /recQ  1q 2q 3q [ /a /b /c ] record               put }
+${ g10 /recU  1l 2l 3l [ /a /b /c ] record /b 99l record-update put }
+false set-global
+sv10 restore
+g10 /recL get /b get 2l eq        (s10: post rec-L /b=2l)       rt-ok
+g10 /recQ get /c get 3q eq        (s10: post rec-Q /c=3q)       rt-ok
+g10 /recU get /b get 99l eq       (s10: post rec-update /b=99l) rt-ok
+
+% ====================================================================
+% SECTION 11: TAGGED -- Long then Int128 payload, local + global
+% ====================================================================
+42l /lbl tag /tL exch def
+tL tag-value 42l eq                        (tag-L: tag-value 42l)    rt-ok
+tL /lbl tag?                               (tag-L: tag? /lbl)        rt-ok
+tL { 1l add } tag-update tag-value 43l eq  (tag-L: tag-update +1=43l) rt-ok
+tL /lbl 0l tag-value-or 42l eq             (tag-L: tag-value-or hit=42l) rt-ok
+tL /other 0l tag-value-or 0l eq            (tag-L: tag-value-or miss=0l) rt-ok
+42q /lbl tag /tQ exch def
+tQ tag-value 42q eq                        (tag-Q: tag-value 42q)    rt-ok
+tQ { 1q add } tag-update tag-value 43q eq  (tag-Q: tag-update +1=43q) rt-ok
+
+${ 8 dict } /g11 exch def
+save /sv11 exch def
+true set-global
+${ g11 /tagL  42l /lbl tag       put }
+${ g11 /tagQ  42q /lbl tag       put }
+false set-global
+sv11 restore
+g11 /tagL get tag-value 42l eq    (s11: post tag-L value=42l)   rt-ok
+g11 /tagQ get tag-value 42q eq    (s11: post tag-Q value=42q)   rt-ok
+
+% ====================================================================
+% SECTION 12: Cat-3 array/dict-result ops region-aware under ${...}
+% ====================================================================
+% The set-algebra / packed-expansion / two-phase ops (union/intersect/difference,
+% zip/zip-longest/interpose/enumerate/chunk/sliding-window, sort-by/group-by/
+% partition, frequencies) build their result + a membership/seen TEMP dict LOCAL,
+% because a global alloc grows the global region DOWN over the live temp region.
+% #46 Cat 3 promotes the local result into global VM AFTER the temp is released
+% (deep_promote_to_global: nested sub-arrays / dict-of-array values are deep-cloned,
+% not shallow-shared).  NON-VACUOUS: without the promote the put R6-rejects.
+${ 32 dict } /g12 exch def
+[ 10l 20l 30l ]    /c1 exch def
+[ 20l 30l 40l ]    /c2 exch def
+[ 1l 2l 3l 4l ]    /c3 exch def
+[ 30l 10l 20l ]    /c4 exch def
+[ 10q 20q 30q ]    /c1q exch def
+[ 20q 30q 40q ]    /c2q exch def
+save /sv12 exch def
+true set-global
+${ g12 /union  c1 c2 union               put }
+${ g12 /inter  c1 c2 intersect           put }
+${ g12 /diff   c1 c2 difference          put }
+${ g12 /zip    c1 c2 zip                 put }
+${ g12 /ziplo  c1 [ 1l 2l ] 0l zip-longest    put }
+${ g12 /enum   c3 enumerate              put }
+${ g12 /chunk  c3 2 chunk                put }
+${ g12 /win    c3 2 sliding-window       put }
+${ g12 /interp c1 0l interpose           put }
+${ g12 /sortby c4 { } sort-by            put }
+${ g12 /grpby  c3 { 2l mod } group-by    put }
+${ g12 /freq   [ 10l 10l 20l ] frequencies put }
+${ g12 /interQ c1q c2q intersect         put }
+false set-global
+sv12 restore
+g12 /union  get length 4 eq        (s12: post union len 4)        rt-ok
+g12 /union  get 0l { add } reduce 100l eq (s12: post union sum 100l) rt-ok
+g12 /inter  get length 2 eq        (s12: post intersect len 2)    rt-ok
+g12 /diff   get length 1 eq        (s12: post difference len 1)   rt-ok
+g12 /zip    get 0 get 1 get 20l eq (s12: post zip[0][1]=20l NESTED) rt-ok
+g12 /enum   get 1 get 1 get 2l eq  (s12: post enumerate[1][1]=2l NESTED) rt-ok
+g12 /chunk  get 0 get 1 get 2l eq  (s12: post chunk[0][1]=2l NESTED) rt-ok
+g12 /win    get length 3 eq        (s12: post sliding-window len 3) rt-ok
+g12 /interp get length 5 eq        (s12: post interpose len 5)    rt-ok
+g12 /sortby get 0 get 10l eq       (s12: post sort-by[0]=10l)     rt-ok
+g12 /sortby get 2 get 30l eq       (s12: post sort-by[2]=30l)     rt-ok
+g12 /grpby  get 0l get length 2 eq (s12: post group-by[0l] NESTED len 2) rt-ok
+g12 /grpby  get 1l get 0 get 1l eq (s12: post group-by[1l][0]=1l NESTED) rt-ok
+g12 /freq   get 10l get 2 eq       (s12: post frequencies[10l]=2 Integer count) rt-ok
+g12 /interQ get length 2 eq        (s12: post intersect-Int128 len 2) rt-ok
+g12 /interQ get 0q { add } reduce 50q eq (s12: post intersect-Int128 sum 50q) rt-ok
+g12 /ziplo  get length 3 eq        (s12: post zip-longest len 3)  rt-ok
+
+% ====================================================================
+% SECTION 13: higher-order / deferred / reactive families region survival
+% ====================================================================
+% curry / thunk / lazy-seq / cell capture ExtValue/WideValue payloads into
+% region-aware structures; under ${...} they land in global VM and must survive
+% save/restore.  Built INSIDE the global block (so the captured proc/value are
+% global too), stored into a global dict, exercised after restore.
+${ 8 dict } /g13 exch def
+save /sv13 exch def
+true set-global
+${ g13 /cur  5l { 2l mul } curry        put }
+${ g13 /curq 5q { 2q mul } curry        put }
+${ g13 /th   { 21l 2l mul } thunk       put }
+${ g13 /cl   5l cell                    put }
+${ g13 /clq  5q cell                    put }
+${ g13 /lz   [ 10l 20l 30l ] lazy-seq   put }
+false set-global
+sv13 restore
+g13 /cur  get exec 10l eq          (s13: post curry exec=10l)       rt-ok
+g13 /curq get exec 10q eq          (s13: post curry exec Int128=10q) rt-ok
+g13 /th   get force 42l eq         (s13: post thunk force=42l)      rt-ok
+g13 /cl   get cell-get 5l eq       (s13: post cell-get=5l)          rt-ok
+g13 /clq  get cell-get 5q eq       (s13: post cell-get Int128=5q)   rt-ok
+g13 /lz   get lazy-head 10l eq     (s13: post lazy-seq head=10l)    rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_container_extvalue: ALL TESTS PASSED) =
+(__test_ok__) =

@@ -1,0 +1,7 @@
+% closure built in ${...}, crossed over save/restore, then exec'd.
+${ mark 30 { 256 string } repeat array-from-mark } pop
+/y 7 def
+save /cl ${ { y 2 mul } } def -1 restore
+{ cl exec } try pop
+/cl2 ${ { y 1 add } } def
+cl2 exec

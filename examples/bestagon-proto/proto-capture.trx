@@ -1,0 +1,392 @@
+% =====================================================================
+% proto-capture.trx -- Phase 0.6H capture state machine prototype
+% =====================================================================
+%
+% Tier P2 of plan_bestagon_derisk_prototyping.md.  Implements GDD
+% section 10 (capture mechanic):
+%   - 10.1 per-turn state machine on /capture-progress + /capturer-unit-id
+%   - 10.2 interruption on capturer leaving building hex
+%   - 10.3 Boots' /capture-speed +50 passive (floor[hp*1.5] per turn)
+%   - 10.4 HQ-capture game-over (previous owner -> /defeated)
+%
+% Plus the Phase 0.6H plan extra:
+%   - Boots Super /auto-start-captures: at SOT, any own Inf/Mech on an
+%     enemy or neutral building auto-begins capture.
+%   - save/restore atomicity: mutations inside a save bracket are
+%     reverted by restore (engine's "preview-then-commit" pattern).
+%
+% Run with debug build (proto is correctness-only):
+%   ./trix examples/bestagon-proto/proto-capture.trx
+%
+% 22 assertions across 7 fixture sections (A-G); default 1 MB VM in << 1 s.
+% =====================================================================
+
+
+% ====================================================================
+% Section 1: constants
+% ====================================================================
+
+/CAPTURE-THRESHOLD 20 def
+
+% Predicate per section 10.1 (only Inf/Mech can capture)
+/is-capture-class? {|klass|
+    klass /infantry eq  klass /mech eq  or
+} def
+
+
+% ====================================================================
+% Section 2: state fixture
+% ====================================================================
+%
+% state Dict:
+%   /buildings   Array of Dicts << /pos /type /owner /capture-progress /capturer-unit-id >>
+%   /units       Array of Dicts << /id /pos /class /hp /owner >>
+%   /factions    Array of Dicts << /id /state >>  (/state = /active | /defeated)
+%   /capture-speed-pct  Integer  (Boots passive: +50 = 1.5x; default 0)
+%   /auto-start-captures  Boolean  (Boots Super; default false)
+
+% nb nu nf -- state
+/make-state {|nb nu nf|#+4
+    /st         16 dict  local-def
+    /buildings  nb array  local-def
+    /units      nu array  local-def
+    /factions   nf array  local-def
+    st /buildings buildings put
+    st /units units put
+    st /factions factions put
+    st /capture-speed-pct 0 put
+    st /auto-start-captures false put
+    st
+} def
+
+% state idx pos type owner --
+/set-building {|st i pos t o|#+1
+    /b  << /pos pos /type t /owner o /capture-progress 0 /capturer-unit-id null >>  local-def
+    st /buildings get i b put
+} def
+
+% state idx id pos class hp owner --
+/set-unit {|st i id pos klass hp owner|#+1
+    /u  << /id id /pos pos /class klass /hp hp /owner owner >>  local-def
+    st /units get i u put
+} def
+
+% state idx id state-name --
+/set-faction {|st i id s|#+1
+    /f  << /id id /state s >>  local-def
+    st /factions get i f put
+} def
+
+
+% ====================================================================
+% Section 3: helpers
+% ====================================================================
+
+% units pos -- unit | null
+/find-unit-at-pos {|units pos|#+2
+    /found  null  local-def
+    units {|u|#+1
+        found is-null {
+            /upos  u /pos get  local-def
+            upos 0 get pos 0 get eq  upos 1 get pos 1 get eq  and {
+                /found u store
+            } if
+        } if
+    } for-all
+    found
+} def
+
+% state fid -- (mutates factions[fid].state = /defeated)
+/defeat-faction {|state fid|
+    state /factions get {|f|
+        f /id get fid eq { f /state /defeated put } if
+    } for-all
+} def
+
+% state fid -- bool
+/faction-defeated? {|state fid|#+1
+    /result  false  local-def
+    state /factions get {|f|
+        f /id get fid eq f /state get /defeated eq and {
+            /result true store
+        } if
+    } for-all
+    result
+} def
+
+
+% ====================================================================
+% Section 4: capture-tick
+% ====================================================================
+%
+% Per section 10.1, called at end-of-turn for each building.  Mutates
+% the building Dict in place.
+%
+% state building --
+/capture-tick {|state building|#+13
+    /bpos  building /pos get  local-def
+    /unit  state /units get bpos find-unit-at-pos  local-def
+
+    unit is-null {
+        % No unit on building -- interrupt per section 10.2
+        building interrupt-capture
+    } {
+        /klass  unit /class get  local-def
+        klass is-capture-class? not {
+            building interrupt-capture
+        } {
+            % Enemy faction must own the capturer; can't capture own building
+            /uowner  unit /owner get  local-def
+            /bowner  building /owner get  local-def
+            uowner bowner eq {
+                building interrupt-capture
+            } {
+                % section 10.3 CO modifier: Boots /capture-speed +50 -> 1.5x
+                /hp        unit /hp get  local-def
+                /pct       state /capture-speed-pct get  local-def
+                /contrib   $[ (hp * (100 + pct)) / 100 ]  local-def
+                /uid       unit /id get  local-def
+                /prog      building /capture-progress get  local-def
+                /capturer  building /capturer-unit-id get  local-def
+
+                % section 10.1 step 1: zero-progress assigns capturer
+                prog 0 eq {
+                    building /capturer-unit-id uid put
+                    /capturer uid store
+                } if
+
+                % section 10.1 step 2-3: same capturer advances
+                capturer uid eq {
+                    /new-prog  $[ prog + contrib ]  local-def
+                    new-prog CAPTURE-THRESHOLD ge {
+                        % FLIP -- building owner changes
+                        building /owner uowner put
+                        building /capture-progress 0 put
+                        building /capturer-unit-id null put
+                        % section 10.4 HQ capture -> previous owner defeated
+                        building /type get /hq eq  bowner 0 ge  and {
+                            state bowner defeat-faction
+                        } if
+                    } {
+                        building /capture-progress new-prog put
+                    } if-else
+                } if
+            } if-else
+        } if-else
+    } if-else
+} def
+
+% building -- (interrupt: reset progress + capturer)
+/interrupt-capture {|building|
+    building /capture-progress 0 put
+    building /capturer-unit-id null put
+} def
+
+
+% ====================================================================
+% Section 5: apply-auto-start (Boots Super)
+% ====================================================================
+%
+% Per section A.7 Boots Super /auto-start-captures: at SOT, any own
+% foot unit standing on an enemy or neutral building auto-begins
+% capture (sets /capturer-unit-id to the unit's id; /capture-progress
+% remains 0).
+%
+% state --
+/apply-auto-start {|state|#+5
+    state /auto-start-captures get  true eq {
+        /buildings  state /buildings get  local-def
+        /units      state /units get  local-def
+        buildings {|b|#+4
+            /bpos  b /pos get  local-def
+            /unit  units bpos find-unit-at-pos  local-def
+            unit is-null not {
+                /klass  unit /class get  local-def
+                klass is-capture-class? {
+                    b /capture-progress get 0 eq
+                } and? {
+                    unit /owner get  b /owner get  ne
+                } and? {
+                    b /capturer-unit-id  unit /id get  put
+                } if
+            } if
+        } for-all
+    } if
+} def
+
+
+% ====================================================================
+% Section 6: assertion helpers
+% ====================================================================
+
+/test-count 0 def
+/fail-count 0 def
+
+% cond label --
+/check {|cond lbl|
+    /test-count $[ test-count + 1 ]  store
+    cond {
+        (  PASS  {0}\n) mark lbl print-fmt pop pop
+    } {
+        (  FAIL  {0}\n) mark lbl print-fmt pop pop
+        /fail-count $[ fail-count + 1 ] store
+    } if-else
+} def
+
+
+% ====================================================================
+% Section 7: tests
+% ====================================================================
+
+(proto-capture: Phase 0.6H -- capture state machine\n\n) print
+
+
+% ----- Test A: single Inf captures neutral city in 2 turns -----
+(\n[A] Inf at HP 10 captures neutral city in 2 turns\n) print
+/sA  1 1 2 make-state  def
+sA 0  [3 3] /city -1  set-building
+sA 0  100 [3 3] /infantry 10 0  set-unit
+sA 0  0 /active  set-faction
+sA 1  1 /active  set-faction
+
+% Tick 1: progress 0 -> 10, capturer set
+sA  sA /buildings get 0 get  capture-tick
+sA /buildings get 0 get /capture-progress get  10 eq  (tick 1 progress = 10)  check
+sA /buildings get 0 get /capturer-unit-id get  100 eq  (tick 1 capturer = 100)  check
+
+% Tick 2: progress 10 + 10 = 20 -> FLIP
+sA  sA /buildings get 0 get  capture-tick
+sA /buildings get 0 get /owner get  0 eq  (tick 2 building flipped to faction 0)  check
+sA /buildings get 0 get /capture-progress get  0 eq  (post-flip progress reset)  check
+sA /buildings get 0 get /capturer-unit-id get  is-null  (post-flip capturer cleared)  check
+
+
+% ----- Test B: Inf moves off mid-capture -> reset -----
+(\n[B] Inf moves off after 1 tick -> progress resets\n) print
+/sB  1 1 2 make-state  def
+sB 0  [3 3] /city -1  set-building
+sB 0  100 [3 3] /infantry 10 0  set-unit
+sB 0  0 /active  set-faction
+sB 1  1 /active  set-faction
+
+sB  sB /buildings get 0 get  capture-tick
+sB /buildings get 0 get /capture-progress get  10 eq  (tick 1 progress = 10)  check
+
+% Move Inf away from building
+sB /units get 0 get /pos [5 5] put
+
+sB  sB /buildings get 0 get  capture-tick
+sB /buildings get 0 get /capture-progress get  0 eq  (interrupted -- progress reset)  check
+sB /buildings get 0 get /capturer-unit-id get  is-null  (interrupted -- capturer cleared)  check
+
+
+% ----- Test C: Inf wounded to HP 4 mid-capture -> slower -----
+(\n[C] Inf wounded to HP 4 after tick 1 -- total 4 ticks to capture\n) print
+/sC  1 1 2 make-state  def
+sC 0  [3 3] /city -1  set-building
+sC 0  100 [3 3] /infantry 10 0  set-unit
+sC 0  0 /active  set-faction
+sC 1  1 /active  set-faction
+
+sC  sC /buildings get 0 get  capture-tick     % progress 0+10 = 10
+sC /units get 0 get /hp 4 put                 % wound to HP 4
+
+sC  sC /buildings get 0 get  capture-tick     % 10+4 = 14
+sC /buildings get 0 get /capture-progress get  14 eq  (tick 2 wounded: prog = 14)  check
+
+sC  sC /buildings get 0 get  capture-tick     % 14+4 = 18
+sC /buildings get 0 get /capture-progress get  18 eq  (tick 3 wounded: prog = 18)  check
+
+sC  sC /buildings get 0 get  capture-tick     % 18+4 = 22 >= 20 -> flip
+sC /buildings get 0 get /owner get  0 eq  (tick 4 wounded: flipped after 4 ticks)  check
+
+
+% ----- Test D: HQ capture -> previous owner defeated -----
+(\n[D] HQ capture -- previous owner faction state -> /defeated\n) print
+/sD  1 1 2 make-state  def
+sD 0  [3 3] /hq 1  set-building              % faction 1's HQ
+sD 0  100 [3 3] /infantry 10 0  set-unit     % faction 0 Inf
+sD 0  0 /active  set-faction
+sD 1  1 /active  set-faction
+
+sD  sD /buildings get 0 get  capture-tick    % progress=10
+sD  sD /buildings get 0 get  capture-tick    % progress=20 -> flip
+
+sD /buildings get 0 get /owner get  0 eq  (HQ flipped to faction 0)  check
+sD 1 faction-defeated?                    (faction 1 marked /defeated)  check
+sD 0 faction-defeated?  not               (faction 0 still /active)  check
+
+
+% ----- Test E: Boots /capture-speed-pct +50 (floor[hp*1.5]) -----
+(\n[E] Boots /capture-speed-pct = 50: full-HP Inf still 2 ticks; HP-5 Inf is 3 ticks\n) print
+/sE  1 1 2 make-state  def
+sE /capture-speed-pct 50 put                  % Boots passive active
+sE 0  [3 3] /city -1  set-building
+sE 0  100 [3 3] /infantry 5 0  set-unit       % HP 5 -> floor(5*1.5)=7 per turn
+sE 0  0 /active  set-faction
+sE 1  1 /active  set-faction
+
+sE  sE /buildings get 0 get  capture-tick     % 0+7 = 7
+sE /buildings get 0 get /capture-progress get  7 eq  (HP5 Boots tick 1: prog = 7)  check
+
+sE  sE /buildings get 0 get  capture-tick     % 7+7 = 14
+sE /buildings get 0 get /capture-progress get  14 eq  (HP5 Boots tick 2: prog = 14)  check
+
+sE  sE /buildings get 0 get  capture-tick     % 14+7 = 21 >= 20 -> flip
+sE /buildings get 0 get /owner get  0 eq  (HP5 Boots flipped after 3 ticks)  check
+
+
+% ----- Test F: Boots Super /auto-start-captures -----
+(\n[F] /auto-start-captures: Inf on enemy city auto-begins capture at SOT\n) print
+/sF  1 1 2 make-state  def
+sF /auto-start-captures true put
+sF 0  [3 3] /city -1  set-building
+sF 0  100 [3 3] /infantry 10 0  set-unit
+sF 0  0 /active  set-faction
+sF 1  1 /active  set-faction
+
+% Before apply-auto-start: capturer null
+sF /buildings get 0 get /capturer-unit-id get  is-null  (pre-SOT: capturer null)  check
+
+sF apply-auto-start
+
+% After: capturer set, progress still 0 (capture-tick will add it next)
+sF /buildings get 0 get /capturer-unit-id get  100 eq  (post-SOT: capturer auto-assigned)  check
+sF /buildings get 0 get /capture-progress get  0 eq  (post-SOT: progress still 0)  check
+
+
+% ----- Test G: save/restore atomicity for capture-tick -----
+(\n[G] save/restore atomicity: tick visible inside bracket, reverted by restore\n) print
+/sG  1 1 2 make-state  def
+sG 0  [3 3] /city -1  set-building
+sG 0  100 [3 3] /infantry 10 0  set-unit
+sG 0  0 /active  set-faction
+sG 1  1 /active  set-faction
+
+% Pre-set mid-capture state: progress 5 with the Inf already as the capturer.
+% (Setting progress without a capturer is an invalid state per §10.1 -- the
+% tick would treat it as "no active capture" since capturer is null.)
+sG /buildings get 0 get /capture-progress 5 put
+sG /buildings get 0 get /capturer-unit-id 100 put
+
+% Apply tick inside save bracket; leave Integer on operand stack to
+% survive restore (Integer immediates aren't journaled)
+save pop
+    sG  sG /buildings get 0 get  capture-tick
+    sG /buildings get 0 get /capture-progress get
+-1 restore
+
+% After restore, the operand stack still holds the inside-value
+/inside-prog  exch  def
+
+inside-prog  15 eq                                  (mutation visible inside bracket: 5+10=15)  check
+sG /buildings get 0 get /capture-progress get  5 eq  (mutation reverted by restore: still 5)  check
+
+
+% ----- summary -----
+(\n--- proto-capture summary ---\n) print
+({0} tests run; {1} failed\n) mark test-count fail-count print-fmt pop pop
+fail-count 0 ne {
+    /proto-capture-fail throw
+} if
+(proto-capture: ALL TESTS PASSED\n) print

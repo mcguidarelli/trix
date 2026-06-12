@@ -1,0 +1,1 @@
+{ logic-var /x exch def { { x 1l unify guard fail } { x 2l unify guard fail } { x 3l unify guard } } choice } /Fail { } try

@@ -1,0 +1,189 @@
+% ====================================================================
+% test_regex_stress.trx -- regex stress tests and edge cases
+% ====================================================================
+% Large inputs, many matches, pathological avoidance, edge cases
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Large string matching
+% ====================================================================
+
+% Build a 50 character string of 'a'
+(a) 50 repeat-string
+/big-a exch def
+
+% Match entire string
+//big-a (^a+$) regex-match true eq  (regex-large: 50 'a' matches a+) rt-ok clear
+
+% Find all single-char matches
+//big-a (a) regex-find-all length 50 eq  (regex-large: 50 individual matches) rt-ok clear
+
+% No match
+//big-a (b) regex-match false eq  (regex-large: no 'b' in 50 'a') rt-ok clear
+
+% ====================================================================
+% SECTION 2: Many capturing groups
+% ====================================================================
+
+% Pattern with 10 capturing groups
+(abcdefghij) ((a)(b)(c)(d)(e)(f)(g)(h)(i)(j)) regex-search
+true eq  (regex-groups: 10 groups matched) rt-ok
+dup length 11 eq  (regex-groups: 11 items in result) rt-ok
+dup 0 get (abcdefghij) eq  (regex-groups: full match) rt-ok
+dup 1 get (a) eq  (regex-groups: group 1 = a) rt-ok
+10 get (j) eq     (regex-groups: group 10 = j) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Alternation with many branches
+% ====================================================================
+
+(xyz) (a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z) regex-search
+true eq  (regex-alt: found in 26-branch alternation) rt-ok
+dup 0 get (x) eq  (regex-alt: matched 'x') rt-ok
+pop clear
+
+(1) (a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z) regex-match
+false eq  (regex-alt: digit not in alpha alternation) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Quantifier edge cases
+% ====================================================================
+
+% Greedy vs exact counts
+(aaa) (a{3}) regex-match true eq  (regex-quant: a{3} matches aaa) rt-ok clear
+(aa) (a{3}) regex-match false eq  (regex-quant: a{3} no match aa) rt-ok clear
+(aaaa) (a{2,4}) regex-match true eq  (regex-quant: a{2,4} matches aaaa) rt-ok clear
+(a) (a{2,4}) regex-match false eq  (regex-quant: a{2,4} no match single a) rt-ok clear
+
+% Zero-length match
+() (a*) regex-match true eq  (regex-quant: a* matches empty) rt-ok clear
+(b) (a*b) regex-match true eq  (regex-quant: a*b matches b) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Character classes
+% ====================================================================
+
+(abc123) ([a-z]+) regex-search
+true eq  (regex-class: [a-z]+ found) rt-ok
+dup 0 get (abc) eq  (regex-class: matched abc) rt-ok
+pop clear
+
+(123abc) ([0-9]+) regex-search
+true eq  (regex-digit-class: [0-9]+ found) rt-ok
+dup 0 get (123) eq  (regex-digit-class: matched 123) rt-ok
+pop clear
+
+% Negated class
+(abc123) ([^a-z]+) regex-search
+true eq  (regex-neg-class: [^a-z]+ found) rt-ok
+dup 0 get (123) eq  (regex-neg-class: matched 123) rt-ok
+pop clear
+
+% ====================================================================
+% SECTION 6: Anchors in complex patterns
+% ====================================================================
+
+(hello world) (^hello) regex-match true eq  (regex-anchor: ^hello) rt-ok clear
+(hello world) (world$) regex-match true eq  (regex-anchor: world$) rt-ok clear
+(hello world) (^hello world$) regex-match true eq  (regex-anchor: full ^...$) rt-ok clear
+(hello world) (^world) regex-match false eq  (regex-anchor: ^world fails) rt-ok clear
+
+% ====================================================================
+% SECTION 7: regex-find-all (no groups, multiple matches)
+% ====================================================================
+
+(a1b2c3) ([a-z][0-9]) regex-find-all
+dup length 3 eq  (regex-findall: 3 matches found) rt-ok
+dup 0 get (a1) eq  (regex-findall: first = a1) rt-ok
+dup 1 get (b2) eq  (regex-findall: second = b2) rt-ok
+2 get (c3) eq      (regex-findall: third = c3) rt-ok clear
+
+% find-all with no matches
+(hello) ([0-9]+) regex-find-all length 0 eq  (regex-findall: no matches) rt-ok clear
+
+% ====================================================================
+% SECTION 8: regex-split
+% ====================================================================
+
+(one,two,three) (,) regex-split
+dup length 3 eq  (regex-split: 3 parts) rt-ok
+dup 0 get (one) eq  (regex-split: part 0) rt-ok
+dup 1 get (two) eq  (regex-split: part 1) rt-ok
+2 get (three) eq    (regex-split: part 2) rt-ok clear
+
+% split with no match
+(hello) (,) regex-split length 1 eq  (regex-split: no match = 1 part) rt-ok clear
+
+% split on whitespace
+(a  b  c) (\\s+) regex-split
+dup length 3 eq  (regex-split-ws: 3 parts) rt-ok
+dup 0 get (a) eq  (regex-split-ws: part 0) rt-ok
+2 get (c) eq      (regex-split-ws: part 2) rt-ok clear
+
+% ====================================================================
+% SECTION 9: regex-replace
+% ====================================================================
+
+(hello world) (world) (earth) regex-replace
+(hello earth) eq  (regex-replace: simple) rt-ok clear
+
+(aaa) (a) (bb) regex-replace
+(bbbbbb) eq  (regex-replace: all occurrences) rt-ok clear
+
+(abc) (x) (y) regex-replace
+(abc) eq  (regex-replace: no match) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Special regex characters (escaping)
+% ====================================================================
+
+% Literal dot
+(a.b) (a\\.b) regex-match true eq  (regex-escape: literal dot) rt-ok clear
+(axb) (a\\.b) regex-match false eq  (regex-escape: dot not matching x) rt-ok clear
+
+% Literal brackets
+(a[b) (a\\[b) regex-match true eq  (regex-escape: literal bracket) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Empty pattern and string edge cases
+% ====================================================================
+
+() () regex-match true eq  (regex-empty: empty matches empty) rt-ok clear
+(a) () regex-match true eq  (regex-empty: empty pattern matches any) rt-ok clear
+() (a) regex-match false eq  (regex-empty: empty string no match for a) rt-ok clear
+
+% ====================================================================
+% SECTION 12: Error paths
+% ====================================================================
+
+% Invalid regex syntax: unbalanced bracket
+{ (hello) ([) regex-match } try /syntax-error eq  (regex-err: unbalanced bracket) rt-ok clear
+
+% Type errors
+{ 42 (a) regex-match } try /type-check eq  (regex-err: int subject) rt-ok clear
+{ (a) 42 regex-match } try /type-check eq  (regex-err: int pattern) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Repeated match stress
+% ====================================================================
+
+% Match 1000 times in a loop
+/match-count 0 def
+100 {
+  (test123) ([0-9]+) regex-search pop pop
+  /match-count match-count 1 add def
+} repeat
+match-count 100 eq  (regex-repeat: 100 match cycles) rt-ok clear
+
+(Regex stress tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

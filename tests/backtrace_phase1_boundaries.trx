@@ -1,0 +1,46 @@
+% backtrace_phase1_boundaries.trx
+%
+% Phase 1 of plan_backtrace_enrichment.md.  Exercises the 8 new boundary
+% annotations added to format_backtrace() in src/ops_system.inl.
+%
+% Each scenario triggers div-by-zero (or similar) deep inside a different
+% control structure, so the corresponding `[X boundary]` line should
+% appear in the stderr backtrace before the operand snapshot.
+%
+% This file is NOT meant to be run end-to-end -- it's a catalogue.  Each
+% top-level form below is a separate scenario; pick one and run it.  The
+% companion shell driver `tests/run_backtrace_tests.sh` runs each in a
+% subshell and asserts the expected boundary line shows.
+
+% --- 1. [loop boundary] -------------------------------------------------
+% scenario: loop_boundary
+{ 1 0 div } loop
+
+% --- 2. [do-while boundary] ---------------------------------------------
+% scenario: dowhile_boundary
+{ true } { 1 0 div } do-while
+
+% --- 3. [repeat boundary] -----------------------------------------------
+% scenario: repeat_boundary
+3 { 1 0 div } repeat
+
+% --- 4. [for-all boundary] ----------------------------------------------
+% scenario: forall_boundary
+[2 0] { 1 exch div pop } for-all
+
+% --- 5. [dip boundary] --------------------------------------------------
+% scenario: dip_boundary
+1 0 1 { div } dip
+
+% --- 6. [locals boundary] -----------------------------------------------
+% scenario: locals_boundary
+/test-locals-bt { |x| x 1 0 div pop } def
+42 test-locals-bt
+
+% --- 7. [in-global/local boundary] --------------------------------------
+% scenario: inglobal_boundary
+${ 1 0 div }
+
+% --- 8. [time boundary] -------------------------------------------------
+% scenario: time_boundary
+{ 1 0 div } time

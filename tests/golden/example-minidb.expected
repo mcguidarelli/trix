@@ -1,0 +1,85 @@
+=== minidb demo ===
+
+ok. table employees created (pk=id).
+ok. inserted into employees (pk=1).
+ok. inserted into employees (pk=2).
+ok. inserted into employees (pk=3).
+ok. inserted into employees (pk=4).
+ok. inserted into employees (pk=5).
+ok. inserted into employees (pk=6).
+ok. inserted into employees (pk=7).
+ok. inserted into employees (pk=8).
+ok. inserted into employees (pk=9).
+ok. inserted into employees (pk=10).
+ok. inserted into employees (pk=11).
+ok. inserted into employees (pk=12).
+  PLAN: full table scan
+id  name   salary
+--  -----  ------
+1   Alice  95000 
+2   Bob    72000 
+3   Carol  88000 
+4   Dave   61000 
+5   Erin   120000
+6   Frank  54000 
+7   Gina   98000 
+8   Henry  48000 
+9   Iris   85000 
+10  Jake   73000 
+11  Kate   110000
+12  Luis   77500 
+(12 rows)
+  PLAN: full table scan
+name   salary
+-----  ------
+Iris   85000 
+Carol  88000 
+Alice  95000 
+Gina   98000 
+Kate   110000
+(5 rows)
+  PLAN: full table scan
+name   salary
+-----  ------
+Bob    72000 
+Dave   61000 
+Frank  54000 
+(3 rows)
+  PLAN: indexed lookup on id=7
+id  name  salary  active
+--  ----  ------  ------
+7   Gina  98000   true  
+(1 row)
+  PLAN: full table scan
+id  name   salary  active
+--  -----  ------  ------
+3   Carol  88000   false 
+(1 row)
+BEGIN (tx depth = 1).
+ok. inserted into employees (pk=13).
+  PLAN: indexed lookup on id=13
+name     salary
+-------  ------
+Mallory  200000
+(1 row)
+ROLLBACK (tx depth after = 0).
+  PLAN: indexed lookup on id=13
+name  salary
+----  ------
+(0 rows)
+BEGIN (tx depth = 1).
+ok. inserted into employees (pk=13).
+COMMIT (tx depth = 0).  [Trix note: no-op; see comment.]
+  PLAN: indexed lookup on id=13
+id  name
+--  ----
+13  Nina
+(1 row)
+TABLE employees:
+  id           int    PRIMARY KEY
+  name         text  
+  salary       int   
+  active       bool  
+
+
+minidb: session ended.  bye.

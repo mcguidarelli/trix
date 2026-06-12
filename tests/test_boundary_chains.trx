@@ -1,0 +1,262 @@
+% ====================================================================
+% test_boundary_chains.trx -- boundary value and chained operations
+% ====================================================================
+% MIN/MAX arithmetic chains, negative zero propagation, denormalized
+% number arithmetic, type boundary conversions
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+/approx-eq {
+  3 1 roll sub abs ge
+} def
+
+% aliases for limits
+/int-max  2147483647 def
+/int-min  -2147483648 def
+/byte-max 255b def
+/byte-min 0b def
+
+/real-NaN      //:systemdict:numbers:real-type:quiet-NaN      def
+/real-Inf      //:systemdict:numbers:real-type:infinity        def
+/real-denorm   //:systemdict:numbers:real-type:denorm-min      def
+/real-max      //:systemdict:numbers:real-type:max             def
+/real-epsilon  //:systemdict:numbers:real-type:epsilon         def
+/double-NaN    //:systemdict:numbers:double-type:quiet-NaN     def
+/double-Inf    //:systemdict:numbers:double-type:infinity      def
+/double-denorm //:systemdict:numbers:double-type:denorm-min    def
+
+% ====================================================================
+% SECTION 1: Integer boundary chains
+% ====================================================================
+
+% MAX - 1 + 1 = MAX
+//int-max 1 sub 1 add //int-max eq  (int-chain: MAX-1+1 = MAX) rt-ok clear
+
+% MIN + 1 - 1 = MIN
+//int-min 1 add 1 sub //int-min eq  (int-chain: MIN+1-1 = MIN) rt-ok clear
+
+% MAX * 1 = MAX
+//int-max 1 mul //int-max eq  (int-chain: MAX*1 = MAX) rt-ok clear
+
+% MIN * 1 = MIN
+//int-min 1 mul //int-min eq  (int-chain: MIN*1 = MIN) rt-ok clear
+
+% MAX / 1 = MAX
+//int-max 1 div //int-max eq  (int-chain: MAX/1 = MAX) rt-ok clear
+
+% MIN / 1 = MIN
+//int-min 1 div //int-min eq  (int-chain: MIN/1 = MIN) rt-ok clear
+
+% 0 * MAX = 0
+0 //int-max mul 0 eq  (int-chain: 0*MAX = 0) rt-ok clear
+
+% MAX + 1 overflows
+{ //int-max 1 add } try /numerical-overflow eq  (int-overflow: MAX+1) rt-ok clear
+
+% MIN - 1 overflows
+{ //int-min 1 sub } try /numerical-overflow eq  (int-overflow: MIN-1) rt-ok clear
+
+% MAX * 2 overflows
+{ //int-max 2 mul } try /numerical-overflow eq  (int-overflow: MAX*2) rt-ok clear
+
+% MIN * -1 overflows (MIN = -2^31, negating it overflows signed 32-bit)
+{ //int-min -1 mul } try /numerical-overflow eq  (int-overflow: MIN*-1) rt-ok clear
+
+% MIN / -1 overflows
+{ //int-min -1 div } try /numerical-overflow eq  (int-overflow: MIN/-1) rt-ok clear
+
+% div by zero
+{ 1 0 div } try /div-by-zero eq  (int-div: 1/0 error) rt-ok clear
+{ 0 0 div } try /div-by-zero eq  (int-div: 0/0 error) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Byte boundary chains
+% ====================================================================
+
+//byte-max 1b sub 1b add //byte-max eq  (byte-chain: MAX-1+1 = 255) rt-ok clear
+//byte-min 1b add 1b sub //byte-min eq  (byte-chain: MIN+1-1 = 0) rt-ok clear
+
+% overflow
+{ //byte-max 1b add } try /numerical-overflow eq  (byte-overflow: 255+1) rt-ok clear
+{ //byte-min 1b sub } try /numerical-overflow eq  (byte-overflow: 0-1) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Unsigned integer boundary chains
+% ====================================================================
+
+16#FFFFFFFF#u 1u sub 1u add 16#FFFFFFFF#u eq  (uint-chain: MAX-1+1) rt-ok clear
+0u 1u add 1u sub 0u eq  (uint-chain: 0+1-1) rt-ok clear
+
+% overflow
+{ 16#FFFFFFFF#u 1u add } try /numerical-overflow eq  (uint-overflow: MAX+1) rt-ok clear
+{ 0u 1u sub } try /numerical-overflow eq  (uint-overflow: 0-1) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Long boundary chains
+% ====================================================================
+
+% Use max long values from system
+//:systemdict:numbers:long-type:max
+dup 1l sub 1l add eq  (long-chain: MAX-1+1 = MAX) rt-ok clear
+
+//:systemdict:numbers:long-type:min
+dup 1l add 1l sub eq  (long-chain: MIN+1-1 = MIN) rt-ok clear
+
+% overflow
+{ //:systemdict:numbers:long-type:max 1l add } try /numerical-overflow eq  (long-overflow: MAX+1) rt-ok clear
+{ //:systemdict:numbers:long-type:min 1l sub } try /numerical-overflow eq  (long-overflow: MIN-1) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Negative zero propagation
+% ====================================================================
+
+% -0.0 exists and is distinct via sign-bit
+-0.0 sign-bit true eq  (neg-zero: sign-bit = true) rt-ok clear
+0.0 sign-bit false eq   (neg-zero: +0.0 sign-bit = false) rt-ok clear
+
+% -0.0 == 0.0 (IEEE says yes)
+-0.0 0.0 eq true eq  (neg-zero: -0.0 eq 0.0) rt-ok clear
+
+% Operations preserving/destroying negative zero
+-0.0 0.0 add sign-bit false eq  (neg-zero: -0.0 + 0.0 loses sign) rt-ok clear
+0.0 -0.0 add sign-bit false eq  (neg-zero: 0.0 + -0.0 loses sign) rt-ok clear
+
+% -0.0 * positive = -0.0
+-1.0 0.0 mul sign-bit true eq  (neg-zero: -1*0 = -0.0) rt-ok clear
+1.0 -0.0 mul sign-bit true eq  (neg-zero: 1*-0.0 = -0.0) rt-ok clear
+
+% double variants
+-0.0d sign-bit true eq  (neg-zero: double sign-bit) rt-ok clear
+-0.0d 0.0d eq true eq   (neg-zero: double -0.0d eq 0.0d) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Denormalized number arithmetic
+% ====================================================================
+
+% denorm-min is positive and not normal
+//real-denorm 0.0 gt true eq  (denorm: positive) rt-ok clear
+//real-denorm normal? false eq  (denorm: not normal) rt-ok clear
+//real-denorm finite? true eq   (denorm: is finite) rt-ok clear
+
+% denorm + 0 = denorm
+//real-denorm 0.0 fmax //real-denorm eq  (denorm: fmax with 0) rt-ok clear
+
+% denorm * 1.0 = denorm
+//real-denorm 1.0 fmin //real-denorm eq  (denorm: fmin with 1.0) rt-ok clear
+
+% double denorm
+//double-denorm 0.0d greater? true eq  (denorm: double positive) rt-ok clear
+//double-denorm normal? false eq  (denorm: double not normal) rt-ok clear
+//double-denorm finite? true eq   (denorm: double is finite) rt-ok clear
+
+% ====================================================================
+% SECTION 7: NaN propagation through FP ops
+% ====================================================================
+
+% fmax/fmin propagate non-NaN (IEEE 754 fmax/fmin)
+//real-NaN 5.0 fmax 5.0 eq  (nan-prop: fmax(NaN,5) = 5) rt-ok clear
+5.0 //real-NaN fmax 5.0 eq  (nan-prop: fmax(5,NaN) = 5) rt-ok clear
+//real-NaN 5.0 fmin 5.0 eq  (nan-prop: fmin(NaN,5) = 5) rt-ok clear
+
+% NaN in classification
+//real-NaN nan? true eq     (nan-prop: nan? = true) rt-ok clear
+//real-NaN finite? false eq (nan-prop: finite? = false) rt-ok clear
+//real-NaN inf? false eq    (nan-prop: inf? = false) rt-ok clear
+
+% NaN comparison (all false except ne)
+//real-NaN //real-NaN eq false eq   (nan-cmp: NaN eq NaN = false) rt-ok clear
+//real-NaN //real-NaN ne true eq    (nan-cmp: NaN ne NaN = true) rt-ok clear
+//real-NaN 1.0 lt false eq          (nan-cmp: NaN lt 1 = false) rt-ok clear
+//real-NaN 1.0 gt false eq          (nan-cmp: NaN gt 1 = false) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Infinity behavior
+% ====================================================================
+
+//real-Inf inf? true eq      (inf: inf? = true) rt-ok clear
+//real-Inf neg inf? true eq  (inf: -Inf inf? = true) rt-ok clear
+//real-Inf finite? false eq  (inf: finite? = false) rt-ok clear
+//real-Inf nan? false eq     (inf: nan? = false) rt-ok clear
+
+% Inf in fmax/fmin
+//real-Inf 1.0 fmax //real-Inf eq   (inf: fmax(Inf,1) = Inf) rt-ok clear
+//real-Inf 1.0 fmin 1.0 eq          (inf: fmin(Inf,1) = 1) rt-ok clear
+
+% copysign with Inf
+1.0 //real-Inf neg copy-sign sign-bit true eq  (inf: copysign neg) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Epsilon-scale arithmetic
+% ====================================================================
+
+% 1.0 + epsilon > 1.0 (defines epsilon)
+1.0 //real-epsilon add 1.0 gt true eq  (epsilon: 1+eps > 1) rt-ok clear
+
+% 1.0 + epsilon/2 may equal 1.0 (below representable)
+% (This is implementation-dependent, just verify no error)
+1.0 //real-epsilon 2.0 div add finite? true eq  (epsilon: 1+eps/2 is finite) rt-ok clear
+
+% max + max overflows to Inf (via arithmetic check)
+{ //real-max //real-max add } try /numerical-inf eq  (epsilon: max+max overflows) rt-ok clear
+
+% ====================================================================
+% SECTION 10: GCD/LCM boundary values
+% ====================================================================
+
+0 0 gcd 0 eq           (gcd: 0,0 = 0) rt-ok clear
+0 5 gcd 5 eq           (gcd: 0,5 = 5) rt-ok clear
+5 0 gcd 5 eq           (gcd: 5,0 = 5) rt-ok clear
+12 8 gcd 4 eq          (gcd: 12,8 = 4) rt-ok clear
+-12 8 gcd 4 eq         (gcd: -12,8 = 4) rt-ok clear
+//int-max 1 gcd 1 eq   (gcd: MAX,1 = 1) rt-ok clear
+
+1 1 lcm 1 eq           (lcm: 1,1 = 1) rt-ok clear
+3 4 lcm 12 eq          (lcm: 3,4 = 12) rt-ok clear
+0 5 lcm 0 eq           (lcm: 0,5 = 0) rt-ok clear
+
+% ====================================================================
+% SECTION 11: abs/neg/sign at boundaries
+% ====================================================================
+
+//int-max abs //int-max eq  (abs: MAX = MAX) rt-ok clear
+0 abs 0 eq                  (abs: 0 = 0) rt-ok clear
+-1 abs 1 eq                 (abs: -1 = 1) rt-ok clear
+
+% abs(MIN) overflows (|MIN| > MAX for 2's complement)
+{ //int-min abs } try /numerical-overflow eq  (abs: MIN overflows) rt-ok clear
+
+//int-max neg //int-max neg eq  (neg: MAX -> -MAX) rt-ok clear
+0 neg 0 eq                      (neg: 0 -> 0) rt-ok clear
+
+% neg(MIN) overflows
+{ //int-min neg } try /numerical-overflow eq  (neg: MIN overflows) rt-ok clear
+
+1 sign 1 eq     (sign: positive) rt-ok clear
+-1 sign -1 eq   (sign: negative) rt-ok clear
+0 sign 0 eq     (sign: zero) rt-ok clear
+//int-max sign 1 eq  (sign: MAX = 1) rt-ok clear
+//int-min sign -1 eq (sign: MIN = -1) rt-ok clear
+
+% ====================================================================
+% SECTION 12: mod/quot-rem at boundaries
+% ====================================================================
+
+//int-max 1 mod 0 eq  (mod: MAX mod 1 = 0) rt-ok clear
+//int-max 2 mod 1 eq  (mod: MAX mod 2 = 1) rt-ok clear
+{ 1 0 mod } try /div-by-zero eq  (mod: div by zero) rt-ok clear
+
+//int-max 1 quot-rem
+0 eq (quot-rem: MAX/1 remainder = 0) rt-ok
+//int-max eq (quot-rem: MAX/1 quotient = MAX) rt-ok clear
+
+(Boundary chain tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

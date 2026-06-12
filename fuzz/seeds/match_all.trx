@@ -1,0 +1,8 @@
+% match-all: gather form -- multi-arm collect, mixed contributions.
+5 [ { 3 gt } { pop (big) } { is-integer } { 2 mul } { pop false } { pop (never) } ] match-all length
+1 [ { pop true } { pop } { pop true } { pop 7 8 9 } ] match-all length
+${ 4 [ { pop true } { 2 mul } ] match-all } length
+{ 9 [ { pop false } { 1 } ] match-all } try clear
+{ 9 [ { pop 42 } { 1 } ] match-all } try clear
+{ 1 [ { pop true } { pop exit } ] match-all } try clear
+5000000000l [ { pop true } { 1 exch pop } ] match-all length

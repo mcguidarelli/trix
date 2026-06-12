@@ -1,0 +1,489 @@
+% ====================================================================
+% Coroutine Tests
+% ====================================================================
+% NOTE: uses stack manipulation instead of /name def because `def`
+% has a pre-existing issue when files are run via the `run` operator.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Type predicate (is-coroutine)
+% ====================================================================
+
+[ { } coroutine-launch dup is-coroutine
+    (is-coroutine: true for coroutine) rt-ok
+coroutine-kill clear
+
+42 is-coroutine not                         (is-coroutine: false for integer) rt-ok clear
+(hello) is-coroutine not                    (is-coroutine: false for string) rt-ok clear
+/foo is-coroutine not                       (is-coroutine: false for name) rt-ok clear
+[1 2 3] is-coroutine not                    (is-coroutine: false for array) rt-ok clear
+<< /a 1 >> is-coroutine not                 (is-coroutine: false for dict) rt-ok clear
+true is-coroutine not                       (is-coroutine: false for boolean) rt-ok clear
+null is-coroutine not                       (is-coroutine: false for null) rt-ok clear
+
+% type name
+[ { } coroutine-launch dup type /coroutine-type eq
+    (is-coroutine: type is coroutine-type) rt-ok
+coroutine-kill clear
+
+% ====================================================================
+% SECTION 2: Basic launch and kill
+% ====================================================================
+
+[ { } coroutine-launch dup is-coroutine
+    (launch: returns coroutine handle) rt-ok
+coroutine-kill clear
+
+% ====================================================================
+% SECTION 3: coroutine-join with return value
+% ====================================================================
+
+% join returns value + true
+[ { 42 } coroutine-launch coroutine-join
+    (join: flag true) rt-ok
+42 eq
+    (join: value is 42) rt-ok clear
+
+% join with no return value
+[ { } coroutine-launch coroutine-join
+not
+    (join: flag false for empty stack) rt-ok
+null eq
+    (join: null when no return) rt-ok clear
+
+% join with die -- no return
+[ { coroutine-die } coroutine-launch coroutine-join
+not
+    (join: die produces no return) rt-ok
+pop clear
+
+% join with parameter passing
+[ 10 { 2 mul } coroutine-launch coroutine-join
+    (join: param return flag true) rt-ok
+20 eq
+    (join: param return value correct) rt-ok clear
+
+% blocking join
+[ { 0 coroutine-sleep 0 coroutine-sleep 99 } coroutine-launch coroutine-join
+    (join: blocking join flag true) rt-ok
+99 eq
+    (join: blocking join value 99) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Return value types
+% ====================================================================
+
+[ { 42 } coroutine-launch coroutine-join pop 42 eq
+    (return: integer) rt-ok clear
+[ { (hello) } coroutine-launch coroutine-join pop (hello) eq
+    (return: string) rt-ok clear
+[ { true } coroutine-launch coroutine-join pop true eq
+    (return: boolean) rt-ok clear
+[ { null } coroutine-launch coroutine-join
+    (return: null available) rt-ok
+null eq
+    (return: null value) rt-ok clear
+[ { 42l } coroutine-launch coroutine-join pop 42l eq
+    (return: long) rt-ok clear
+[ { 3.14d } coroutine-launch coroutine-join pop 3.14d eq
+    (return: double) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Shared state communication
+% ====================================================================
+
+/shared-val 0 def
+[ { /shared-val 42 def } coroutine-launch coroutine-join pop pop
+shared-val 42 eq
+    (shared: userdict write visible) rt-ok clear
+
+% ====================================================================
+% SECTION 6: coroutine-wait-all
+% ====================================================================
+
+/wa-a 0 def /wa-b 0 def
+[ { 0 coroutine-sleep /wa-a 1 def } coroutine-launch pop
+[ { 0 coroutine-sleep 0 coroutine-sleep /wa-b 2 def } coroutine-launch pop
+coroutine-wait-all
+wa-a 1 eq wa-b 2 eq and
+    (wait-all: both completed) rt-ok clear
+
+coroutine-wait-all
+true
+    (wait-all: no-op with none) rt-ok clear
+
+% ====================================================================
+% SECTION 7: die operator
+% ====================================================================
+
+{ coroutine-die } try /invalid-exit eq
+    (die: error from main) rt-ok clear
+
+% ====================================================================
+% SECTION 8: kill operator
+% ====================================================================
+
+% kill a coroutine
+[ { 100 coroutine-sleep } coroutine-launch dup coroutine-kill
+coroutine-status /dead eq
+    (kill: killed) rt-ok clear
+
+% kill dead is no-op
+[ { } coroutine-launch dup coroutine-kill dup coroutine-kill
+coroutine-status /dead eq
+    (kill: dead is no-op) rt-ok clear
+
+% ====================================================================
+% SECTION 9: coroutine-status
+% ====================================================================
+
+[ { 100 coroutine-sleep } coroutine-launch
+dup coroutine-status /ready eq
+    (status: ready after launch) rt-ok
+dup coroutine-kill
+coroutine-status /dead eq
+    (status: dead after kill) rt-ok clear
+
+% ====================================================================
+% SECTION 10: coroutine-release
+% ====================================================================
+
+[ { 42 } coroutine-launch dup coroutine-kill
+coroutine-release
+true
+    (release: dead coroutine released) rt-ok clear
+
+% ====================================================================
+% SECTION 11: try/catch inside coroutine
+% ====================================================================
+
+[ { { 1 0 div } try /div-by-zero eq } coroutine-launch coroutine-join
+    (try-catch: flag true) rt-ok
+    (try-catch: caught error inside coroutine) rt-ok clear
+
+% ====================================================================
+% SECTION 12: Uncaught error kills coroutine
+% ====================================================================
+
+[ { 1 0 div } coroutine-launch coroutine-join
+not
+    (uncaught: no return on error death) rt-ok
+pop clear
+
+% ====================================================================
+% SECTION 13: Loops inside coroutine
+% ====================================================================
+
+[ { 0 1 1 5 { add } for } coroutine-launch coroutine-join
+    (loop: flag true) rt-ok
+15 eq
+    (loop: for sum correct) rt-ok clear
+
+% ====================================================================
+% SECTION 14: begin/end inside coroutine
+% ====================================================================
+
+% begin/end test uses local variable binding syntax instead of def
+[ { { |x| x } 42 exch exec } coroutine-launch coroutine-join
+    (locals: flag true) rt-ok
+42 eq
+    (locals: local vars work) rt-ok clear
+
+% ====================================================================
+% SECTION 15: Nested launch
+% ====================================================================
+
+[ { [ { 99 } coroutine-launch coroutine-join pop } coroutine-launch coroutine-join
+    (nested: outer flag true) rt-ok
+99 eq
+    (nested: inner value) rt-ok clear
+
+% ====================================================================
+% SECTION 16: Multiple coroutines
+% ====================================================================
+
+/rr-count 0 def
+[ { 0 coroutine-sleep /rr-count rr-count 1 add def 0 coroutine-sleep /rr-count rr-count 1 add def } coroutine-launch pop
+[ { 0 coroutine-sleep /rr-count rr-count 1 add def 0 coroutine-sleep /rr-count rr-count 1 add def } coroutine-launch pop
+[ { 0 coroutine-sleep /rr-count rr-count 1 add def 0 coroutine-sleep /rr-count rr-count 1 add def } coroutine-launch pop
+coroutine-wait-all
+rr-count 6 eq
+    (round-robin: 3x2 increments) rt-ok clear
+
+% ====================================================================
+% SECTION 17: stopped inside coroutine
+% ====================================================================
+
+[ { { 1 2 add stop } stopped pop } coroutine-launch coroutine-join
+    (stopped: flag true) rt-ok
+3 eq
+    (stopped: value correct) rt-ok clear
+
+% ====================================================================
+% SECTION 18: make-executable blocked
+% ====================================================================
+
+[ { } coroutine-launch dup
+{ exch make-executable } try /type-check eq
+    (make-exec: blocked for coroutine) rt-ok
+coroutine-kill clear
+
+% ====================================================================
+% SECTION 19: Deep recursion
+% ====================================================================
+
+/deep-fib {
+    dup 2 lt { } {
+        dup 1 sub deep-fib exch 2 sub deep-fib add
+    } if-else
+} def
+
+[ 10 { |n| n deep-fib } coroutine-launch coroutine-join
+    (deep: flag true) rt-ok
+55 eq
+    (deep: fib(10) = 55) rt-ok clear
+
+% ====================================================================
+% SECTION 20: :status coroutine instrumentation
+% ====================================================================
+
+% baseline: no live coroutines (only main)
+/coroutine-count query-status 0 eq
+    (status: coroutine-count 0 at baseline) rt-ok clear
+
+/coroutine-is-main query-status
+    (status: is-main true at baseline) rt-ok clear
+
+/coroutine-running query-status 0 gt
+    (status: running offset positive) rt-ok clear
+
+% launch one, check count
+[ { 100 coroutine-sleep } coroutine-launch
+/coroutine-count query-status 1 eq
+    (status: coroutine-count 1 after launch) rt-ok
+
+% total includes main + 1
+/coroutine-total query-status 2 eq
+    (status: coroutine-total 2 after launch) rt-ok
+
+% kill it, count back to 0
+coroutine-kill
+/coroutine-count query-status 0 eq
+    (status: coroutine-count 0 after kill) rt-ok clear
+
+% free list entries after kill
+/coroutine-stack-free query-status 0 gt
+    (status: stack-free > 0 after kill) rt-ok clear
+
+% launch and join, check ctx-free after join
+[ { 42 } coroutine-launch coroutine-join pop pop
+/coroutine-ctx-free query-status 1 ge
+    (status: ctx-free >= 1 after join) rt-ok clear
+
+% launch 3, check count, wait-all, check free lists
+[ { 0 coroutine-sleep } coroutine-launch pop
+[ { 0 coroutine-sleep } coroutine-launch pop
+[ { 0 coroutine-sleep } coroutine-launch pop
+/coroutine-count query-status 3 eq
+    (status: coroutine-count 3 after triple launch) rt-ok
+coroutine-wait-all
+/coroutine-count query-status 0 eq
+    (status: coroutine-count 0 after wait-all) rt-ok clear
+
+% inside coroutine, is-main should be false
+[ { /coroutine-is-main query-status not } coroutine-launch coroutine-join
+    (status: join flag true) rt-ok
+    (status: is-main false inside coroutine) rt-ok clear
+
+% ====================================================================
+% SECTION 21: TCO works inside coroutines
+% ====================================================================
+% Coroutines have their own exec stack segment.  TCO should work
+% normally, allowing deep tail recursion within a coroutine.
+
+/coro-tco-countdown { dup 0 le { pop } { 1 sub coro-tco-countdown } if-else } def
+
+[ { 10000 coro-tco-countdown 42 } coroutine-launch
+coroutine-join pop
+42 eq                                        (tco-coroutine: 10K depth in coroutine) rt-ok clear
+
+% ====================================================================
+% SECTION 22: TCO mutual recursion inside coroutine
+% ====================================================================
+
+/coro-tco-ping { dup 0 le { pop 99 } { 1 sub coro-tco-pong } if-else } def
+/coro-tco-pong { dup 0 le { pop 99 } { 1 sub coro-tco-ping } if-else } def
+
+[ { 5000 coro-tco-ping } coroutine-launch
+coroutine-join pop
+99 eq                                        (tco-coroutine: mutual 5K in coroutine) rt-ok clear
+
+% ====================================================================
+% SECTION 23: coroutine-last-error (Wart W03 phase A)
+% ====================================================================
+% Side-channel diagnostic: query the exit reason of the most recently
+% joined/awaited/released coroutine in the calling context.  /no-error
+% is the sentinel for clean outcomes (alive coroutine, no observed
+% coroutine yet, or one that exited normally).
+
+% No coroutine joined yet -> /no-error
+coroutine-last-error /no-error eq
+    (last-error: /no-error before any join) rt-ok clear
+
+% Normal exit -> /no-error (m_exit_reason /normal mapped to /no-error)
+[ { 42 } coroutine-launch coroutine-join pop pop
+coroutine-last-error /no-error eq
+    (last-error: /no-error after normal join) rt-ok clear
+
+% Uncaught error -> error name
+[ { 1 0 div } coroutine-launch coroutine-join pop pop
+coroutine-last-error /div-by-zero eq
+    (last-error: /div-by-zero captured) rt-ok clear
+
+% User-thrown error -> the user's name
+[ { /my-error throw } coroutine-launch coroutine-join pop pop
+coroutine-last-error /my-error eq
+    (last-error: user-thrown name captured) rt-ok clear
+
+% throw-with also reaches us
+[ { /custom-failure (extra data) throw-with } coroutine-launch coroutine-join pop pop
+coroutine-last-error /custom-failure eq
+    (last-error: throw-with name captured) rt-ok clear
+
+% Peer kill -> /killed
+[ { 100 coroutine-sleep } coroutine-launch dup coroutine-kill coroutine-join pop pop
+coroutine-last-error /killed eq
+    (last-error: /killed captured) rt-ok clear
+
+% coroutine-die -> /no-error (graceful peer-initiated exit, like /normal)
+[ { coroutine-die } coroutine-launch coroutine-join pop pop
+coroutine-last-error /no-error eq
+    (last-error: /no-error from coroutine-die) rt-ok clear
+
+% After a clean join, the cache is reset to /no-error
+[ { 1 0 div } coroutine-launch coroutine-join pop pop
+[ { 99 } coroutine-launch coroutine-join pop pop
+coroutine-last-error /no-error eq
+    (last-error: cache reset by next clean join) rt-ok clear
+
+% coroutine-release also captures
+[ { 1 0 div } coroutine-launch
+% wait until dead, then release.  while predicate must leave a bool on
+% top *and* leave the coroutine handle in place for the next iteration.
+{ dup coroutine-status /dead ne } { 0 coroutine-sleep } while
+coroutine-release
+coroutine-last-error /div-by-zero eq
+    (last-error: capture on release) rt-ok clear
+
+% Type-check / opstack-overflow not exercised: op takes no args, single push.
+% Multiple coroutines: most recent join wins
+[ { /first-error throw } coroutine-launch coroutine-join pop pop
+[ { /second-error throw } coroutine-launch coroutine-join pop pop
+coroutine-last-error /second-error eq
+    (last-error: most recent join wins) rt-ok clear
+
+% Per-coroutine: child's last-error is independent of parent's
+[ { /parent-error throw } coroutine-launch coroutine-join pop pop
+[ {
+    coroutine-last-error /no-error eq
+        (last-error: child sees /no-error not parent's) rt-ok
+} coroutine-launch coroutine-join pop pop clear
+
+% ====================================================================
+% SECTION 24: coroutine-await (Wart W03 phase B)
+% ====================================================================
+% Erlang-link semantics: blocks until target dies; on normal exit pushes
+% the return value, on abnormal exit rethrows the same error so a wrapping
+% try / try-catch catches it as if local.
+
+% Normal exit -> push value
+[ { 42 } coroutine-launch coroutine-await
+42 eq
+    (await: normal exit pushes value) rt-ok clear
+
+% Already-dead-normal: no block, pushes value immediately
+[ { 100 } coroutine-launch
+{ dup coroutine-status /dead ne } { 0 coroutine-sleep } while
+coroutine-await 100 eq
+    (await: already-dead-normal returns immediately) rt-ok clear
+
+% Abnormal /div-by-zero rethrown, catchable by try
+[ { mark { 1 0 div } coroutine-launch coroutine-await } try
+/div-by-zero eq
+    (await: /div-by-zero rethrown) rt-ok clear
+
+% User-thrown name catchable as that name
+[ { mark { /my-error throw } coroutine-launch coroutine-await } try
+/my-error eq
+    (await: /my-error rethrown) rt-ok clear
+
+% throw-with name catchable; data NOT preserved across rethrow
+[ { mark { /custom (data) throw-with } coroutine-launch coroutine-await } try
+/custom eq
+    (await: throw-with name rethrown) rt-ok clear
+
+% Peer kill rethrown as /killed
+[ { mark { 100 coroutine-sleep } coroutine-launch dup coroutine-kill coroutine-await } try
+/killed eq
+    (await: kill rethrown as /killed) rt-ok clear
+
+% try-catch handler dict dispatches on rethrown name
+[ <<
+    /div-by-zero { (sentinel-DBZ) eq pop true }
+    /default { pop false }
+>>
+{ mark { 1 0 div } coroutine-launch coroutine-await
+  pop true } try-catch
+% predicate "true" was pushed by handler/branch -> just check
+    (await: handler dict matches /div-by-zero) rt-ok clear
+
+% try-catch dispatches on user name
+[ <<
+    /my-key { (sentinel-my-key) eq pop true }
+    /default { pop false }
+>>
+{ mark { /my-key throw } coroutine-launch coroutine-await
+  pop true } try-catch
+    (await: handler dict matches user name) rt-ok clear
+
+% Graceful coroutine-die pushes null (not rethrown)
+[ { coroutine-die } coroutine-launch coroutine-await
+null eq
+    (await: coroutine-die pushes null) rt-ok clear
+
+% Blocking await: target sleeps then returns
+[ { 0 coroutine-sleep 0 coroutine-sleep 99 } coroutine-launch coroutine-await
+99 eq
+    (await: blocking await of computation) rt-ok clear
+
+% await self -> /invalid-exit
+{ coroutine-self coroutine-await } try
+/invalid-exit eq
+    (await: cannot await self) rt-ok clear
+
+% await on non-coroutine -> /type-check
+{ 42 coroutine-await } try
+/type-check eq
+    (await: type-check on integer) rt-ok clear
+
+% capture_joined_exit_reason fires on await too -- last-error reflects rethrown name
+% (after the try-caught rethrow, the running coroutine's cache holds the err name).
+[ { /capt-test throw } coroutine-launch
+{ dup coroutine-await } try pop
+% try caught the rethrown /capt-test; the cache should reflect the captured reason.
+% (The cache is per-coroutine; main is the running coroutine here.)
+coroutine-last-error /capt-test eq
+    (await: capture_joined_exit_reason fires on rethrow path) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_coroutine: ALL TESTS PASSED) =
+(__test_ok__) =

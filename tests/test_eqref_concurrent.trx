@@ -1,0 +1,458 @@
+% ====================================================================
+% test_eqref_concurrent.trx -- per-coroutine binding cache isolation
+% ====================================================================
+% Regression suite for the per-coroutine name-binding cache (commit
+% c97d34a).  The cache used to live on the Name object itself
+% (Name::m_binding), so two coroutines that `def`'d the same name
+% stomped each other's binding across yields -- silent, uncatchable.
+% These tests drive the exact scenarios the bug manifested in, with
+% the fix verified by expecting each coroutine to see its OWN value.
+%
+% Every section uses `8 dict begin ... end` so each actor has a local
+% dict for its `def`s (without it, def writes to the shared userdict,
+% which would be a sharing collision independent of the cache bug).
+% Results come back via each actor's op-stack top, which coroutine-join
+% surfaces on main's stack.
+
+(=== eqref concurrent tests ===) =
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Two actors, same name, different values
+% ====================================================================
+% A defs /x = 5, B defs /x = 42.  After each yields and the other
+% runs, each actor must still see its own /x.
+
+mark {
+    8 dict begin
+    /x 5 def
+    0 coroutine-sleep
+    0 coroutine-sleep
+    x
+    end
+} actor-spawn /a-actor exch def
+
+mark {
+    8 dict begin
+    /x 42 def
+    0 coroutine-sleep
+    0 coroutine-sleep
+    x
+    end
+} actor-spawn /b-actor exch def
+
+a-actor coroutine-join
+    (sec1: actor A joined cleanly) rt-ok
+5 eq
+    (sec1: actor A sees own /x=5 after B's def) rt-ok clear
+b-actor coroutine-join
+    (sec1: actor B joined cleanly) rt-ok
+42 eq
+    (sec1: actor B sees own /x=42 after A's def) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Three-actor worker pool incrementing shared name
+% ====================================================================
+% All three workers def /counter in their own scope and increment it
+% across multiple yields.  Each must report its own tally, not mixed.
+
+mark {
+    8 dict begin
+    /counter 0 def
+    0 1 9 { pop counter 1 add /counter exch def 0 coroutine-sleep } for
+    counter
+    end
+} actor-spawn /w1 exch def
+
+mark {
+    8 dict begin
+    /counter 0 def
+    0 1 9 { pop counter 10 add /counter exch def 0 coroutine-sleep } for
+    counter
+    end
+} actor-spawn /w2 exch def
+
+mark {
+    8 dict begin
+    /counter 0 def
+    0 1 9 { pop counter 100 add /counter exch def 0 coroutine-sleep } for
+    counter
+    end
+} actor-spawn /w3 exch def
+
+w1 coroutine-join pop 10 eq
+    (sec2: worker 1 counter = 10) rt-ok clear
+w2 coroutine-join pop 100 eq
+    (sec2: worker 2 counter = 100) rt-ok clear
+w3 coroutine-join pop 1000 eq
+    (sec2: worker 3 counter = 1000) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Nested begin/end scopes across yields
+% ====================================================================
+% Inner scope defs /x that shadows outer scope's /x.  Yield.  Inner
+% value must survive the yield.  End the inner scope and the outer
+% /x must reappear.  Each actor does its checks internally and returns
+% a single boolean so main doesn't juggle multi-value op stacks.
+
+mark {
+    8 dict begin
+    /x 100 def
+    8 dict begin
+    /x 200 def
+    0 coroutine-sleep
+    x 200 eq          % inner should be 200 after yield
+    end
+    0 coroutine-sleep
+    x 100 eq          % outer should reappear after inner end + yield
+    and
+    end
+} actor-spawn /nested exch def
+
+mark {
+    8 dict begin
+    /x 999 def
+    0 coroutine-sleep
+    0 coroutine-sleep
+    x 999 eq
+    end
+} actor-spawn /peer exch def
+
+nested coroutine-join pop
+    (sec3: nested inner+outer both correct across yields) rt-ok clear
+peer coroutine-join pop
+    (sec3: peer actor unaffected by nested's dict churn) rt-ok clear
+
+% ====================================================================
+% SECTION 4: save/restore mutating a bound name across a yield
+% ====================================================================
+% Inside an actor: bind /x = 10 pre-save, save, rebind /x = 20 post-
+% save, yield, read /x (expect 20), restore, yield, read /x (expect
+% 10 -- the save journal rolled the binding back AND the cache
+% correctly dropped the post-save entry).  Actor checks internally
+% and returns a single boolean.
+
+mark {
+    8 dict begin
+    /x 10 def
+    x 10 eq                  % pre-save check
+    /sv save def
+    /x 20 def
+    0 coroutine-sleep
+    x 20 eq                  % post-save check
+    sv restore
+    0 coroutine-sleep
+    x 10 eq                  % post-restore check
+    and and
+    end
+} actor-spawn /sr-actor exch def
+
+sr-actor coroutine-join pop
+    (sec4: save/restore of /x across yields matches all 3 expected values) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Coroutine death reclamation (cache pool vs unbounded leak)
+% ====================================================================
+% Spawn 50 actors, each does a def that populates its binding cache,
+% then dies.  A working binding_table_free_all puts the bucket array
+% (64 bytes) and the BindingEntry (16 bytes) back into the process-
+% wide free lists on death, so cycle N re-uses cycle N-1's blocks.
+%
+% If reclamation were broken, each cycle would add 64 + 16 = 80 bytes
+% -- 4000 bytes over 50 cycles, easy to detect.  Baseline actor
+% lifecycle churn (mailbox edge cases, monitor bookkeeping) already
+% grows VM by a small amount per cycle independent of the cache, so
+% we measure the DIFFERENCE: 50 cycles with a def vs 50 cycles with
+% an empty body.  The extra-bytes-attributable-to-the-def should be
+% near zero once pools are saturated.
+
+% Prewarm names used in the measurement harness.
+mark { /leak 1 def } actor-spawn coroutine-join pop pop
+0 0 add 0 eq pop
+0 0 sub 0 eq pop
+
+% 50 empty-body cycles to establish baseline lifecycle churn.
+/base-before //:status:vm-used def
+0 1 49 { pop
+    mark { } actor-spawn coroutine-join pop pop
+} for
+/base-delta //:status:vm-used base-before sub def
+
+% 50 def-body cycles.
+/def-before //:status:vm-used def
+0 1 49 { pop
+    mark { /leak 99 def } actor-spawn coroutine-join pop pop
+} for
+/def-delta //:status:vm-used def-before sub def
+
+% If the cache leaked 80 bytes per cycle we'd see def-delta ~ base +
+% 4000.  Pooling correctly recycles, so the two deltas should be
+% within ~200 bytes of each other.
+def-delta base-delta sub 200 lt
+    (sec5: def-cycles do not leak more than baseline-cycles) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Main's cache is isolated from actor activity
+% ====================================================================
+% Main defs /anchor pre-spawn, spawns an actor that defs /anchor to a
+% different value in its own scope, waits for the actor to die, reads
+% /anchor.  Main must see its original value.
+
+/anchor 7 def
+anchor 7 eq
+    (sec6: main /anchor = 7 pre-spawn) rt-ok clear
+
+mark {
+    8 dict begin
+    /anchor 9999 def
+    0 coroutine-sleep
+    end
+} actor-spawn coroutine-join pop pop
+
+anchor 7 eq
+    (sec6: main /anchor = 7 after actor touched own /anchor) rt-ok clear
+
+% ====================================================================
+% SECTION 7: undef in multi-coroutine mode (binding_remove_all_coroutines)
+% ====================================================================
+% Two actors both cache a userdict-level binding via lookup.  One actor
+% then undefs the name from userdict.  The other actor's cache entry
+% must be invalidated (not return a stale pointer into the nulled
+% DictEntry slot).  This is the ONLY path through binding_remove_all_
+% coroutines and was untested until now.
+%
+% Sequence (deterministic via explicit yields):
+%   1. Main defs /sec7-key in userdict pre-spawn.
+%   2. Actor A reads /sec7-key twice (populates A's cache), yields.
+%   3. Actor B reads /sec7-key (populates B's cache), undefs
+%      /sec7-key from userdict -- must invalidate A's entry too.
+%   4. A wakes, reads /sec7-key -- must get /undefined error.
+%   5. B checks its own final state.
+
+/sec7-key 77 def
+
+mark {
+    8 dict begin
+    sec7-key pop              % populate A's cache
+    sec7-key pop              % confirm cache hit still works
+    0 coroutine-sleep         % let B run its undef
+    0 coroutine-sleep         % extra yield so B fully completes
+    /sec7-key where not       % must now be undefined everywhere
+    end
+} actor-spawn /sec7-a exch def
+
+mark {
+    8 dict begin
+    0 coroutine-sleep         % let A populate its cache first
+    sec7-key pop              % populate B's cache
+    userdict /sec7-key undef  % triggers binding_remove_all_coroutines
+    /sec7-key where not       % B's own cache also cleared
+    end
+} actor-spawn /sec7-b exch def
+
+sec7-a coroutine-join pop
+    (sec7: actor A observes undef via binding_remove_all_coroutines) rt-ok clear
+sec7-b coroutine-join pop
+    (sec7: actor B's own cache cleared by undef) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Dict-pop peer impact (binding_clear_all_coroutines_pointing_into)
+% ====================================================================
+% Exercises the multi-coroutine branch of Dict::clear_name_bindings that
+% fires on `end`, @end-locals, cleardictstack, and coroutine death.  The
+% implementation conservatively scans every live coroutine's binding
+% table -- this stress test drives many begin/def/end cycles in two
+% concurrent actors to make sure the scan remains correct under churn
+% (no crashes, no stale reads, final values as expected).
+
+mark {
+    8 dict begin
+    0 1 29 { pop
+        8 dict begin
+        /cycle-local 100 def
+        cycle-local pop          % populate cache inside inner scope
+        0 coroutine-sleep         % yield mid-scope
+        cycle-local 100 eq        % confirm cache still correct
+        end                       % triggers clear_name_bindings_pointing_into
+        not { /sec8-a-fail exit } if
+    } for
+    true
+    end
+} actor-spawn /sec8-a exch def
+
+mark {
+    8 dict begin
+    0 1 29 { pop
+        8 dict begin
+        /cycle-local 999 def
+        cycle-local pop
+        0 coroutine-sleep
+        cycle-local 999 eq
+        end
+        not { /sec8-b-fail exit } if
+    } for
+    true
+    end
+} actor-spawn /sec8-b exch def
+
+sec8-a coroutine-join pop
+    (sec8: actor A 30 begin/end cycles correct under concurrent churn) rt-ok clear
+sec8-b coroutine-join pop
+    (sec8: actor B 30 begin/end cycles correct under concurrent churn) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Pipeline stages with def (pipe_finalize_stage_context path)
+% ====================================================================
+% Pipeline stages are coroutines, but spawn via pipe_finalize_stage_context
+% rather than coroutine_launch_common.  Both paths funnel through
+% coroutine_count_inc, so the gate transition fires either way -- but the
+% stage code path is distinct and should be exercised directly.  A
+% pipe-map body that defs a name in a local scope and reads it back
+% proves:
+%   a. Stage coroutine's m_binding_table is populated on first lookup
+%   b. Stage's def is isolated to its own coroutine (main's view unaffected)
+%   c. The stage processes every element correctly (no cross-element leakage)
+
+/sec9-main-canary 11 def
+
+[1 2 3 4 5] { 8 dict begin /sec9-main-canary 999 def sec9-main-canary 10 mul end } pipe-map 4 pipe-collect
+/sec9-out exch def
+
+sec9-out length 5 eq
+    (sec9: pipe-map stage processed all 5 elements) rt-ok clear
+sec9-out 0 get 9990 eq
+    (sec9: stage saw its own /sec9-main-canary=999) rt-ok clear
+sec9-out 4 get 9990 eq
+    (sec9: final element also saw stage-local 999) rt-ok clear
+sec9-main-canary 11 eq
+    (sec9: main /sec9-main-canary unchanged after pipeline) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Supervisor children with def
+% ====================================================================
+% Supervised children spawn via supervisor's synchronous-spawn path
+% (phase 0 of this series).  Verify a supervised actor's def is local
+% and its cache resolves correctly.
+
+/sec10-result null def
+
+<<
+    /strategy /one-for-one  /intensity 3  /period 30000
+    /children [
+        << /id /worker  /start {
+            8 dict begin
+            /w-local 314 def
+            w-local pop                            % populate cache
+            userdict /sec10-result w-local put     % write result into main's userdict
+            actor-recv pop                         % block so we can observe
+            end
+        }  /restart /transient >>
+    ]
+>> supervisor /sec10-sup exch def
+
+% Let the supervisor spawn its child and the child run to actor-recv.
+% Supervised children spawn and initialize over several scheduler turns,
+% so yield generously before sampling the result.
+0 1 49 { pop 0 coroutine-sleep } for
+
+sec10-result 314 eq
+    (sec10: supervised child def/cache resolves correctly) rt-ok clear
+
+sec10-sup coroutine-kill
+0 coroutine-sleep 0 coroutine-sleep clear
+
+% ====================================================================
+% SECTION 11: Gate oscillation 0->1->0->1->0 (cache transition stress)
+% ====================================================================
+% Repeat spawn/join rounds with main reading /sec11-x each zero phase.
+% Every round triggers:
+%   on_first_spawn_transition (0->1): flush all Name::m_binding
+%   on_last_death_transition (1->0): drop main's m_binding_table
+% Main's /sec11-x lookup must resolve correctly in every zero phase:
+%   - First zero read: cache miss, dict walk, populate Name::m_binding
+%   - Zero reads after oscillation: Name::m_binding was flushed by the
+%     previous 0->1 transition, so cache miss again, walks dict stack.
+% Value must be 99 on every single read.
+
+/sec11-x 99 def
+/sec11-round-count 0 def
+/sec11-all-correct true def
+
+0 1 9 { pop
+    sec11-x 99 eq not { /sec11-all-correct false def } if
+    /sec11-round-count sec11-round-count 1 add def
+    mark { 8 dict begin /throwaway 1 def end } actor-spawn coroutine-join pop pop
+    sec11-x 99 eq not { /sec11-all-correct false def } if
+} for
+
+sec11-round-count 10 eq
+    (sec11: completed 10 oscillation rounds) rt-ok clear
+sec11-all-correct
+    (sec11: main /sec11-x=99 across all zero phases of oscillation) rt-ok clear
+
+% ====================================================================
+% SECTION 12: Chain collision stress (dense table forces chain walks)
+% ====================================================================
+% 16-bucket table.  An actor defs N distinct names where N > 16 forces
+% multiple collisions per bucket, exercising binding_table_lookup's
+% chain walk (pre-stress tests had at most 1-deep chains).  Read every
+% name back and verify the cached value.
+
+mark {
+    128 dict begin
+    % 64 distinct names -- by pigeonhole, avg chain length = 4,
+    % with realistic mix32 distribution max chain length ~6-8.
+    /n0   0 def  /n1   1 def  /n2   2 def  /n3   3 def
+    /n4   4 def  /n5   5 def  /n6   6 def  /n7   7 def
+    /n8   8 def  /n9   9 def  /n10 10 def  /n11 11 def
+    /n12 12 def  /n13 13 def  /n14 14 def  /n15 15 def
+    /n16 16 def  /n17 17 def  /n18 18 def  /n19 19 def
+    /n20 20 def  /n21 21 def  /n22 22 def  /n23 23 def
+    /n24 24 def  /n25 25 def  /n26 26 def  /n27 27 def
+    /n28 28 def  /n29 29 def  /n30 30 def  /n31 31 def
+    /n32 32 def  /n33 33 def  /n34 34 def  /n35 35 def
+    /n36 36 def  /n37 37 def  /n38 38 def  /n39 39 def
+    /n40 40 def  /n41 41 def  /n42 42 def  /n43 43 def
+    /n44 44 def  /n45 45 def  /n46 46 def  /n47 47 def
+    /n48 48 def  /n49 49 def  /n50 50 def  /n51 51 def
+    /n52 52 def  /n53 53 def  /n54 54 def  /n55 55 def
+    /n56 56 def  /n57 57 def  /n58 58 def  /n59 59 def
+    /n60 60 def  /n61 61 def  /n62 62 def  /n63 63 def
+
+    % Every read must hit the cache; yield once mid-stream so the
+    % reads exercise cached lookups (first reads populate, second
+    % batch hits cached entries across a yield).
+    n0 0 eq   n15 15 eq and   n31 31 eq and   n47 47 eq and   n63 63 eq and
+    0 coroutine-sleep
+    n0 0 eq   and
+    n7 7 eq   and    n16 16 eq and    n25 25 eq and    n38 38 eq and
+    n49 49 eq and    n58 58 eq and    n60 60 eq and    n63 63 eq and
+    end
+} actor-spawn /sec12-actor exch def
+
+% Spawn a peer so we're genuinely in multi-coroutine mode during the reads.
+mark {
+    8 dict begin
+    /peer-marker 1 def
+    0 coroutine-sleep
+    peer-marker 1 eq
+    end
+} actor-spawn /sec12-peer exch def
+
+sec12-actor coroutine-join pop
+    (sec12: 64-name chain walk resolves all reads correctly) rt-ok clear
+sec12-peer coroutine-join pop
+    (sec12: peer unaffected by dense-chain actor) rt-ok clear
+
+(eqref concurrent tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

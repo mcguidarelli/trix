@@ -1,0 +1,40 @@
+Test: backtrace_basic
+Feature: @call marker / format_backtrace()
+
+Run
+---
+  cd /home/parallels/cps
+  ./ps tests/backtrace_basic.ps
+
+Input
+-----
+None (script is self-contained).
+
+Expected stdout
+---------------
+(empty)
+
+Expected stderr
+---------------
+  #0: --div--
+  #1: bar at tests/backtrace_basic.ps:8:4
+  #2: foo at tests/backtrace_basic.ps:8:4
+      at tests/backtrace_basic.ps:8:3
+  operands: --integer-- 0 --integer-- 1
+Trix div-by-zero --div--: division by zero
+Trix exiting --interpreter--
+
+Notes
+-----
+- #0 is always the operator that raised the error (div).
+- #1 and #2 are the @call frames from execute_name() for bar and foo.
+- Each frame now shows a SourceLoc (Phase 2): "at file:line:col".
+  Both show line 8 col 4 — bar is called from inside foo's proc body,
+  so m_last_scan_location holds the position of the most recently
+  scanned token (foo on line 8), not bar's position in the proc
+  definition.  Directly-streamed calls are always exact; proc-body
+  calls show the current stream position (known approximation).
+- "at tests/backtrace_basic.ps:8:3" is the @run stream context (Phase 1):
+  the live scanner position when the error fired.
+- The operand snapshot (Phase 1) shows the two div operands with types.
+- "Trix exiting --interpreter--" comes from default-handler calling quit.

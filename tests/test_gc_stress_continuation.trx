@@ -1,0 +1,76 @@
+% ====================================================================
+% test_gc_stress_continuation.trx -- deterministic GC-UAF guard for the
+% delimited-continuation + algebraic-effect families: a continuation built
+% inside ${...} captures GLOBAL refs (a captured body, or the effect
+% handler-dict that perform lifts off the err stack into the ctx).  The
+% ContinuationContext is a LOCAL vm_alloc block, so the GC reaches those
+% global refs ONLY by descending into it from the Continuation Object on a
+% root stack.  Pre-fix gc_mark_object had no Continuation descent (the type
+% fell through the local-VM walk's needs_walk gate), so a stress GC swept the
+% captured handler-dict / body while the continuation was still resumable;
+% the resumed handler then read a freed (poisoned) block -- UBSan misaligned
+% DictEntry / boolean_value assertion.  Fix: gc_mark_object descends into a
+% ContinuationContext via gc_walk_continuation (ops_continuation.inl), marking
+% its exec/err/dict/op Object segments.
+% ====================================================================
+% Debug-only (needs vm-gc-stress / vm-gc-poison).  Run via
+% tests/run_gc_stress_tests.sh; run_all.sh skips test_gc_stress_*.
+%
+% Non-vacuity: every assert below builds the captured segment (body and/or
+% handler-dict) inside ${...} so it lands in GLOBAL VM -- the swept region.
+% Each case CRASHES on the pre-fix binary and yields the exact value here on
+% the post-fix binary.  Long (Nl) / Int128 (Nq) payloads arm the clones; a
+% local-built handler-dict (control case) is never global-swept and isolates
+% the region dependence.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+true vm-gc-stress
+true vm-gc-poison
+
+% ====================================================================
+% DELIMITED CONTINUATIONS -- capture / abort-exec with a GLOBAL body
+% ====================================================================
+% Splice: handler resumes K; captured body `5l add` was built global.
+${ 10l { { 99l exch exec } capture 5l add } delimit add } 114l eq (capture splice Long global) rt-ok clear
+${ 10q { { 99q exch exec } capture 5q add } delimit add } 114q eq (capture splice Int128 global) rt-ok clear
+% Abort: resume value + trimmed splice, captured body global.
+${ 10l { { 99l exch abort-exec } capture 5l add } delimit add } 114l eq (abort-exec Long global) rt-ok clear
+${ 10q { { 99q exch abort-exec } capture 5q add } delimit add } 114q eq (abort-exec Int128 global) rt-ok clear
+% Handler discards K (no resume): body never runs, returns a global Long.
+${ { { pop 42l } capture 10l add } delimit } 42l eq (capture drop-K Long global) rt-ok clear
+
+% ====================================================================
+% ALGEBRAIC EFFECTS -- perform lifts the handler-dict into the ctx
+% ====================================================================
+% Single perform, GLOBAL handler-dict (the original repro).
+${ << /get-num { 100l exch exec } >> { /get-num perform 5l add } handle-effect } 105l eq (effect resume Long global) rt-ok clear
+${ << /get-num { 100q exch exec } >> { /get-num perform 5q add } handle-effect } 105q eq (effect resume Int128 global) rt-ok clear
+% Deep handler: two performs find the same global dict after resume.
+${ << /inc { 1l exch exec } /dec { 2l exch exec } >> { /inc perform /dec perform add } handle-effect } 3l eq (deep two-perform Long global) rt-ok clear
+${ << /inc { 1q exch exec } /dec { 2q exch exec } >> { /inc perform /dec perform add } handle-effect } 3q eq (deep two-perform Int128 global) rt-ok clear
+% Nested handlers, both GLOBAL dicts; inner delegates unknown effect to outer.
+${ << /a { 100l exch exec } >> { << /b { 200l exch exec } >> { /a perform /b perform add } handle-effect } handle-effect } 300l eq (nested delegate Long global) rt-ok clear
+% Effect resume followed by MORE global allocation (forces GC after resume
+% while the deep-handler scope is reinstated in the ctx-restored err stack).
+${ << /g { 50l exch exec } >> { /g perform [ 1l 2l 3l 4l 5l ] 0l { add } reduce add } handle-effect } 65l eq (effect then global-array reduce global) rt-ok clear
+
+% ---- CONTROL: handler-dict built OUTSIDE ${} (local) is never global-swept;
+% isolates the region dependence (passes pre- and post-fix). ----
+<< /get-num { 100l exch exec } >> /local-h exch def
+local-h { /get-num perform 5l add } handle-effect 105l eq (effect resume Long local-dict control) rt-ok clear
+
+false vm-gc-poison
+false vm-gc-stress
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_gc_stress_continuation: ALL TESTS PASSED) =
+(__test_ok__) =

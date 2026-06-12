@@ -1,0 +1,7 @@
+% vm-starve.trx -- leak heap at save level 0 until the VM is exhausted.
+% At exhaustion the global handler cannot allocate its stack-preservation
+% arrays either, so it takes the 'insufficient VM for vm-full handler'
+% short-circuit.  That abnormal exit must carry +Error::VMFull (45) as
+% the process exit code, not 0 (ENGINE BUG #9); run_cli_tests.sh pins it.
+{ 4096 string pop } loop
+(unreachable) =

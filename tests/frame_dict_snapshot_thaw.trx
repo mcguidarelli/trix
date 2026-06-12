@@ -1,0 +1,4 @@
+% frame_dict_snapshot_thaw.trx -- phase 2: thaw the frame-dict snapshot.
+% Run test_frame_dict_snapshot.trx first to produce
+% tests/frame_dict_snapshot.img.
+(tests/frame_dict_snapshot.img) thaw

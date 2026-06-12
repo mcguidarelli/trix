@@ -1,0 +1,1734 @@
+% examples/chip8.trx -- CHIP-8 + Super-CHIP emulator (Phase 1).
+%
+% A CHIP-8 emulator that runs real public-domain ROMs from the late
+% 1970s.  Phase 1 establishes the static parts: 4KB byte-string memory,
+% the standard low-res + Super-CHIP hi-res font sprites, a ROM loader
+% that drops bytes at 0x200, and a disassembler that pretty-prints the
+% instruction stream.  Later phases add the CPU step, timers, renderer,
+% and keyboard.
+%
+% Run:
+%   ./trix examples/chip8.trx <rom-path>          % play a ROM (raw-mode tty)
+%   ./trix examples/chip8.trx --disasm <rom-path> % disassemble a ROM (no tty)
+%   ./trix examples/chip8.trx --self-test         % run in-source assertions
+%   ./trix examples/chip8.trx --help
+
+clear
+
+% --- Memory + font sprites ----------------------------------------------------
+%
+% CHIP-8 has 4KB of byte-addressable RAM at 0x000-0xFFF.  Programs load
+% at 0x200 (the bottom 512 bytes were reserved for the original COSMAC
+% VIP interpreter; modern emulators use that region for the built-in
+% font sprites).
+%
+%   0x000..0x04F   low-res font sprites    (16 chars * 5 bytes  = 80 bytes)
+%   0x050..0x0EF   hi-res font sprites     (16 chars * 10 bytes = 160 bytes)
+%   0x200..0xFFF   ROM + program working memory
+%
+% The hi-res font is a Super-CHIP extension; FX30 maps Vx (0..F) to
+% the 10-byte sprite at 0x050 + Vx*10.  Font glyph data below is the
+% canonical set used by Octo and most modern CHIP-8/SCHIP emulators.
+
+% Low-res 4x5 font: digits 0-F.  Each row is one byte, top-to-bottom.
+% Rows in order: 0 1 2 3 4 5 6 7 8 9 A B C D E F.
+/font-lo <
+    F0909090F0
+    2060202070
+    F010F080F0
+    F010F010F0
+    9090F01010
+    F080F010F0
+    F080F090F0
+    F010204040
+    F090F090F0
+    F090F010F0
+    F090F09090
+    E090E090E0
+    F0808080F0
+    E0909090E0
+    F080F080F0
+    F080F08080
+> def
+
+% Hi-res 8x10 font: digits 0-F, 10 bytes each.  Octo-compatible glyphs.
+% Rows in order: 0 1 2 3 4 5 6 7 8 9 A B C D E F.
+/font-hi <
+    3C7EC3C3C3C3C3C37E3C
+    1838581818181818183C
+    3E7FC3060C1830607F7F
+    3C7EC3030E0E03C37E3C
+    060E1E3666C6FFFF0606
+    FFFFC0C0FCFE03C37E3C
+    3E7CC0C0FCFEC3C37E3C
+    FFFF030608182030607E
+    3C7EC3C37E7EC3C37E3C
+    3C7EC3C37F3F03033E7C
+    7EFFC3C3C3FFFFC3C3C3
+    FCFEC3C3FCFCC3C3FEFC
+    3E7FC3C0C0C0C0C37F3E
+    FCFEC3C3C3C3C3C3FEFC
+    FFFFC0C0FCFCC0C0FFFF
+    FFFFC0C0FCFCC0C0C0C0
+> def
+
+% --- VM state ----------------------------------------------------------------
+
+/memory 4096 string def
+memory 0     font-lo put-interval
+memory 16#50 font-hi put-interval
+
+/rom-end 16#200 def         % one past last loaded ROM byte; loader updates this
+
+% --- ROM loader --------------------------------------------------------------
+%
+% load-rom path -- bytes-loaded
+%
+% Reads file at `path` as a byte stream and copies into memory at 0x200.
+% Returns the number of bytes loaded (also stored in /rom-end as 0x200+N).
+% Raises /limit-check if the ROM would exceed available memory
+% (max 0xFFF - 0x200 + 1 = 3584 bytes).
+
+/load-rom {|path|#+3
+    /strm path (r)#b stream local-def
+    /raw strm read-all local-def       % whole file as a Trix string
+    strm close-stream
+    /n raw length local-def
+    n 16#FFF 16#200 sub 1 add gt {
+        /limit-check (load-rom: ROM size {0} bytes exceeds max {1}) {
+            n  16#FFF 16#200 sub 1 add
+        } throw-with
+    } if
+    memory 16#200 raw put-interval
+    /rom-end 16#200 n add store
+    n
+} def
+
+% --- Disassembler ------------------------------------------------------------
+%
+% CHIP-8 instructions are 2 bytes, big-endian.  Disassembly format:
+%
+%   ADDR: HHLL  MNEMONIC OPERANDS
+%
+% e.g.
+%
+%   0200: 00E0  CLS
+%   0202: A22A  LD I, 22A
+%   0204: 600C  LD V0, 0C
+%
+% The full opcode table is below; SCHIP additions are marked.
+
+% read-word addr -- word
+% Read a big-endian 16-bit word from memory at addr.  Result is a
+% UInteger so shift-right / shift-left work on it directly.
+/read-word {|addr|
+    memory addr     get /uinteger-type cast 8 shift-left
+    memory addr 1 add get /uinteger-type cast
+    or
+} def
+
+% Format helpers.  print-fmt with mark + args; "" prefix on ratio strings.
+%
+% fmt-hex3 word -- str   % "00C" / "22A"
+% fmt-hex2 byte -- str   % "F0"
+
+% These return a fresh string each call.  =string would share a single
+% temp-pool slot across the whole interpreter, and any subsequent =string
+% (including from a sibling helper) would invalidate the result.  Since
+% disasm-instr's outer sprint-fmt also wants =string as its dst, using
+% =string here would race with that dst.  Pay the small alloc cost.
+/fmt-hex3 {|n|
+    16 string ({0:03X}) mark n sprint-fmt pop
+} def
+
+/fmt-hex2 {|n|
+    16 string ({0:02X}) mark n sprint-fmt pop
+} def
+
+/fmt-hex4 {|n|
+    16 string ({0:04X}) mark n sprint-fmt pop
+} def
+
+% disasm-instr opcode -- str
+%
+% Decode a single 16-bit opcode into its mnemonic.  Returns a freshly
+% allocated string; caller is responsible for printing or storing.
+% Unknown opcodes return "??? <hex>" so disassembly never fails.
+
+% Module-level dispatch dicts.  case looks each up in O(1) and execs the
+% body in the caller's frame, so locals (op, x, y, n, nn, nnn, op-hex)
+% inside the bodies resolve fine.
+
+/disasm-0xxx <<                                               % zero high-nibble: SCHIP control + SYS
+    16#00E0 { (CLS) }
+    16#00EE { (RET) }
+    16#00FB { (SCR) }
+    16#00FC { (SCL) }
+    16#00FD { (EXIT) }
+    16#00FE { (LOW) }
+    16#00FF { (HIGH) }
+    /default {
+        op 16#FFF0#u and 16#00C0#u eq {
+            =string (SCD {0:X}) mark n sprint-fmt pop
+        } {
+            =string (SYS {0}) mark nnn fmt-hex3 sprint-fmt pop
+        } if-else
+    }
+>> def
+
+/disasm-8xyN <<                                                % 8XY*: ALU ops
+    0  { =string (LD V{0:X}, V{1:X})   mark x y sprint-fmt pop }
+    1  { =string (OR V{0:X}, V{1:X})   mark x y sprint-fmt pop }
+    2  { =string (AND V{0:X}, V{1:X})  mark x y sprint-fmt pop }
+    3  { =string (XOR V{0:X}, V{1:X})  mark x y sprint-fmt pop }
+    4  { =string (ADD V{0:X}, V{1:X})  mark x y sprint-fmt pop }
+    5  { =string (SUB V{0:X}, V{1:X})  mark x y sprint-fmt pop }
+    6  { =string (SHR V{0:X}, V{1:X})  mark x y sprint-fmt pop }
+    7  { =string (SUBN V{0:X}, V{1:X}) mark x y sprint-fmt pop }
+    14 { =string (SHL V{0:X}, V{1:X})  mark x y sprint-fmt pop }
+    /default { =string (??? {0}) mark op-hex sprint-fmt pop }
+>> def
+
+/disasm-EXNN <<                                                % EX**: keyboard skip
+    16#9E { =string (SKP V{0:X})  mark x sprint-fmt pop }
+    16#A1 { =string (SKNP V{0:X}) mark x sprint-fmt pop }
+    /default { =string (??? {0}) mark op-hex sprint-fmt pop }
+>> def
+
+/disasm-FXNN <<                                                % FX**: timer / I / BCD / RPL
+    16#07 { =string (LD V{0:X}, DT)   mark x sprint-fmt pop }
+    16#0A { =string (LD V{0:X}, K)    mark x sprint-fmt pop }
+    16#15 { =string (LD DT, V{0:X})   mark x sprint-fmt pop }
+    16#18 { =string (LD ST, V{0:X})   mark x sprint-fmt pop }
+    16#1E { =string (ADD I, V{0:X})   mark x sprint-fmt pop }
+    16#29 { =string (LD F, V{0:X})    mark x sprint-fmt pop }
+    16#30 { =string (LD HF, V{0:X})   mark x sprint-fmt pop }       % SCHIP hi-res font
+    16#33 { =string (LD B, V{0:X})    mark x sprint-fmt pop }
+    16#55 { =string (LD [I], V{0:X})  mark x sprint-fmt pop }
+    16#65 { =string (LD V{0:X}, [I])  mark x sprint-fmt pop }
+    16#75 { =string (LD R, V{0:X})    mark x sprint-fmt pop }       % SCHIP RPL flags
+    16#85 { =string (LD V{0:X}, R)    mark x sprint-fmt pop }       % SCHIP RPL flags
+    /default { =string (??? {0}) mark op-hex sprint-fmt pop }
+>> def
+
+/disasm-by-n0 <<                                               % outer: high nibble
+    0  { disasm-0xxx op /integer-type cast case }
+    1  { =string (JP {0})          mark nnn fmt-hex3 sprint-fmt pop }
+    2  { =string (CALL {0})        mark nnn fmt-hex3 sprint-fmt pop }
+    3  { =string (SE V{0:X}, {1})  mark x nn fmt-hex2 sprint-fmt pop }
+    4  { =string (SNE V{0:X}, {1}) mark x nn fmt-hex2 sprint-fmt pop }
+    5  {
+        n 0 eq { =string (SE V{0:X}, V{1:X}) mark x y sprint-fmt pop }
+                { =string (??? {0})           mark op-hex sprint-fmt pop } if-else
+    }
+    6  { =string (LD V{0:X}, {1})  mark x nn fmt-hex2 sprint-fmt pop }
+    7  { =string (ADD V{0:X}, {1}) mark x nn fmt-hex2 sprint-fmt pop }
+    8  { disasm-8xyN n case }
+    9  {
+        n 0 eq { =string (SNE V{0:X}, V{1:X}) mark x y sprint-fmt pop }
+                { =string (??? {0})            mark op-hex sprint-fmt pop } if-else
+    }
+    10 { =string (LD I, {0})       mark nnn fmt-hex3 sprint-fmt pop }
+    11 { =string (JP V0, {0})      mark nnn fmt-hex3 sprint-fmt pop }
+    12 { =string (RND V{0:X}, {1}) mark x nn fmt-hex2 sprint-fmt pop }
+    13 {
+        n 0 eq { =string (DRW V{0:X}, V{1:X}, 0 (16x16)) mark x y sprint-fmt pop }
+                { =string (DRW V{0:X}, V{1:X}, {2:X})    mark x y n sprint-fmt pop } if-else
+    }
+    14 { disasm-EXNN nn case }
+    15 { disasm-FXNN nn case }
+>> def
+
+/disasm-instr {|op|#+7
+    /op op /uinteger-type cast local-def         % shifts require UInteger
+    /n0 op 12 shift-right 16#F#u and /integer-type cast local-def    % high nibble
+    /x  op 8  shift-right 16#F#u and /integer-type cast local-def
+    /y  op 4  shift-right 16#F#u and /integer-type cast local-def
+    /n  op                16#F#u and /integer-type cast local-def
+    /nn op                16#FF#u and /integer-type cast local-def
+    /nnn op               16#FFF#u and /integer-type cast local-def
+    /op-hex op fmt-hex4 local-def
+    disasm-by-n0 n0 case
+} def
+
+% disasm-rom --
+% Walk memory from 0x200 to rom-end and print disassembly.  Each line:
+%   ADDR: HHLL  MNEMONIC OPERANDS
+% Two bytes per instruction, big-endian.  Caveat: ROMs intermix code
+% and data, so stretches of "??? XXXX" past a JP/RET are normal.
+
+/disasm-rom { ||#3
+    /addr 16#200 local-def
+    % Walk in 2-byte pairs, only while there are at least 2 bytes left.
+    { addr rom-end 1 sub lt } {
+        /word addr read-word local-def
+        ({0}: {1}  {2}\n)
+            mark addr fmt-hex3 word fmt-hex4 word disasm-instr
+            print-fmt pop pop
+        /addr addr 2 add store
+    } while
+    % Trailing odd byte (rom-end - 0x200 was odd-length).  Emit a .byte
+    % directive so the assembler can round-trip it as a single byte
+    % instead of misreading past-EOF as a two-byte opcode.
+    addr rom-end lt {
+        /b memory addr get local-def
+        ({0}: {1}    .byte {1}\n)
+            mark addr fmt-hex3 b fmt-hex2
+            print-fmt pop pop
+    } if
+} def
+
+% --- Phase 2: CPU state + step ----------------------------------------------
+%
+% Per the canonical CHIP-8 spec:
+%   16 8-bit V registers (V0..VF; VF doubles as carry/borrow/collision flag)
+%   16-bit I register (memory address)
+%   16-bit PC (program counter)
+%   8-bit DT (delay timer; decrements at 60Hz)
+%   8-bit ST (sound timer; decrements at 60Hz, beeps while > 0)
+%   16-level call stack (SP + 16 saved PCs)
+%   Framebuffer: 64x32 monochrome (lo-res) or 128x64 (Super-CHIP hi-res)
+%   16-key keypad (bitmap: bit n = key n down)
+%   8 RPL flag bytes (Super-CHIP persistent storage; FX75 / FX85)
+%
+% The framebuffer is a flat byte string with one byte per pixel (0 = off,
+% 1 = on).  Lo-res mode uses bytes [0 .. 64*32-1] with row stride 64;
+% hi-res mode uses bytes [0 .. 128*64-1] with row stride 128.  Storing the
+% byte-per-pixel form costs ~5x bit-packed but makes DRW collision and
+% per-pixel writes trivial; Phase 4 (renderer) will pack to half-blocks
+% on output.
+
+/V       16  string def       % V0..VF (read as Byte via get)
+/I-reg   0   def              % 16-bit, stored as Integer (0..0xFFF)
+/PC      16#200 def
+/DT      0    def             % stored as Integer (0..255)
+/ST      0    def
+/c8-stack   16 array def         % 16 saved PCs
+/SP      0  def               % index of next free slot; pushes write stack[SP] then SP++
+/FB      8192 string def      % 128*64 byte-per-pixel buffer
+/FB-cols 64 def
+/FB-rows 32 def
+/mode    /lo def
+/key-bits    0u def               % 16-bit bitmap; bit k set if key k currently down
+/RPL     8 string def         % Super-CHIP persistent flags
+/halted  false def            % set true by 00FD (EXIT) or by an unknown opcode
+
+% cpu-reset --
+% Wipe all CPU state to the post-power-on defaults.  Memory keeps the
+% font sprites and any loaded ROM (caller controls those via load-rom).
+/cpu-reset {
+    /V    16 string store
+    /I-reg 0  store
+    /PC   16#200 store
+    /DT   0   store
+    /ST   0   store
+    /SP   0   store
+    /c8-stack 16 array store
+    /FB   8192 string store
+    /FB-cols 64 store
+    /FB-rows 32 store
+    /mode  /lo store
+    /key-bits  0u  store
+    /RPL   8 string store
+    /halted false store
+} def
+
+% --- Helpers ----------------------------------------------------------------
+
+% v-get x -- byte
+% Read V[x].  x is a nibble (0..15).
+/v-get {|x| V x get } def
+
+% v-set x byte --
+% Write V[x].  Caller must pass a Byte (use #b suffix or to-byte).
+/v-set {|x b| V x b put } def
+
+% v-set-int x int --
+% Write V[x] from an Integer, masking to 8 bits and converting to Byte.
+% Most arithmetic ops produce Integer; this does the narrow-to-byte step.
+/v-set-int {|x v| V x v /uinteger-type cast 16#FF#u and /byte-type cast put } def
+
+% push-pc pc --
+% Push pc onto the call stack.  Raises /stack-overflow if the 16-slot
+% stack is full.
+/push-pc {|pc|
+    SP 16 ge { /opstack-overflow (chip8: call stack overflow at PC={0:03X}) mark PC throw-with } if
+    c8-stack SP pc put
+    /SP SP 1 add store
+} def
+
+% pop-pc -- pc
+% Pop the saved PC off the call stack.
+/pop-pc {
+    SP 0 le { /opstack-underflow (chip8: RET with empty call stack at PC={0:03X}) mark PC throw-with } if
+    /SP SP 1 sub store
+    c8-stack SP get
+} def
+
+% fetch -- opcode
+% Read 16-bit big-endian word at PC and advance PC by 2.  Result is a
+% UInteger so the disasm/dispatch helpers see consistent shifts.
+/fetch {
+    PC read-word
+    /PC PC 2 add store
+} def
+
+% fb-clear --
+% Wipe the framebuffer to all zeros.  Used by CLS and on resolution change.
+% Sets /display-dirty so the renderer repaints.
+/fb-clear { /FB 8192 string store /display-dirty true store } def
+
+% fb-get x y -- byte
+% Read pixel at (x, y).  x and y must already be wrapped to the active
+% resolution by the caller.
+/fb-get {|x y| FB y FB-cols mul x add get } def
+
+% fb-set x y byte --
+% Write pixel at (x, y).  Caller wraps coordinates and passes a Byte.
+/fb-set {|x y b| FB y FB-cols mul x add b put } def
+
+% fb-xor x y bit -- collision-bit
+% XOR a 1-bit value into pixel (x, y) and return 1 if the pixel went from
+% on to off (collision), else 0.  Coordinates wrap at framebuffer bounds
+% (CHIP-8 standard behavior; per Cowgod the 1977 spec wraps but most modern
+% interpreters clip; wrap matches more ROMs in practice).
+/fb-xor {|x y bit|#+3
+    /xw x FB-cols mod local-def
+    /yw y FB-rows mod local-def
+    /old xw yw fb-get local-def
+    xw yw old bit /byte-type cast xor /byte-type cast fb-set
+    old 1b eq bit 1 eq and { 1b } { 0b } if-else
+} def
+
+% --- Super-CHIP scroll ops --------------------------------------------------
+%
+% All three allocate a fresh zero-filled 8192-byte buffer, copy the shifted
+% content from FB into it, then rebind /FB to the new buffer.  The fresh
+% allocation avoids the byte-overlap hazard that an in-place shift would
+% have, and the per-pixel byte layout (1 byte = 1 pixel, FB-cols-stride
+% rows) lets the shift become one or two whole-row get-interval/put-interval
+% blits per row -- no per-pixel loop.  Bytes outside the active resolution
+% region (lo-res leaves bytes [2048..8191] unused) stay zero.
+
+% scroll-right-4 --
+% SCHIP SCR (00FB): shift the entire framebuffer right by 4 columns.
+% Vacated leftmost 4 columns become zero; rightmost 4 columns scroll off.
+/scroll-right-4 { ||#3
+    /tmp 8192 string local-def
+    0 1 FB-rows 1 sub {
+        /row exch local-def
+        /base row FB-cols mul local-def
+        tmp base 4 add  FB base FB-cols 4 sub get-interval  put-interval
+    } for
+    /FB tmp store
+    /display-dirty true store
+} def
+
+% scroll-left-4 --
+% SCHIP SCL (00FC): shift the entire framebuffer left by 4 columns.
+% Vacated rightmost 4 columns become zero; leftmost 4 columns scroll off.
+/scroll-left-4 { ||#3
+    /tmp 8192 string local-def
+    0 1 FB-rows 1 sub {
+        /row exch local-def
+        /base row FB-cols mul local-def
+        tmp base  FB base 4 add FB-cols 4 sub get-interval  put-interval
+    } for
+    /FB tmp store
+    /display-dirty true store
+} def
+
+% scroll-down n --
+% SCHIP SCD N (00CN): shift the entire framebuffer down by N rows.
+% Vacated top N rows become zero.  N >= FB-rows acts as CLS.
+/scroll-down {|n|#+1
+    /tmp 8192 string local-def
+    n FB-rows lt {
+        % copy rows [0 .. rows-n-1] from FB into tmp[n .. rows-1]
+        tmp n FB-cols mul
+            FB 0 FB-rows n sub FB-cols mul get-interval
+            put-interval
+    } if
+    /FB tmp store
+    /display-dirty true store
+} def
+
+% --- CPU dispatch tables ----------------------------------------------------
+%
+% Mirrors disasm's structure but each body MUTATES state instead of building
+% a string.  Module-level dicts are scanned once at load time; case lookup
+% on each instruction is O(1).
+
+/exec-0xxx <<
+    16#00E0 { fb-clear }                                   % CLS
+    16#00EE { /PC pop-pc store }                           % RET
+    16#00FB { scroll-right-4 }                             % SCR
+    16#00FC { scroll-left-4 }                              % SCL
+    16#00FD { /halted true store }                         % EXIT
+    16#00FE {                                              % LOW: enter lo-res
+        /mode /lo store
+        /FB-cols 64 store /FB-rows 32 store
+        fb-clear
+        scr null eq not { chip8-resize-screen } if
+    }
+    16#00FF {                                              % HIGH: enter hi-res
+        /mode /hi store
+        /FB-cols 128 store /FB-rows 64 store
+        fb-clear
+        scr null eq not { chip8-resize-screen } if
+    }
+    /default {
+        op 16#FFF0#u and 16#00C0#u eq {
+            n scroll-down                                  % SCD N
+        } {
+            % 0NNN SYS -- ignored on modern interpreters (no-op)
+        } if-else
+    }
+>> def
+
+/exec-8xyN <<
+    0  { x y v-get v-set }                                  % LD Vx, Vy
+    1  { x x v-get y v-get or /byte-type cast v-set }       % OR
+    2  { x x v-get y v-get and /byte-type cast v-set }      % AND
+    3  { x x v-get y v-get xor /byte-type cast v-set }      % XOR
+    4  {                                                    % ADD Vx, Vy (sets VF=carry)
+        /sum x v-get /integer-type cast y v-get /integer-type cast add local-def
+        x sum v-set-int
+        15 sum 16#100 ge { 1b } { 0b } if-else v-set
+    }
+    5  {                                                    % SUB Vx, Vy (VF = NOT borrow)
+        /a x v-get /integer-type cast local-def
+        /b y v-get /integer-type cast local-def
+        x a b sub v-set-int
+        15 a b ge { 1b } { 0b } if-else v-set
+    }
+    6  {                                                    % SHR Vx (VF = LSB pre-shift)
+        /vx x v-get /uinteger-type cast local-def
+        x vx 1 shift-right v-set-int
+        15 vx 1u and 1u eq { 1b } { 0b } if-else v-set
+    }
+    7  {                                                    % SUBN Vx, Vy (Vx = Vy - Vx, VF = NOT borrow)
+        /a x v-get /integer-type cast local-def
+        /b y v-get /integer-type cast local-def
+        x b a sub v-set-int
+        15 b a ge { 1b } { 0b } if-else v-set
+    }
+    14 {                                                    % SHL Vx (VF = MSB pre-shift)
+        /vx x v-get /uinteger-type cast local-def
+        x vx 1 shift-left v-set-int
+        15 vx 16#80#u and 16#80#u eq { 1b } { 0b } if-else v-set
+    }
+    /default { /halted true store }
+>> def
+
+/exec-FXNN <<
+    16#07 { x DT v-set-int }                                  % LD Vx, DT
+    16#0A {                                                   % LD Vx, K (block-on-key)
+        % Re-execute this opcode every step until /keys becomes non-zero.
+        % key-actor (Phase 5) updates /keys from the terminal in raw-mode.
+        key-bits 0u eq { /PC PC 2 sub store } if              % rewind PC, retry next step
+        key-bits 0u ne { x key-bits countr-zero v-set-int } if    % lowest-numbered down key
+    }
+    16#15 { /DT x v-get /integer-type cast store }
+    16#18 {                                                   % LD ST, Vx
+        /old-st ST local-def
+        /ST x v-get /integer-type cast store
+        bell-mode old-st 0 eq and ST 0 gt and { (\x07) print flush } if
+    }
+    16#1E { /I-reg I-reg x v-get /integer-type cast add 16#10000 mod store }
+    16#29 { /I-reg x v-get /integer-type cast 5 mul store }   % LD F, Vx -- lo-res font at 0
+    16#30 { /I-reg x v-get /integer-type cast 10 mul 16#50 add store }  % LD HF, Vx -- hi-res font at 0x50
+    16#33 {                                                   % LD B, Vx -- BCD
+        /vx x v-get /integer-type cast local-def
+        memory I-reg     vx 100 div 10 mod /byte-type cast put
+        memory I-reg 1 add vx 10 div 10 mod /byte-type cast put
+        memory I-reg 2 add vx 10 mod /byte-type cast put
+    }
+    16#55 {                                                   % LD [I], Vx
+        0 1 x { /i exch local-def memory I-reg i add V i get put } for
+    }
+    16#65 {                                                   % LD Vx, [I]
+        0 1 x { /i exch local-def V i memory I-reg i add get put } for
+    }
+    16#75 {                                                   % LD R, Vx (SCHIP RPL store)
+        x 7 gt { /halted true store } {
+            0 1 x { /i exch local-def RPL i V i get put } for
+        } if-else
+    }
+    16#85 {                                                   % LD Vx, R (SCHIP RPL load)
+        x 7 gt { /halted true store } {
+            0 1 x { /i exch local-def V i RPL i get put } for
+        } if-else
+    }
+    /default { /halted true store }
+>> def
+
+/exec-EXNN <<
+    16#9E {                                                   % SKP Vx -- skip if key Vx down
+        key-bits 1u x v-get /integer-type cast shift-left and 0u ne { /PC PC 2 add store } if
+    }
+    16#A1 {                                                   % SKNP Vx -- skip if key Vx not down
+        key-bits 1u x v-get /integer-type cast shift-left and 0u eq { /PC PC 2 add store } if
+    }
+    /default { /halted true store }
+>> def
+
+% draw-sprite x y n -- (sets VF as collision flag)
+% Lo-res 8-wide sprite: n bytes from memory[I..I+n-1].  N=0 in hi-res mode
+% means a 16x16 SCHIP sprite (32 bytes from memory[I..I+31], 2 bytes per row).
+/draw-sprite {|sx sy n|#+12
+    /collision 0b local-def
+    /vx sx v-get /integer-type cast FB-cols mod local-def
+    /vy sy v-get /integer-type cast FB-rows mod local-def
+    n 0 eq mode /hi eq and {
+        % SCHIP DXY0: 16x16 sprite, 2 bytes per row.
+        0 1 15 {
+            /row exch local-def
+            /hi-byte memory I-reg row 2 mul add get /uinteger-type cast local-def
+            /lo-byte memory I-reg row 2 mul add 1 add get /uinteger-type cast local-def
+            0 1 7 {
+                /col exch local-def
+                /bit hi-byte 7 col sub shift-right 1u and /integer-type cast local-def
+                bit 1 eq { vx col add vy row add bit fb-xor /collision exch collision or store } if
+                /bit lo-byte 7 col sub shift-right 1u and /integer-type cast store
+                bit 1 eq { vx col 8 add add vy row add bit fb-xor /collision exch collision or store } if
+            } for
+        } for
+    } {
+        % Lo-res or DXY(N>0) hi-res: 8-wide, n rows.
+        0 1 n 1 sub {
+            /row exch local-def
+            /sprite-byte memory I-reg row add get /uinteger-type cast local-def
+            0 1 7 {
+                /col exch local-def
+                /bit sprite-byte 7 col sub shift-right 1u and /integer-type cast local-def
+                bit 1 eq { vx col add vy row add bit fb-xor /collision exch collision or store } if
+            } for
+        } for
+    } if-else
+    15 collision v-set
+    /display-dirty true store
+} def
+
+/exec-by-n0 <<                                               % outer dispatch on high nibble
+    0  { exec-0xxx op /integer-type cast case }
+    1  { /PC nnn store }                                     % JP nnn
+    2  {                                                     % CALL nnn
+        PC push-pc
+        /PC nnn store
+    }
+    3  { x v-get /integer-type cast nn eq { /PC PC 2 add store } if }    % SE Vx, nn
+    4  { x v-get /integer-type cast nn eq not { /PC PC 2 add store } if } % SNE Vx, nn
+    5  { x v-get y v-get eq n 0 eq and { /PC PC 2 add store } if }       % SE Vx, Vy
+    6  { x nn v-set-int }                                                 % LD Vx, nn
+    7  { x x v-get /integer-type cast nn add v-set-int }                  % ADD Vx, nn
+    8  { exec-8xyN n case }
+    9  { x v-get y v-get eq not n 0 eq and { /PC PC 2 add store } if }   % SNE Vx, Vy
+    10 { /I-reg nnn store }                                               % LD I, nnn
+    11 { /PC nnn V 0 get /integer-type cast add 16#1000 mod store }      % JP V0, nnn
+    12 {                                                                  % RND Vx, nn
+        /r 256u rand-bounded-uinteger local-def
+        x r nn /uinteger-type cast and v-set-int
+    }
+    13 { x y n draw-sprite }                                              % DRW
+    14 { exec-EXNN nn case }
+    15 { exec-FXNN nn case }
+>> def
+
+% cpu-step --
+% Fetch-decode-execute one instruction.  Decoder unpacks fields into the
+% same locals (op, x, y, n, nn, nnn) that disasm-instr's dispatch bodies
+% expect, then dispatches via exec-by-n0.  Sets /halted on EXIT or unknown
+% opcode; caller checks halted to stop the run loop.
+
+/cpu-step { ||#16
+    /op fetch /uinteger-type cast local-def
+    /n0 op 12 shift-right 16#F#u and /integer-type cast local-def
+    /x  op 8  shift-right 16#F#u and /integer-type cast local-def
+    /y  op 4  shift-right 16#F#u and /integer-type cast local-def
+    /n  op                16#F#u and /integer-type cast local-def
+    /nn op                16#FF#u and /integer-type cast local-def
+    /nnn op               16#FFF#u and /integer-type cast local-def
+    exec-by-n0 n0 case
+} def
+
+% cpu-run-until proc --
+% Run cpu-step in a loop until proc returns true (predicate sees current
+% state).  Saves the caller from writing a bare while around step.
+/cpu-run-until {|done?|
+    { halted not done? exec not and } { cpu-step } while
+} def
+
+% --- Native CPU kernel (chip8.cpp host binary) -------------------------------
+%
+% The dedicated ./chip8 binary registers `chip8-step-fast`, a C kernel
+% that executes up to N instructions per call against the SAME state
+% objects (memory / V / FB strings, the call stack, and a packed scalar
+% array).  Rare instructions come back with a defer reason and are
+% executed by the Trix dispatch above, which stays the REFERENCE
+% implementation -- the self-test runs both in lockstep and requires
+% byte-identical machine state.  Selected with --cpu-kernel=native|trix;
+% plain ./trix has no native kernel and always runs the reference.
+%
+% Reason codes from the kernel: 0 = budget done, 1 = defer (next
+% instruction needs the reference path: EXIT, LOW/HIGH mode switch, RPL
+% save/load, unknown opcode, out-of-range access, call-stack edge),
+% 2 = key-wait (FX0A with no key down, PC rewound -- sleep a tick).
+
+/native-cpu-available userdict /chip8-step-fast known? def
+/cpu-kernel-pref /native def        % --cpu-kernel=native|trix
+/use-native-cpu false def           % resolved after parse-args
+/cpu-state 9 array def              % [PC I DT ST SP keys hi dirty bell]
+
+% cpu-burst budget -- consumed
+% Run up to `budget` instructions through the native kernel, then finish
+% a deferred instruction (if any) with one reference cpu-step.
+/cpu-burst {|budget|#+4
+    cpu-state 0 PC put
+    cpu-state 1 I-reg put
+    cpu-state 2 DT put
+    cpu-state 3 ST put
+    cpu-state 4 SP put
+    cpu-state 5 key-bits /integer-type cast put
+    cpu-state 6 mode /hi eq { 1 } { 0 } if-else put
+    cpu-state 7 0 put
+    cpu-state 8 0 put
+    memory V FB c8-stack cpu-state budget chip8-step-fast
+    /reason   exch local-def
+    /consumed exch local-def
+    /PC    cpu-state 0 get store
+    /I-reg cpu-state 1 get store
+    /DT    cpu-state 2 get store
+    /ST    cpu-state 3 get store
+    /SP    cpu-state 4 get store
+    cpu-state 7 get 1 eq { /display-dirty true store } if
+    cpu-state 8 get 1 eq bell-mode and { (\x07) print flush } if
+    reason 1 eq { cpu-step /consumed consumed 1 add store } if
+    consumed
+} def
+
+% --- Phase 5: Keyboard + bell -----------------------------------------------
+%
+% chip8 has a 16-key hex keypad (0..F).  We map it onto the standard
+% modern PC layout used by every CHIP-8 emulator since the 1990s:
+%
+%     1 2 3 C        1 2 3 4
+%     4 5 6 D   <-   Q W E R
+%     7 8 9 E        A S D F
+%     A 0 B F        Z X C V
+%
+% Pressing a PC key sets the matching chip8-bit in /keys for KEY-HOLD-MS
+% milliseconds (terminal keyboards don't generate key-up events; we fake
+% release by decaying after a short hold time).  ESC exits.
+%
+% --bell: when the ROM sets a non-zero ST (FX18), ring the terminal bell
+% once.  Most ROMs set ST as a one-shot beep; Phase 5 doesn't model the
+% audio waveform, just the click.
+
+(lib/keys.trx) require
+
+/chip8-keymap <<
+    16#31 1     16#32 2     16#33 3     16#34 16#C
+    16#71 4     16#77 5     16#65 6     16#72 16#D
+    16#61 7     16#73 8     16#64 9     16#66 16#E
+    16#7A 16#A  16#78 0     16#63 16#B  16#76 16#F
+>> def
+
+/KEY-HOLD-MS    150 def
+/key-deadlines  16 array def       % per-key absolute deadline (clock microseconds, ULong)
+/bell-mode      false def           % set true by --bell
+
+% Initialize deadlines to 0ul (the "no key down" sentinel).  An array literal
+% pre-fills with nulls; we want ULong throughout so arithmetic with `clock`
+% (which returns ULong) and comparisons against the deadline work without
+% per-iteration type-checks.
+0 1 15 { /i exch def key-deadlines i 0ul put } for
+
+% key-actor --
+% In raw-mode (set up by run-emulator-fullscreen via with-fullscreen-screen),
+% reads stdin one byte at a time with a short timeout.  Maps recognized
+% bytes to chip8 nibbles, sets the matching bit in /keys, and records a
+% deadline in /key-deadlines.  ESC sets /halted true.  Each cycle also
+% decays any expired key bits.
+/key-actor { ||#6
+    { halted not } {
+        50 read-key-byte-timeout {
+            % stack: byte true (we have a byte)
+            /b exch local-def
+            % Bare ESC quits.  Arrow/function keys arrive as ESC-prefixed
+            % sequences (ESC [ A etc.): a short poll right after the ESC
+            % tells them apart -- a continuation byte means sequence, and
+            % chip8 has no use for those keys, so drain and ignore it.
+            % (The tail bytes of a sequence arrive in the same terminal
+            % write as the first, so the 0ms drain polls see them.)
+            b 16#1B#b eq {
+                20 read-key-byte-timeout {
+                    pop
+                    { 0 read-key-byte-timeout { pop } { exit } if-else } loop
+                } { /halted true store } if-else
+            } {
+                chip8-keymap b /integer-type cast known-get {
+                    /nib exch local-def
+                    /key-bits key-bits 1u nib shift-left or store
+                    % deadline = clock (ULong) + KEY-HOLD-MS * 1000 (cast to ULong).
+                    % `clock + Integer` is a type-check error; cast first.
+                    key-deadlines nib
+                        clock KEY-HOLD-MS 1000 mul /ulong-type cast add put
+                } if
+            } if-else
+        } if
+        % Decay: clear any bit whose deadline has passed.  Compare against
+        % 0ul (sentinel for "key not down") so the deadline stays ULong-typed.
+        key-bits 0u ne {
+            /now clock local-def
+            0 1 15 {
+                /k exch local-def
+                key-deadlines k get /d exch local-def
+                d 0ul gt now d ge and {
+                    /key-bits key-bits 1u k shift-left not and store
+                    key-deadlines k 0ul put
+                } if
+            } for
+        } if
+    } while
+} def
+
+% --- Phase 4: Terminal renderer ---------------------------------------------
+%
+% Half-block default: each terminal cell shows two stacked CHIP-8 pixels via
+% the box-drawing glyphs U+2580 / U+2584 / U+2588 (and U+0020 for empty).
+% Lo-res 64x32 -> 64x16 cells; hi-res 128x64 -> 128x32 cells.  The terminal
+% probably has more rows than that, so the unused rows below stay blank.
+%
+% --ascii mode: one terminal cell per CHIP-8 pixel, using `#` for on and
+% space for off.  Lo-res 64x32 -> 64x32 cells; hi-res 128x64 -> 128x64.
+% Useful when the terminal lacks Unicode box-drawing or when piping output.
+%
+% Rendering is on a dirty-flag basis: DRW / CLS / HIGH / LOW set
+% /display-dirty true; the render actor polls the flag every ~16ms,
+% re-paints the chip8 region of scr, then calls screen-render to push the
+% diff to stdout.
+
+/scr            null  def      % Screen handle (allocated by run-emulator-fullscreen)
+/display-dirty  true  def      % set true on FB / mode change; cleared after render
+/ascii-mode     false def      % CLI flag --ascii
+
+(lib/screen.trx) require
+
+% chip8-screen-dims -- cols rows
+% Compute the chip8 region's screen-cell dimensions for the current mode
+% + ascii setting.  Half-block packs 2 vertical pixels per cell row.
+/chip8-screen-dims {
+    ascii-mode {
+        FB-cols  FB-rows
+    } {
+        FB-cols  FB-rows 2 div
+    } if-else
+} def
+
+% chip8-render-halfblock scr -- scr
+% Pack two vertical FB pixels into each terminal cell using ▀ / ▄ / █.
+% Top pixel = upper half of the cell; bottom pixel = lower half.
+% Foreground = white (7), background = black (0); attributes = none.
+/chip8-render-halfblock {|scr|#+8
+    /rows-out FB-rows 2 div local-def
+    0 1 rows-out 1 sub {
+        /row exch local-def
+        0 1 FB-cols 1 sub {
+            /col exch local-def
+            /top col row 2 mul fb-get local-def
+            /bot col row 2 mul 1 add fb-get local-def
+            /ch
+                top 1b eq bot 1b eq and { 16#2588 } {
+                top 1b eq               { 16#2580 } {
+                bot 1b eq               { 16#2584 } {
+                                          16#0020
+                } if-else } if-else } if-else local-def
+            scr col row ch 7 0 0 screen-put-cell pop
+        } for
+    } for
+    scr
+} def
+
+% chip8-render-ascii scr -- scr
+% One terminal cell per FB pixel: '#' on, ' ' off.  Same fg/bg/attrs.
+/chip8-render-ascii {|scr|#+3
+    0 1 FB-rows 1 sub {
+        /row exch local-def
+        0 1 FB-cols 1 sub {
+            /col exch local-def
+            /ch col row fb-get 1b eq { 16#23 } { 16#20 } if-else local-def
+            scr col row ch 7 0 0 screen-put-cell pop
+        } for
+    } for
+    scr
+} def
+
+% chip8-render scr -- scr
+% Dispatch to halfblock or ascii based on /ascii-mode.
+/chip8-render {
+    ascii-mode { chip8-render-ascii } { chip8-render-halfblock } if-else
+} def
+
+% render-actor --
+% Polls /display-dirty every 16ms.  When set, re-renders the chip8 region
+% of scr and pushes the diff to stdout via screen-render.  Exits when
+% /halted goes true.
+/render-actor {
+    { halted not } {
+        display-dirty {
+            scr chip8-render screen-render pop
+            /display-dirty false store
+        } if
+        16 coroutine-sleep
+    } while
+} def
+
+% chip8-resize-screen --
+% Resize scr to the current mode's pixel-region cell dims.  Called when
+% the emulator boots and again on every HIGH / LOW resolution switch.
+/chip8-resize-screen {
+    chip8-screen-dims                              % cols rows on stack
+    {|c r| scr c r screen-resize pop } exec
+} def
+
+% Set /display-dirty true on every state change that affects the framebuffer
+% or its dimensions.  Already wired into draw-sprite and fb-clear (where
+% applicable) below; this section just documents the contract.
+
+% --- Phase 3: Timers + scheduler --------------------------------------------
+%
+% CHIP-8 has two timers: DT (delay timer) the program reads via FX07 to gate
+% game logic, and ST (sound timer) that beeps while > 0.  Both decrement at
+% 60Hz regardless of CPU instruction rate.  The CPU itself runs at a
+% configurable rate -- canonical default is 500 IPS (~8 instructions per
+% 60Hz frame).  Both rates are independent, so we run them in two
+% cooperating coroutines:
+%
+%   timer-actor: tick once per ~16.67ms (60Hz).  Decrement DT and ST if > 0.
+%   cpu-actor:   tick at /ips rate (1000/ips ms between steps).  Call cpu-step.
+%
+% Both actors check the /halted flag in their loop predicate, so 00FD EXIT
+% (or any unknown opcode) shuts the whole thing down cleanly.
+%
+% No mailbox / display-dirty wiring yet -- Phase 4 (renderer) will add a
+% signal so the renderer only redraws when DRW or CLS marked the screen
+% dirty.
+
+/ips         500 def              % default CPU rate (instructions per second)
+/timer-co    null def              % handle for the timer coroutine
+/cpu-co      null def              % handle for the CPU coroutine
+
+% timer-actor --
+% 60Hz delay/sound-timer decrementer.  Loops until halted; sleeps 17ms
+% per cycle (close enough to 1/60 = 16.67ms for our purposes).
+/timer-actor {
+    { halted not } {
+        DT 0 gt { /DT DT 1 sub store } if
+        ST 0 gt { /ST ST 1 sub store } if
+        17 coroutine-sleep
+    } while
+} def
+
+% cpu-actor --
+% Steps the CPU at /ips rate.  Computes period at startup so changing /ips
+% mid-run requires a restart of the actor.
+%
+% Native kernel: the reference path runs ONE instruction per tick, so
+% the achievable rate is capped by the ~1ms scheduler granularity
+% (--ips beyond ~1000 cannot be honored).  With --cpu-kernel=native the
+% actor instead runs a BATCH of ips/1000 instructions per 1ms tick, so
+% high --ips values are actually achieved; keys still update at tick
+% granularity in both modes.
+/cpu-actor { ||#2
+    /period 1000 ips div local-def    % milliseconds between steps; 500 IPS -> 2ms
+    period 0 le { /period 1 store } if
+    /batch ips 1000 div local-def     % instructions per tick when native
+    batch 1 lt { /batch 1 store } if
+    use-native-cpu
+    {
+        { halted not } {
+            batch cpu-burst pop
+            period coroutine-sleep
+        } while
+    }
+    {
+        { halted not } {
+            cpu-step
+            period coroutine-sleep
+        } while
+    } if-else
+} def
+
+% run-emulator --
+% Boot the two coroutines, wait for the CPU actor to halt, then clean up
+% the timer actor.  Caller has already loaded a ROM and called cpu-reset.
+/run-emulator {
+    /timer-co mark { timer-actor } coroutine-launch store
+    /cpu-co   mark { cpu-actor }   coroutine-launch store
+    cpu-co coroutine-await pop                 % blocks until /halted
+    timer-co coroutine-await pop               % timer notices halted within 17ms
+} def
+
+% run-emulator-fullscreen --
+% Like run-emulator but adds the renderer.  Sets up alt-screen + raw-mode +
+% a Screen handle sized to the chip8 region (per mode + ascii setting),
+% launches a third coroutine that polls /display-dirty and repaints.
+/run-emulator-fullscreen {
+    {|s|
+        /scr s store
+        chip8-resize-screen
+        /display-dirty true store
+        /timer-co  mark { timer-actor }  coroutine-launch store
+        /cpu-co    mark { cpu-actor }    coroutine-launch store
+        /render-co mark { render-actor } coroutine-launch store
+        /key-co    mark { key-actor }    coroutine-launch store
+        cpu-co    coroutine-await pop          % CPU halts on EXIT or ESC-via-key-actor
+        key-co    coroutine-await pop
+        render-co coroutine-await pop
+        timer-co  coroutine-await pop
+    } with-fullscreen-screen
+} def
+
+% --- Self-test ---------------------------------------------------------------
+%
+% Build a synthetic ROM that exercises every opcode shape (CHIP-8 + SCHIP),
+% poke it into memory directly, and verify disassembly output.
+
+% rt-ok: bool str --
+% Tiny test helper so the self-test runs without a runner.  Prints "ok: <label>"
+% on true; raises /assert-failed with the label on false.
+/rt-ok {|cond label|
+    cond { (ok: ) print label print nl } { label false assert } if-else
+} def
+
+% Synthetic ROM exercising every opcode shape (CHIP-8 + SCHIP).  Layout
+% in row-pair order matches the assertions in run-self-test below.
+/self-test-rom <
+    00E0 00EE 00C5 00FB 00FC 00FD 00FE 00FF
+    1234 2456 3A0F 4B20 5AB0 6C42 7D03
+    8120 8121 8122 8123 8124 8125 8126 8127 812E
+    9120 A300 B400 C5FF D125 D120
+    E69E E7A1
+    F807 F90A FA15 FB18 FC1E FD29 FE30 F033 F155 F265 F375 F485
+> def
+
+/run-self-test {
+    % Splat the synthetic ROM into memory and update rom-end.
+    memory 16#200 self-test-rom put-interval
+    /rom-end 16#200 self-test-rom length add store
+
+    (chip8 self-test: {0} bytes ({1} instrs) at 0x200\n)
+        mark self-test-rom length self-test-rom length 2 div
+        print-fmt pop pop
+
+    % Spot-check disassembly of a handful of opcodes.
+    16#00E0 disasm-instr (CLS)              eq (CLS)              rt-ok
+    16#00EE disasm-instr (RET)              eq (RET)              rt-ok
+    16#00C5 disasm-instr (SCD 5)            eq (SCD 5)            rt-ok
+    16#00FB disasm-instr (SCR)              eq (SCR)              rt-ok
+    16#00FC disasm-instr (SCL)              eq (SCL)              rt-ok
+    16#00FD disasm-instr (EXIT)             eq (EXIT)             rt-ok
+    16#00FE disasm-instr (LOW)              eq (LOW)              rt-ok
+    16#00FF disasm-instr (HIGH)             eq (HIGH)             rt-ok
+    16#1234 disasm-instr (JP 234)           eq (JP 234)           rt-ok
+    16#2456 disasm-instr (CALL 456)         eq (CALL 456)         rt-ok
+    16#3A0F disasm-instr (SE VA, 0F)        eq (SE VA, 0F)        rt-ok
+    16#5AB0 disasm-instr (SE VA, VB)        eq (SE VA, VB)        rt-ok
+    16#5AB1 disasm-instr (??? 5AB1)         eq (??? 5AB1)         rt-ok
+    16#6C42 disasm-instr (LD VC, 42)        eq (LD VC, 42)        rt-ok
+    16#8124 disasm-instr (ADD V1, V2)       eq (ADD V1, V2)       rt-ok
+    16#A300 disasm-instr (LD I, 300)        eq (LD I, 300)        rt-ok
+    16#D125 disasm-instr (DRW V1, V2, 5)    eq (DRW V1, V2, 5)    rt-ok
+    16#D120 disasm-instr (DRW V1, V2, 0 (16x16))
+                                            eq (DRW V1, V2, 0 (16x16)) rt-ok
+    16#F033 disasm-instr (LD B, V0)         eq (LD B, V0)         rt-ok
+    16#FE30 disasm-instr (LD HF, VE)        eq (LD HF, VE)        rt-ok
+    16#F375 disasm-instr (LD R, V3)         eq (LD R, V3)         rt-ok
+
+    % Memory bytes round-trip through put-interval / get.  String::get
+    % returns Byte, so compare against #b literals.
+    memory 16#200 get 16#00#b eq (rom byte 0 = 00) rt-ok
+    memory 16#201 get 16#E0#b eq (rom byte 1 = E0) rt-ok
+    16#200 read-word 16#00E0#u eq (read-word @0x200) rt-ok
+    16#202 read-word 16#00EE#u eq (read-word @0x202) rt-ok
+
+    % Font sprites landed at the right addresses.
+    memory 16#000 get 16#F0#b eq (font-lo[0,0] = F0) rt-ok
+    memory 16#004 get 16#F0#b eq (font-lo[0,4] = F0) rt-ok
+    memory 16#050 get 16#3C#b eq (font-hi[0,0] = 3C) rt-ok
+    memory 16#0E9 get 16#C0#b eq (font-hi[F,9] = C0) rt-ok
+
+    % Lockstep first: the later test phases (screens, CPU unit tests)
+    % retain enough sl=0 allocations that the default VM has too little
+    % headroom left for the snapshot pairs afterwards.
+    native-cpu-available { run-lockstep-tests } if
+
+    run-cpu-tests
+
+    (chip8 self-test PASSED\n) print
+    (__test_ok__) =
+} def
+
+% --- Native-kernel lockstep tests --------------------------------------------
+%
+% Only under the ./chip8 host binary (native-cpu-available).  Each
+% scenario runs twice from an identical baseline -- memory restored to a
+% pristine copy, cpu-reset, the scenario's setup proc, and the same PCG
+% seed -- once through the reference cpu-step loop and once through
+% cpu-burst with a deliberately awkward batch size of 7 (so bursts
+% straddle defers mid-stream).  The COMPLETE machine state must come out
+% equal: PC / I / DT / ST / SP / mode / resolution, all 4096 memory
+% bytes, all 16 V registers, all 8192 framebuffer bytes, and all 16 call
+% stack slots.
+%
+% `current-setup` is a userdict proc slot: procs stored in dicts run on
+% bare-name lookup, so each scenario stores its setup there and the two
+% run drivers invoke it by name.
+
+/current-setup { } def
+
+% machine-snapshot -- arr
+/machine-snapshot {
+    [
+        PC I-reg DT ST SP mode FB-cols FB-rows
+        memory 4096 string copy
+        V 16 string copy
+        FB 8192 string copy
+        0 1 15 { c8-stack exch get } for
+    ]
+} def
+
+% snapshots-equal? a b -- bool
+/snapshots-equal? {|a b|#+2
+    /same a length b length eq local-def
+    same {
+        0 1 a length 1 sub {
+            /i exch local-def
+            a i get b i get eq not { /same false store } if
+        } for
+    } if
+    same
+} def
+
+% lockstep-baseline --
+% Restore memory to the pristine copy taken at lockstep start, then
+% cpu-reset and run the scenario setup.
+/lockstep-baseline {
+    pristine-mem memory copy pop
+    cpu-reset
+    current-setup
+    16#C0FFEE#ul rand-seed
+} def
+
+% lockstep-run-ref steps -- snapshot
+/lockstep-run-ref {|steps|#+2
+    lockstep-baseline
+    /remaining steps local-def
+    { remaining 0 gt halted not and } {
+        cpu-step
+        /remaining remaining 1 sub store
+    } while
+    machine-snapshot
+} def
+
+% lockstep-run-native steps -- snapshot
+/lockstep-run-native {|steps|#+4
+    lockstep-baseline
+    /remaining steps local-def
+    { remaining 0 gt halted not and } {
+        /chunk remaining 7 lt { remaining } { 7 } if-else local-def
+        /remaining remaining chunk cpu-burst sub store
+    } while
+    machine-snapshot
+} def
+
+% lockstep-pair steps label --
+% The whole pair runs inside a save bracket: the two runs allocate
+% snapshots plus every fb-clear/scroll's fresh framebuffer at the
+% current level, and without the bracket the scenarios exhaust the
+% default VM.  The verdict bool is computed BEFORE the restore and
+% rides the operand stack across it (immediates survive restore);
+% the journaled /FB //V //stack rebinds roll back to the pre-pair
+% bindings, and memory's unjournaled bytes are re-pristined by the
+% next lockstep-baseline.
+/lockstep-pair {|steps label|#+2
+    save pop
+    steps lockstep-run-ref
+    steps lockstep-run-native
+    snapshots-equal?
+    -1 restore
+    label rt-ok
+} def
+
+/run-lockstep-tests { ||#4
+    (-- native-kernel lockstep --\n) print
+    /pristine-mem memory 4096 string copy def
+
+    % The repo bundles no .ch8 ROMs (run chip8-roms/fetch-ch8.py to pull
+    % CC0 ROMs), so every lockstep case below is built inline via enc-at and
+    % the self-test needs no external files.  Together they cover DRW, RND,
+    % ALU, every scroll, the HIGH/LOW mode switches, FX0A key-wait, and
+    % CALL/RET/BCD -- the kernel paths the old file-loaded ROM cases drove.
+
+    % Synthetic SCHIP tour: HIGH mode switch (defer), 16x16 DRW, all
+    % three scrolls, ALU, RND, register dump/load round-trip.  Ends in
+    % hi-res so the scrolled framebuffer content is part of the compare.
+    /current-setup {
+        16#200 16#00FF enc-at        % HIGH        (defer)
+        16#202 16#A050 enc-at        % LD I, 0x50  (hi font)
+        16#204 16#600A enc-at        % LD V0, 10
+        16#206 16#6105 enc-at        % LD V1, 5
+        16#208 16#D010 enc-at        % DRW V0,V1,0 (16x16)
+        16#20A 16#00C3 enc-at        % SCD 3
+        16#20C 16#00FB enc-at        % SCR
+        16#20E 16#00FC enc-at        % SCL
+        16#210 16#8014 enc-at        % ADD V0, V1
+        16#212 16#C2FF enc-at        % RND V2, FF
+        16#214 16#A300 enc-at        % LD I, 0x300
+        16#216 16#F255 enc-at        % LD [I], V0..V2
+        16#218 16#F165 enc-at        % LD V0..V1, [I]
+        16#21A 16#1234 enc-at        % JP 0x234 (stop point)
+    } store
+    14 (lockstep: synthetic SCHIP tour, 14 steps) lockstep-pair
+
+    % LOW mode switch defers back to lo-res (fb-clear + resize path).
+    /current-setup {
+        16#200 16#00FF enc-at        % HIGH (defer)
+        16#202 16#A050 enc-at        % LD I, 0x50
+        16#204 16#6000 enc-at        % LD V0, 0
+        16#206 16#6100 enc-at        % LD V1, 0
+        16#208 16#D015 enc-at        % DRW V0,V1,5
+        16#20A 16#00FE enc-at        % LOW  (defer)
+        16#20C 16#1234 enc-at        % JP (stop)
+    } store
+    7 (lockstep: HIGH/LOW round-trip, 7 steps) lockstep-pair
+
+    % FX0A key-wait: no key down -- PC parks on the instruction.
+    /current-setup {
+        16#200 16#F30A enc-at
+        /key-bits 0u store
+    } store
+    3 (lockstep: FX0A parked \(no key\), 3 steps) lockstep-pair
+
+    % FX0A with key 3 down -- the wait resolves to the lowest key.
+    /current-setup {
+        16#200 16#F30A enc-at
+        /key-bits 16#8#u store
+    } store
+    1 (lockstep: FX0A resolves key 3, 1 step) lockstep-pair
+    /key-bits 0u store
+
+    % CALL / RET, BCD (to an empty page), and a conditional skip.
+    /current-setup {
+        16#200 16#6017 enc-at        % LD V0, 0x17
+        16#202 16#A400 enc-at        % LD I, 0x400 (clear of the sub at 0x300)
+        16#204 16#F033 enc-at        % BCD V0 -> mem[0x400..0x402]
+        16#206 16#2300 enc-at        % CALL 0x300
+        16#208 16#3018 enc-at        % SE V0, 0x18 (skips: sub added 1)
+        16#20C 16#1234 enc-at        % JP (stop)
+        16#300 16#7001 enc-at        % ADD V0, 1
+        16#302 16#00EE enc-at        % RET
+    } store
+    7 (lockstep: CALL/RET + BCD + skip, 7 steps) lockstep-pair
+} def
+
+% enc-at addr op --
+% Encode a 16-bit opcode big-endian at memory[addr..addr+1].  Used by
+% the CPU tests to plant instructions without going through a ROM file.
+/enc-at {|addr op|#+1
+    /op-uint op /uinteger-type cast local-def
+    memory addr     op-uint 8 shift-right 16#FF#u and /byte-type cast put
+    memory addr 1 add op-uint 16#FF#u and /byte-type cast put
+} def
+
+% step-at addr --
+% Set PC to addr and run one cpu-step.  Does NOT reset state -- caller
+% controls cpu-reset and any pre-step register / memory setup.
+/step-at {|addr|
+    /PC addr store
+    cpu-step
+} def
+
+% Phase 2 unit tests.  Each block: set state, plant op, step, assert.
+/run-cpu-tests {
+    % --- cpu-reset ---
+    cpu-reset
+    PC 16#200 eq                            (cpu-reset: PC = 0x200) rt-ok
+    I-reg 0 eq                              (cpu-reset: I = 0) rt-ok
+    SP 0 eq                                 (cpu-reset: SP = 0) rt-ok
+    halted not                              (cpu-reset: not halted) rt-ok
+
+    % --- 6XNN: LD Vx, nn ---
+    16#300 16#6042 enc-at      16#300 step-at
+    V 0 get 16#42#b eq                      (LD V0, 42) rt-ok
+    PC 16#302 eq                            (PC after LD) rt-ok
+
+    % --- 7XNN: ADD Vx, nn ---
+    cpu-reset
+    V 0 16#10#b put
+    16#300 16#7005 enc-at      16#300 step-at
+    V 0 get 16#15#b eq                      (ADD V0, 05 -> 15) rt-ok
+
+    % --- 1NNN: JP ---
+    16#300 16#1234 enc-at      16#300 step-at
+    PC 16#234 eq                            (JP 234) rt-ok
+
+    % --- 2NNN/00EE: CALL + RET round-trip ---
+    cpu-reset
+    16#200 16#2300 enc-at                  % CALL 300 at 0x200
+    16#300 16#00EE enc-at                  % RET at 0x300
+    cpu-step                                % execute CALL
+    PC 16#300 eq                            (CALL: PC = 300) rt-ok
+    SP 1 eq                                 (CALL: SP = 1) rt-ok
+    cpu-step                                % execute RET
+    PC 16#202 eq                            (RET: PC = 202) rt-ok
+    SP 0 eq                                 (RET: SP = 0) rt-ok
+
+    % --- 3XNN: SE Vx, nn (skip when equal) ---
+    cpu-reset
+    V 5 16#42#b put
+    16#300 16#3542 enc-at       16#300 step-at
+    PC 16#304 eq                            (SE V5,42 skipped when equal) rt-ok
+
+    % --- 4XNN: SNE Vx, nn (skip when not equal) ---
+    cpu-reset
+    V 5 16#01#b put
+    16#300 16#4542 enc-at       16#300 step-at
+    PC 16#304 eq                            (SNE V5,42 skipped when unequal) rt-ok
+
+    % --- 8XY0: LD Vx, Vy ---
+    cpu-reset
+    V 1 16#AA#b put
+    16#300 16#8010 enc-at       16#300 step-at
+    V 0 get 16#AA#b eq                      (LD V0, V1) rt-ok
+
+    % --- 8XY4: ADD Vx, Vy with carry ---
+    cpu-reset
+    V 0 16#FF#b put
+    V 1 16#02#b put
+    16#300 16#8014 enc-at       16#300 step-at
+    V 0 get 16#01#b eq                      (ADD V0, V1: low byte) rt-ok
+    V 15 get 1b eq                         (ADD V0, V1: VF = carry) rt-ok
+
+    % --- 8XY5: SUB Vx, Vy ---
+    cpu-reset
+    V 0 16#10#b put
+    V 1 16#01#b put
+    16#300 16#8015 enc-at       16#300 step-at
+    V 0 get 16#0F#b eq                      (SUB V0, V1: 0x0F) rt-ok
+    V 15 get 1b eq                         (SUB V0, V1: VF = NOT borrow) rt-ok
+
+    % --- 8XY6: SHR ---
+    cpu-reset
+    V 0 16#0B#b put
+    16#300 16#8006 enc-at       16#300 step-at
+    V 0 get 16#05#b eq                      (SHR V0: 0x0B >> 1 = 0x05) rt-ok
+    V 15 get 1b eq                         (SHR V0: VF = old LSB) rt-ok
+
+    % --- 8XYE: SHL ---
+    cpu-reset
+    V 0 16#81#b put
+    16#300 16#800E enc-at       16#300 step-at
+    V 0 get 16#02#b eq                      (SHL V0: 0x81 << 1 = 0x02) rt-ok
+    V 15 get 1b eq                         (SHL V0: VF = old MSB) rt-ok
+
+    % --- ANNN: LD I, nnn ---
+    16#300 16#A123 enc-at       16#300 step-at
+    I-reg 16#123 eq                         (LD I, 123) rt-ok
+
+    % --- FX55 / FX65: LD [I],Vx + LD Vx,[I] round-trip ---
+    cpu-reset
+    V 0 16#11#b put
+    V 1 16#22#b put
+    V 2 16#33#b put
+    /I-reg 16#400 store
+    16#300 16#F255 enc-at       16#300 step-at
+    memory 16#400 get 16#11#b eq            (LD [I], V0..V2: byte 0) rt-ok
+    memory 16#401 get 16#22#b eq            (LD [I], V0..V2: byte 1) rt-ok
+    memory 16#402 get 16#33#b eq            (LD [I], V0..V2: byte 2) rt-ok
+    cpu-reset
+    /I-reg 16#400 store
+    16#300 16#F265 enc-at       16#300 step-at
+    V 0 get 16#11#b eq                      (LD V0..V2, [I]: V0) rt-ok
+    V 1 get 16#22#b eq                      (LD V0..V2, [I]: V1) rt-ok
+    V 2 get 16#33#b eq                      (LD V0..V2, [I]: V2) rt-ok
+
+    % --- FX33: BCD ---
+    cpu-reset
+    V 0 123b put
+    /I-reg 16#400 store
+    16#300 16#F033 enc-at       16#300 step-at
+    memory 16#400 get 1b eq                (BCD 123: hundreds = 1) rt-ok
+    memory 16#401 get 2b eq                (BCD 123: tens = 2) rt-ok
+    memory 16#402 get 3b eq                (BCD 123: ones = 3) rt-ok
+
+    % --- FX29: LD F, Vx (lo-res font sprite address) ---
+    cpu-reset
+    V 0 16#0A#b put
+    16#300 16#F029 enc-at       16#300 step-at
+    I-reg 16#0A 5 mul eq                    (LD F, VA: I = 0x32) rt-ok
+
+    % --- FX30: LD HF, Vx (hi-res font, SCHIP) ---
+    cpu-reset
+    V 0 16#03#b put
+    16#300 16#F030 enc-at       16#300 step-at
+    I-reg 16#50 16#03 10 mul add eq         (LD HF, V3: I = 0x6E) rt-ok
+
+    % --- 00E0: CLS ---
+    cpu-reset
+    FB 0 1b put                            % poke a pixel into FB (put mutates in place)
+    16#300 16#00E0 enc-at       16#300 step-at
+    FB 0 get 0b eq                         (CLS: pixel cleared) rt-ok
+
+    % --- DXYN: draw a 1-row 8-pixel sprite ---
+    cpu-reset
+    /I-reg 16#400 store
+    memory 16#400 16#FF#b put              % sprite row = 0xFF (8 pixels on)
+    V 0 0b put                    % x = 0
+    V 1 0b put                    % y = 0
+    16#300 16#D011 enc-at       16#300 step-at
+    FB 0 get 1b eq                         (DRW: pixel (0,0) on) rt-ok
+    FB 7 get 1b eq                         (DRW: pixel (7,0) on) rt-ok
+    V 15 get 0b eq                         (DRW: VF = 0 (no collision)) rt-ok
+
+    % Re-draw same sprite -> all 8 pixels collide and flip off.
+    cpu-reset
+    /I-reg 16#400 store
+    memory 16#400 16#FF#b put
+    V 0 0b put V 1 0b put
+    16#300 16#D011 enc-at       16#300 step-at
+    16#300 16#D011 enc-at
+    /PC 16#300 store cpu-step
+    FB 0 get 0b eq                         (DRW: re-draw clears pixel) rt-ok
+    V 15 get 1b eq                         (DRW: VF = 1 (collision)) rt-ok
+
+    % --- 00FE / 00FF: SCHIP resolution switch ---
+    cpu-reset
+    16#300 16#00FF enc-at       16#300 step-at
+    mode /hi eq                             (HIGH: mode = /hi) rt-ok
+    FB-cols 128 eq                          (HIGH: cols = 128) rt-ok
+    FB-rows 64 eq                           (HIGH: rows = 64) rt-ok
+    16#302 16#00FE enc-at       16#302 step-at
+    mode /lo eq                             (LOW: mode = /lo) rt-ok
+    FB-cols 64 eq                           (LOW: cols = 64) rt-ok
+
+    % --- 00FD: EXIT ---
+    cpu-reset
+    16#300 16#00FD enc-at       16#300 step-at
+    halted                                  (EXIT: halted) rt-ok
+
+    % --- SCHIP scroll ops ---
+    % SCR: shift entire FB right by 4 columns.  Pixels at column c move to
+    % column c+4; leftmost 4 columns become zero; rightmost 4 fall off.
+    cpu-reset
+    FB 0  1b put                            % (0, 0) -- will move to (4, 0)
+    FB 5  1b put                            % (5, 0) -- will move to (9, 0)
+    FB 64 1b put                            % (0, 1) -- will move to (4, 1)
+    16#300 16#00FB enc-at       16#300 step-at
+    FB 0  get 0b eq                         (SCR: (0,0) cleared) rt-ok
+    FB 4  get 1b eq                         (SCR: (0,0) -> (4,0)) rt-ok
+    FB 9  get 1b eq                         (SCR: (5,0) -> (9,0)) rt-ok
+    FB 64 get 0b eq                         (SCR: (0,1) cleared) rt-ok
+    FB 68 get 1b eq                         (SCR: (0,1) -> (4,1)) rt-ok
+
+    % SCL: shift entire FB left by 4 columns.
+    cpu-reset
+    FB 5 1b put                             % (5, 0) -> (1, 0)
+    FB 9 1b put                             % (9, 0) -> (5, 0)
+    16#300 16#00FC enc-at       16#300 step-at
+    FB 1 get 1b eq                          (SCL: (5,0) -> (1,0)) rt-ok
+    FB 5 get 1b eq                          (SCL: (9,0) -> (5,0)) rt-ok
+    FB 9 get 0b eq                          (SCL: (9,0) cleared) rt-ok
+
+    % SCD N: shift down N rows.  Top N rows become zero.
+    cpu-reset
+    FB 0  1b put                            % (0, 0) -> (0, 2)
+    FB 64 1b put                            % (0, 1) -> (0, 3)
+    16#300 16#00C2 enc-at       16#300 step-at      % SCD 2
+    FB 0   get 0b eq                        (SCD 2: (0,0) cleared) rt-ok
+    FB 64  get 0b eq                        (SCD 2: (0,1) cleared) rt-ok
+    FB 128 get 1b eq                        (SCD 2: (0,0) -> (0,2)) rt-ok
+    FB 192 get 1b eq                        (SCD 2: (0,1) -> (0,3)) rt-ok
+
+    % SCD with N >= rows: scrolls everything off (acts like CLS).
+    cpu-reset
+    FB 0 1b put
+    16#300 16#00CF enc-at       16#300 step-at      % SCD 15 (lo-res rows = 32, so partial)
+    FB 0 get 0b eq                          (SCD 15: (0,0) cleared) rt-ok
+    FB 0 15 64 mul add get 1b eq            (SCD 15: (0,0) -> (0,15)) rt-ok
+
+    % --- IBM logo smoke: load + run a few steps + check FB has pixels ---
+    cpu-reset
+    % Plant the well-known IBM logo prefix at 0x200 + sprite data after
+    % JP 228 (so we don't need a real ROM file).  Just verify CLS + the
+    % first DRW lights up some pixels.
+    16#200 16#00E0 enc-at                  % CLS
+    16#202 16#A20A enc-at                  % LD I, 20A
+    16#204 16#600C enc-at                  % LD V0, 0C
+    16#206 16#6108 enc-at                  % LD V1, 08
+    16#208 16#D015 enc-at                  % DRW V0, V1, 5  (5 rows from font 0 at 0x000)
+    % Sprite source is the lo-res font for digit 0 at 0x000-0x004 (already
+    % loaded by module init).  But our LD I points to 0x20A; replace with
+    % LD I, 0 so we sprite from font[0].
+    16#202 16#A000 enc-at
+    cpu-step  cpu-step  cpu-step  cpu-step  cpu-step
+    PC 16#20A eq                            (IBM smoke: PC after 5 steps) rt-ok
+    % Pixel (0x0C, 0x08), the top-left of the sprite, should be on
+    % (font digit 0 row 0 = 0xF0 -> bits 7..4 set).  fb-index = y*64 + x.
+    FB 16#08 64 mul 16#0C add get 1b eq    (IBM smoke: digit-0 top pixel set) rt-ok
+
+    % --- Phase 3: scheduler smoke (timer + cpu actors) ---
+    % An EXIT opcode at 0x200 should halt the emulator within one cpu-step
+    % cycle.  Both actors observe /halted and unwind cleanly.  ROM = just
+    % EXIT, so the cpu-actor reaches halted on its first step.
+    cpu-reset
+    16#200 16#00FD enc-at
+    run-emulator
+    halted                                  (run-emulator: halted) rt-ok
+    PC 16#202 eq                            (run-emulator: PC = 0x202) rt-ok
+
+    % And a slightly bigger one: CLS, LD V0,5, LD DT,V0, EXIT.  Verifies
+    % that DT got written (5) and then halt observed.
+    cpu-reset
+    16#200 16#00E0 enc-at      % CLS
+    16#202 16#6005 enc-at      % LD V0, 5
+    16#204 16#F015 enc-at      % LD DT, V0
+    16#206 16#00FD enc-at      % EXIT
+    run-emulator
+    halted                                  (run-emulator multi-step: halted) rt-ok
+    PC 16#208 eq                            (run-emulator multi-step: PC = 0x208) rt-ok
+    DT 5 le                                 (run-emulator: DT was set then maybe ticked) rt-ok
+
+    run-render-tests
+    run-keyboard-tests
+} def
+
+% Keyboard self-test: manually set /keys bits and verify SKP / SKNP / LD K
+% react correctly.  Doesn't need a tty -- bypasses the key-actor entirely.
+/run-keyboard-tests {
+    % SKP Vx skips when key Vx is down
+    cpu-reset
+    /key-bits 1u 5 shift-left store
+    V 0 5b put
+    16#300 16#E09E enc-at   16#300 step-at
+    PC 16#304 eq                            (SKP V0=5, key 5 down: skip) rt-ok
+
+    % SKNP Vx doesn't skip when key Vx is down
+    cpu-reset
+    /key-bits 1u 5 shift-left store
+    V 0 5b put
+    16#300 16#E0A1 enc-at   16#300 step-at
+    PC 16#302 eq                            (SKNP V0=5, key 5 down: no skip) rt-ok
+
+    % LD Vx, K with no key down rewinds PC
+    cpu-reset
+    /key-bits 0u store
+    16#300 16#F00A enc-at   16#300 step-at
+    PC 16#300 eq                            (LD V0,K, no key: PC rewinds) rt-ok
+
+    % LD Vx, K with bit 7 down stores 7 in V0 and advances PC
+    cpu-reset
+    /key-bits 1u 7 shift-left store
+    16#300 16#F00A enc-at   16#300 step-at
+    V 0 get 7b eq                           (LD V0,K: V0 = pressed key) rt-ok
+    PC 16#302 eq                            (LD V0,K: PC advanced) rt-ok
+
+    % chip8-keymap layout
+    chip8-keymap 16#31 known?               (keymap: '1' present) rt-ok
+    chip8-keymap 16#76 known?               (keymap: 'v' present) rt-ok
+    chip8-keymap 16#71 get 4 eq             (keymap: 'q' -> 4) rt-ok
+    chip8-keymap 16#76 get 16#F eq          (keymap: 'v' -> F) rt-ok
+    chip8-keymap 16#78 get 0 eq             (keymap: 'x' -> 0) rt-ok
+} def
+
+% Renderer self-test: plant known FB bits, render to an off-screen Screen,
+% capture the screen-render-to byte stream, verify the expected UTF-8
+% glyph sequences land in the output.  Doesn't touch stdout / tty.
+/run-render-tests { ||#3
+    cpu-reset
+    FB 0  1b put                                  % (0, 0) -- top of cell (0, 0)
+    FB 64 1b put                                  % (0, 1) -- bottom of cell (0, 0)
+    FB 1  1b put                                  % (1, 0) -- top of cell (1, 0)
+    /sink 8192 make-string-stream local-def
+    /test-scr 64 16 make-screen local-def
+    test-scr chip8-render-halfblock pop
+    test-scr sink screen-render-to pop
+    /bytes sink get-string-stream local-def
+    bytes (\xE2\x96\x88) contains?     (render-halfblock: full-block at on/on cell)  rt-ok
+    bytes (\xE2\x96\x80) contains?     (render-halfblock: upper-half at on/off cell) rt-ok
+
+    % ASCII mode: # for on, space for off.  Just verify a # appears
+    % on the line where (0, 0) is on.
+    /ascii-mode true store
+    /sink 8192 make-string-stream store
+    /test-scr 64 32 make-screen store
+    test-scr chip8-render-ascii pop
+    test-scr sink screen-render-to pop
+    /bytes sink get-string-stream store
+    bytes (#) contains?                (render-ascii: '#' present)               rt-ok
+    /ascii-mode false store
+
+    % chip8-screen-dims tracks mode + ascii setting
+    /ascii-mode false store
+    /FB-cols 64 store /FB-rows 32 store
+    chip8-screen-dims                                       % stack: cols rows
+    16 eq exch 64 eq and                (screen-dims: lo-res halfblock 64x16) rt-ok
+    /FB-cols 128 store /FB-rows 64 store
+    chip8-screen-dims
+    32 eq exch 128 eq and               (screen-dims: hi-res halfblock 128x32) rt-ok
+    /ascii-mode true store
+    chip8-screen-dims
+    64 eq exch 128 eq and               (screen-dims: hi-res ascii 128x64) rt-ok
+    /ascii-mode false store
+    /FB-cols 64 store /FB-rows 32 store
+} def
+
+% --- CLI ---------------------------------------------------------------------
+
+/print-usage {
+    (Usage: chip8 <rom-path> [--ascii] [--ips=N]      \(host binary\)\n) print
+    (       trix examples/chip8.trx <rom-path> [--ascii] [--ips=N]\n) print
+    (       trix examples/chip8.trx --disasm <rom-path>\n) print
+    (       trix examples/chip8.trx --self-test\n) print
+    (       trix examples/chip8.trx --help\n\n) print
+    (CHIP-8 / Super-CHIP emulator.  Default: load ROM, run interactively\n) print
+    (with half-block rendering on the terminal.  --ascii uses '#' / ' '\n) print
+    (instead.  --ips=N tunes CPU rate \(default 500 = ~8 instructions per\n) print
+    (60Hz frame\).  --disasm prints the instruction stream and exits.\n) print
+    (--cpu-kernel=native|trix picks the CPU implementation: native is the\n) print
+    (C kernel registered by the ./chip8 host binary \(default there, and\n) print
+    (required for --ips much past 1000\); trix is the reference dispatch,\n) print
+    (the only choice under plain ./trix.\n) print
+    (Keys \(Phase 5+\): 1 2 3 4 / Q W E R / A S D F / Z X C V map to the\n) print
+    (16 chip8 keys; ESC quits.\n) print
+} def
+
+% parse-flag arg --
+% Helper: handle one CLI token.  Sets /rom-path or toggles flags.  Unknown
+% flags are silently ignored (forward-compat).
+/parse-flag {|arg|
+    arg (--ascii) eq      { /ascii-mode true store } if
+    arg (--bell)  eq      { /bell-mode true store } if
+    arg (--disasm) eq     { /disasm-only true store } if
+    arg (--self-test) eq  { /self-test-mode true store } if
+    arg (--snapshot) eq   { /snapshot-mode true store } if
+    arg (--ips=) starts-with? {
+        % (--ips=) is 6 bytes; slice from index 6, past the '='
+        /ips arg 6 arg length 6 sub get-interval to-number /integer-type cast store
+    } if
+    arg (--cpu-kernel=native) eq { /cpu-kernel-pref /native store } if
+    arg (--cpu-kernel=trix)   eq { /cpu-kernel-pref /trix   store } if
+    arg (--snapshot=) starts-with? {
+        /snapshot-mode true store
+        /snapshot-cycles arg 11 arg length 11 sub get-interval to-number /integer-type cast store
+    } if
+    arg starts-with-flag? { } { /rom-path arg store } if-else
+} def
+
+/starts-with-flag? {|s| s length 0 gt { s 0 get 16#2D#b eq } { false } if-else } def
+
+/disasm-only      false def
+/self-test-mode   false def
+/snapshot-mode    false def
+/snapshot-cycles  300 def         % default cycles for --snapshot (no arg)
+/rom-path         () def
+
+% Parse argv into the globals above.  Recognized: --ascii, --disasm,
+% --self-test, --help / -h, and one ROM path token.
+/parse-args { ||#4
+    /args command-line-args local-def
+    /n args length local-def
+    0 1 n 1 sub {
+        /i exch local-def
+        /arg args i get local-def
+        arg (--help) eq arg (-h) eq or { print-usage quit } if
+        arg parse-flag
+    } for
+} def
+
+% pick-rom-from-menu -- path
+% List ROMs in examples/chip8-roms/ and prompt for a number.  Used when no
+% ROM path is given on the command line.
+/pick-rom-from-menu { ||#6
+    /roms [] local-def
+    (examples/chip8-roms/*.ch8) {|p| /roms roms p append store } filename-for-all
+    roms length 0 eq {
+        (No ROMs found in examples/chip8-roms/.\n) print
+        (Pass a ROM path explicitly: ./trix examples/chip8.trx <rom>\n) print
+        quit
+    } if
+    (CHIP-8 ROMs in examples/chip8-roms/:\n\n) print
+    0 1 roms length 1 sub {
+        /i exch local-def
+        ({0:>3}. {1}\n) mark i 1 add roms i get print-fmt pop pop
+    } for
+    (\nEnter ROM number (or ESC to quit): ) print flush
+    /buf 64 string local-def
+    /input () local-def
+    /pick 0 local-def
+    stdin buf read-line
+    {
+        /input exch trim store
+        input length 0 eq { (No selection.\n) print quit } if
+        /pick input to-number /integer-type cast 1 sub store
+        pick 0 lt pick roms length ge or
+            { (Out of range.\n) print quit }
+            { roms pick get }
+        if-else
+    } { (No selection.\n) print quit } if-else
+} def
+
+% run-snapshot --
+% Headless mode: run the emulator for /snapshot-cycles cpu-step iterations
+% (or until /halted), then dump the framebuffer to stdout as ASCII text
+% ('#' for on, ' ' for off).  No coroutines, no tty, no raw-mode -- runs
+% in CI / pipes / docs-build scripts.  Caller has set /rom-path.
+/run-snapshot { ||#3
+    cpu-reset
+    rom-path load-rom pop
+    /i 0 local-def
+    use-native-cpu
+    {
+        { halted not i snapshot-cycles lt and } {
+            /chunk snapshot-cycles i sub local-def
+            chunk 64 gt { /chunk 64 store } if
+            /i i chunk cpu-burst add store
+        } while
+    }
+    {
+        { halted not i snapshot-cycles lt and } { cpu-step /i i 1 add store } while
+    } if-else
+    render-snapshot
+} def
+
+% render-snapshot --
+% Print the current FB to stdout one row per line, '#' for on / ' ' for off.
+% Honors current resolution (FB-cols / FB-rows) so SCHIP hi-res snapshots
+% just work with no flag toggling.
+/render-snapshot { ||#2
+    0 1 FB-rows 1 sub {
+        /row exch local-def
+        0 1 FB-cols 1 sub {
+            /col exch local-def
+            col row fb-get 1b eq { (#) } { ( ) } if-else print
+        } for
+        nl
+    } for
+} def
+
+/main {
+    parse-args
+    % Resolve the CPU implementation: --cpu-kernel=native needs the
+    % chip8.cpp host binary's kernel; fall back to the reference
+    % silently (mirrors tetrix.trx's --ai-kernel handling).
+    /use-native-cpu native-cpu-available cpu-kernel-pref /native eq and store
+    self-test-mode { run-self-test quit } if
+    rom-path () eq { /rom-path pick-rom-from-menu store } if
+    snapshot-mode { run-snapshot quit } if
+    cpu-reset                                  % zero CPU state; memory keeps font sprites
+    rom-path load-rom pop                      % copy ROM bytes to memory[0x200..]
+    disasm-only { disasm-rom } { run-emulator-fullscreen } if-else
+} def
+
+main

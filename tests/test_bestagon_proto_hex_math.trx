@@ -1,0 +1,25 @@
+% ====================================================================
+% test_bestagon_proto_hex_math.trx -- run examples/bestagon-proto/
+% proto-hex-math.trx self-test via the standard tests/ harness.
+% ====================================================================
+%
+% Thin wrapper: loads proto-hex-math.trx (Phase 0.6A: hex coord math
+% per GDD section 3), which auto-runs its self-test on load.  We just
+% need to confirm the test reached its end without throwing.
+%
+% Asserts:
+%   - pos<->cube round-trip identity on all 3 map sizes
+%     (Tutorial 450 / Standard 1800 / Epic 4050 cells)
+%   - pos-neighbors interior cells return exactly 6 neighbors
+%     (368 + 1632 + 3796 = 5796 cells)
+%   - pos-neighbors corner + edge counts on 25x18 (8 spot checks)
+%   - hex-distance spec spot checks (10 cells)
+%   - hex-distance symmetry on 50 random pairs
+%   - hex-distance triangle inequality on 30 random triples
+%
+% Runs on default 1 MB VM -- test loops wrap each iteration in
+% save/restore to reclaim per-cell allocation.
+% ====================================================================
+
+(examples/bestagon-proto/proto-hex-math.trx) run
+(__test_ok__) =

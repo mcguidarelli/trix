@@ -1,0 +1,108 @@
+% ====================================================================
+% test_pipe_global.trx -- VM Redux Phase 5+8 follow-up pipe migration
+% ====================================================================
+% PipeBufferHeader is now allocated from global VM via
+% gvm_alloc<PipeBufferHeader>(total, ChunkKind::PipeBuffer).  The
+% buffer is BASE-immune to save/restore, and the per-save-level pool
+% is collapsed to a class-indexed-only pool (mirror of the Phase 3
+% mailbox migration).  Three invariants:
+%
+%   I1. Allocating a pipe buffer bumps /by-kind/pipebuffer.
+%   I2. A buffer allocated inside a save scope, then closed and
+%       reclaimed, is parked back in the pool (no leak across save
+%       cycles).
+%   I3. Deep nested save/restore cycles + spawn show bounded growth
+%       (the pool absorbs the recycled buffers across save scopes).
+%
+% Pipes are SPSC: a buffer pairs one producer to one consumer.  We
+% close the producer side via pipe-close to mark the buffer as
+% complete on its end; once the consumer drains it, both flags fire
+% and pipe_recycle returns the block to the pool.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+/yield-many { 0 1 29 { pop 0 coroutine-sleep } for } def
+
+% ====================================================================
+% SECTION 1: pipe-buffer allocation lands in /by-kind/pipebuffer
+% ====================================================================
+vm-global-info /by-kind get /pipebuffer get /count get /pre1 exch def
+
+8 pipe-buffer /buf1 exch def
+yield-many
+
+vm-global-info /by-kind get /pipebuffer get /count get /post1 exch def
+post1 pre1 sub 1 ge   (s1: pipebuffer count +>=1 after pipe-buffer)  rt-ok
+
+% Drain the buffer end-to-end so it returns to the pool.
+buf1 pipe-close
+[ { buf1 pipe-get pop } coroutine-launch pop
+yield-many
+
+% ====================================================================
+% SECTION 2: above-barrier buffer is recycled, not leaked
+% ====================================================================
+% Allocate a buffer inside a save scope, drain + close it so it
+% recycles, then restore.  The pool entries themselves are in global
+% VM (BASE-immune), so the recycled buffer remains available for
+% reuse after the restore.
+
+yield-many
+vm-global-info /by-kind get /pipebuffer get /count get /pre2 exch def
+
+save /sv2 exch def
+8 pipe-buffer /buf2 exch def
+buf2 pipe-close
+[ { buf2 pipe-get pop } coroutine-launch pop
+yield-many
+sv2 restore
+
+yield-many
+
+% Allocate a fresh same-class buffer post-restore: should reuse the
+% recycled slot from the pool, not bump live-block count further.
+8 pipe-buffer /buf2b exch def
+buf2b pipe-close
+[ { buf2b pipe-get pop } coroutine-launch pop
+yield-many
+
+vm-global-info /by-kind get /pipebuffer get /count get /post2 exch def
+% Strict bound: at most +1 from pre2 (the live new buffer; the recycled
+% one is pool-parked and doesn't increase the live block count).
+post2 pre2 sub 1 le   (s2: pipebuffer not leaked across restore)     rt-ok
+
+% ====================================================================
+% SECTION 3: deep nested save/restore + alloc cycles are bounded
+% ====================================================================
+yield-many
+vm-global-info /by-kind get /pipebuffer get /count get /pre3 exch def
+
+% Three nested save/restore cycles, each allocating + draining a buffer.
+3 1 1 {
+    pop
+    save /sv-loop exch def
+    8 pipe-buffer /buf-loop exch def
+    buf-loop pipe-close
+    [ { buf-loop pipe-get pop } coroutine-launch pop
+    yield-many
+    sv-loop restore
+} for
+yield-many
+
+vm-global-info /by-kind get /pipebuffer get /count get /post3 exch def
+% Bounded growth: pool absorbs the recycled buffers across save scopes.
+% Allow a small delta for any transient slack from coroutine spawns or
+% loop frames, mirroring the mailbox test's tolerance.
+post3 pre3 sub 3 le   (s3: 3 alloc/restore cycles bounded growth)    rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_pipe_global: ALL TESTS PASSED) =
+(__test_ok__) =

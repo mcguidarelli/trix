@@ -1,0 +1,2 @@
+% undef-persist: silent removal that survives restore.  No value-check.
+4 dict /st exch def st /a 1 put st /b 2 put save /sv exch def st /a undef-persist sv restore st /a known?

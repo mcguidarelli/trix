@@ -1,0 +1,91 @@
+% ============================================================================
+% test_b8_tetrix_safety.trx -- B8 group 1 (HIGH memory-safety) for the tetrix
+% native AI kernels.  These ops only exist under ./tetrix (./trix lacks them),
+% so the suite self-guards and the ./trix run_all skips it.
+%
+% Run:  ./tetrix --operand-depth 128 tests/test_b8_tetrix_safety.trx
+%       (--operand-depth 128 -- the minimum -- is needed by the tetrix:1-0
+%        capacity case, which fills the operand stack exactly to its limit)
+%
+% tetrix:1-0  field-clear-rows-fast leaves field+count (net +1) on the operand
+%             stack with no require_op_capacity guard -> OOB write past
+%             m_op_limit when the stack is full.  Now reserves a slot first
+%             (require_op_capacity is public user-op API) -> /opstack-overflow.
+% tetrix:1-1  piece-collides-fast computed r = py + dr in int32 BEFORE the
+%             bounds check; script-supplied py/dr = INT32_MAX -> signed-overflow
+%             UB (UBSan-abort debug).  Widened to long_t before the check.
+% tetrix:1-2  piece-merge-fast: identical int32 coord overflow.
+% tetrix:1-3  piece-ghost-row-fast: try_row + 1 / next_row + dr int32 overflow;
+%             try_row is now long_t and the loop is capped at FIELD_ROWS.
+% ============================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+userdict /piece-collides-fast known? not {
+    (test_b8_tetrix_safety: skipped (./trix has no tetrix user ops)) =
+    quit
+} if
+
+% --- shared fixtures (lifted from test_tetrix_native.trx) ---
+/make-row { 10 array /row exch def 0 1 9 { /j exch def row j 0 put } for row } def
+/make-field { 20 array /fld exch def 0 1 19 { /j exch def fld j make-row put } for fld } def
+
+% A 4-cell [dr dc] shape whose first cell has dr=1, so the i=0 add
+% (py + dr) overflows when py = INT32_MAX -- before any bounds check.
+/ovf-shape [ [1 0] [0 0] [0 1] [1 1] ] def
+
+% ---------------------------------------------------------------------------
+% tetrix:1-1 -- piece-collides-fast with py = INT32_MAX (field shape py px)
+% ---------------------------------------------------------------------------
+% Pre-fix: r = py + dr = INT32_MAX + 1 in int32 -> UBSan signed-overflow abort.
+% Post-fix: long_t r = 2147483648 >= FIELD_ROWS -> out of bounds -> collision.
+make-field ovf-shape 2147483647 0 piece-collides-fast
+true eq (tetrix:1-1 collides py=INT32_MAX -> true, no signed-overflow UB) rt-ok
+clear
+
+% ---------------------------------------------------------------------------
+% tetrix:1-2 -- piece-merge-fast (field shape color py px :- field)
+% ---------------------------------------------------------------------------
+% Every shape cell lands out of bounds, so the field is returned unchanged
+% (length still 20).  Pre-fix: UBSan abort on the i=0 add.
+make-field ovf-shape 7 2147483647 0 piece-merge-fast
+length 20 eq (tetrix:1-2 merge py=INT32_MAX -> field intact, no UB) rt-ok
+clear
+
+% ---------------------------------------------------------------------------
+% tetrix:1-3 -- piece-ghost-row-fast (field shape py px :- ghost-row)
+% ---------------------------------------------------------------------------
+% Pre-fix: next_row = try_row + 1 = INT32_MAX + 1 overflows on the first loop
+% iteration.  Post-fix: the while-cap (try_row < FIELD_ROWS) skips the loop and
+% returns py_start unchanged.
+make-field ovf-shape 2147483647 0 piece-ghost-row-fast
+2147483647 eq (tetrix:1-3 ghost-row py=INT32_MAX -> py_start, no UB) rt-ok
+clear
+
+% ---------------------------------------------------------------------------
+% tetrix:1-0 -- field-clear-rows-fast functional + capacity guard
+% ---------------------------------------------------------------------------
+% Functional: an all-zero field has no full rows -> count 0, field intact.
+make-field field-clear-rows-fast
+/cnt exch def
+length 20 eq (tetrix:1-0 field-clear-rows-fast leaves a 20-row field) rt-ok
+cnt 0 eq (tetrix:1-0 field-clear-rows-fast count 0 for an empty field) rt-ok
+clear
+
+% The tetrix:1-0 capacity guard -- field-clear-rows-fast raising
+% /opstack-overflow instead of writing past m_op_limit when the operand stack
+% is full -- is verified OUT OF BAND, not here: an opstack-overflow cannot be
+% caught by `try` (catching needs operand-stack room, so a full stack escalates
+% to the global handler).  It is exercised by the standalone expected-failure
+% probe tests/test_b8_tetrix_capacity.trx (see its header + B8-remaining.md).
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

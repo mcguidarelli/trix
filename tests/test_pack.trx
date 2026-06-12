@@ -1,0 +1,572 @@
+% test_pack.trx — Binary pack/unpack/pack-size operators
+% Tests: format specifiers, endianness, round-trips, strings, errors
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION: pack-size
+% ====================================================================
+
+(B) pack-size 1 eq           (pack-size: B = 1) rt-ok clear
+(H) pack-size 2 eq           (pack-size: H = 2) rt-ok clear
+(I) pack-size 4 eq           (pack-size: I = 4) rt-ok clear
+(L) pack-size 8 eq           (pack-size: L = 8) rt-ok clear
+(b) pack-size 1 eq           (pack-size: b = 1) rt-ok clear
+(h) pack-size 2 eq           (pack-size: h = 2) rt-ok clear
+(i) pack-size 4 eq           (pack-size: i = 4) rt-ok clear
+(l) pack-size 8 eq           (pack-size: l = 8) rt-ok clear
+(f) pack-size 4 eq           (pack-size: f = 4) rt-ok clear
+(d) pack-size 8 eq           (pack-size: d = 8) rt-ok clear
+(x) pack-size 1 eq           (pack-size: x = 1) rt-ok clear
+(5s) pack-size 5 eq          (pack-size: 5s = 5) rt-ok clear
+(BHI) pack-size 7 eq         (pack-size: BHI = 7) rt-ok clear
+(4B) pack-size 4 eq          (pack-size: 4B = 4) rt-ok clear
+(3x) pack-size 3 eq          (pack-size: 3x = 3) rt-ok clear
+(BxB) pack-size 3 eq         (pack-size: BxB = 3) rt-ok clear
+(>HIBd) pack-size 15 eq      (pack-size: >HIBd = 15) rt-ok clear
+() pack-size 0 eq            (pack-size: empty = 0) rt-ok clear
+
+% ====================================================================
+% SECTION: pack basic types
+% ====================================================================
+
+% Single byte unsigned
+mark 42 (B) pack length 1 eq           (pack: B length) rt-ok clear
+mark 0 (B) pack 0 get 0b eq            (pack: B zero) rt-ok clear
+mark 255 (B) pack 0 get 255b eq        (pack: B max) rt-ok clear
+
+% Single byte signed
+mark 42 (b) pack length 1 eq           (pack: b length) rt-ok clear
+mark -1 (b) pack 0 get 255b eq         (pack: b -1 = 0xFF) rt-ok clear
+mark 127 (b) pack 0 get 127b eq        (pack: b max) rt-ok clear
+mark -128 (b) pack 0 get 128b eq       (pack: b min = 0x80) rt-ok clear
+
+% 32-bit integer
+mark 0 (i) pack length 4 eq            (pack: i length) rt-ok clear
+mark 0 (I) pack length 4 eq            (pack: I length) rt-ok clear
+
+% 64-bit
+mark 0l (l) pack length 8 eq           (pack: l length) rt-ok clear
+mark 0ul (L) pack length 8 eq          (pack: L length) rt-ok clear
+
+% Float
+mark 0.0 (f) pack length 4 eq          (pack: f length) rt-ok clear
+
+% Double
+mark 0.0d (d) pack length 8 eq         (pack: d length) rt-ok clear
+
+% Multiple values
+mark 1 2 3 (BBB) pack length 3 eq      (pack: 3 bytes) rt-ok clear
+
+% Padding
+mark 42 99 (BxB) pack length 3 eq      (pack: padding length) rt-ok clear
+mark 42 99 (BxB) pack 1 get 0b eq      (pack: padding is zero) rt-ok clear
+
+% Repeat count
+mark 1 2 3 4 (4B) pack length 4 eq     (pack: repeat 4B) rt-ok clear
+
+% ====================================================================
+% SECTION: unpack basic types
+% ====================================================================
+
+% Unsigned byte round-trip
+mark 42 (B) pack (B) unpack
+1 eq (unpack: B count) rt-ok
+/byte-type cast 42b eq (unpack: B value) rt-ok clear
+
+% Signed byte round-trip
+mark -1 (b) pack (b) unpack
+1 eq (unpack: b count) rt-ok
+-1 eq (unpack: b value -1) rt-ok clear
+
+mark 127 (b) pack (b) unpack
+1 eq (unpack: b max count) rt-ok
+127 eq (unpack: b value 127) rt-ok clear
+
+% 16-bit unsigned round-trip
+mark 1234u (H) pack (H) unpack
+1 eq (unpack: H count) rt-ok
+1234u eq (unpack: H value) rt-ok clear
+
+% 16-bit signed round-trip
+mark -1000 (h) pack (h) unpack
+1 eq (unpack: h count) rt-ok
+-1000 eq (unpack: h value) rt-ok clear
+
+% 32-bit unsigned round-trip
+mark 100000u (I) pack (I) unpack
+1 eq (unpack: I count) rt-ok
+100000u eq (unpack: I value) rt-ok clear
+
+% 32-bit signed round-trip
+mark -100000 (i) pack (i) unpack
+1 eq (unpack: i count) rt-ok
+-100000 eq (unpack: i value) rt-ok clear
+
+% 64-bit signed round-trip
+mark 9999999999l (l) pack (l) unpack
+1 eq (unpack: l count) rt-ok
+9999999999l eq (unpack: l value) rt-ok clear
+
+% 64-bit unsigned round-trip
+mark 9999999999ul (L) pack (L) unpack
+1 eq (unpack: L count) rt-ok
+9999999999ul eq (unpack: L value) rt-ok clear
+
+% Float round-trip
+mark 3.14 (f) pack (f) unpack
+1 eq (unpack: f count) rt-ok
+3.14 sub abs 0.001 lt (unpack: f value ~3.14) rt-ok clear
+
+% Double round-trip
+mark 3.14159265358979d (d) pack (d) unpack
+1 eq (unpack: d count) rt-ok
+3.14159265358979d sub abs 1e-10d lt (unpack: d value) rt-ok clear
+
+% ====================================================================
+% SECTION: string specifier
+% ====================================================================
+
+% Exact fit
+mark (Hello) (5s) pack (5s) unpack
+1 eq (unpack: 5s count) rt-ok
+(Hello) eq (unpack: 5s value) rt-ok clear
+
+% Zero-pad short string
+mark (Hi) (5s) pack length 5 eq     (pack: 5s zero-pads) rt-ok clear
+mark (Hi) (5s) pack (5s) unpack
+1 eq (unpack: 5s padded count) rt-ok
+% Result is 5 bytes: 'H' 'i' 0 0 0
+length 5 eq (unpack: 5s padded length) rt-ok clear
+
+% Truncate long string
+mark (Hello World) (5s) pack (5s) unpack
+1 eq (unpack: 5s truncate count) rt-ok
+(Hello) eq (unpack: 5s truncated value) rt-ok clear
+
+% ====================================================================
+% SECTION: endianness
+% ====================================================================
+
+% Big-endian 16-bit: 0x0102 -> 01 02
+mark 16#0102#u (>H) pack
+dup 0 get 1b eq  (endian: >H byte 0) rt-ok
+dup 1 get 2b eq  (endian: >H byte 1) rt-ok
+pop clear
+
+% Little-endian 16-bit: 0x0102 -> 02 01
+mark 16#0102#u (<H) pack
+dup 0 get 2b eq  (endian: <H byte 0) rt-ok
+dup 1 get 1b eq  (endian: <H byte 1) rt-ok
+pop clear
+
+% Big-endian 32-bit: 0x01020304 -> 01 02 03 04
+mark 16#01020304#u (>I) pack
+dup 0 get 1b eq  (endian: >I byte 0) rt-ok
+dup 3 get 4b eq  (endian: >I byte 3) rt-ok
+pop clear
+
+% Little-endian 32-bit: 0x01020304 -> 04 03 02 01
+mark 16#01020304#u (<I) pack
+dup 0 get 4b eq  (endian: <I byte 0) rt-ok
+dup 3 get 1b eq  (endian: <I byte 3) rt-ok
+pop clear
+
+% Endianness round-trip
+mark 16#CAFE#u (>H) pack (>H) unpack
+pop 16#CAFE#u eq (endian: >H round-trip) rt-ok clear
+
+mark 16#CAFE#u (<H) pack (<H) unpack
+pop 16#CAFE#u eq (endian: <H round-trip) rt-ok clear
+
+% Mixed endianness in one format
+mark 16#0102#u 16#0304#u (>H<H) pack
+dup 0 get 1b eq  (endian: >H<H first BE byte 0) rt-ok
+dup 2 get 4b eq  (endian: >H<H second LE byte 0) rt-ok
+pop clear
+
+% ====================================================================
+% SECTION: type coercion
+% ====================================================================
+
+% Pack integer as byte
+mark 42 (B) pack (B) unpack pop /byte-type cast 42b eq (coerce: int->B) rt-ok clear
+
+% Pack byte as integer
+mark 42b (i) pack (i) unpack pop 42 eq (coerce: byte->i) rt-ok clear
+
+% Pack integer as float
+mark 42 (f) pack (f) unpack pop 42.0 sub abs 0.001 lt (coerce: int->f) rt-ok clear
+
+% Pack integer as double
+mark 42 (d) pack (d) unpack pop 42.0d sub abs 1e-10d lt (coerce: int->d) rt-ok clear
+
+% ====================================================================
+% SECTION: multiple values
+% ====================================================================
+
+mark 1 2 3 (BBB) pack (BBB) unpack
+3 eq (multi: BBB count) rt-ok pop pop pop clear
+
+mark 100 200u 3.14 (iId) pack (iId) unpack
+3 eq (multi: iId count) rt-ok pop pop pop clear
+
+% ====================================================================
+% SECTION: error handling
+% ====================================================================
+
+% Wrong arg count
+<< /range-check { pop clear true } >>
+{ mark 1 2 (B) pack } try-catch
+(error: too many args) rt-ok clear
+
+<< /range-check { pop clear true } >>
+{ mark (BB) pack } try-catch
+(error: too few args) rt-ok clear
+
+% Range overflow
+<< /range-check { pop clear true } >>
+{ mark 256 (B) pack } try-catch
+(error: B overflow) rt-ok clear
+
+<< /range-check { pop clear true } >>
+{ mark -129 (b) pack } try-catch
+(error: b underflow) rt-ok clear
+
+<< /range-check { pop clear true } >>
+{ mark 70000 (H) pack } try-catch
+(error: H overflow) rt-ok clear
+
+% Type mismatch
+<< /type-check { pop clear true } >>
+{ mark (hello) (i) pack } try-catch
+(error: string for int spec) rt-ok clear
+
+<< /type-check { pop clear true } >>
+{ mark 42 (5s) pack } try-catch
+(error: int for string spec) rt-ok clear
+
+% Invalid format specifier
+<< /invalid-format-string { pop clear true } >>
+{ mark 42 (Z) pack } try-catch
+(error: invalid specifier) rt-ok clear
+
+% Unpack string too short
+<< /range-check { pop clear true } >>
+{ 2 string (I) unpack } try-catch
+(error: string too short) rt-ok clear
+
+% Empty format produces empty string
+mark () pack length 0 eq (edge: empty format) rt-ok clear
+
+% ====================================================================
+% SECTION: boundary values
+% ====================================================================
+
+% Signed byte boundaries
+mark -128 (b) pack (b) unpack pop -128 eq     (boundary: b min) rt-ok clear
+mark 127 (b) pack (b) unpack pop 127 eq       (boundary: b max) rt-ok clear
+
+% Unsigned byte boundaries
+mark 0 (B) pack (B) unpack pop 0b eq          (boundary: B min) rt-ok clear
+mark 255 (B) pack (B) unpack pop 255b eq      (boundary: B max) rt-ok clear
+
+% Signed 16-bit boundaries
+mark -32768 (h) pack (h) unpack pop -32768 eq (boundary: h min) rt-ok clear
+mark 32767 (h) pack (h) unpack pop 32767 eq   (boundary: h max) rt-ok clear
+
+% Unsigned 16-bit boundaries
+mark 0u (H) pack (H) unpack pop 0u eq         (boundary: H min) rt-ok clear
+mark 65535u (H) pack (H) unpack pop 65535u eq  (boundary: H max) rt-ok clear
+
+% Signed 32-bit boundaries
+mark -2147483648 (i) pack (i) unpack pop -2147483648 eq (boundary: i min) rt-ok clear
+mark 2147483647 (i) pack (i) unpack pop 2147483647 eq   (boundary: i max) rt-ok clear
+
+% Unsigned 32-bit boundaries
+mark 0u (I) pack (I) unpack pop 0u eq                   (boundary: I min) rt-ok clear
+mark 4294967295u (I) pack (I) unpack pop 4294967295u eq  (boundary: I max) rt-ok clear
+
+% 64-bit boundaries
+mark 0l (l) pack (l) unpack pop 0l eq         (boundary: l zero) rt-ok clear
+mark 0ul (L) pack (L) unpack pop 0ul eq       (boundary: L zero) rt-ok clear
+
+% Float special values
+mark 0.0 (f) pack (f) unpack pop 0.0 eq       (boundary: f zero) rt-ok clear
+mark -0.0 (f) pack (f) unpack pop dup 0.0 eq exch sign-bit and (boundary: f neg-zero) rt-ok clear
+
+% Double special values
+mark 0.0d (d) pack (d) unpack pop 0.0d eq     (boundary: d zero) rt-ok clear
+
+% Infinity round-trip
+mark inf (f) pack (f) unpack pop inf? (boundary: f +inf) rt-ok clear
+mark inf#d (d) pack (d) unpack pop inf? (boundary: d +inf) rt-ok clear
+
+% NaN round-trip (NaN != NaN, so check with nan?)
+mark nan (f) pack (f) unpack pop nan? (boundary: f NaN) rt-ok clear
+mark nan#d (d) pack (d) unpack pop nan? (boundary: d NaN) rt-ok clear
+
+% ====================================================================
+% SECTION: stress tests
+% ====================================================================
+
+% Large repeat count: 100 bytes
+mark
+0 1 99 { /byte-type cast } for
+(100B) pack
+length 100 eq (stress: 100B pack length) rt-ok clear
+
+% Large repeat count round-trip
+mark
+0 1 49 { } for
+(50i) pack (50i) unpack
+50 eq (stress: 50i unpack count) rt-ok
+% Verify first and last values
+50 1 sub index 0 eq (stress: 50i first value) rt-ok
+0 index 49 eq (stress: 50i last value) rt-ok
+0 1 49 { pop pop } for clear
+
+% Mixed format stress: pack many different types
+mark 1 2u 3l 4ul 5.0 6.0d (bHlLfd) pack
+(bHlLfd) unpack
+6 eq (stress: mixed 6 types count) rt-ok
+6.0d sub abs 1e-10d lt (stress: mixed double) rt-ok
+5.0 sub abs 0.001 lt (stress: mixed float) rt-ok
+4ul eq (stress: mixed ulong) rt-ok
+3l eq (stress: mixed long) rt-ok
+2u eq (stress: mixed uint16) rt-ok
+1 eq (stress: mixed int8) rt-ok
+clear
+
+% Pack string at max spec_size
+mark (ABCDEFGHIJ) (10s) pack length 10 eq (stress: 10s length) rt-ok clear
+
+% Multiple strings
+mark (AA) (BB) (CC) (2s2s2s) pack length 6 eq (stress: multi-string) rt-ok clear
+mark (AA) (BB) (CC) (2s2s2s) pack (2s2s2s) unpack
+3 eq (stress: multi-string count) rt-ok
+(CC) eq (stress: multi-string last) rt-ok
+(BB) eq (stress: multi-string middle) rt-ok
+(AA) eq (stress: multi-string first) rt-ok
+clear
+
+% ====================================================================
+% SECTION: additional error / sad path tests
+% ====================================================================
+
+% b range overflow high
+<< /range-check { pop clear true } >>
+{ mark 128 (b) pack } try-catch
+(error: b overflow high) rt-ok clear
+
+% h range overflow
+<< /range-check { pop clear true } >>
+{ mark 32768 (h) pack } try-catch
+(error: h overflow) rt-ok clear
+
+% h range underflow
+<< /range-check { pop clear true } >>
+{ mark -32769 (h) pack } try-catch
+(error: h underflow) rt-ok clear
+
+% H range overflow
+<< /range-check { pop clear true } >>
+{ mark 65536 (H) pack } try-catch
+(error: H overflow 65536) rt-ok clear
+
+% B negative value
+<< /range-check { pop clear true } >>
+{ mark -1 (B) pack } try-catch
+(error: B negative) rt-ok clear
+
+% Unpack with zero-length string for non-empty format
+<< /range-check { pop clear true } >>
+{ () (B) unpack } try-catch
+(error: unpack empty string) rt-ok clear
+
+% Unpack string 1 byte too short
+<< /range-check { pop clear true } >>
+{ 3 string (I) unpack } try-catch
+(error: unpack 3 bytes for I) rt-ok clear
+
+% Invalid specifier characters
+<< /invalid-format-string { pop clear true } >>
+{ (Z) pack-size } try-catch
+(error: pack-size invalid spec) rt-ok clear
+
+% Repeat count without specifier
+<< /invalid-format-string { pop clear true } >>
+{ (42) pack-size } try-catch
+(error: pack-size repeat no spec) rt-ok clear
+
+% Type mismatch: boolean for integer specifier
+<< /type-check { pop clear true } >>
+{ mark true (i) pack } try-catch
+(error: bool for int spec) rt-ok clear
+
+% Type mismatch: dict for any specifier
+<< /type-check { pop clear true } >>
+{ mark 4 dict (I) pack } try-catch
+(error: dict for uint spec) rt-ok clear
+
+% Type mismatch: array for float specifier
+<< /type-check { pop clear true } >>
+{ mark [1 2] (f) pack } try-catch
+(error: array for float spec) rt-ok clear
+
+% ====================================================================
+% SECTION: endianness identity (native round-trip)
+% ====================================================================
+
+% Native endian round-trip for each multi-byte type
+mark 12345 (=h) pack (=h) unpack pop 12345 eq          (native: h round-trip) rt-ok clear
+mark 12345u (=H) pack (=H) unpack pop 12345u eq        (native: H round-trip) rt-ok clear
+mark 123456789 (=i) pack (=i) unpack pop 123456789 eq   (native: i round-trip) rt-ok clear
+mark 123456789u (=I) pack (=I) unpack pop 123456789u eq (native: I round-trip) rt-ok clear
+mark 123456789l (=l) pack (=l) unpack pop 123456789l eq (native: l round-trip) rt-ok clear
+mark 123456789ul (=L) pack (=L) unpack pop 123456789ul eq (native: L round-trip) rt-ok clear
+mark 3.14 (=f) pack (=f) unpack pop 3.14 sub abs 0.001 lt (native: f round-trip) rt-ok clear
+mark 3.14d (=d) pack (=d) unpack pop 3.14d sub abs 1e-10d lt (native: d round-trip) rt-ok clear
+
+% Cross-endian round-trip: big then little
+mark 16#DEADBEEF#u (>I) pack (<I) unpack pop 16#EFBEADDE#u eq (cross: >I -> <I byte reversal) rt-ok clear
+
+% Padding consumed but not produced as value
+mark 42 99 (BxB) pack (BxB) unpack
+2 eq (padding: unpack count excludes x) rt-ok
+/byte-type cast 99b eq (padding: second value) rt-ok
+/byte-type cast 42b eq (padding: first value) rt-ok
+clear
+
+% ====================================================================
+% SECTION: 128-bit pack/unpack (q signed, Q unsigned)
+% ====================================================================
+
+% pack-size: q/Q both 16 bytes
+(q) pack-size 16 eq                    (pack-size: q = 16) rt-ok clear
+(Q) pack-size 16 eq                    (pack-size: Q = 16) rt-ok clear
+(2q) pack-size 32 eq                   (pack-size: 2q = 32) rt-ok clear
+(qQ) pack-size 32 eq                   (pack-size: qQ = 32) rt-ok clear
+(BqQH) pack-size 35 eq                 (pack-size: BqQH = 35) rt-ok clear
+
+% pack length: 16 bytes per slot
+mark 0q (q) pack length 16 eq          (pack: q length) rt-ok clear
+mark 0uq (Q) pack length 16 eq         (pack: Q length) rt-ok clear
+
+% Native round-trip: zero, one, negative, INT128_MAX, INT128_MIN
+mark 0q (=q) pack (=q) unpack
+pop 0q deep-eq                         (native: q zero round-trip) rt-ok clear
+
+mark 1q (=q) pack (=q) unpack
+pop 1q deep-eq                         (native: q one round-trip) rt-ok clear
+
+mark -1q (=q) pack (=q) unpack
+pop -1q deep-eq                        (native: q -1 round-trip) rt-ok clear
+
+mark 16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q (=q) pack (=q) unpack
+pop 16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q deep-eq
+                                       (native: q INT128_MAX round-trip) rt-ok clear
+
+mark -170141183460469231731687303715884105728q (=q) pack (=q) unpack
+pop -170141183460469231731687303715884105728q deep-eq
+                                       (native: q INT128_MIN round-trip) rt-ok clear
+
+% Native round-trip Q: zero, one, UINT128_MAX
+mark 0uq (=Q) pack (=Q) unpack
+pop 0uq deep-eq                        (native: Q zero round-trip) rt-ok clear
+
+mark 1uq (=Q) pack (=Q) unpack
+pop 1uq deep-eq                        (native: Q one round-trip) rt-ok clear
+
+mark 16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq (=Q) pack (=Q) unpack
+pop 16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq deep-eq
+                                       (native: Q UINT128_MAX round-trip) rt-ok clear
+
+% Big-endian round-trip preserves value
+mark 16#0123456789ABCDEFFEDCBA9876543210#uq (>Q) pack (>Q) unpack
+pop 16#0123456789ABCDEFFEDCBA9876543210#uq deep-eq
+                                       (big: Q round-trip) rt-ok clear
+
+% Little-endian round-trip preserves value
+mark 16#0123456789ABCDEFFEDCBA9876543210#uq (<Q) pack (<Q) unpack
+pop 16#0123456789ABCDEFFEDCBA9876543210#uq deep-eq
+                                       (little: Q round-trip) rt-ok clear
+
+% Cross-endian: big then little reverses 16 bytes
+mark 16#0102030405060708090A0B0C0D0E0F10#uq (>Q) pack (<Q) unpack
+pop 16#100F0E0D0C0B0A090807060504030201#uq deep-eq
+                                       (cross: >Q -> <Q byte reversal) rt-ok clear
+
+% Repeat count: pack three Int128 in one call, unpack with same repeat
+mark 1q 2q 3q (=3q) pack (=3q) unpack
+3 eq                                   (repeat: 3q unpack count) rt-ok
+3q deep-eq                             (repeat: 3q value [2]) rt-ok
+2q deep-eq                             (repeat: 3q value [1]) rt-ok
+1q deep-eq                             (repeat: 3q value [0]) rt-ok clear
+
+% Mixed format: B q Q H in one pack
+mark 7 16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q 16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq 65535u (=BqQH) pack
+dup length 35 eq                       (mixed: BqQH length) rt-ok
+(=BqQH) unpack
+4 eq                                   (mixed: BqQH unpack count) rt-ok
+65535u eq                              (mixed: H value) rt-ok
+16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq deep-eq (mixed: Q value) rt-ok
+16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q deep-eq  (mixed: q value) rt-ok
+/byte-type cast 7b eq                  (mixed: B value) rt-ok clear
+
+% Widening: pack a regular Integer into a q slot, unpack as Int128
+mark 42 (=q) pack (=q) unpack
+pop 42q deep-eq                        (widen: Integer -> q) rt-ok clear
+
+% Widening: pack a Long into a q slot
+mark 1234567890123l (=q) pack (=q) unpack
+pop 1234567890123q deep-eq             (widen: Long -> q) rt-ok clear
+
+% Widening: pack a ULong into a Q slot
+mark 18446744073709551615ul (=Q) pack (=Q) unpack
+pop 18446744073709551615uq deep-eq     (widen: ULong -> Q) rt-ok clear
+
+% Error: negative value into Q (unsigned)
+<< /range-check { pop clear true } >>
+{ mark -1q (Q) pack } try-catch
+                                       (error: negative -> Q) rt-ok clear
+
+% Error: type mismatch — string for q
+<< /type-check { pop clear true } >>
+{ mark (hello) (q) pack } try-catch
+                                       (error: string -> q) rt-ok clear
+
+% Error: short input string for unpack
+<< /range-check { pop clear true } >>
+{ (012345) (q) unpack } try-catch
+                                       (error: short string for q unpack) rt-ok clear
+% ====================================================================
+% SECTION: regression -- pack frees the last argument's ExtValue
+% ====================================================================
+% An off-by-one in the operand-stack teardown set m_op_ptr to
+% mark+argN-1 before freeing [mark .. m_op_ptr], so the TOP (last)
+% argument's ExtValue (Long/ULong/Double/128-bit backing cell) leaked.
+% Bracket a pack whose last arg is ExtValue-backed with the live
+% ExtValue count; it must be unchanged.
+
+//:status:extvalue-active /pack-ev-before exch def
+mark 18446744073709551615ul (L) pack pop
+//:status:extvalue-active /pack-ev-after exch def
+pack-ev-after pack-ev-before eq   (regress: pack top arg ExtValue freed, no leak) rt-ok clear
+
+% Multi-arg, last arg ExtValue-backed -- exercises the off-by-one directly.
+//:status:extvalue-active /pack-ev-before2 exch def
+mark 1 2 18446744073709551615ul (BBL) pack pop
+//:status:extvalue-active /pack-ev-after2 exch def
+pack-ev-after2 pack-ev-before2 eq (regress: pack last-of-many arg ExtValue freed) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

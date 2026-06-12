@@ -1,0 +1,167 @@
+% ====================================================================
+% Scheduler Observability Tests (Phase 5 Scheduler)
+% ====================================================================
+% Tests query-status keys for coroutine state counts and scheduler counters.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Baseline state counts (no coroutines)
+% ====================================================================
+
+/coroutine-ready query-status 0 eq       (baseline: no ready coroutines) rt-ok
+/coroutine-sleeping query-status 0 eq    (baseline: no sleeping coroutines) rt-ok
+/coroutine-blocked query-status 0 eq     (baseline: no blocked coroutines) rt-ok
+/coroutine-suspended query-status 0 eq   (baseline: no suspended coroutines) rt-ok
+
+% ====================================================================
+% SECTION 2: Queue depth tracking
+% ====================================================================
+
+/ready-queue-depth query-status 0 eq     (baseline: ready queue empty) rt-ok
+/ready-high-queue-depth query-status 0 eq (baseline: high queue empty) rt-ok
+/timer-list-depth query-status 0 eq      (baseline: timer list empty) rt-ok
+
+% ====================================================================
+% SECTION 3: Scheduler counters are non-negative
+% ====================================================================
+
+/sched-count query-status 0l ge          (counter: sched-count >= 0) rt-ok
+/sched-ready-pops query-status 0l ge     (counter: sched-ready-pops >= 0) rt-ok
+/sched-timer-wakes query-status 0l ge    (counter: sched-timer-wakes >= 0) rt-ok
+/sched-real-sleeps query-status 0l ge    (counter: sched-real-sleeps >= 0) rt-ok
+
+% ====================================================================
+% SECTION 4: State counts with active coroutines
+% ====================================================================
+
+% Capture sched-count before launching coroutines
+/sched-before /sched-count query-status def
+
+% Launch a coroutine that sleeps (goes to timer list)
+/sleeper [
+    { 5000 coroutine-sleep }
+    coroutine-launch def
+
+0 coroutine-sleep  % yield to let sleeper start and enter its sleep
+
+/coroutine-sleeping query-status 1 eq    (active: 1 sleeping coroutine) rt-ok
+/timer-list-depth query-status 1 eq      (active: timer list depth is 1) rt-ok
+
+% Suspend the sleeper
+sleeper coroutine-suspend
+
+/coroutine-suspended query-status 1 eq   (suspend: 1 suspended coroutine) rt-ok
+/coroutine-sleeping query-status 0 eq    (suspend: no sleeping after suspend) rt-ok
+/timer-list-depth query-status 0 eq      (suspend: timer list empty after suspend) rt-ok
+
+% Kill the sleeper
+sleeper coroutine-kill
+
+/coroutine-suspended query-status 0 eq   (killed: no suspended after kill) rt-ok
+
+% ====================================================================
+% SECTION 5: Ready queue depth with multiple coroutines
+% ====================================================================
+
+% Launch 3 coroutines that yield immediately
+/c1 [
+    { 0 coroutine-sleep
+      0 coroutine-sleep
+    }
+    coroutine-launch def
+
+/c2 [
+    { 0 coroutine-sleep
+      0 coroutine-sleep
+    }
+    coroutine-launch def
+
+/c3 [
+    { 0 coroutine-sleep
+      0 coroutine-sleep
+    }
+    coroutine-launch def
+
+% After launch, all 3 are in the ready queue
+/ready-queue-depth query-status 3 eq     (multi: 3 in ready queue after launch) rt-ok
+/coroutine-ready query-status 3 eq       (multi: 3 ready coroutines) rt-ok
+
+% Yield to let them all run and re-yield
+0 coroutine-sleep
+
+% After all yield back, they should be back in the ready queue
+/ready-queue-depth query-status 3 eq     (multi: 3 in ready queue after yield cycle) rt-ok
+
+% Clean up
+c1 coroutine-join pop pop
+c2 coroutine-join pop pop
+c3 coroutine-join pop pop
+
+% ====================================================================
+% SECTION 6: High-priority queue depth
+% ====================================================================
+
+% Launch a normal coroutine, then elevate it to high from main.
+% Since main hasn't yielded, h1 is still in the ready queue.
+/h1 [
+    { 0 coroutine-sleep }
+    coroutine-launch def
+
+% h1 is in the normal ready queue.  Elevate to high.
+h1 1 coroutine-priority
+
+/ready-high-queue-depth query-status 1 eq (high: 1 in high queue) rt-ok
+/ready-queue-depth query-status 0 eq     (high: normal queue empty after elevation) rt-ok
+
+h1 coroutine-join pop pop
+
+/ready-high-queue-depth query-status 0 eq (high: high queue empty after join) rt-ok
+
+% ====================================================================
+% SECTION 7: Scheduler counters increment
+% ====================================================================
+
+/sched-after /sched-count query-status def
+sched-after sched-before gt              (counter: sched-count incremented) rt-ok
+
+/sched-ready-pops query-status 0l gt     (counter: sched-ready-pops > 0 after coroutines ran) rt-ok
+
+% ====================================================================
+% SECTION 8: Blocked coroutine count
+% ====================================================================
+
+% Launch a coroutine that blocks on join (blocks on a sleeping target)
+/target8 [
+    { 5000 coroutine-sleep }
+    coroutine-launch def
+
+/joiner8 [
+    { target8 coroutine-join pop pop }
+    coroutine-launch def
+
+0 coroutine-sleep  % yield to let joiner8 start and block on join
+
+/coroutine-blocked query-status 1 eq     (blocked: 1 blocked coroutine - joiner) rt-ok
+/coroutine-sleeping query-status 1 eq    (blocked: 1 sleeping coroutine - target) rt-ok
+
+% Kill target to unblock joiner
+target8 coroutine-kill
+0 coroutine-sleep  % let joiner complete
+
+joiner8 coroutine-join pop pop
+
+/coroutine-blocked query-status 0 eq     (blocked: no blocked after cleanup) rt-ok
+
+clear
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_scheduler_stats: ALL TESTS PASSED) =
+(__test_ok__) =

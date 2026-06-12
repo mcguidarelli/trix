@@ -1,0 +1,1 @@
+<< /ask { pop 42 } >> { [ { /ask perform } coroutine-launch coroutine-join exch pop pop clear } handle-effect

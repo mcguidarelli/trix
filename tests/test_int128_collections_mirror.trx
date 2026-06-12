@@ -1,0 +1,230 @@
+% ====================================================================
+% Mirror of test_collections.trx long/ulong cases for Int128/UInt128.
+%
+% Every collection-operator pattern that test_collections.trx exercised
+% with `l`/`ul` literals is paralleled here with `h`/`uh` to force
+% type-dispatch sites (sum, product, sort, filter, etc.) to handle
+% 128-bit operands. This specifically targets the kind of UB the
+% feature sprint shipped -- switch-on-Object::type() without
+% Int128/UInt128 arms that silently fell through or std::unreachable'd.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: flatten with nested 128-bit arrays
+% ====================================================================
+
+[[1000q 2000q] [3000q]] flatten
+  dup 0 get 1000q deep-eq
+  over 1 get 2000q deep-eq and
+  over 2 get 3000q deep-eq and exch pop       (flatten: int128 leaves) rt-ok clear
+
+[[1000uq 2000uq] [3000uq]] flatten
+  dup 0 get 1000uq deep-eq
+  over 1 get 2000uq deep-eq and
+  over 2 get 3000uq deep-eq and exch pop      (flatten: uint128 leaves) rt-ok clear
+
+% ====================================================================
+% SECTION 2: partition with 128-bit predicate
+% ====================================================================
+
+[100q 200q 300q 400q] { 250q gt } partition
+  /fail exch def
+  /pass exch def
+  pass [300q 400q] deep-eq   (partition: int128 pass) rt-ok
+  fail [100q 200q] deep-eq   (partition: int128 fail) rt-ok clear
+
+[100uq 200uq 300uq 400uq] { 250uq gt } partition
+  /fail2 exch def
+  /pass2 exch def
+  pass2 [300uq 400uq] deep-eq   (partition: uint128 pass) rt-ok
+  fail2 [100uq 200uq] deep-eq   (partition: uint128 fail) rt-ok clear
+
+% ====================================================================
+% SECTION 3: type-predicate surface
+% ====================================================================
+
+42q is-number                                 (is-number: int128 true) rt-ok clear
+42uq is-number                                (is-number: uint128 true) rt-ok clear
+42q is-float not                              (is-float: int128 false) rt-ok clear
+42uq is-float not                             (is-float: uint128 false) rt-ok clear
+42q is-long not                               (is-long: int128 false) rt-ok clear
+42uq is-ulong not                             (is-ulong: uint128 false) rt-ok clear
+42q is-int128                                 (is-int128: int128 true) rt-ok clear
+42uq is-int128 not                            (is-int128: uint128 false) rt-ok clear
+42q is-uint128 not                            (is-uint128: int128 false) rt-ok clear
+42uq is-uint128                               (is-uint128: uint128 true) rt-ok clear
+42q is-signed                                 (is-signed: int128 true) rt-ok clear
+42uq is-signed not                            (is-signed: uint128 false) rt-ok clear
+42uq is-unsigned                              (is-unsigned: uint128 true) rt-ok clear
+42q is-unsigned not                           (is-unsigned: int128 false) rt-ok clear
+
+% ====================================================================
+% SECTION 4: for-all / reduce / sum over 128-bit arrays
+% ====================================================================
+
+/sum-acc 0q def
+[1000000000q 2000000000q 3000000000q] { sum-acc add /sum-acc exch def } for-all
+sum-acc 6000000000q deep-eq                   (for-all: int128 accumulator sum) rt-ok clear
+
+/usum-acc 0uq def
+[1000000000uq 2000000000uq 3000000000uq] { usum-acc add /usum-acc exch def } for-all
+usum-acc 6000000000uq deep-eq                 (for-all: uint128 accumulator sum) rt-ok clear
+
+[1q 2q 3q 4q] 0q { add } reduce 10q deep-eq   (reduce: int128 sum) rt-ok clear
+[1uq 2uq 3uq 4uq] 0uq { add } reduce 10uq deep-eq (reduce: uint128 sum) rt-ok clear
+
+% ====================================================================
+% SECTION 5: filter / any / all with 128-bit predicate
+% ====================================================================
+
+[1000000000q 2000000000q 3000000000q 4000000000q] { 2500000000q gt } filter
+  dup 0 get 3000000000q deep-eq               (filter: int128 first) rt-ok
+      1 get 4000000000q deep-eq               (filter: int128 second) rt-ok clear
+
+[1000000000uq 2000000000uq 3000000000uq 4000000000uq] { 2500000000uq gt } filter
+  dup 0 get 3000000000uq deep-eq              (filter: uint128 first) rt-ok
+      1 get 4000000000uq deep-eq              (filter: uint128 second) rt-ok clear
+
+[1000000000q 2000000000q] { 1500000000q gt } any (any: int128 true) rt-ok clear
+[1000000000q 2000000000q] { 0q gt } all          (all: int128 true) rt-ok clear
+[1000000000uq 2000000000uq] { 1500000000uq gt } any (any: uint128 true) rt-ok clear
+[1000000000uq 2000000000uq] { 0uq gt } all          (all: uint128 true) rt-ok clear
+
+% ====================================================================
+% SECTION 6: min-by / max-by / sort-by on 128-bit elements
+% ====================================================================
+
+[100q 300q 200q] { } min-by 100q deep-eq      (min-by: int128) rt-ok clear
+[100q 300q 200q] { } max-by 300q deep-eq      (max-by: int128) rt-ok clear
+[100uq 300uq 200uq] { } min-by 100uq deep-eq  (min-by: uint128) rt-ok clear
+[100uq 300uq 200uq] { } max-by 300uq deep-eq  (max-by: uint128) rt-ok clear
+
+[42q] { } sort-by
+  dup 0 get 42q deep-eq                       (sort-by: single int128) rt-ok clear
+[42uq] { } sort-by
+  dup 0 get 42uq deep-eq                      (sort-by: single uint128) rt-ok clear
+
+[3q 1q 2q] { } sort-by [1q 2q 3q] deep-eq     (sort-by: int128 identity proc) rt-ok clear
+[3uq 1uq 2uq] { } sort-by [1uq 2uq 3uq] deep-eq (sort-by: uint128 identity proc) rt-ok clear
+
+% ====================================================================
+% SECTION 7: take-while / drop-while with 128-bit predicate
+% ====================================================================
+
+[1000000000q 2000000000q 3000000000q] { 2500000000q lt } take-while
+  dup 1 get 2000000000q deep-eq               (take-while: int128 last) rt-ok clear
+
+[1000000000q 2000000000q 3000000000q] { 2500000000q lt } drop-while
+  dup 0 get 3000000000q deep-eq               (drop-while: int128 first) rt-ok clear
+
+[1000000000uq 2000000000uq 3000000000uq] { 2500000000uq lt } take-while
+  dup 1 get 2000000000uq deep-eq              (take-while: uint128 last) rt-ok clear
+
+[1000000000uq 2000000000uq 3000000000uq] { 2500000000uq lt } drop-while
+  dup 0 get 3000000000uq deep-eq              (drop-while: uint128 first) rt-ok clear
+
+% ====================================================================
+% SECTION 8: group-by with 128-bit keys (identity proc)
+% ====================================================================
+
+[10q 20q 10q 30q 20q 10q] { } group-by
+  dup 10q get length 3 eq                     (group-by: int128 group size) rt-ok
+  20q get length 2 eq                         (group-by: int128 group size 20) rt-ok clear
+
+[10uq 20uq 10uq 30uq 20uq 10uq] { } group-by
+  dup 10uq get length 3 eq                    (group-by: uint128 group size) rt-ok
+  20uq get length 2 eq                        (group-by: uint128 group size 20) rt-ok clear
+
+% ====================================================================
+% SECTION 9: scan with 128-bit state + update
+% ====================================================================
+
+[1q 2q 3q] 0q { add } scan
+  dup 3 get 6q deep-eq                        (scan: int128 final) rt-ok
+      0 get 0q deep-eq                        (scan: int128 seed) rt-ok clear
+
+[1uq 2uq 3uq] 0uq { add } scan
+  dup 3 get 6uq deep-eq                       (scan: uint128 final) rt-ok
+      0 get 0uq deep-eq                       (scan: uint128 seed) rt-ok clear
+
+% ====================================================================
+% SECTION 10: map with 128-bit transformation
+% ====================================================================
+
+[1q 2q 3q] { 10q mul } map
+  dup 0 get 10q deep-eq                       (map: int128 scale0) rt-ok
+      2 get 30q deep-eq                       (map: int128 scale2) rt-ok clear
+
+[1uq 2uq 3uq] { 10uq mul } map
+  dup 0 get 10uq deep-eq                      (map: uint128 scale0) rt-ok
+      2 get 30uq deep-eq                      (map: uint128 scale2) rt-ok clear
+
+% ====================================================================
+% SECTION 11: source-preservation guards (common source-not-mutated tests)
+% ====================================================================
+
+/src [10q 20q 30q] def
+src { 25q gt } any pop
+src 0 get 10q deep-eq   (srcguard: any int128 source[0] intact) rt-ok
+src 2 get 30q deep-eq   (srcguard: any int128 source[2] intact) rt-ok clear
+
+/src2 [10q 20q 30q] def
+src2 0q { add } reduce pop
+src2 0 get 10q deep-eq   (srcguard: reduce int128 source[0] intact) rt-ok
+src2 2 get 30q deep-eq   (srcguard: reduce int128 source[2] intact) rt-ok clear
+
+/src3 [30q 10q 20q] def
+src3 { } sort-by pop
+src3 0 get 30q deep-eq   (srcguard: sort-by int128 source[0] intact) rt-ok
+src3 1 get 10q deep-eq   (srcguard: sort-by int128 source[1] intact) rt-ok clear
+
+/src4 [30q 10q 20q] def
+src4 { } min-by pop
+src4 0 get 30q deep-eq   (srcguard: min-by int128 source[0] intact) rt-ok
+src4 2 get 20q deep-eq   (srcguard: min-by int128 source[2] intact) rt-ok clear
+
+/src5 [1q 2q 3q] def
+src5 { 10q mul } map pop
+src5 0 get 1q deep-eq    (srcguard: map int128 source[0] intact) rt-ok
+src5 2 get 3q deep-eq    (srcguard: map int128 source[2] intact) rt-ok clear
+
+% ====================================================================
+% SECTION 12: zip / chunk on 128-bit packed arrays
+% ====================================================================
+
+{ 1q 2q 3q } { 4q 5q 6q } zip
+  dup 0 get dup 0 get 1q deep-eq exch 1 get 4q deep-eq and
+                                              (zip: int128 pair 0) rt-ok
+  dup 2 get dup 0 get 3q deep-eq exch 1 get 6q deep-eq and
+                                              (zip: int128 pair 2) rt-ok
+  pop clear
+
+{ 10q 20q 30q 40q } 2 chunk
+  dup 0 get dup 0 get 10q deep-eq exch 1 get 20q deep-eq and
+                                              (chunk: int128 chunk 0) rt-ok
+  pop clear
+
+% ====================================================================
+% SECTION 13: packed-array aggregates (sum / min-of / max-of)
+% ====================================================================
+
+{ 10q 20q 30q } sum 60q deep-eq               (pk-sum: int128) rt-ok clear
+{ 10uq 20uq 30uq } sum 60uq deep-eq           (pk-sum: uint128) rt-ok clear
+{ 30q 10q 20q } min-of 10q deep-eq            (pk-min-of: int128) rt-ok clear
+{ 10q 30q 20q } max-of 30q deep-eq            (pk-max-of: int128) rt-ok clear
+{ 30uq 10uq 20uq } min-of 10uq deep-eq        (pk-min-of: uint128) rt-ok clear
+{ 10uq 30uq 20uq } max-of 30uq deep-eq        (pk-max-of: uint128) rt-ok clear
+
+(test_int128_collections_mirror.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

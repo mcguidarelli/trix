@@ -1,0 +1,3 @@
+/m null def
+[ { actor-recv /m exch def } actor-spawn /a exch def
+(hello) a actor-send 0 coroutine-sleep m

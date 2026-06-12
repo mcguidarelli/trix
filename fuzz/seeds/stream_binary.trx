@@ -1,0 +1,4 @@
+64 make-string-stream /s exch def
+s 42 write
+s 16 write
+s get-string-stream length

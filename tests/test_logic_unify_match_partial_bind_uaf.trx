@@ -1,0 +1,169 @@
+% ====================================================================
+% test_logic_unify_match_partial_bind_uaf.trx
+% ====================================================================
+% Guardrail test for the partial-bind-then-restore scenario described
+% in memory/plan_unify_match_partial_bind_uaf.md.
+%
+% Theory of the bug (2026-05-04 audit):
+%   lvar_bind shallow-shares the bound value's m_offset with the lvar's
+%   binding storage.  On a per-attempt save/restore in unify_match_op,
+%   the Flavor::Object restore handler calls maybe_free_extvalue on the
+%   lvar slot, freeing the ExtValue that the pattern array's storage
+%   still references.  Subsequent reads of pattern[k] would dereference
+%   a freed (and possibly reallocated) ExtValue slot.
+%
+% Empirical finding (2026-05-12):
+%   The bug as documented does NOT manifest with the current Trix code.
+%   Multiple reproducers across the trigger surface (unify, unify-match,
+%   with and without try, with many spam allocations between operations)
+%   all show pattern[0] reading correctly after a failed partial-bind.
+%
+%   The lvar_bind code is structurally unchanged from the audit:
+%   make_copy(curr_save_level) is a shallow Object struct copy that
+%   preserves m_offset.  The Flavor::Object restore handler still calls
+%   maybe_free_extvalue on the post-bind bytes.  So the audit's
+%   structural analysis is sound.
+%
+%   But something in the surrounding system (name-eval cloning, array
+%   construction, free-list bucket selection, or restore's count-and-
+%   bucket reset) prevents the freed slot from being reused by
+%   subsequent allocations.  Pattern[0]'s m_offset still resolves to
+%   bytes that contain the original value.
+%
+% Purpose of this test:
+%   Exercise the partial-bind path and assert pattern[0] still reads
+%   correctly.  If a future change "fixes" whatever is currently
+%   preventing the corruption, this test will start failing -- pointing
+%   directly at the partial-bind UAF as a real regression vector.
+%
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- Setup: runtime-allocated Long in the pattern ---
+1l 41l add /target exch def        % target = 42l, fresh allocation
+[ [ [ target 100l ] { } ] ] /pairs exch def
+
+% --- Trigger: unify-match that partial-binds an lvar to pattern[0]
+%     then mismatches on pattern[1] ---
+{ logic-var /x exch def [ x 99l ] pairs unify-match } /Fail { } try
+
+% --- Force fresh ExtValue allocations after the fail, in case the
+%     freed slot landed on the free list and would be reused. ---
+0l 1l add pop
+0l 2l add pop
+0l 3l add pop
+0l 4l add pop
+0l 5l add /spam exch def
+
+% --- Assertions ---
+% Pattern[0] should still read 42l.  Pre-fix-of-the-theoretical-bug:
+% reads stale/recycled data.  Today: reads 42l correctly.
+pairs 0 get 0 get 0 get 42l eq
+    (partial-bind scenario: pattern[0] reads 42l unchanged) rt-ok
+
+% Sanity: spam succeeded with the expected value.
+spam 5l eq
+    (sanity: spam allocation has expected value) rt-ok clear
+
+% Pairs == should round-trip cleanly.
+pairs 0 get 0 get 1 get 100l eq
+    (sanity: pattern[1] reads 100l unchanged) rt-ok
+
+% vm-validate as a final cross-check.
+/vm-validate query-status true eq
+    (vm-validate passes after partial-bind sequence) rt-ok
+
+% ====================================================================
+% S2-S5: Extended sad-path coverage per plan_lvar_bind_context_aware.md
+% ====================================================================
+
+% --- S2: Multi-Long partial-bind across 3+ lvars before mismatch ---
+%        Pattern [a b c 9999l] vs value [100l 200l 300l 500l].
+%        a/b/c bind in sequence; the 4th element mismatch (9999l != 500l)
+%        rolls back all three sub-binds.  Verify pattern slots intact
+%        after the failed match, then re-use pattern with a matching
+%        value.
+1l 99l add /v0 exch def       % v0=100l, runtime alloc
+1l 199l add /v1 exch def      % v1=200l
+1l 299l add /v2 exch def      % v2=300l
+[ [ [ v0 v1 v2 9999l ] { } ] ] /pairs-s2 exch def
+{ logic-var /a exch def logic-var /b exch def logic-var /c exch def
+  [ 100l 200l 300l 500l ] [ a b c 9999l ] pairs-s2 0 get 0 exch put
+  pop  % drop the put-return
+  100l [ a b c 9999l ] pairs-s2 unify-match
+} /Fail { } try
+pairs-s2 0 get 0 get 0 get  v0 eq
+    (S2: pattern slot 0 (v0=100l) intact after multi-lvar mismatch) rt-ok
+pairs-s2 0 get 0 get 3 get 9999l eq
+    (S2: pattern slot 3 (9999l) intact after mismatch) rt-ok
+
+% --- S3: Tight loop -- 100 iterations of failed unify-match ---
+%        Each iter constructs a fresh pattern + fresh lvar, attempts
+%        unify-match against a value designed to mismatch at the tail.
+%        Aggressive spam allocations between iters to disturb the
+%        free-list bucket state.  Verify no corruption of a stable
+%        reference value across the entire loop.
+1l 41l add /s3-target exch def     % 42l
+{
+    logic-var /x-s3 exch def
+    { [ x-s3 9999l ] [[ [ s3-target 500l ] { } ]] unify-match }
+        /Fail { } try
+    0l 1l add pop  0l 2l add pop  0l 3l add pop
+    0l 4l add pop  0l 5l add pop  0l 6l add pop
+} /s3-iter exch def
+100 /s3-iter load repeat
+s3-target 42l eq
+    (S3: 100x failed unify-match + spam -- target value 42l intact) rt-ok
+
+% --- S4: Backtracking via choice/fail loops the same lvar through
+%         multiple binds and rollbacks ---
+%        Each `choice` alternative binds /x to a different Long; the
+%        guard fails, triggering rollback to the next alternative.
+%        Verify the pattern array under the inner unify-match remains
+%        usable after each rollback.
+1l 99l add /s4-needle exch def    % 100l
+[ [ [ s4-needle 200l ] { } ] ] /s4-pairs exch def
+{
+    logic-var /x-s4 exch def
+    {
+        { x-s4 1l unify guard  fail }     % attempt 1: x=1l, then fail
+        { x-s4 2l unify guard  fail }     % attempt 2: x=2l, then fail
+        { x-s4 3l unify guard
+          [ x-s4 200l ] s4-pairs unify-match  % attempt 3: bind in unify-match
+        }
+    } choice
+} /Fail { } try
+s4-pairs 0 get 0 get 0 get s4-needle eq
+    (S4: backtracking via choice/fail -- pattern slot intact) rt-ok
+
+% --- S5: Save/restore at multiple nested levels around unify-match ---
+%        Outer save Y+1, inner save Y+2.  Failed match (via try) inside
+%        the inner scope restores Y+2 then we restore the outer Y+1.
+%        Verify the outer ExtValue counter returns to baseline.
+1l 41l add /s5-base exch def
+//:status:extvalue-active /s5-baseline exch def
+save /S5-outer exch def
+  save /S5-inner exch def
+    { logic-var /xS5 exch def
+      [ s5-base 100l ] [ [ [ xS5 9999l ] { } ] ] unify-match }
+      /Fail { clear } try
+  S5-inner restore
+S5-outer restore
+//:status:extvalue-active s5-baseline eq
+    (S5: nested save/restore -- ExtValues reclaimed to baseline) rt-ok
+
+/vm-validate query-status true eq
+    (vm-validate passes after S2-S5) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_logic_unify_match_partial_bind_uaf: ALL TESTS PASSED) =
+(__test_ok__) =

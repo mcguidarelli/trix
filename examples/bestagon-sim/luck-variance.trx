@@ -1,0 +1,266 @@
+% =====================================================================
+% luck-variance.trx -- Per-cell luck-on damage variance (Phase 0.5D)
+% =====================================================================
+%
+% Tier 1.3 of plan_bestagon_balance_prototyping.md.  For every legal
+% damage-table cell, runs 10K luck-on trials and measures variance:
+% min/median/max/std HP + P(damage >= 10 HP) = "one-shot at full HP".
+%
+% Methodology (per plan §0.5D):
+%   - Attacker full HP, defender full HP, on Plain, no CO, no vet,
+%     no Power, no Super.  Pure base damage + luck variance.
+%   - Plain defense stars: 2 for foot defenders (Inf/Mech), 1 otherwise
+%     (§4 inf-only column applies).
+%   - Calls combat-core's `apply-formula` directly to skip resolve-
+%     modifiers (since there's nothing to resolve when atk/def CO
+%     contribute nothing).
+%
+% Outputs (gitignored under examples/bestagon-sim/out/):
+%   luck-variance.csv          one row per legal cell + stats
+%   luck-variance-summary.md   top-20 cells by p-one-shot + overall
+%
+% Success criterion (per plan):
+%   P(one-shot at full HP) < 5% for any cell.
+%   If violated: re-spec damage table OR clamp luck range to [0, 7].
+%
+% Run with the prod build:
+%   ./trix.opt examples/bestagon-sim/luck-variance.trx
+%
+% Performance: ~1.75M apply-formula calls (175 cells x 10K trials).
+% Zero VM-heap allocation in
+% the inner loop (apply-formula uses frame-local locals only).  No
+% --vm-size override needed.
+% =====================================================================
+
+(examples/bestagon-sim/combat-core.trx) run
+
+
+% ====================================================================
+% Section 1: configuration
+% ====================================================================
+
+/n-trials   10000 def
+/luck-bound    10u def           % uniform_int(0, 9) per §7.3
+/hist-bins    20 def             % HP-damage histogram bins (0..19)
+
+
+% ====================================================================
+% Section 2: per-defender Plain terrain stars
+% ====================================================================
+%
+% §4 Plain: 1 (2 inf).  Pure non-CO terrain bonus on Plain.
+
+/plain-stars-of {|def-u|
+    def-u foot? { 2 } { 1 } if-else
+} def
+
+
+% ====================================================================
+% Section 3: zero-init array helper
+% ====================================================================
+
+/make-zero-array {|n|#+2
+    /a n array local-def
+    0 1 n 1 sub  {
+        /i exch def
+        a i 0 put
+    } for
+    a
+} def
+
+
+% ====================================================================
+% Section 4: per-cell simulation
+% ====================================================================
+%
+% Stack at call: atk-u def-u base-pct main-stream summary-stream
+% (consumes nothing; pushes nothing).  Side effects: increments
+% running stats, writes one CSV row.
+%
+% Per-cell loop: 10K luck rolls -> histogram[hp] += 1.  Then derive
+% min/median/max/std/p-one-shot from histogram and emit a CSV row.
+
+/run-cell {|atk-u def-u base m|#+16
+    /terrain-stars  def-u plain-stars-of  local-def
+    /hist           hist-bins make-zero-array  local-def
+    /one-shots      0       local-def
+    /sum-hp         0       local-def
+    /sum-sq         0       local-def
+    /min-hp         hist-bins local-def
+    /max-hp         0       local-def
+
+    1 1 n-trials  {
+        pop                                     % drop for counter
+        /luck-pp  luck-bound rand-bounded-uinteger /integer-type cast  local-def
+        /damage   base luck-pp 0 0 terrain-stars 10 10 apply-formula  local-def
+
+        % Histogram clamp -- if damage exceeds hist-bins, cap at top
+        % bin (shouldn't happen in pure-base-luck w/ no CO; defensive).
+        /idx  damage hist-bins 1 sub  min  local-def
+        hist idx  hist idx get 1 add  put
+
+        /sum-hp   sum-hp damage add  store
+        /sum-sq   sum-sq damage damage mul add  store
+        damage 10 ge { /one-shots one-shots 1 add store } if
+        damage min-hp lt { /min-hp damage store } if
+        damage max-hp gt { /max-hp damage store } if
+    } for
+
+    /mean-hp     $[ (sum-hp * 1.0) / n-trials ]  local-def
+    /variance    $[ (sum-sq * 1.0) / n-trials - mean-hp * mean-hp ]  local-def
+    /std-hp      variance 0.0 lt { 0.0 } { variance 0.5 pow } if-else  local-def
+    /median-hp   hist hist-median  local-def
+    /p-one-shot  $[ (one-shots * 1.0) / n-trials ]  local-def
+
+    m ({0:s},{1:s},{2},{3},{4},{5},{6:.3f},{7:.3f}\n)
+        mark
+        atk-u def-u base min-hp median-hp max-hp std-hp p-one-shot
+        fprint-fmt pop pop
+
+    % Stash this cell into the pre-allocated cells-buffer for sorting.
+    cells-buffer  cell-count
+        [ atk-u  def-u  base  p-one-shot ]#r  put
+    /cell-count cell-count 1 add store
+} def
+
+
+% ====================================================================
+% Section 5: histogram median helper
+% ====================================================================
+%
+% Walks cumulative count until it crosses n/2.
+
+/hist-total {|h|#+2
+    /sum 0 local-def
+    0 1 hist-bins 1 sub  {
+        /i exch def
+        /sum sum h i get add store
+    } for
+    sum
+} def
+
+/hist-median {|h|#+4
+    /n h hist-total local-def
+    /target  n 2 div local-def
+    /cumul 0 local-def
+    /result 0 local-def
+    0 1 hist-bins 1 sub  {
+        /i exch def
+        /cumul cumul h i get add store
+        cumul target ge result 0 eq and {
+            /result i store
+        } if
+    } for
+    result
+} def
+
+
+% ====================================================================
+% Section 6: orchestration
+% ====================================================================
+
+% Deterministic seed.
+2026051502ul rand-seed
+
+/out-main     (examples/bestagon-sim/out/luck-variance.csv)         def
+/out-summary  (examples/bestagon-sim/out/luck-variance-summary.md)  def
+
+(=== luck-variance sim starting ===\n) print
+
+/main-stream  out-main (w)#b stream  def
+
+main-stream (atk_unit,def_unit,base,min_hp,median_hp,max_hp,std_hp,p_one_shot\n) write-string
+
+/cells-evaluated 0 def
+/cells-violating 0 def
+
+% Pre-allocated buffer for top-N sorting (we have ~150 legal cells).
+/cells-buffer  256 array def
+/cell-count    0 def
+
+damage-table { |atk-u atk-row|
+    atk-row { |def-u base|
+        atk-u def-u base main-stream run-cell
+        /cells-evaluated cells-evaluated 1 add store
+    } for-all
+} for-all
+
+main-stream close-stream
+(  main written: {0:s}\n) mark out-main print-fmt pop pop
+
+
+% ====================================================================
+% Section 7: summary -- collect cells from scratch arena, sort by
+% p-one-shot, emit top-20 + overall stats.
+% ====================================================================
+
+% Cells-buffer holds the first `cell-count` entries.  Each entry is an
+% Array [atk-u def-u base p-one-shot].  Build a slice + sort by
+% p-one-shot descending.
+/n-cells  cell-count  def
+/active-cells  n-cells array def
+0 1 n-cells 1 sub  { |i|
+    active-cells i  cells-buffer i get  put
+} for
+
+% sort-by descending p-one-shot (index 3 of each entry).  Negate to
+% reverse-sort.
+/sorted-cells  active-cells { 3 get neg } sort-by  def
+
+(  cells evaluated: {0}\n) mark cells-evaluated print-fmt pop pop
+
+% Count cells with p-one-shot >= 0.05
+/violators  0 def
+0 1 n-cells 1 sub  { |i|
+    sorted-cells i get 3 get  0.05 ge {
+        /violators violators 1 add store
+    } if
+} for
+
+% Write summary.md
+/s  out-summary (w)#b stream  def
+
+s (# Bestagon luck-variance sim summary\n\n) write-string
+s (Per-cell variance under luck-on (uniform_int(0, 9)) at full HP,) write-string
+s ( Plain terrain, no CO / no vet / no Power.\n\n) write-string
+
+s (## Counts\n\n) write-string
+s (- cells evaluated:       {0}\n) mark cells-evaluated fprint-fmt pop pop
+s (- trials per cell:       {0}\n) mark n-trials        fprint-fmt pop pop
+s (- cells with p-one-shot >= 5%: {0}\n) mark violators  fprint-fmt pop pop
+s (\n) write-string
+
+s (## Top-20 cells by p-one-shot\n\n) write-string
+s (| rank | atk_unit | def_unit | base | p_one_shot |\n)  write-string
+s (|---|---|---|---|---|\n)  write-string
+
+/top-n  20 n-cells min  def
+0 1 top-n 1 sub  {|i|#+5
+    /entry      sorted-cells i get    local-def
+    /atk-u      entry 0 get           local-def
+    /def-u      entry 1 get           local-def
+    /base       entry 2 get           local-def
+    /p-shot     entry 3 get           local-def
+    s (| {0} | {1:s} | {2:s} | {3} | {4:.3f} |\n)
+        mark
+        i 1 add  atk-u  def-u  base  p-shot
+        fprint-fmt pop pop
+} for
+
+s (\n## Success criterion\n\n) write-string
+violators 0 eq {
+    s (All cells have p-one-shot < 5%. ✓\n) write-string
+} {
+    s (**{0} cells violate the < 5% threshold.** Consider:\n\n)
+        mark violators fprint-fmt pop pop
+    s (- re-specifying outlier cells in §7.5, or\n) write-string
+    s (- clamping luck range to [0, 7] in §7.3.\n) write-string
+} if-else
+
+s close-stream
+(  summary written: {0:s}\n) mark out-summary print-fmt pop pop
+
+(\n=== summary ===\n) print
+(  cells evaluated:   {0}\n) mark cells-evaluated print-fmt pop pop
+(  trials per cell:   {0}\n) mark n-trials        print-fmt pop pop
+(  violators (p >= 5%): {0}\n) mark violators     print-fmt pop pop

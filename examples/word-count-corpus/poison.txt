@@ -1,0 +1,9 @@
+Some innocent text leading in, quite ordinary words
+that a tokenizer would happily consume one by one.
+
+But halfway through this document, an unexpected token appears:
+POISONWORD
+
+and the worker that encounters it must crash.  The supervisor
+will notice, restart the worker, and processing of the remaining
+files will continue without operator intervention.

@@ -1,0 +1,4 @@
+% ${ ... } block syntax: runs body with set-global true so
+% allocations land in global VM.  Body builds a Dict + leaves it on
+% the stack; outer code defines /g and reads back.
+${ 4 dict } /g exch def g /count 0 put-persist g /count get

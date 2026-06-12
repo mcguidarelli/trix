@@ -1,0 +1,911 @@
+% ====================================================================
+% test_curry.trx -- Phase 1: Curry type (inline values only)
+% ====================================================================
+% Validates curry creation, execution, uncurry decomposition, type
+% predicates, and interaction with other language features.
+% Phase 1 restricts captured values to non-ExtValue types.
+%
+% NOTE: \name at top level is immediately executed, not pushed as data.
+% Use //name (immediate lookup) or { name } (proc) as callables.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Basic curry creation and execution
+% ====================================================================
+
+% curry with integer value and operator callable
+5 //add curry 3 exch exec 8 eq
+    (curry: int + add) rt-ok clear
+
+% curry with real value
+2.5 //add curry 1.5 exch exec 4.0 eq
+    (curry: real + add) rt-ok clear
+
+% curry with boolean value
+true { not } curry exec false eq
+    (curry: bool + proc) rt-ok clear
+
+% curry with string value
+(hello) { length } curry exec 5 eq
+    (curry: string + proc) rt-ok clear
+
+% curry with byte value
+65b { 1b add } curry exec 66b eq
+    (curry: byte + proc) rt-ok clear
+
+% curry with integer value and proc callable
+10 { 2 mul } curry exec 20 eq
+    (curry: int + proc) rt-ok clear
+
+% curry with null value
+null { pop 42 } curry exec 42 eq
+    (curry: null + proc) rt-ok clear
+
+% curry with zero
+0 //add curry 7 exch exec 7 eq
+    (curry: zero + add) rt-ok clear
+
+% curry with negative
+-5 //add curry 10 exch exec 5 eq
+    (curry: negative int + add) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Uncurry decomposition
+% ====================================================================
+
+5 //add curry uncurry
+    //add eq exch 5 eq and
+    (uncurry: decomposes to value and callable) rt-ok clear
+
+% Verify uncurry returns the captured value and callable
+% After uncurry: stack is [value, callable], value=10, callable={2 mul}
+10 { 2 mul } curry uncurry
+    % stack: 10 {2 mul}
+    exch 10 eq        % check value is 10, stack: {2 mul} true
+    exch 20 exch exec % execute {2 mul} on 20, stack: true 40
+    40 eq and
+    (uncurry: decomposes proc curry) rt-ok clear
+
+% round-trip: curry then uncurry preserves values
+42 //sub curry uncurry
+    //sub eq exch 42 eq and
+    (uncurry: round-trip preserves values) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Type predicates
+% ====================================================================
+
+5 //add curry type /curry-type eq
+    (type: curry reports curry-type) rt-ok clear
+
+5 //add curry is-curry
+    (is-curry: true for curry) rt-ok clear
+
+42 is-curry not
+    (is-curry: false for integer) rt-ok clear
+
+(hello) is-curry not
+    (is-curry: false for string) rt-ok clear
+
+{ 1 2 add } is-curry not
+    (is-curry: false for proc) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Curry is executable by default
+% ====================================================================
+
+% Curry created by curry operator is executable
+5 //add curry 3 exch exec 8 eq
+    (curry: is executable) rt-ok clear
+
+% make-literal on Curry raises type-check (Curry must remain executable)
+5 //add curry  % create curry outside try-catch
+<< /type-check { clear true } >> { make-literal } try-catch
+    (curry: make-literal raises type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Nested curries (N-ary closures)
+% ====================================================================
+
+% 2-level curry: close over 2 values
+% curry(1, curry(2, add)) => when exec'd: push 1, exec inner => push 2, add => 3
+1 2 //add curry curry exec 3 eq
+    (curry: 2-level nested) rt-ok clear
+
+% 3-level curry: close over 3 values
+10 20 30 { add add } curry curry curry exec 60 eq
+    (curry: 3-level nested) rt-ok clear
+
+% Uncurry outer level of nested curry
+1 2 //add curry curry uncurry
+    is-curry exch 1 eq and
+    (curry: uncurry outer of nested) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Curry with various callable types
+% ====================================================================
+
+% Callable is an operator
+5 //mul curry 6 exch exec 30 eq
+    (curry: callable is operator) rt-ok clear
+
+% Callable is a proc (array)
+5 { dup mul } curry exec 25 eq
+    (curry: callable is proc) rt-ok clear
+
+% Callable is another curry
+3 //add curry 2 exch curry exec 5 eq
+    (curry: callable is curry) rt-ok clear
+
+% Callable is a literal name (executed via name lookup when curry fires)
+/my-op { 2 mul } def
+5 /my-op make-executable curry exec 10 eq
+    (curry: callable is executable name) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Curry in def/load
+% ====================================================================
+
+/my-add5 5 //add curry def
+3 my-add5 8 eq
+    (curry: def and execute by name) rt-ok clear
+
+/my-add5 load is-curry
+    (curry: load retrieves curry) rt-ok clear
+
+/my-add5 load uncurry
+    //add eq exch 5 eq and
+    (curry: load + uncurry) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Curry in arrays
+% ====================================================================
+
+% Array containing curries
+[ 1 //add curry 2 //add curry 3 //add curry ] length 3 eq
+    (curry: array of curries) rt-ok clear
+
+% Get curry from array and execute it
+[ 1 //add curry 2 //add curry ] 0 get 10 exch exec 11 eq
+    (curry: get from array and exec) rt-ok clear
+
+[ 1 //add curry 2 //add curry ] 1 get 10 exch exec 12 eq
+    (curry: get second from array and exec) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Curry in dict
+% ====================================================================
+
+<< /inc 1 //add curry /dec -1 //add curry >>
+    dup /inc get 10 exch exec 11 eq
+    (curry: dict value exec) rt-ok
+    /dec get 10 exch exec 9 eq
+    (curry: dict value exec 2) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Curry with map
+% ====================================================================
+
+% Use curry with map: add 10 to each element
+/add10 10 //add curry def
+[1 2 3] { add10 } map
+    dup 0 get 11 eq exch dup 1 get 12 eq exch 2 get 13 eq and and
+    (curry: named curry in map) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Curry equality (by offset)
+% ====================================================================
+
+5 //add curry dup eq
+    (curry: same curry eq itself) rt-ok clear
+
+% Two different curries with same values are NOT eq (different offsets)
+5 //add curry 5 //add curry eq not
+    (curry: different curries not eq) rt-ok clear
+
+% deep-eq: same value and callable => structurally equal
+5 //add curry 5 //add curry deep-eq
+    (curry: deep-eq same value+callable) rt-ok clear
+
+% deep-eq: different value => not equal
+5 //add curry 6 //add curry deep-eq not
+    (curry: deep-eq different value) rt-ok clear
+
+% deep-eq: different callable => not equal
+5 //add curry 5 //sub curry deep-eq not
+    (curry: deep-eq different callable) rt-ok clear
+
+% deep-eq: nested curries
+1 2 //add curry curry 1 2 //add curry curry deep-eq
+    (curry: deep-eq nested curries) rt-ok clear
+
+% deep-eq: curry vs non-curry => not equal
+5 //add curry 5 deep-eq not
+    (curry: deep-eq curry vs integer) rt-ok clear
+
+% deep-ne: same value and callable => not deep-ne
+5 //add curry 5 //add curry deep-ne not
+    (curry: deep-ne same) rt-ok clear
+
+% deep-ne: different => deep-ne
+5 //add curry 6 //add curry deep-ne
+    (curry: deep-ne different) rt-ok clear
+
+% deep-eq: curry with different proc callables
+5 { dup mul } curry 5 { dup add } curry deep-eq not
+    (curry: deep-eq different procs not equal) rt-ok clear
+
+% deep-eq: curry in array
+[ 5 //add curry ] [ 5 //add curry ] deep-eq
+    (curry: deep-eq curry inside arrays) rt-ok clear
+
+% ====================================================================
+% SECTION 12: Curry printing (= and ==)
+% ====================================================================
+
+% Test that = operator prints "curry"
+% Capture output via sprint-fmt
+=string ({}) mark 5 //add curry sprint-fmt pop
+(curry) eq
+    (curry: sprint-fmt default prints curry) rt-ok clear
+
+% Test O format produces a string containing "curry"
+=string ({}O) mark 5 //add curry sprint-fmt pop
+(curry) search pop pop pop true
+    (curry: sprint-fmt O contains curry) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Curry type-case dispatch
+% ====================================================================
+
+5 //add curry
+<< /curry-type { (found-curry) } >> type-case
+(found-curry) eq
+    (curry: type-case dispatches on curry-type) rt-ok clear
+
+% ====================================================================
+% SECTION 14: ExtValue captured values (Long, ULong, Double, Address)
+% ====================================================================
+
+% --- Long ---
+100l //add curry 200l exch exec 300l eq
+    (curry: Long captured value + add) rt-ok clear
+
+100l { 2l mul } curry exec 200l eq
+    (curry: Long captured value + proc) rt-ok clear
+
+% --- ULong ---
+100ul //add curry 200ul exch exec 300ul eq
+    (curry: ULong captured value + add) rt-ok clear
+
+% --- Double ---
+1.5d //add curry 2.5d exch exec 4.0d eq
+    (curry: Double captured value + add) rt-ok clear
+
+3.14d { 2.0d mul } curry exec 6.28d eq
+    (curry: Double captured value + proc) rt-ok clear
+
+% --- Uncurry recovers ExtValue correctly ---
+42l //add curry uncurry
+    //add eq exch 42l eq and
+    (curry: uncurry Long recovers value) rt-ok clear
+
+100ul //sub curry uncurry
+    //sub eq exch 100ul eq and
+    (curry: uncurry ULong recovers value) rt-ok clear
+
+3.14d //mul curry uncurry
+    //mul eq exch 3.14d eq and
+    (curry: uncurry Double recovers value) rt-ok clear
+
+% --- Deep-eq with ExtValue curries ---
+42l //add curry 42l //add curry deep-eq
+    (curry: deep-eq Long curries) rt-ok clear
+
+42l //add curry 43l //add curry deep-eq not
+    (curry: deep-eq different Long curries) rt-ok clear
+
+1.5d //mul curry 1.5d //mul curry deep-eq
+    (curry: deep-eq Double curries) rt-ok clear
+
+% --- Nested curry with ExtValue ---
+10l 20l //add curry curry exec 30l eq
+    (curry: nested curry with Long values) rt-ok clear
+
+% --- ExtValue curry in array ---
+[ 42l //add curry 3.14d //mul curry ] length 2 eq
+    (curry: ExtValue curries in array) rt-ok clear
+
+[ 42l //add curry ] 0 get 8l exch exec 50l eq
+    (curry: get ExtValue curry from array and exec) rt-ok clear
+
+% --- Multiple ExtValue curries in sequence ---
+100l //add curry 200l exch exec
+50l //add curry 50l exch exec
+add 400l eq
+    (curry: multiple ExtValue curries in sequence) rt-ok clear
+
+% ====================================================================
+% SECTION 14b: Save/restore with ExtValue curries
+% ====================================================================
+
+% Long curry defined before save survives restore
+/sv-curry-l 42l //add curry def
+save
+    /sv-curry-l 99l //mul curry def
+restore
+8l sv-curry-l 50l eq
+    (curry: save/restore Long curry recovers) rt-ok clear
+
+% Long curry created after save is rolled back
+save
+    /tmp-curry-l 100l //sub curry def
+restore
+{ /tmp-curry-l load } try /undefined eq
+    (curry: Long curry after save rolled back) rt-ok clear
+
+% Double curry save/restore
+/sv-curry-d 1.5d //add curry def
+save
+    /sv-curry-d 9.9d //mul curry def
+restore
+2.5d sv-curry-d 4.0d eq
+    (curry: save/restore Double curry recovers) rt-ok clear
+
+% Nested save/restore with ExtValue curries
+/outer-sv save def
+    /c-long 10l //add curry def
+    /inner-sv save def
+        /c-double 2.5d //mul curry def
+    inner-sv restore
+    { /c-double load } try /undefined eq
+    (curry: inner restore rolls back Double curry) rt-ok clear
+    20l c-long 30l eq
+    (curry: outer Long curry survives inner restore) rt-ok clear
+outer-sv restore
+clear
+
+% ExtValue curry in array, save/restore
+/arr-ev [ 42l //add curry 3.14d //mul curry ] def
+save
+    arr-ev 0 99l //sub curry put
+restore
+arr-ev 0 get 8l exch exec 50l eq
+    (curry: array ExtValue curry restored) rt-ok clear
+
+% Overwrite curry after save, restore recovers original ExtValue
+/ev-curry 100l //add curry def
+save
+    /ev-curry 200l //mul curry def
+restore
+50l ev-curry 150l eq
+    (curry: overwrite ExtValue curry, restore recovers) rt-ok clear
+
+% Curry in dict, save/restore
+<< /op 42l //add curry >> /ev-dict exch def
+save
+    ev-dict /op 99l //mul curry put
+restore
+ev-dict /op get 8l exch exec 50l eq
+    (curry: dict ExtValue curry restored) rt-ok clear
+
+% Uncurry after restore — ExtValue still valid
+/uc-curry 42l //add curry def
+save restore
+/uc-curry load uncurry
+    //add eq exch 42l eq and
+    (curry: uncurry ExtValue after save/restore) rt-ok clear
+
+% Create many ExtValue curries after save, restore — free list intact
+save
+    100 { 1l { add } curry pop } repeat
+restore
+% Verify subsequent ExtValue allocations succeed
+42l 1l add 43l eq
+    (curry: free list intact after restore of many ExtValue curries) rt-ok clear
+
+% Curry of curry with ExtValues, restore
+/cc-ev 10l 20l //add curry curry def
+save
+    /cc-ev 99l 88l //mul curry curry def
+restore
+% cc-ev is curry(10l, curry(20l, add)): pushes 10l, then inner pushes 20l, add => 30l
+% So 30l on stack + 30l from curry = leaves 30l 10l on stack; add on 20l+10l
+% Actually: push 10l, exec curry(20l, add) which pushes 20l and adds top two: 20l+10l=30l
+% Stack: 30l, 30l
+30l cc-ev add 60l eq
+    (curry: nested ExtValue curry restored) rt-ok clear
+
+% Execute ExtValue curry after restore
+/exec-ev 100l //add curry def
+/exec-sv save def
+    /exec-ev 200l //mul curry def
+    50l exec-ev 10000l eq
+    (curry: new ExtValue curry works before restore) rt-ok clear
+exec-sv restore
+50l exec-ev 150l eq
+    (curry: original ExtValue curry works after restore) rt-ok clear
+
+% ====================================================================
+% SECTION 15: Error cases
+% ====================================================================
+
+% uncurry on non-curry
+{ 42 uncurry } try /type-check eq
+    (curry: uncurry non-curry raises type-error) rt-ok clear
+
+{ (hello) uncurry } try /type-check eq
+    (curry: uncurry string raises type-error) rt-ok clear
+
+% ====================================================================
+% SECTION 16: Curry does not interfere with exec stack
+% ====================================================================
+
+% Verify curry execution doesn't leave debris on exec stack
+/pre-depth //:status:exec-depth def
+5 //add curry 3 exch exec pop
+//:status:exec-depth pre-depth eq
+    (curry: exec stack clean after curry exec) rt-ok clear
+
+% ====================================================================
+% SECTION 16b: Curry + TCO (happy / sad / stress / fuzz)
+% ====================================================================
+
+% --- HAPPY: Named curry used inside tail-recursive function ---
+% dec-curry subtracts 1; the tail call (countdown-c) gets TCO
+/dec-curry -1 //add curry def
+/countdown-c {
+    dup 0 le { pop } { dec-curry countdown-c } if-else
+} def
+10000 countdown-c count 0 eq
+    (tco+curry: countdown via curry 10000) rt-ok clear
+
+% --- HAPPY: Named curry called in tail position ---
+% inc-curry is the last thing executed in the true branch.
+% execute_name dispatches the curry via TCO frame reuse.
+/inc-curry 1 //add curry def
+/curry-tail {
+    dup 100 lt { inc-curry curry-tail } if
+} def
+0 curry-tail 100 eq
+    (tco+curry: curry in tail position) rt-ok clear
+
+% --- HAPPY: Tail-recursive accumulator using curry ---
+% Each iteration creates a curry to add n to the accumulator
+/sum-curry {
+    % n acc -- sum(1..n)
+    exch dup 0 le { pop } {
+        dup 3 -1 roll  % n n acc
+        { add } curry exec  % curry(acc, add) exec => n+acc
+        exch 1 sub exch sum-curry
+    } if-else
+} def
+/tco-sv save def
+100 0 sum-curry 5050 eq
+    (tco+curry: sum accumulator via curry 100) rt-ok clear
+tco-sv restore
+/tco-sv save def
+1000 0 sum-curry 500500 eq
+    (tco+curry: sum accumulator via curry 1000) rt-ok clear
+tco-sv restore
+
+% --- HAPPY: Mutual recursion with curry ---
+% dec-curry is defined above: -1 //add curry
+/even-curry {
+    dup 0 eq { pop true } { dec-curry odd-curry } if-else
+} def
+/odd-curry {
+    dup 0 eq { pop false } { dec-curry even-curry } if-else
+} def
+10000 even-curry true eq
+    (tco+curry: mutual recursion 10000 even) rt-ok clear
+10001 odd-curry true eq
+    (tco+curry: mutual recursion 10001 odd) rt-ok clear
+
+% --- HAPPY: Compose in tail position ---
+/inc-compose { 1 add } { } compose def
+/compose-loop {
+    dup 100 lt { inc-compose compose-loop } if
+} def
+0 compose-loop 100 eq
+    (tco+curry: compose in tail position) rt-ok clear
+
+% --- HAPPY: Curry with ExtValue in tail-recursive function ---
+/sum-long {
+    % n acc -- sum (using Long arithmetic)
+    exch dup 0l eq { pop } { dup 3 -1 roll { add } curry exec exch -1l add exch sum-long } if-else
+} def
+/tco-sv save def
+100l 0l sum-long 5050l eq
+    (tco+curry: Long curry in tail-recursive sum) rt-ok clear
+tco-sv restore
+
+% --- HAPPY: Deep curry chain doesn't grow exec stack ---
+% Verify exec-depth stays constant across iterations using pre-defined curry
+/depth-before //:status:exec-depth def
+/depth-check {
+    dup 0 le { pop } {
+        dec-curry  % use pre-defined curry (no VM alloc per iteration)
+        //:status:exec-depth depth-before eq { } {
+            (FAILED: exec depth grew) =
+        } if-else
+        depth-check
+    } if-else
+} def
+1000 depth-check count 0 eq
+    (tco+curry: exec depth constant over 1000 iterations) rt-ok clear
+
+% --- SAD: Curry in non-tail position still overflows ---
+% The curry call is followed by another operation, preventing TCO
+/non-tail-curry {
+    dup 0 le { } { 1 sub non-tail-curry 1 { add } curry exec } if-else
+} def
+{ 1000 non-tail-curry } try /execstack-overflow eq
+    (tco+curry: non-tail curry overflows) rt-ok clear
+
+% --- STRESS: 100,000 iterations with pre-defined curry ---
+/stress-curry {
+    dup 0 le { pop } { dec-curry stress-curry } if-else
+} def
+100000 stress-curry count 0 eq
+    (tco+curry: stress 100000 iterations) rt-ok clear
+
+% --- STRESS: Deep mutual recursion with curry ---
+5000 even-curry true eq
+    (tco+curry: stress mutual 5000 even) rt-ok clear
+5001 odd-curry true eq
+    (tco+curry: stress mutual 5001 odd) rt-ok clear
+
+% --- FUZZ: Curry created fresh each iteration ---
+% Each iteration creates a new curry object (tests VM allocation under TCO)
+/fresh-curry {
+    dup 0 le { pop } {
+        dup { add } curry pop  % create and discard a curry
+        1 sub fresh-curry
+    } if-else
+} def
+/fuzz-sv save def
+5000 fresh-curry count 0 eq
+    (tco+curry: fresh curry each iteration 5000) rt-ok clear
+fuzz-sv restore
+
+% --- FUZZ: Compose created fresh each iteration ---
+/fresh-compose {
+    dup 0 le { pop } {
+        { dup } { mul } compose pop  % create and discard a compose
+        1 sub fresh-compose
+    } if-else
+} def
+/fuzz-sv save def
+5000 fresh-compose count 0 eq
+    (tco+curry: fresh compose each iteration 5000) rt-ok clear
+fuzz-sv restore
+
+% --- FUZZ: Alternating curry and compose in single-arg recursion ---
+/inc-compose { 1 add } { } compose def
+/alt-curry {
+    dup 5000 ge { } {
+        dup 2 mod 0 eq {
+            inc-curry    % even: use pre-defined curry
+        } {
+            inc-compose  % odd: use pre-defined compose (auto-executes via name lookup)
+        } if-else
+        alt-curry
+    } if-else
+} def
+0 alt-curry 5000 eq
+    (tco+curry: alternating curry/compose 5000) rt-ok clear
+
+% --- FUZZ: Curry with ExtValue created fresh each iteration ---
+/fresh-ev-curry {
+    dup 0 le { pop } {
+        dup 1l { add } curry pop pop  % create Long curry, discard
+        1 sub fresh-ev-curry
+    } if-else
+} def
+/fuzz-sv save def
+2000 fresh-ev-curry count 0 eq
+    (tco+curry: fresh ExtValue curry each iteration 2000) rt-ok clear
+fuzz-sv restore
+
+% ====================================================================
+% SECTION 17: Multiple curries in sequence
+% ====================================================================
+
+1 //add curry 2 exch exec
+3 //mul curry 4 exch exec
+add 15 eq
+    (curry: multiple curries in sequence) rt-ok clear
+
+% ====================================================================
+% SECTION 18: Curry with control flow
+% ====================================================================
+
+% curry inside if-else
+true { 5 { add } curry 3 exch exec } { 0 } if-else 8 eq
+    (curry: inside if-else true branch) rt-ok clear
+
+false { 0 } { 5 { add } curry 3 exch exec } if-else 8 eq
+    (curry: inside if-else false branch) rt-ok clear
+
+% curry inside loop
+0 3 { 1 { add } curry exec } repeat 3 eq
+    (curry: inside repeat loop) rt-ok clear
+
+% ====================================================================
+% SECTION 19: Curry with try/catch
+% ====================================================================
+
+{ 5 { add } curry (not-a-number) exch exec } try
+/type-check eq
+    (curry: error inside curry exec propagates) rt-ok clear
+
+% curry survives try with no error
+{ 5 { add } curry 3 exch exec } try
+pop 8 eq
+    (curry: try with no error) rt-ok clear
+
+% ====================================================================
+% SECTION 20: Curry with for-all
+% ====================================================================
+
+0 [1 2 3 4 5] { { add } curry exec } for-all 15 eq
+    (curry: for-all with curry) rt-ok clear
+
+% ====================================================================
+% SECTION 21: Save/restore basics (Phase 1, no ExtValue)
+% ====================================================================
+
+% Curry defined before save survives restore
+/sv-curry 5 //add curry def
+save
+    /sv-curry 99 //mul curry def
+restore
+3 sv-curry 8 eq
+    (curry: save/restore recovers original curry) rt-ok clear
+
+% Curry created after save is gone after restore
+save
+    /tmp-curry 42 //sub curry def
+restore
+{ /tmp-curry load } try /undefined eq
+    (curry: curry after save rolled back) rt-ok clear
+
+% Nested save/restore
+/outer-save save def
+    /c1 1 //add curry def
+    /inner-save save def
+        /c2 2 //add curry def
+    inner-save restore
+    { /c2 load } try /undefined eq
+    (curry: inner save/restore rollback) rt-ok clear
+    10 c1 11 eq
+    (curry: outer curry survives inner restore) rt-ok clear
+outer-save restore
+clear
+
+% Curry in array, save/restore
+/arr [ 1 //add curry 2 //add curry ] def
+save
+    arr 0 10 //mul curry put
+restore
+arr 0 get 5 exch exec 6 eq
+    (curry: array element curry restored) rt-ok clear
+
+% ====================================================================
+% SECTION 22: Curry with begin/end scoping
+% ====================================================================
+
+<< /adder 7 //add curry >> begin
+5 adder 12 eq
+    (curry: curry in dict scope) rt-ok
+end clear
+
+% ====================================================================
+% SECTION 23: Stress -- many curries
+% ====================================================================
+
+% Create and execute 100 curries
+0
+100 {
+    1 { add } curry exec
+} repeat
+100 eq
+    (curry: 100 sequential curry+exec) rt-ok clear
+
+% Deeply nested curry (5 levels)
+% curry(5, curry(4, curry(3, curry(2, curry(1, {add})))))
+% Innermost: push 1, exec {add} — adds 1 to whatever is below
+% Each level pushes its value, then execs inner curry
+1 { add } curry
+2 exch curry
+3 exch curry
+4 exch curry
+5 exch curry
+% Execute: pushes 5,4,3,2,1 then add runs on 1+2=3
+% Stack after: 5 4 3 3
+exec
+3 eq
+    (curry: 5-level nested curry exec) rt-ok
+pop pop pop clear
+
+% ====================================================================
+% SECTION 24: Curry with various value types - comprehensive
+% ====================================================================
+
+% Integer variants
+0 { 1 add } curry exec 1 eq
+    (curry: zero integer) rt-ok clear
+
+-100 { 100 add } curry exec 0 eq
+    (curry: large negative integer) rt-ok clear
+
+% Unsigned integer
+42u { 1u add } curry exec 43u eq
+    (curry: unsigned integer) rt-ok clear
+
+% Mark (unusual but valid)
+mark { count-to-mark } curry exec 0 eq
+    (curry: mark value) rt-ok pop clear
+
+% Boolean variants
+false { not } curry exec true eq
+    (curry: false value) rt-ok clear
+
+true { not } curry exec false eq
+    (curry: true value) rt-ok clear
+
+% ====================================================================
+% SECTION 25: Curry as dict key
+% ====================================================================
+
+% Curry as dict value (make-literal no longer allowed on Curry)
+5 //add curry /my-curry exch def
+<< /key /my-curry load >> /key get is-curry
+    (curry: usable as dict value) rt-ok clear
+
+% ====================================================================
+% SECTION 26: Curry with finally
+% ====================================================================
+
+/finally-ran false def
+{ 5 { add } curry 3 exch exec } { /finally-ran true def } finally
+8 eq finally-ran and
+    (curry: finally runs after curry exec) rt-ok clear
+
+% ====================================================================
+% SECTION 27: Curry with with-stream
+% ====================================================================
+
+% with-stream pushes the stream on the operand stack.
+% Test: create curry, exec inside with-stream body, write result to file.
+/ws-tmp (/tmp/test_curry_ws.trx) def
+ws-tmp (w)#b {
+    % stack: stream
+    5 { add } curry 3 exch exec
+    % stack: stream 8
+    =string ({}\\n) mark 4 -1 roll sprint-fmt pop
+    % stack: stream "8\n"
+    write-string
+    % stack: --
+} with-stream
+% Read back and verify curry computed the correct result
+/ws-buf (          ) def
+ws-tmp (r)#b { ws-buf read-string pop } with-stream
+ws-buf 0 get 56b eq   % '8' = ASCII 56
+    (curry: curry result written via with-stream) rt-ok clear
+ws-tmp delete-file
+
+% ====================================================================
+% SECTION 28: Compose operator
+% ====================================================================
+
+% compose two procs: double then add-10
+{ 2 mul } { 10 add } compose 5 exch exec 20 eq
+    (compose: double then add-10) rt-ok clear
+
+% compose operator callables
+//dup //mul compose 7 exch exec 49 eq
+    (compose: dup then mul = square) rt-ok clear
+
+% compose with named curry
+/double { 2 mul } def
+/inc { 1 add } def
+/double load /inc load compose 5 exch exec 11 eq
+    (compose: double then inc) rt-ok clear
+
+% compose result is a curry
+{ 2 mul } { 10 add } compose is-curry
+    (compose: result is curry) rt-ok clear
+
+% compose with curry callable
+5 //add curry { 2 mul } compose 3 exch exec 16 eq
+    (compose: curry then proc) rt-ok clear
+
+% triple compose: f g h compose compose
+{ 1 add } { 2 mul } compose { 3 sub } compose
+10 exch exec 19 eq
+    (compose: triple composition) rt-ok clear
+
+% compose identity: { } as identity function
+{ } { 2 mul } compose 5 exch exec 10 eq
+    (compose: identity compose f = f) rt-ok clear
+
+{ 2 mul } { } compose 5 exch exec 10 eq
+    (compose: f compose identity = f) rt-ok clear
+
+% compose in def
+/square //dup //mul compose def
+7 square 49 eq
+    (compose: named compose) rt-ok clear
+
+% compose deep-eq: same callables produce structurally equal procs
+//dup //mul compose //dup //mul compose deep-eq
+    (compose: deep-eq same composition) rt-ok clear
+
+% compose deep-eq: different callables
+//dup //mul compose //dup //add compose deep-eq not
+    (compose: deep-eq different composition) rt-ok clear
+
+% ====================================================================
+% SECTION 29: Packed array round-trip with curry
+% ====================================================================
+
+% Curry inside a packed proc body (via #p suffix)
+% scan_procedure packs the body; executing it must decode the curry correctly
+/pack-test { 5 { add } curry 3 exch exec }#p def
+pack-test 8 eq
+    (packed: curry in packed proc executes correctly) rt-ok clear
+
+% Packed proc containing ExtValue curry
+/pack-ev { 100l { add } curry 200l exch exec }#p def
+pack-ev 300l eq
+    (packed: ExtValue curry in packed proc) rt-ok clear
+
+% Packed proc with compose
+/pack-compose { { dup } { mul } compose 6 exch exec }#p def
+pack-compose 36 eq
+    (packed: compose in packed proc) rt-ok clear
+
+% Curry round-trip: create curry at top level, put in array, pack, decode
+% The curry must be created outside the packed proc since //add inside {} executes
+% Curry created at runtime inside packed proc body — the curry operator
+% runs at execution time, the packed encoding holds the body's operators/values
+% (not the curry Object itself). The curry Object lives on the operand stack.
+% Packed encoding of curry Objects is exercised by snap-shot/thaw (Section 30).
+
+% ====================================================================
+% SECTION 30: Snap-shot with curry (thaw requires separate helper)
+% ====================================================================
+
+% Verify snap-shot succeeds with curries in VM state
+/snap-curry 42 //add curry def
+/snap-ev-curry 100l //add curry def
+/snap-compose { dup } { mul } compose def
+/snap-file (/tmp/test_curry_snap.img) def
+snap-file snap-shot
+
+% Verify curries still work after snap-shot (in-process, no thaw)
+8 snap-curry 50 eq
+    (snapshot: curry works after snap-shot) rt-ok clear
+
+50l snap-ev-curry 150l eq
+    (snapshot: ExtValue curry works after snap-shot) rt-ok clear
+
+7 snap-compose 49 eq
+    (snapshot: compose works after snap-shot) rt-ok clear
+
+snap-file delete-file
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_curry: ALL TESTS PASSED) =
+(__test_ok__) =

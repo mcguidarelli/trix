@@ -1,0 +1,13 @@
+% smoke_target.trx -- tiny target for the --inspect TTY smoke test.
+% Defines /factorial then invokes it twice.
+
+/factorial {|n|
+    n 0 le
+    { 1 }
+    { n n 1 sub factorial mul }
+    if-else
+} def
+
+5 factorial /r1 exch def
+3 factorial /r2 exch def
+r1 r2 add =

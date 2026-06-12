@@ -1,0 +1,3 @@
+[ { 0 coroutine-sleep 0 coroutine-sleep 0 coroutine-sleep } 10 actor-spawn-capacity /a exch def
+1 a actor-send 2 a actor-send 3 a actor-send
+a actor-mailbox-count

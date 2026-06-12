@@ -1,0 +1,3 @@
+% wait-all issued from a non-main coroutine.
+mark { mark { 1 } coroutine-launch coroutine-wait-all } coroutine-launch
+coroutine-await

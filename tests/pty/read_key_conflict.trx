@@ -1,0 +1,24 @@
+% pty/read_key_conflict.trx -- single-reader discipline: while a spawned
+% coroutine is blocked on stdin (coroutine_block_on_stdin registered it
+% as m_stdin_blocked_reader), a second read-key-byte that also reaches
+% the block path raises /invalid-access.  The PTY feeder then sends one
+% byte so the blocked child wakes, reads it, and completes.
+% Driven by tests/run_pty_tests.sh.
+(lib/keys.trx) require
+{
+    mark {
+        read-key-byte
+        { (child-byte: ) print = }
+        { (child-eof) = }
+        if-else
+    } coroutine-launch
+    /child exch def
+    0 coroutine-sleep                  % child runs to its stdin block
+    { read-key-byte } try
+    /invalid-access eq
+    { (conflict-detected) = }
+    { (NO-CONFLICT) = }
+    if-else
+    child coroutine-await pop          % feeder byte releases the child
+} with-raw-mode
+(S5-done) =

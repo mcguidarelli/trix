@@ -1,0 +1,1343 @@
+% ====================================================================
+% Actor Framework Tests
+% ====================================================================
+
+% rt-ok counts failures so the file can THROW at the end -- test_all.trx
+% counts a file as failed only when its run throws, so a print-only
+% rt-ok would let assertion failures slip past the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+/==s { /==s-v exch def =string ({0:O}) [ ==s-v ] asprint-fmt pop } def
+/yield-many { 0 1 29 { pop 0 coroutine-sleep } for } def
+
+% ====================================================================
+% SECTION 1: actor-spawn basic
+% ====================================================================
+
+[ { } actor-spawn is-coroutine
+    (spawn: returns coroutine) rt-ok clear
+0 coroutine-sleep
+
+[ { } actor-spawn is-actor
+    (spawn: is-actor true) rt-ok clear
+0 coroutine-sleep
+
+[ { coroutine-die } coroutine-launch is-actor not
+    (spawn: plain coroutine is not actor) rt-ok clear
+0 coroutine-sleep
+
+% ====================================================================
+% SECTION 2: is-actor predicate
+% ====================================================================
+
+42 is-actor not
+    (is-actor: false for integer) rt-ok clear
+(hello) is-actor not
+    (is-actor: false for string) rt-ok clear
+null is-actor not
+    (is-actor: false for null) rt-ok clear
+true is-actor not
+    (is-actor: false for boolean) rt-ok clear
+[1 2 3] is-actor not
+    (is-actor: false for array) rt-ok clear
+
+% ====================================================================
+% SECTION 3: actor-self
+% ====================================================================
+
+actor-self is-coroutine
+    (self: returns coroutine in main) rt-ok clear
+
+/self-result null def
+[ { actor-self /self-result exch def } coroutine-launch pop
+0 coroutine-sleep
+self-result is-coroutine
+    (self: returns coroutine in plain coroutine) rt-ok clear
+
+/self-result2 null def
+/my-actor [ {
+    actor-self /self-result2 exch def
+} actor-spawn def
+0 coroutine-sleep
+self-result2 my-actor eq
+    (self: actor-self equals own handle) rt-ok clear
+
+% ====================================================================
+% SECTION 4: actor-spawn-capacity
+% ====================================================================
+
+[ { } 4 actor-spawn-capacity is-actor
+    (spawn-capacity: creates actor) rt-ok clear
+0 coroutine-sleep
+
+{ [ { } 0 actor-spawn-capacity } try /no-error ne
+    (spawn-capacity: zero capacity raises error) rt-ok clear
+{ [ { } -1 actor-spawn-capacity } try /no-error ne
+    (spawn-capacity: negative capacity raises error) rt-ok clear
+
+% ====================================================================
+% SECTION 5: actor-send and actor-recv basic
+% ====================================================================
+
+/recv-result null def
+/echo [ {
+    actor-recv /recv-result exch def
+} actor-spawn def
+42 echo actor-send
+0 coroutine-sleep
+recv-result 42 eq
+    (send-recv: integer message delivered) rt-ok clear
+
+/recv-result2 null def
+/echo2 [ {
+    actor-recv /recv-result2 exch def
+} actor-spawn def
+(hello) echo2 actor-send
+0 coroutine-sleep
+recv-result2 (hello) eq
+    (send-recv: string message delivered) rt-ok clear
+
+/recv-result3 null def
+/recv-got-msg false def
+/echo3 [ {
+    actor-recv /recv-result3 exch def
+    /recv-got-msg true def
+} actor-spawn def
+null echo3 actor-send
+0 coroutine-sleep
+recv-got-msg
+    (send-recv: null message delivered) rt-ok clear
+
+% ====================================================================
+% SECTION 6: actor-send to non-actor raises error
+% ====================================================================
+
+/plain-coro [ { 100 coroutine-sleep } coroutine-launch def
+{ 42 plain-coro actor-send } try /no-error ne
+    (send: non-actor raises invalid-access) rt-ok
+plain-coro coroutine-kill clear
+
+% ====================================================================
+% SECTION 7: actor-send to dead actor (silent drop)
+% ====================================================================
+
+/dead-actor [ { } actor-spawn def
+0 coroutine-sleep 0 coroutine-sleep
+{ 42 dead-actor actor-send } try /no-error eq
+    (send: dead actor is silent drop, no error) rt-ok clear
+
+% ====================================================================
+% SECTION 8: actor-recv in non-actor raises error
+% ====================================================================
+
+/recv-err null def
+[ {
+    { actor-recv } try /recv-err exch def
+} coroutine-launch pop
+0 coroutine-sleep
+recv-err /no-error ne
+    (recv: non-actor raises invalid-access) rt-ok clear
+
+% ====================================================================
+% SECTION 9: multiple messages FIFO order
+% ====================================================================
+
+/fifo-1 null def
+/fifo-2 null def
+/fifo-3 null def
+/fifo-actor [ {
+    actor-recv /fifo-1 exch def
+    actor-recv /fifo-2 exch def
+    actor-recv /fifo-3 exch def
+} actor-spawn def
+1 fifo-actor actor-send
+2 fifo-actor actor-send
+3 fifo-actor actor-send
+0 coroutine-sleep
+fifo-1 1 eq
+    (fifo: first message is 1) rt-ok
+fifo-2 2 eq
+    (fifo: second message is 2) rt-ok
+fifo-3 3 eq
+    (fifo: third message is 3) rt-ok
+clear
+
+% ====================================================================
+% SECTION 10: actor-mailbox-count and actor-mailbox-empty?
+% ====================================================================
+
+/count-actor [ {
+    1000 coroutine-sleep
+} actor-spawn def
+
+count-actor actor-mailbox-empty?
+    (mailbox-empty: true when empty) rt-ok
+count-actor actor-mailbox-count 0 eq
+    (mailbox-count: 0 when empty) rt-ok
+42 count-actor actor-send
+count-actor actor-mailbox-empty? not
+    (mailbox-empty: false after send) rt-ok
+count-actor actor-mailbox-count 1 eq
+    (mailbox-count: 1 after one send) rt-ok
+99 count-actor actor-send
+count-actor actor-mailbox-count 2 eq
+    (mailbox-count: 2 after two sends) rt-ok
+count-actor coroutine-kill clear
+
+% ====================================================================
+% SECTION 11: mailbox-count/empty on non-actor raises error
+% ====================================================================
+
+/plain2 [ { 100 coroutine-sleep } coroutine-launch def
+{ plain2 actor-mailbox-count } try /no-error ne
+    (mailbox-count: non-actor raises error) rt-ok clear
+{ plain2 actor-mailbox-empty? } try /no-error ne
+    (mailbox-empty: non-actor raises error) rt-ok
+plain2 coroutine-kill clear
+
+% ====================================================================
+% SECTION 12: actor-spawn with parameters
+% ====================================================================
+
+/param-result null def
+[ 10 20 {
+    add /param-result exch def
+} actor-spawn pop
+0 coroutine-sleep
+param-result 30 eq
+    (spawn-params: parameters passed correctly) rt-ok clear
+
+% ====================================================================
+% SECTION 13: request/response (simple doubler)
+% ====================================================================
+
+/doubled null def
+/doubler [ {
+    actor-recv 2 mul /doubled exch def
+} actor-spawn def
+21 doubler actor-send
+0 coroutine-sleep
+doubled 42 eq
+    (request-response: doubled value received) rt-ok clear
+
+% ====================================================================
+% SECTION 14: actor-recv-timeout (message arrives before timeout)
+% ====================================================================
+
+/timeout-result null def
+/timeout-flag null def
+/to-actor [ {
+    5000 actor-recv-timeout /timeout-flag exch def /timeout-result exch def
+} actor-spawn def
+99 to-actor actor-send
+0 coroutine-sleep
+timeout-flag true eq
+    (recv-timeout: true when message arrives) rt-ok
+timeout-result 99 eq
+    (recv-timeout: correct message) rt-ok
+clear
+
+% ====================================================================
+% SECTION 15: actor-recv-timeout (timeout expires)
+% ====================================================================
+
+/to-result null def
+/to-flag null def
+[ {
+    1 actor-recv-timeout /to-flag exch def /to-result exch def
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep 50 coroutine-sleep
+to-flag false eq
+    (recv-timeout: false on timeout) rt-ok
+to-result null eq
+    (recv-timeout: null on timeout) rt-ok
+clear
+
+% ====================================================================
+% SECTION 16: actor death cleanup (no leak)
+% ====================================================================
+
+/die-actor [ {
+} actor-spawn def
+1 die-actor actor-send
+2 die-actor actor-send
+3 die-actor actor-send
+0 coroutine-sleep
+die-actor is-actor
+    (death-cleanup: still reports is-actor) rt-ok
+{ 4 die-actor actor-send } try /no-error eq
+    (death-cleanup: send to dead is silent) rt-ok
+clear
+
+% ====================================================================
+% SECTION 16: multi-actor communication (A forwards to B)
+% ====================================================================
+
+/ma-result 0 def
+/actor-b [ {
+    actor-recv /ma-result exch def
+} actor-spawn def
+
+/actor-a [ {
+    actor-recv actor-recv add actor-b actor-send
+} actor-spawn def
+
+10 actor-a actor-send
+20 actor-a actor-send
+0 coroutine-sleep 0 coroutine-sleep 0 coroutine-sleep 0 coroutine-sleep
+ma-result 30 eq
+    (multi-actor: A sums and forwards to B) rt-ok clear
+
+% ====================================================================
+% SECTION 17: actor-recv-match basic
+% ====================================================================
+
+/match-result null def
+[ {
+    10 actor-self actor-send
+    20 actor-self actor-send
+    30 actor-self actor-send
+
+    { 25 gt } actor-recv-match /match-result exch def
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep
+match-result 30 eq
+    (recv-match: found matching message) rt-ok clear
+
+% ====================================================================
+% SECTION 18: actor-recv-match leaves non-matching messages
+% ====================================================================
+
+/match-result2 null def
+/remain-1 null def
+/remain-2 null def
+[ {
+    1 actor-self actor-send
+    2 actor-self actor-send
+    3 actor-self actor-send
+
+    { 3 eq } actor-recv-match /match-result2 exch def
+
+    actor-recv /remain-1 exch def
+    actor-recv /remain-2 exch def
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep
+match-result2 3 eq
+    (recv-match: correct match) rt-ok
+remain-1 1 eq
+    (recv-match: first remaining is 1) rt-ok
+remain-2 2 eq
+    (recv-match: second remaining is 2) rt-ok
+clear
+
+% ====================================================================
+% SECTION 19: stress test - many messages
+% ====================================================================
+
+/stress-sum 0 def
+/stress-actor [ {
+    0
+    1 1 100 { pop actor-recv add } for
+    /stress-sum exch def
+} actor-spawn def
+
+0 1 99 { stress-actor actor-send } for
+yield-many
+stress-sum 4950 eq
+    (stress: 100 messages summed correctly) rt-ok clear
+
+% ====================================================================
+% SECTION 18: ExtValue messages (Long, Double)
+% ====================================================================
+
+/ext-long null def
+/ext-double null def
+/ext-actor [ {
+    actor-recv /ext-long exch def
+    actor-recv /ext-double exch def
+} actor-spawn def
+1000000000l ext-actor actor-send
+3.14159d ext-actor actor-send
+0 coroutine-sleep
+ext-long 1000000000l eq
+    (extvalue: Long message preserved) rt-ok
+ext-double 3.14159d eq
+    (extvalue: Double message preserved) rt-ok
+clear
+
+% ====================================================================
+% SECTION 19: tagged messages
+% ====================================================================
+
+/tag-result null def
+/tag-actor [ {
+    actor-recv dup tag-name /increment eq {
+        tag-value /tag-result exch def
+    } { pop } if-else
+} actor-spawn def
+5 /increment tag tag-actor actor-send
+0 coroutine-sleep
+tag-result 5 eq
+    (tagged-msg: tagged message delivered) rt-ok clear
+
+% ====================================================================
+% SECTION 20: record messages
+% ====================================================================
+
+/rec-type null def
+/rec-val null def
+/rec-actor [ {
+    actor-recv dup
+    /type get /rec-type exch def
+    /value get /rec-val exch def
+} actor-spawn def
+<< /type /put /value 42 >> rec-actor actor-send
+0 coroutine-sleep
+rec-type /put eq
+    (record-msg: type field correct) rt-ok
+rec-val 42 eq
+    (record-msg: value field correct) rt-ok
+clear
+
+% ====================================================================
+% SECTION 21: coroutine-join with actors
+% ====================================================================
+
+/join-result null def
+/join-actor [ {
+    actor-recv /join-result exch def
+    42
+} actor-spawn def
+99 join-actor actor-send
+join-actor coroutine-join
+    (join: actor terminates) rt-ok
+42 eq
+    (join: return value captured) rt-ok
+join-result 99 eq
+    (join: message was processed) rt-ok
+clear
+
+% ====================================================================
+% SECTION 22: sad path — actor-send type checks
+% ====================================================================
+
+{ 42 99 actor-send } try /no-error ne
+    (sad-send: integer target raises type-check) rt-ok clear
+{ 42 (hello) actor-send } try /no-error ne
+    (sad-send: string target raises type-check) rt-ok clear
+{ 42 null actor-send } try /no-error ne
+    (sad-send: null target raises type-check) rt-ok clear
+{ 42 [1 2] actor-send } try /no-error ne
+    (sad-send: array target raises type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 23: sad path — recv-timeout/recv-match in non-actor
+% ====================================================================
+
+/rterr null def
+[ {
+    { 100 actor-recv-timeout } try /rterr exch def
+} coroutine-launch pop
+0 coroutine-sleep
+rterr /no-error ne
+    (sad: recv-timeout in non-actor raises error) rt-ok clear
+
+/rmerr null def
+[ {
+    { { true } actor-recv-match } try /rmerr exch def
+} coroutine-launch pop
+0 coroutine-sleep
+rmerr /no-error ne
+    (sad: recv-match in non-actor raises error) rt-ok clear
+
+% actor-recv-match with non-executable predicate
+/rmerr2 null def
+[ {
+    { 42 actor-recv-match } try /rmerr2 exch def
+} actor-spawn pop
+0 coroutine-sleep
+rmerr2 /no-error ne
+    (sad: recv-match literal pred raises type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 24: boundary — capacity-1 mailbox
+% ====================================================================
+
+/cap1-result null def
+/cap1-actor [ { } 1 actor-spawn-capacity def
+cap1-actor actor-mailbox-empty?
+    (cap1: empty at start) rt-ok
+42 cap1-actor actor-send
+cap1-actor actor-mailbox-count 1 eq
+    (cap1: count 1 after send) rt-ok
+cap1-actor actor-mailbox-empty? not
+    (cap1: not empty after send) rt-ok
+cap1-actor coroutine-kill clear
+
+% capacity-1 with backpressure: send two, second blocks until first consumed
+/cap1-val null def
+/cap1-actor2 [ {
+    actor-recv /cap1-val exch def
+} 1 actor-spawn-capacity def
+1 cap1-actor2 actor-send
+2 cap1-actor2 actor-send     % blocks: mailbox full; @actor-send-retry
+0 coroutine-sleep 0 coroutine-sleep 0 coroutine-sleep
+cap1-val 1 eq
+    (cap1: first message delivered through backpressure) rt-ok clear
+
+% ====================================================================
+% SECTION 25: boundary — all message types
+% ====================================================================
+
+/msg-byte null def
+/msg-bool null def
+/msg-name null def
+/msg-arr null def
+/msg-dict null def
+/msg-real null def
+/type-actor [ {
+    actor-recv /msg-byte exch def
+    actor-recv /msg-bool exch def
+    actor-recv /msg-name exch def
+    actor-recv /msg-arr exch def
+    actor-recv /msg-dict exch def
+    actor-recv /msg-real exch def
+} actor-spawn def
+65b type-actor actor-send
+true type-actor actor-send
+/foo type-actor actor-send
+[1 2 3] type-actor actor-send
+<< /a 1 >> type-actor actor-send
+3.14 type-actor actor-send
+0 coroutine-sleep
+msg-byte 65b eq
+    (types: byte message) rt-ok
+msg-bool true eq
+    (types: boolean message) rt-ok
+msg-name /foo eq
+    (types: name message) rt-ok
+msg-arr length 3 eq
+    (types: array message length) rt-ok
+msg-dict /a get 1 eq
+    (types: dict message) rt-ok
+msg-real 3.14 eq
+    (types: real message) rt-ok
+clear
+
+% ====================================================================
+% SECTION 26: boundary — mailbox drain back to 0
+% ====================================================================
+
+/drain-actor [ {
+    actor-recv pop
+    actor-recv pop
+    1000 coroutine-sleep
+} actor-spawn def
+10 drain-actor actor-send
+20 drain-actor actor-send
+drain-actor actor-mailbox-count 2 eq
+    (drain: count 2 before recv) rt-ok
+0 coroutine-sleep  % actor processes both
+drain-actor actor-mailbox-count 0 eq
+    (drain: count 0 after drain) rt-ok
+drain-actor actor-mailbox-empty?
+    (drain: empty after drain) rt-ok
+drain-actor coroutine-kill clear
+
+% ====================================================================
+% SECTION 27: boundary — recv-match at index 0 (first matches)
+% ====================================================================
+
+/match0-result null def
+[ {
+    100 actor-self actor-send
+    200 actor-self actor-send
+    { 100 eq } actor-recv-match /match0-result exch def
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep
+match0-result 100 eq
+    (match-idx0: first message matched) rt-ok clear
+
+% recv-match where last message matches
+/matchN-result null def
+[ {
+    1 actor-self actor-send
+    2 actor-self actor-send
+    3 actor-self actor-send
+    4 actor-self actor-send
+    5 actor-self actor-send
+    { 5 eq } actor-recv-match /matchN-result exch def
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep
+matchN-result 5 eq
+    (match-last: last message matched) rt-ok clear
+
+% ====================================================================
+% SECTION 28: boundary — actor sends to itself
+% ====================================================================
+
+/self-msg null def
+[ {
+    42 actor-self actor-send
+    actor-recv /self-msg exch def
+} actor-spawn pop
+0 coroutine-sleep
+self-msg 42 eq
+    (self-send: actor sends to itself) rt-ok clear
+
+% ====================================================================
+% SECTION 29: boundary — recv-timeout 0ms (immediate)
+% ====================================================================
+
+/imm-flag null def
+[ {
+    0 actor-recv-timeout /imm-flag exch def pop
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep 50 coroutine-sleep
+imm-flag false eq
+    (timeout-0ms: immediate timeout returns false) rt-ok clear
+
+% ====================================================================
+% SECTION 30: stress — 5 actors, 200 messages total
+% ====================================================================
+
+% 5 senders each send 40 messages (value 1) to a collector that sums them.
+% Total = 200 messages, expected sum = 200.
+/s5-sum 0 def
+/s5-collector [ {
+    0
+    1 1 200 { pop actor-recv add } for
+    /s5-sum exch def
+} actor-spawn def
+
+0 1 4 { pop
+    [ s5-collector {
+        1 1 40 { pop dup 1 exch actor-send } for
+        pop
+    } actor-spawn pop
+} for
+
+yield-many yield-many yield-many
+s5-sum 200 eq
+    (stress-5x200: 5 senders 40 each, sum correct) rt-ok clear
+
+% ====================================================================
+% SECTION 31: stress — multiple senders to one actor
+% ====================================================================
+
+/ms-count 0 def
+/ms-actor [ {
+    1 1 10 { pop actor-recv pop ms-count 1 add /ms-count exch def } for
+} actor-spawn def
+
+% 10 different senders each send 1 message
+0 1 9 {
+    ms-actor actor-send
+} for
+yield-many
+ms-count 10 eq
+    (multi-sender: 10 senders delivered) rt-ok clear
+
+% ====================================================================
+% SECTION 32: stress — explicit backpressure
+% ====================================================================
+
+/bp-count 0 def
+/bp-actor [ {
+    1 1 20 { pop actor-recv pop bp-count 1 add /bp-count exch def } for
+} 4 actor-spawn-capacity def    % capacity 4: forces backpressure
+
+0 1 19 { bp-actor actor-send } for   % 20 messages into capacity-4
+yield-many
+bp-count 20 eq
+    (backpressure: 20 msgs through cap-4 mailbox) rt-ok clear
+
+% ====================================================================
+% SECTION 33: fuzz — rapid spawn/die cycles
+% ====================================================================
+
+/spawn-die-ok true def
+1 1 20 { pop
+    [ { } actor-spawn pop
+    0 coroutine-sleep
+} for
+spawn-die-ok
+    (fuzz-spawn-die: 20 rapid spawn/die cycles) rt-ok clear
+
+% ====================================================================
+% SECTION 34: fuzz — ExtValue death cleanup
+% ====================================================================
+
+% Spawn actor, send ExtValue messages, let it die without receiving
+/ext-die-actor [ { } actor-spawn def
+1000000000l ext-die-actor actor-send
+2000000000l ext-die-actor actor-send
+3.14159d ext-die-actor actor-send
+0 coroutine-sleep
+{ 99 ext-die-actor actor-send } try /no-error eq
+    (fuzz-ext-death: ExtValue cleanup, send to dead ok) rt-ok clear
+
+% ====================================================================
+% SECTION 35: fuzz — ExtValue through backpressure
+% ====================================================================
+
+/ext-bp-sum 0l def
+/ext-bp-actor [ {
+    0l
+    1 1 10 { pop actor-recv add } for
+    /ext-bp-sum exch def
+} 2 actor-spawn-capacity def    % capacity 2: forces backpressure for Longs
+
+1l ext-bp-actor actor-send
+2l ext-bp-actor actor-send
+3l ext-bp-actor actor-send
+4l ext-bp-actor actor-send
+5l ext-bp-actor actor-send
+6l ext-bp-actor actor-send
+7l ext-bp-actor actor-send
+8l ext-bp-actor actor-send
+9l ext-bp-actor actor-send
+10l ext-bp-actor actor-send
+yield-many
+ext-bp-sum 55l eq
+    (fuzz-ext-bp: Long through backpressure) rt-ok clear
+
+% ====================================================================
+% SECTION 36: fuzz — recv-match stress (match deep in queue)
+% ====================================================================
+
+/deep-match null def
+[ {
+    1 1 15 { actor-self actor-send } for     % fill with 1..15
+    { 15 eq } actor-recv-match /deep-match exch def
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep
+deep-match 15 eq
+    (fuzz-match-deep: match at end of 15 messages) rt-ok clear
+
+% ====================================================================
+% SECTION 37: stress — 5 actors exchanging 1000 messages
+% ====================================================================
+% Success criterion #1 from the plan.  5 ring actors, each forwards
+% received messages to the next actor in the ring.  Main injects 1000
+% messages into ring-0; ring-4 (terminal) counts them.
+
+/ring-count 0 def
+
+% Build ring backwards: terminal first, then forwarders
+/ring-4 [ {
+    1 1 1000 { pop actor-recv pop ring-count 1 add /ring-count exch def } for
+} actor-spawn def
+
+/ring-3 [ ring-4 {
+    1 1 1000 { pop actor-recv over actor-send } for pop
+} actor-spawn def
+
+/ring-2 [ ring-3 {
+    1 1 1000 { pop actor-recv over actor-send } for pop
+} actor-spawn def
+
+/ring-1 [ ring-2 {
+    1 1 1000 { pop actor-recv over actor-send } for pop
+} actor-spawn def
+
+/ring-0 [ ring-1 {
+    1 1 1000 { pop actor-recv over actor-send } for pop
+} actor-spawn def
+
+% Inject 1000 messages into ring-0
+1 1 1000 { ring-0 actor-send } for
+
+% Yield enough for messages to traverse the 5-stage ring with backpressure
+yield-many yield-many yield-many yield-many yield-many
+yield-many yield-many yield-many yield-many yield-many
+
+ring-count 1000 eq
+    (stress-ring: 5 actors, 1000 messages through ring) rt-ok clear
+
+% ====================================================================
+% SECTION 38: boundary — recv-timeout 0ms with message available
+% ====================================================================
+
+/imm-msg null def
+/imm-flag2 null def
+/imm-actor [ {
+    0 actor-recv-timeout /imm-flag2 exch def /imm-msg exch def
+} actor-spawn def
+77 imm-actor actor-send
+0 coroutine-sleep
+imm-flag2 true eq
+    (timeout-0ms-msg: true when message available) rt-ok
+imm-msg 77 eq
+    (timeout-0ms-msg: correct message) rt-ok
+clear
+
+% ====================================================================
+% SECTION 39: boundary — ULong and Address messages
+% ====================================================================
+
+/msg-ul null def
+/msg-addr null def
+/uladdr-actor [ {
+    actor-recv /msg-ul exch def
+    actor-recv /msg-addr exch def
+} actor-spawn def
+18446744073709551615ul uladdr-actor actor-send
+16#DEADBEEF#a uladdr-actor actor-send
+0 coroutine-sleep
+msg-ul 18446744073709551615ul eq
+    (types-ext: ULong max preserved) rt-ok
+msg-addr 16#DEADBEEF#a eq
+    (types-ext: Address preserved) rt-ok
+clear
+
+% ====================================================================
+% SECTION 40: boundary — fill exactly to capacity
+% ====================================================================
+
+/cap-exact [ {
+    1000 coroutine-sleep
+} 4 actor-spawn-capacity def
+1 cap-exact actor-send
+2 cap-exact actor-send
+3 cap-exact actor-send
+4 cap-exact actor-send
+cap-exact actor-mailbox-count 4 eq
+    (cap-exact: exactly at capacity) rt-ok
+cap-exact actor-mailbox-empty? not
+    (cap-exact: not empty) rt-ok
+cap-exact coroutine-kill clear
+
+% ====================================================================
+% SECTION 41: recv-match blocks, then matching message arrives
+% ====================================================================
+
+/delayed-match null def
+/dm-actor [ {
+    % Start recv-match before any messages exist -- blocks
+    { 99 eq } actor-recv-match /delayed-match exch def
+} actor-spawn def
+0 coroutine-sleep              % let actor start and block on recv-match
+10 dm-actor actor-send         % non-matching
+20 dm-actor actor-send         % non-matching
+99 dm-actor actor-send         % match!
+0 coroutine-sleep 0 coroutine-sleep 0 coroutine-sleep
+delayed-match 99 eq
+    (match-delayed: match arrives after blocking) rt-ok clear
+
+% ====================================================================
+% SECTION 42: recv-match first message matches (skip 0)
+% ====================================================================
+
+/match-first null def
+[ {
+    42 actor-self actor-send
+    99 actor-self actor-send
+    { 42 eq } actor-recv-match /match-first exch def
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep
+match-first 42 eq
+    (match-first: first message is the match) rt-ok clear
+
+% ====================================================================
+% SECTION 43: is-actor on dead actor
+% ====================================================================
+
+/dead-check [ { } actor-spawn def
+0 coroutine-sleep 0 coroutine-sleep
+dead-check coroutine-status /dead eq
+    (dead-is-actor: status is dead) rt-ok
+dead-check is-actor
+    (dead-is-actor: is-actor still true for dead actor) rt-ok
+clear
+
+% ====================================================================
+% SECTION 44: death wakes blocked sender
+% ====================================================================
+
+/wake-err null def
+/wake-actor [ { } 1 actor-spawn-capacity def
+1 wake-actor actor-send    % fill cap-1 mailbox
+
+% Spawn sender that will block on full mailbox
+[ wake-actor {
+    % send second message -- blocks because mailbox is full
+    2 exch actor-send
+} coroutine-launch pop
+
+0 coroutine-sleep          % sender blocks on full mailbox
+wake-actor coroutine-kill  % kill actor: should wake blocked sender
+0 coroutine-sleep 0 coroutine-sleep
+% Sender got woken, retried, found dead target -> silent drop -> done
+{ /wake-err /no-error def } try pop
+wake-err /no-error eq
+    (death-wakes-sender: blocked sender recovers) rt-ok clear
+
+% ====================================================================
+% SECTION 45: multiple sequential recv-timeout calls
+% ====================================================================
+
+/seq-t1 null def
+/seq-t2 null def
+/seq-actor [ {
+    5000 actor-recv-timeout /seq-t1 exch def pop
+    5000 actor-recv-timeout /seq-t2 exch def pop
+} actor-spawn def
+(first) seq-actor actor-send
+(second) seq-actor actor-send
+0 coroutine-sleep
+seq-t1 true eq
+    (seq-timeout: first recv-timeout succeeds) rt-ok
+seq-t2 true eq
+    (seq-timeout: second recv-timeout succeeds) rt-ok
+clear
+
+% ====================================================================
+% SECTION 46: boundary — actor-spawn-capacity large
+% ====================================================================
+
+[ { 1000 coroutine-sleep } 256 actor-spawn-capacity dup is-actor
+    (cap-large: capacity 256 actor created) rt-ok
+coroutine-kill clear
+
+% ====================================================================
+% SECTION 50: actor-recv-match-timeout — match arrives before timeout
+% ====================================================================
+
+/rmt-msg null def
+/rmt-flag null def
+/rmt-actor [ {
+    10 actor-self actor-send
+    20 actor-self actor-send
+    30 actor-self actor-send
+
+    { 25 gt } 5000 actor-recv-match-timeout /rmt-flag exch def /rmt-msg exch def
+} actor-spawn def
+0 coroutine-sleep 0 coroutine-sleep
+rmt-flag true eq
+    (recv-match-timeout: true on match) rt-ok
+rmt-msg 30 eq
+    (recv-match-timeout: correct matched message) rt-ok clear
+
+% ====================================================================
+% SECTION 51: actor-recv-match-timeout — timeout expires, no match
+% ====================================================================
+
+/rmt2-msg null def
+/rmt2-flag null def
+[ {
+    % send messages that will NOT match the predicate
+    1 actor-self actor-send
+    2 actor-self actor-send
+
+    { 100 gt } 1 actor-recv-match-timeout /rmt2-flag exch def /rmt2-msg exch def
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep 50 coroutine-sleep
+rmt2-flag false eq
+    (recv-match-timeout: false on timeout) rt-ok
+rmt2-msg null eq
+    (recv-match-timeout: null on timeout) rt-ok clear
+
+% ====================================================================
+% SECTION 52: actor-recv-match-timeout — non-matching messages preserved
+% ====================================================================
+
+/rmt3-match null def
+/rmt3-r1 null def
+/rmt3-r2 null def
+[ {
+    1 actor-self actor-send
+    2 actor-self actor-send
+    3 actor-self actor-send
+
+    { 3 eq } 5000 actor-recv-match-timeout pop /rmt3-match exch def
+
+    actor-recv /rmt3-r1 exch def
+    actor-recv /rmt3-r2 exch def
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep
+rmt3-match 3 eq
+    (recv-match-timeout: correct match value) rt-ok
+rmt3-r1 1 eq
+    (recv-match-timeout: remaining msg 1) rt-ok
+rmt3-r2 2 eq
+    (recv-match-timeout: remaining msg 2) rt-ok clear
+
+% ====================================================================
+% SECTION 53: actor-recv-match-timeout — match arrives after initial scan
+% ====================================================================
+
+/rmt4-msg null def
+/rmt4-flag null def
+/rmt4-actor [ {
+    % start with no matching messages; one arrives later
+    { 42 eq } 5000 actor-recv-match-timeout /rmt4-flag exch def /rmt4-msg exch def
+} actor-spawn def
+0 coroutine-sleep                            % let actor start and block
+42 rmt4-actor actor-send                     % send matching message
+0 coroutine-sleep 0 coroutine-sleep
+rmt4-flag true eq
+    (recv-match-timeout: match after initial empty) rt-ok
+rmt4-msg 42 eq
+    (recv-match-timeout: correct late match) rt-ok clear
+
+% ====================================================================
+% SECTION 54: actor-recv-match-timeout — timeout 0 (immediate check)
+% ====================================================================
+
+/rmt5-msg null def
+/rmt5-flag null def
+/rmt5-actor [ {
+    10 actor-self actor-send
+    { 10 eq } 0 actor-recv-match-timeout /rmt5-flag exch def /rmt5-msg exch def
+} actor-spawn def
+0 coroutine-sleep 0 coroutine-sleep
+rmt5-flag true eq
+    (recv-match-timeout: immediate match with 0ms) rt-ok
+rmt5-msg 10 eq
+    (recv-match-timeout: correct immediate value) rt-ok clear
+
+% ====================================================================
+% SECTION 55: actor-recv-match-timeout — timeout 0, no match
+% ====================================================================
+
+/rmt6-flag null def
+[ {
+    5 actor-self actor-send
+    { 100 eq } 0 actor-recv-match-timeout /rmt6-flag exch def pop
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep 50 coroutine-sleep
+rmt6-flag false eq
+    (recv-match-timeout: immediate timeout with 0ms no match) rt-ok clear
+
+% ====================================================================
+% SECTION 56: actor-recv-match-timeout — type errors
+% ====================================================================
+
+[ {
+    { 42 100 actor-recv-match-timeout } try /type-check eq
+        (recv-match-timeout: non-callable pred error) rt-ok
+    { { true } -1 actor-recv-match-timeout } try /range-check eq
+        (recv-match-timeout: negative timeout error) rt-ok
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep
+clear
+
+% ====================================================================
+% SECTION 57: actor-recv-match-timeout — pred returns non-boolean
+% ====================================================================
+
+[ {
+    42 actor-self actor-send
+    { pop 99 } 5000 actor-recv-match-timeout
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep
+//:status:last-error /type-check eq
+    (recv-match-timeout: pred non-bool error) rt-ok clear
+
+% ====================================================================
+% SECTION 58: actor-recv-match-timeout — non-actor coroutine
+% ====================================================================
+
+[ {
+    { { true } 100 actor-recv-match-timeout } try /invalid-access eq
+        (recv-match-timeout: non-actor error) rt-ok
+} coroutine-launch pop
+0 coroutine-sleep 0 coroutine-sleep
+clear
+
+% ====================================================================
+% SECTION 59: stress — many messages, match is last
+% ====================================================================
+
+/rmt-stress-msg null def
+/rmt-stress-flag null def
+[ {
+    1 1 15 { actor-self actor-send } for      % send 1..15
+    { 15 eq } 5000 actor-recv-match-timeout
+    /rmt-stress-flag exch def /rmt-stress-msg exch def
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep
+rmt-stress-flag true eq
+    (recv-match-timeout: stress match last of 15) rt-ok
+rmt-stress-msg 15 eq
+    (recv-match-timeout: stress correct value) rt-ok clear
+
+% ====================================================================
+% SECTION 60: fuzz — ExtValue (Long) messages through match-timeout
+% ====================================================================
+
+/rmt-ext-msg null def
+/rmt-ext-flag null def
+[ {
+    1111111111l actor-self actor-send
+    9999999999l actor-self actor-send
+    { 5000000000l gt } 5000 actor-recv-match-timeout
+    /rmt-ext-flag exch def /rmt-ext-msg exch def
+} actor-spawn pop
+0 coroutine-sleep 0 coroutine-sleep
+rmt-ext-flag true eq
+    (recv-match-timeout: extvalue match found) rt-ok
+rmt-ext-msg 9999999999l eq
+    (recv-match-timeout: extvalue correct value) rt-ok clear
+
+% ====================================================================
+% SECTION 61: actor-try-send — success (space available)
+% ====================================================================
+
+mark {
+    actor-self /me exch def
+    42 me actor-try-send
+        (try-send: delivered returns true) rt-ok
+    actor-recv 42 eq
+        (try-send: message received) rt-ok
+} actor-spawn coroutine-join pop clear
+
+% ====================================================================
+% SECTION 62: actor-try-send — dead target returns false
+% ====================================================================
+
+mark {
+    mark { } actor-spawn /dead exch def
+    0 coroutine-sleep 0 coroutine-sleep
+    99 dead actor-try-send not
+        (try-send: dead target returns false) rt-ok
+} actor-spawn coroutine-join pop clear
+
+% ====================================================================
+% SECTION 63: actor-try-send — full mailbox returns false
+% ====================================================================
+
+mark {
+    mark { { actor-recv pop } loop } actor-spawn-capacity 1 exch
+    /target exch def
+    % Fill the 1-capacity mailbox
+    1 target actor-send
+    0 coroutine-sleep
+    % Try to send again — should be full
+    2 target actor-try-send not
+        (try-send: full mailbox returns false) rt-ok
+    target coroutine-kill
+} actor-spawn coroutine-join pop clear
+
+% ====================================================================
+% SECTION 64: actor-try-send — type error
+% ====================================================================
+
+{ 42 99 actor-try-send } try /type-check eq
+    (try-send: non-coroutine target) rt-ok clear
+
+% ====================================================================
+% SECTION 65: actor-broadcast — basic
+% ====================================================================
+
+/bc-results [] def
+mark {
+    % Spawn 3 receivers
+    mark { actor-recv } actor-spawn /r1 exch def
+    mark { actor-recv } actor-spawn /r2 exch def
+    mark { actor-recv } actor-spawn /r3 exch def
+    0 coroutine-sleep
+
+    % Broadcast message
+    (hello) [ r1 r2 r3 ] actor-broadcast
+
+    % Collect results
+    r1 coroutine-join pop /v1 exch def
+    r2 coroutine-join pop /v2 exch def
+    r3 coroutine-join pop /v3 exch def
+
+    v1 (hello) eq (broadcast: r1 got hello) rt-ok
+    v2 (hello) eq (broadcast: r2 got hello) rt-ok
+    v3 (hello) eq (broadcast: r3 got hello) rt-ok
+} actor-spawn coroutine-join pop clear
+
+% ====================================================================
+% SECTION 66: actor-broadcast — dead actor skipped
+% ====================================================================
+
+mark {
+    mark { actor-recv } actor-spawn /alive exch def
+    mark { } actor-spawn /dead exch def
+    0 coroutine-sleep 0 coroutine-sleep
+    % dead should be dead now
+    42 [ alive dead ] actor-broadcast
+    alive coroutine-join pop
+    42 eq (broadcast: alive got msg, dead skipped) rt-ok
+} actor-spawn coroutine-join pop clear
+
+% ====================================================================
+% SECTION 67: actor-broadcast — empty array
+% ====================================================================
+
+mark {
+    (msg) [] actor-broadcast
+    true (broadcast: empty array no-op) rt-ok
+} actor-spawn coroutine-join pop clear
+
+% ====================================================================
+% SECTION 68: actor-flush — basic
+% ====================================================================
+
+mark {
+    10 actor-self actor-send
+    20 actor-self actor-send
+    30 actor-self actor-send
+    actor-flush 3 eq
+        (flush: returned 3) rt-ok
+    actor-self actor-mailbox-empty?
+        (flush: mailbox empty after flush) rt-ok
+} actor-spawn coroutine-join pop clear
+
+% ====================================================================
+% SECTION 69: actor-flush — empty mailbox
+% ====================================================================
+
+mark {
+    actor-flush 0 eq
+        (flush: empty returns 0) rt-ok
+} actor-spawn coroutine-join pop clear
+
+% ====================================================================
+% SECTION 70: actor-flush — non-actor error
+% ====================================================================
+
+{ actor-flush } try /invalid-access eq
+    (flush: non-actor error) rt-ok clear
+
+% ====================================================================
+% SECTION 71: actor-set-name / actor-name — basic
+% ====================================================================
+
+[ { actor-recv pop } actor-spawn /a exch def
+
+% unnamed actor returns false
+a actor-name false eq
+    (actor-name: unnamed returns false) rt-ok
+
+% set a debug name
+/worker a actor-set-name
+
+% named actor returns name true
+a actor-name true eq
+    (actor-name: named returns true) rt-ok
+/worker eq
+    (actor-name: returns correct name) rt-ok  clear
+
+% ====================================================================
+% SECTION 72: actor-set-name — == printing with name
+% ====================================================================
+
+[ { actor-recv pop } actor-spawn /a exch def
+/logger a actor-set-name
+
+a ==s (--actor:logger:) starts-with?
+    (actor-name: ==s includes name) rt-ok  clear
+
+% ====================================================================
+% SECTION 73: actor-set-name — non-actor coroutine error
+% ====================================================================
+
+[ { 1 yield } coroutine-launch /c exch def
+{ /test c actor-set-name } try /type-check eq
+    (actor-set-name: non-actor error) rt-ok  clear
+
+% ====================================================================
+% SECTION 74: actor-set-name — type errors
+% ====================================================================
+
+{ /x 42 actor-set-name } try /type-check eq
+    (actor-set-name: non-coroutine error) rt-ok
+
+[ { actor-recv pop } actor-spawn /a exch def
+{ 99 a actor-set-name } try /type-check eq
+    (actor-set-name: non-name error) rt-ok  clear
+
+% ====================================================================
+% SECTION 75: actor-name — overwrite name
+% ====================================================================
+
+[ { actor-recv pop } actor-spawn /a exch def
+/alpha a actor-set-name
+a actor-name pop /alpha eq
+    (actor-name: first name) rt-ok
+/beta a actor-set-name
+a actor-name pop /beta eq
+    (actor-name: overwritten name) rt-ok  clear
+
+% ====================================================================
+% SECTION 76: recv registration survives an unrelated save/restore
+% ====================================================================
+% ENGINE BUG #12 regression (the tetrix --ai-peek wedge): a historical
+% restore-time mailbox scrub nulled every parked reader registration --
+% CoroutineContexts live in global VM, so the scrub's above-barrier
+% offset test matched EVERY parked actor, and any save/restore between
+% an actor's recv-park and the next send lost the wakeup forever.  The
+% same fossil unlinked parked blocked-senders; both died with it.
+% Shape: park an actor in actor-recv, run an unrelated save/restore,
+% THEN send.  The actor must wake and process the message.  (No
+% coroutine-await here -- on a regressed engine the actor never wakes
+% and an await would hang the suite; the yield + flag check fails
+% cleanly instead.)
+
+/got-msg 1 array def
+got-msg 0 0 put
+[ { actor-recv  got-msg 0  3 -1 roll  put } actor-spawn /a exch def
+0 coroutine-sleep                      % let the actor reach actor-recv and park
+save restore                           % unrelated save/restore while it is parked
+42 a actor-send                        % must wake the parked reader
+0 coroutine-sleep                      % give the woken actor a slice
+0 coroutine-sleep
+got-msg 0 get 42 eq
+    (actor-recv: parked registration survives unrelated restore) rt-ok  clear
+
+% ====================================================================
+% SECTION 77: blocked-sender link survives an unrelated save/restore
+% ====================================================================
+% Sender side of the same fossil scrub: a sender parked on a FULL
+% mailbox (capacity 64) was unlinked from the blocked-sender list by
+% any restore, so the receiver's drain never woke it.  Shape: receiver
+% actor holds off recv'ing; sender actor pushes 70 messages (parks at
+% 64); main runs save/restore while the sender is parked; receiver is
+% released and drains everything; the sender must complete its loop.
+% Hang-free on regression: flags simply stay 0 and the asserts fail.
+
+/released 1 array def
+released 0 0 put
+/sender-done 1 array def
+sender-done 0 0 put
+/recv-count 1 array def
+recv-count 0 0 put
+[ {
+    { released 0 get 0 eq } { 10 coroutine-sleep } while
+    0 1 69 { pop actor-recv pop recv-count 0 recv-count 0 get 1 add put } for
+} actor-spawn /r exch def
+[ r {
+    /tgt exch def
+    0 1 69 { tgt actor-send } for
+    sender-done 0 1 put
+} actor-spawn pop
+50 coroutine-sleep                     % sender fills 64 slots and parks
+save restore                           % unrelated save/restore while it is parked
+released 0 1 put                       % receiver starts draining
+0 1 200 {                              % bounded wait (max ~4s); exits early when done
+    pop
+    sender-done 0 get 1 eq  recv-count 0 get 70 eq  and { exit } if
+    20 coroutine-sleep
+} for
+sender-done 0 get 1 eq
+    (actor-send: parked sender survives unrelated restore) rt-ok
+recv-count 0 get 70 eq
+    (actor-send: all 70 messages delivered after restore) rt-ok  clear
+
+% ====================================================================
+% vm-validate (final integrity check)
+% ====================================================================
+
+//:status:vm-validate
+    (vm-validate: heap integrity after all actor tests) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /actor-assertions-failed throw } if
+(test_actor: ALL TESTS PASSED) =
+(__test_ok__) =

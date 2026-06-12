@@ -1,0 +1,16 @@
+% bind-into-dict: atomic batch bind into an arbitrary dict (any non-Null key).
+8 dict /d1 exch def 1 2 3 [/x /y /z] d1 bind-into-dict d1 length
+8 dict /d2 exch def 99 [/only] d2 bind-into-dict d2 /only get
+16 dict /d3 exch def (a) (b) [10 20] d3 bind-into-dict d3 10 get d3 20 get
+16 dict /d4 exch def 1 2 3 [/n 42 (s)] d4 bind-into-dict d4 /n get d4 42 get d4 (s) get
+4 dict /d5 exch def d5 /a 0 put d5 /b 0 put d5 /c 0 put d5 /d 0 put 1 2 3 4 [/a /b /c /d] d5 bind-into-dict d5 /d get
+4 dict /d6 exch def d6 /a 0 put d6 /b 0 put d6 /c 0 put d6 /d 0 put { 99 [/new] d6 bind-into-dict } try   % net-new at limit
+8 dict /d7 exch def { [ ] d7 bind-into-dict } try                                                       % empty -> unsupported
+8 dict /d8 exch def { 1 2 [/a /a] d8 bind-into-dict } try                                               % dup -> unsupported
+8 dict /d9 exch def { 1 2 [/a null] d9 bind-into-dict } try                                             % null key -> type-check
+8 dict /d10 exch def { 1 [/a /b /c] d10 bind-into-dict } try                                            % underflow
+2 dict /d11 exch def { 1 2 3 [/a /b /c] d11 bind-into-dict } try                                        % capacity -> limit-check
+4 dynamic-dict /d12 exch def 1 2 3 4 5 6 [/a /b /c /d /e /f] d12 bind-into-dict d12 length              % dynamic grow
+8 dict /d13 exch def d13 /x 1 put d13 make-readonly pop { 1 [/y] d13 bind-into-dict } try                % read-only -> read-only
+16 dict /d14 exch def d14 /pre 100 put save 1 2 [/a /b] d14 bind-into-dict restore d14 length            % save/restore
+8 dict /d15 exch def 1 2 3 [/p /q /r]#= d15 bind-into-dict d15 /r get                                    % eqarray keys

@@ -1,0 +1,1173 @@
+% examples/schedule.trx -- recurring-event schedule generator.
+%
+% Showcase for the Trix /chrono surface: daily / weekly / monthly /
+% yearly recurrence rules with all the knobs you'd expect from an
+% Outlook-style scheduling dialog, rendered as a table, CSV, or
+% calendar grid.
+%
+% Run examples:
+%   ./trix examples/schedule.trx --kind daily --every-weekday --after 5
+%   ./trix examples/schedule.trx --kind weekly --every-n-weeks 2 --days mon,wed,fri
+%   ./trix examples/schedule.trx --kind monthly --day 15 --every-n-months 1
+%   ./trix examples/schedule.trx --kind monthly --ordinal last --day-type fri \
+%       --every-n-months 1
+%   ./trix examples/schedule.trx --kind monthly --weekday fri --day 13
+%   ./trix examples/schedule.trx --kind yearly --month dec --day 25
+%   ./trix examples/schedule.trx --kind yearly --ordinal fourth --day-type thu \
+%       --month nov                                              % Thanksgiving
+%   ./trix examples/schedule.trx --kind yearly --ordinal last --day-type mon \
+%       --month may                                              % Memorial Day
+%   ./trix examples/schedule.trx --kind monthly --day 15 --calendar
+%   ./trix examples/schedule.trx --kind yearly --month dec --day 25 --csv
+%
+% Or load a named rule from a flat-text file:
+%   ./trix examples/schedule.trx --rules-file examples/schedule-rules.txt \
+%       --rule-name thanksgiving --after 5
+% (CLI --start/--after/--csv/--calendar override anything in the file.)
+%
+% Demonstrates: make-date, date-year, date-month, date-day, date-weekday,
+% date-add-days, date-add-months, date-add-years, date-diff-days,
+% days-in-month, leap-year?, day-of-year, instant-to-date, :D format
+% spec, /chrono dict.
+
+% =====================================================================
+% Lookup tables: weekday and month name <-> number.
+% =====================================================================
+
+% chrono date-weekday returns /sunday=0 .. /saturday=6.
+/weekday-num <<
+    /sun 0  /sunday    0
+    /mon 1  /monday    1
+    /tue 2  /tuesday   2
+    /wed 3  /wednesday 3
+    /thu 4  /thursday  4
+    /fri 5  /friday    5
+    /sat 6  /saturday  6
+>> make-readonly def
+
+/weekday-short [(Sun) (Mon) (Tue) (Wed) (Thu) (Fri) (Sat)] def
+/weekday-long  [(Sunday) (Monday) (Tuesday) (Wednesday) (Thursday) (Friday) (Saturday)] def
+
+/month-num <<
+    /jan 1   /january   1
+    /feb 2   /february  2
+    /mar 3   /march     3
+    /apr 4   /april     4
+    /may 5
+    /jun 6   /june      6
+    /jul 7   /july      7
+    /aug 8   /august    8
+    /sep 9   /september 9
+    /oct 10  /october  10
+    /nov 11  /november 11
+    /dec 12  /december 12
+>> make-readonly def
+
+/month-short [() (Jan) (Feb) (Mar) (Apr) (May) (Jun) (Jul) (Aug) (Sep) (Oct) (Nov) (Dec)] def
+/month-long  [() (January) (February) (March) (April) (May) (June)
+              (July) (August) (September) (October) (November) (December)] def
+
+/ordinal-num <<
+    /first 1  /1st 1
+    /second 2 /2nd 2
+    /third 3  /3rd 3
+    /fourth 4 /4th 4
+    /last 0
+>> make-readonly def
+
+% Indexed by ordinal-num (0..4) for display.
+/ordinal-names [(last) (first) (second) (third) (fourth)] def
+
+% Day-type checkers: receive weekday-num, return bool.
+/day-type-checkers <<
+    /day      { pop true }
+    /weekday  { dup 0 gt exch 6 lt and }    % 1..5
+    /weekend  { dup 0 eq exch 6 eq or }     % 0 or 6
+    /sun { 0 eq } /sunday    { 0 eq }
+    /mon { 1 eq } /monday    { 1 eq }
+    /tue { 2 eq } /tuesday   { 2 eq }
+    /wed { 3 eq } /wednesday { 3 eq }
+    /thu { 4 eq } /thursday  { 4 eq }
+    /fri { 5 eq } /friday    { 5 eq }
+    /sat { 6 eq } /saturday  { 6 eq }
+>> make-readonly def
+
+% Render a /day-type Name as English prose for rule summaries.
+% /day -> "day", /weekday -> "weekday", /weekend -> "weekend day",
+% /mon..sun (or long form) -> "Monday".."Sunday".
+% Name -- string-to-print
+/day-type-prose {
+    /__dt exch def
+    __dt /day eq      { (day) }
+    { __dt /weekday eq { (weekday) }
+    { __dt /weekend eq { (weekend day) }
+    { weekday-long weekday-num __dt get get } if-else } if-else } if-else
+} def
+
+% =====================================================================
+% Small calendar helpers.
+% =====================================================================
+
+% udate -- weekday-num
+/weekday-of {
+    date-weekday weekday-num exch get
+} def
+
+% Apply the day-type's checker proc to weekday-num.
+% wkday day-type -- bool
+/day-type-matches? {
+    day-type-checkers exch get exec
+} def
+
+% Find the udate of the Nth occurrence of a day-type within a given
+% (year, month).  ordinal in 1..4 or 0 (=last).  Returns 0u if no such
+% occurrence (e.g. 4th Sunday in February for some months).
+%
+% year month ordinal day-type -- udate-or-0u
+/nth-day-type-in-month {
+    /day-type exch def
+    /ord exch def
+    /m exch def
+    /y exch def
+    /max-day y m days-in-month def
+
+    ord 0 eq {
+        % "last": walk backwards from end-of-month until a match.
+        /d max-day def
+        /found 0u def
+        {
+            d 1 lt { exit } if
+            y m d make-date
+            dup weekday-of day-type day-type-matches?
+            { /found exch def exit } { pop } if-else
+            /d d 1 sub def
+        } loop
+        found
+    }{
+        % 1..4: walk forwards, count matches.
+        /d 1 def
+        /cnt 0 def
+        /found 0u def
+        {
+            d max-day gt { exit } if
+            y m d make-date
+            dup weekday-of day-type day-type-matches?
+            {
+                /cnt cnt 1 add def
+                cnt ord eq { /found exch def exit } { pop } if-else
+            }{
+                pop
+            } if-else
+            /d d 1 add def
+        } loop
+        found
+    } if-else
+} def
+
+% Advance (year, month) by N months; year and month roll over correctly.
+% year month n -- year' month'
+% Use a |...| frame so we don't stomp the caller's globaldict /n /m /y --
+% the next-* handlers and the walk-* helpers all rely on those bindings
+% staying live across an advance-months call.  (Pre-frame versions of
+% this proc silently broke --every-n-months > 1: the cadence /n in the
+% caller was clobbered to 1, so quarterly schedules ran monthly.)
+/advance-months {|y m n|#4
+    /total y 12 mul m 1 sub add n add local-def
+    total 12 div                    % new year
+    total 12 mod 1 add              % new month
+} def
+
+% (Y1 M1) (Y2 M2) -- months-diff   (Y2*12+M2) - (Y1*12+M1), can be negative
+/months-between {
+    /m2 exch def
+    /y2 exch def
+    /m1 exch def
+    /y1 exch def
+    y2 12 mul m2 add y1 12 mul m1 add sub
+} def
+
+% =====================================================================
+% Argument parsing.
+% =====================================================================
+
+% Globals filled in by parse-args.  /kind == /none signals "no rule yet".
+/kind /none def
+/start-flag () def
+/until-flag () def
+/after-flag -1 def
+/limit-flag 1000 def
+/csv-flag false def
+/calendar-flag false def
+
+% Daily
+/daily-mode /none def    % /weekday | /weekend | /n
+/n-flag 1 def
+
+% Weekly
+/every-n-weeks-flag 1 def
+/days-flag () def       % comma list
+
+% Monthly
+/monthly-mode /none def  % /day | /ordinal | /weekday-on-day
+/day-flag -1 def
+/every-n-months-flag 1 def
+/ordinal-flag /none def
+/day-type-flag /none def
+/offset-flag 0 def
+/weekday-flag /none def
+
+% Yearly
+/yearly-mode /none def   % /fixed | /ordinal
+/month-flag /none def
+
+% Rules-file mode: load a named rule from a flat text file.
+/rules-file-flag () def
+/rule-name-flag () def
+
+%  usage-bail -- raise /range-check after a friendly diagnostic line so
+%  invalid arguments exit non-zero (Error-enum code 30), matching the
+%  zmachine/chip8 sibling convention.  Bare runs and --help keep the
+%  print-usage-and-exit-0 contract.
+/usage-bail {
+    /range-check (schedule: invalid arguments -- see the line above) throw-with
+} def
+
+/usage {
+    (Usage: trix examples/schedule.trx --kind <daily|weekly|monthly|yearly> [...flags...]\n) print
+    nl
+    (Daily (pick one):\n) print
+    (  --every-weekday                        Mon-Fri only\n) print
+    (  --every-weekend                        Sat-Sun only\n) print
+    (  --every-n N                            every N days  (N > 0)\n) print
+    nl
+    (Weekly:\n) print
+    (  --every-n-weeks N                      N > 0  (default 1)\n) print
+    (  --days sun,mon,tue,wed,thu,fri,sat     comma subset (case-insensitive)\n) print
+    nl
+    (Monthly (pick one):\n) print
+    (  --day D --every-n-months M             D in 1..31, M > 0\n) print
+    (  --ordinal first|second|third|fourth|last\n) print
+    (    --day-type day|weekday|weekend|sun|mon|tue|wed|thu|fri|sat\n) print
+    (    --every-n-months M  [--offset N]\n) print
+    (  --weekday <sun-sat> --day D            "Friday the 13th" pattern\n) print
+    nl
+    (Yearly (pick one):\n) print
+    (  --month <jan-dec> --day D              fixed-date holiday\n) print
+    (  --ordinal <first|...|last>\n) print
+    (    --day-type <as above>\n) print
+    (    --month <jan-dec>  [--offset N]\n) print
+    nl
+    (Range:\n) print
+    (  --start YYYY-MM-DD                     default: today\n) print
+    (  --until YYYY-MM-DD                     end mode "by"\n) print
+    (  --after N                              end mode "after"  (default 12)\n) print
+    (  --limit N                              hard safety cap   (default 1000)\n) print
+    nl
+    (Output:\n) print
+    (  --csv                                  comma-separated rows\n) print
+    (  --calendar                             month grid with occurrences highlighted\n) print
+    nl
+    (Rules file (load a named rule from a flat-text file):\n) print
+    (  --rules-file <path>                    file: 'name: --flag VAL ...' per line\n) print
+    (  --rule-name <name>                     pick one rule from the file\n) print
+    (  CLI --start/--after/--csv/--calendar override anything in the file\n) print
+} def
+
+/starts-with-flag? {|s|
+    s length 0 gt { s 0 get 16#2D#b eq } { false } if-else
+} def
+
+% Parse "YYYY-MM-DD" string -- udate.  Uses ScanFmt :D directly.
+/parse-date-string {|s|#3
+    s ({0:D%Y-%m-%d}) mark 0u sscan-fmt
+    1 ne { (schedule: bad date string '{0}' - expected YYYY-MM-DD\n) mark s print-fmt pop pop usage-bail } if
+    /__d exch local-def
+    __d
+} def
+
+% Split a comma-string into an array of Names (one Name per token).
+% s -- arr-of-Names
+/split-csv-names {|s|#10
+    /out [] local-def
+    /len s length local-def
+    /i 0 local-def
+    {
+        i len ge { exit } if
+        /j i local-def
+        { j len ge { exit } if
+          s j get 16#2C#b eq { exit } if
+          /j j 1 add local-def } loop
+        /tok s i j i sub get-interval local-def
+        tok length 0 gt {
+            /out out tok to-name append local-def
+        } if
+        /i j 1 add local-def
+    } loop
+    out
+} def
+
+/parse-flag {|arg|
+    arg (--help) eq arg (-h) eq or { usage quit } if
+
+    arg (--kind=) starts-with? { /kind arg 7 arg length 7 sub get-interval to-name store } if
+    arg (--kind) eq { /__expect-kind true store } if
+
+    arg (--every-weekday) eq        { /daily-mode /weekday store } if
+    arg (--every-weekend) eq        { /daily-mode /weekend store } if
+    arg (--every-weekend-day) eq    { /daily-mode /weekend store } if
+    arg (--every-n=) starts-with?   {
+        /daily-mode /n store
+        /n-flag arg 10 arg length 10 sub get-interval to-number /integer-type cast store
+    } if
+    arg (--every-n) eq              { /__expect-every-n true store } if
+
+    arg (--every-n-weeks=) starts-with? {
+        /every-n-weeks-flag arg 16 arg length 16 sub get-interval to-number /integer-type cast store
+    } if
+    arg (--every-n-weeks) eq        { /__expect-every-n-weeks true store } if
+
+    arg (--days=) starts-with?      { /days-flag arg 7 arg length 7 sub get-interval store } if
+    arg (--days) eq                 { /__expect-days true store } if
+
+    arg (--day=) starts-with?       {
+        /day-flag arg 6 arg length 6 sub get-interval to-number /integer-type cast store
+        monthly-mode /none eq yearly-mode /none eq and {
+            % Will be classified once we know --kind; for now leave mode flags alone.
+        } if
+    } if
+    arg (--day) eq                  { /__expect-day true store } if
+
+    arg (--every-n-months=) starts-with? {
+        /every-n-months-flag arg 17 arg length 17 sub get-interval to-number /integer-type cast store
+    } if
+    arg (--every-n-months) eq       { /__expect-every-n-months true store } if
+
+    arg (--ordinal=) starts-with?   { /ordinal-flag arg 10 arg length 10 sub get-interval to-name store } if
+    arg (--ordinal) eq              { /__expect-ordinal true store } if
+
+    arg (--day-type=) starts-with?  { /day-type-flag arg 11 arg length 11 sub get-interval to-name store } if
+    arg (--day-type) eq             { /__expect-day-type true store } if
+
+    arg (--offset=) starts-with?    {
+        /offset-flag arg 9 arg length 9 sub get-interval to-number /integer-type cast store
+    } if
+    arg (--offset) eq               { /__expect-offset true store } if
+
+    arg (--weekday=) starts-with?   { /weekday-flag arg 10 arg length 10 sub get-interval to-name store } if
+    arg (--weekday) eq              { /__expect-weekday true store } if
+
+    arg (--month=) starts-with?     { /month-flag arg 8 arg length 8 sub get-interval to-name store } if
+    arg (--month) eq                { /__expect-month true store } if
+
+    arg (--start=) starts-with?     { /start-flag arg 8 arg length 8 sub get-interval store } if
+    arg (--start) eq                { /__expect-start true store } if
+
+    arg (--until=) starts-with?     { /until-flag arg 8 arg length 8 sub get-interval store } if
+    arg (--until) eq                { /__expect-until true store } if
+
+    arg (--after=) starts-with?     {
+        /after-flag arg 8 arg length 8 sub get-interval to-number /integer-type cast store
+    } if
+    arg (--after) eq                { /__expect-after true store } if
+
+    arg (--limit=) starts-with?     {
+        /limit-flag arg 8 arg length 8 sub get-interval to-number /integer-type cast store
+    } if
+    arg (--limit) eq                { /__expect-limit true store } if
+
+    arg (--csv) eq                  { /csv-flag true store } if
+    arg (--calendar) eq             { /calendar-flag true store } if
+
+    arg (--rules-file=) starts-with? { /rules-file-flag arg 14 arg length 14 sub get-interval store } if
+    arg (--rules-file) eq           { /__expect-rules-file true store } if
+    arg (--rule-name=) starts-with?  { /rule-name-flag arg 13 arg length 13 sub get-interval store } if
+    arg (--rule-name) eq            { /__expect-rule-name true store } if
+} def
+
+% Two-arg flags use a tiny "expect-next" state machine.
+/__expect-kind          false def
+/__expect-every-n       false def
+/__expect-every-n-weeks false def
+/__expect-days          false def
+/__expect-day           false def
+/__expect-every-n-months false def
+/__expect-ordinal       false def
+/__expect-day-type      false def
+/__expect-offset        false def
+/__expect-weekday       false def
+/__expect-month         false def
+/__expect-start         false def
+/__expect-until         false def
+/__expect-after         false def
+/__expect-limit         false def
+/__expect-rules-file    false def
+/__expect-rule-name     false def
+
+/handle-arg {|arg|
+    /matched false def
+    __expect-kind             { /kind                arg to-name store /__expect-kind             false store /matched true store } if
+    __expect-every-n          { /daily-mode          /n store
+                                /n-flag              arg to-number /integer-type cast store
+                                /__expect-every-n    false store /matched true store } if
+    __expect-every-n-weeks    { /every-n-weeks-flag  arg to-number /integer-type cast store
+                                /__expect-every-n-weeks false store /matched true store } if
+    __expect-days             { /days-flag           arg store /__expect-days             false store /matched true store } if
+    __expect-day              { /day-flag            arg to-number /integer-type cast store
+                                /__expect-day        false store /matched true store } if
+    __expect-every-n-months   { /every-n-months-flag arg to-number /integer-type cast store
+                                /__expect-every-n-months false store /matched true store } if
+    __expect-ordinal          { /ordinal-flag        arg to-name store /__expect-ordinal          false store /matched true store } if
+    __expect-day-type         { /day-type-flag       arg to-name store /__expect-day-type         false store /matched true store } if
+    __expect-offset           { /offset-flag         arg to-number /integer-type cast store
+                                /__expect-offset     false store /matched true store } if
+    __expect-weekday          { /weekday-flag        arg to-name store /__expect-weekday          false store /matched true store } if
+    __expect-month            { /month-flag          arg to-name store /__expect-month            false store /matched true store } if
+    __expect-start            { /start-flag          arg store /__expect-start            false store /matched true store } if
+    __expect-until            { /until-flag          arg store /__expect-until            false store /matched true store } if
+    __expect-after            { /after-flag          arg to-number /integer-type cast store
+                                /__expect-after      false store /matched true store } if
+    __expect-limit            { /limit-flag          arg to-number /integer-type cast store
+                                /__expect-limit      false store /matched true store } if
+    __expect-rules-file       { /rules-file-flag     arg store /__expect-rules-file false store /matched true store } if
+    __expect-rule-name        { /rule-name-flag      arg store /__expect-rule-name  false store /matched true store } if
+    matched not { arg parse-flag } if
+} def
+
+% Strip leading/trailing ASCII whitespace from a string.  s -- s'.
+/trim-ws {|s|#4
+    /len s length local-def
+    /lo 0 local-def
+    /hi len local-def
+    {
+        lo hi ge { exit } if
+        s lo get dup 16#20#b eq exch dup 16#09#b eq exch
+            dup 16#0A#b eq exch 16#0D#b eq or or or not { exit } if
+        /lo lo 1 add local-def
+    } loop
+    {
+        hi lo le { exit } if
+        s hi 1 sub get dup 16#20#b eq exch dup 16#09#b eq exch
+            dup 16#0A#b eq exch 16#0D#b eq or or or not { exit } if
+        /hi hi 1 sub local-def
+    } loop
+    s lo hi lo sub get-interval
+} def
+
+% Split a line on the first ':' into (name, rest).  No ':' -> ('', s).
+% s -- name-str rest-str
+/split-on-first-colon {|s|#3
+    /len s length local-def
+    /i 0 local-def
+    {
+        i len ge { exit } if
+        s i get 16#3A#b eq { exit } if
+        /i i 1 add local-def
+    } loop
+    i len ge
+        { () s }
+        { s 0 i get-interval  s i 1 add len i sub 1 sub get-interval }
+        if-else
+} def
+
+% Tokenize a flag string on whitespace, returning array of strings.
+% Drops empty tokens, so multiple spaces collapse.
+/tokenize-flags {|s|#3
+    /raw s ( ) split local-def
+    /out [] local-def
+    raw {|tok|#2
+        /trimmed tok trim-ws local-def
+        trimmed length 0 gt { /out out trimmed append store } if
+    } for-all
+    out
+} def
+
+% Open the rules file, find the line whose name matches `rule-name-flag`,
+% and run its flag tokens through handle-arg.  Errors out if file missing
+% or rule-name not found.
+/load-rule-from-file {
+    /__path rules-file-flag def
+    rule-name-flag length 0 eq {
+        (schedule: --rules-file requires --rule-name <name>\n) print usage-bail
+    } if
+    /__open-err { /__strm __path (r)#b stream def } try def
+    __open-err /no-error ne {
+        (schedule: cannot open rules file '{0}' ({1})\n) mark
+            __path __open-err print-fmt pop pop usage-bail
+    } if
+    /__buf 1024 string def
+    /__found false def
+    /__matched-tokens [] def
+    {
+        __strm __buf read-line
+        { /__line exch def
+          /__line __line trim-ws def
+          __line length 0 gt {
+              __line 0 get 16#23#b ne {
+                  __line split-on-first-colon
+                  /__rest exch def
+                  /__name exch def
+                  __name trim-ws rule-name-flag eq {
+                      /__matched-tokens __rest tokenize-flags def
+                      /__found true def
+                      exit
+                  } if
+              } if
+          } if
+        }
+        { pop exit }
+        if-else
+    } loop
+    __strm close-stream
+    __found not {
+        (schedule: rule '{0}' not found in {1}\n) mark
+            rule-name-flag __path print-fmt pop pop usage-bail
+    } if
+    __matched-tokens {|t| t handle-arg } for-all
+} def
+
+/parse-args {
+    /args command-line-args def
+    /n args length def
+    % Pass 1: full CLI scan -- so rules-file-flag/rule-name-flag get set.
+    0 1 n 1 sub {|i| /arg args i get def arg handle-arg } for
+    % If a rules file was named, load the matching rule's flags now, then
+    % re-scan the CLI so explicit CLI flags override file values.
+    rules-file-flag length 0 gt {
+        load-rule-from-file
+        0 1 n 1 sub {|i| /arg args i get def arg handle-arg } for
+    } if
+} def
+
+% =====================================================================
+% Rule construction (consult parsed flags).
+% =====================================================================
+
+/today epoch-time instant-to-date def
+
+/rule null def
+/start null def
+/end-spec null def
+
+/build-start {
+    start-flag length 0 eq { today }
+    { start-flag parse-date-string } if-else
+} def
+
+/build-end-spec {
+    until-flag length 0 gt {
+        << /kind /by  /by until-flag parse-date-string >>
+    }{
+        after-flag 0 ge {
+            << /kind /after  /cnt after-flag >>
+        }{
+            % Default
+            << /kind /after  /cnt 12 >>
+        } if-else
+    } if-else
+} def
+
+/require-pos { /tag exch def /v exch def
+    v 0 le {
+        (schedule: {0} requires a positive integer (got {1:d})\n) mark tag v print-fmt pop pop usage-bail
+    } if
+} def
+
+/require-day-1-31 { /v exch def
+    v 1 lt v 31 gt or {
+        (schedule: --day must be 1..31 (got {0:d})\n) mark v print-fmt pop pop usage-bail
+    } if
+} def
+
+% Convert /days-flag (string) into a set of weekday-nums.
+/days-set-from-flag {
+    /set-out 8 set def
+    days-flag length 0 eq {
+        % default: all 7
+        0 1 6 {|i| /set-out set-out i set-add def } for
+    }{
+        days-flag split-csv-names {|nm|
+            weekday-num nm known? not {
+                (schedule: --days has unknown weekday '{0}'\n) mark nm print-fmt pop pop usage-bail
+            } if
+            /set-out set-out weekday-num nm get set-add def
+        } for-all
+    } if-else
+    set-out
+} def
+
+/build-rule {
+    kind /daily eq {
+        daily-mode /weekday eq { << /kind /daily-weekday >> }
+        { daily-mode /weekend eq { << /kind /daily-weekend >> }
+        { daily-mode /n eq {
+            n-flag /--every-n require-pos
+            << /kind /daily-n  /n n-flag  /start start >>
+          }
+          { (schedule: --kind=daily needs --every-weekday | --every-weekend | --every-n N\n) print usage-bail }
+          if-else
+        } if-else
+        } if-else
+    }
+    { kind /weekly eq {
+        every-n-weeks-flag /--every-n-weeks require-pos
+        << /kind /weekly  /every-n-weeks every-n-weeks-flag
+           /days days-set-from-flag
+           /anchor start >>
+    }
+    { kind /monthly eq {
+        every-n-months-flag /--every-n-months require-pos
+        weekday-flag /none ne {
+            % Friday-the-13th pattern
+            day-flag require-day-1-31
+            weekday-num weekday-flag known? not {
+                (schedule: --weekday has unknown name '{0}'\n) mark weekday-flag print-fmt pop pop usage-bail
+            } if
+            << /kind /monthly-wkday-on-day
+               /weekday weekday-num weekday-flag get
+               /day day-flag >>
+        }
+        { ordinal-flag /none ne {
+            ordinal-num ordinal-flag known? not {
+                (schedule: --ordinal must be first|second|third|fourth|last (got {0})\n) mark ordinal-flag print-fmt pop pop usage-bail
+            } if
+            day-type-checkers day-type-flag known? not {
+                (schedule: --day-type unknown (got {0})\n) mark day-type-flag print-fmt pop pop usage-bail
+            } if
+            << /kind /monthly-ordinal
+               /ordinal ordinal-num ordinal-flag get
+               /day-type day-type-flag
+               /every-n-months every-n-months-flag
+               /offset offset-flag
+               /anchor-y start date-year
+               /anchor-m start date-month >>
+        }
+        { day-flag 0 gt {
+            day-flag require-day-1-31
+            << /kind /monthly-day
+               /day day-flag
+               /every-n-months every-n-months-flag
+               /anchor-y start date-year
+               /anchor-m start date-month >>
+        }
+        { (schedule: --kind=monthly needs --day, or --ordinal+--day-type, or --weekday+--day\n) print usage-bail }
+        if-else } if-else } if-else
+    }
+    { kind /yearly eq {
+        month-flag /none eq {
+            (schedule: --kind=yearly requires --month\n) print usage-bail
+        } if
+        month-num month-flag known? not {
+            (schedule: --month unknown (got {0})\n) mark month-flag print-fmt pop pop usage-bail
+        } if
+        /m-num month-num month-flag get def
+        ordinal-flag /none ne {
+            day-type-checkers day-type-flag known? not {
+                (schedule: --day-type unknown (got {0})\n) mark day-type-flag print-fmt pop pop usage-bail
+            } if
+            ordinal-num ordinal-flag known? not {
+                (schedule: --ordinal must be first|second|third|fourth|last\n) print usage-bail
+            } if
+            << /kind /yearly-ordinal
+               /ordinal ordinal-num ordinal-flag get
+               /day-type day-type-flag
+               /month m-num
+               /offset offset-flag >>
+        }{
+            day-flag require-day-1-31
+            << /kind /yearly-fixed
+               /month m-num
+               /day day-flag >>
+        } if-else
+    }
+    { (schedule: --kind must be daily|weekly|monthly|yearly (got {0})\n) mark kind print-fmt pop pop usage-bail }
+    if-else } if-else } if-else } if-else
+} def
+
+% =====================================================================
+% Per-rule next-on-or-after handlers.
+% =====================================================================
+%
+% Each handler: rule curr -- next-udate-or-0u
+% Returns 0u if no occurrence exists at or after curr (or hard safety
+% cap exceeded).
+
+/MAX-DAILY-WALK 366 def       % hard cap: scanning > 1 year of days = bug
+/MAX-MONTH-WALK 1200 def      % 100 years of monthly retries
+/MAX-YEAR-WALK 200 def        % 200 years of yearly retries
+
+% Daily walker: scan day-by-day from curr, return first day whose
+% predicate fires.  pred takes a udate, returns bool.
+% curr pred -- udate-or-0u
+/walk-days-while-not {
+    /__pred exch def
+    /__curr exch def
+    /__found 0u def
+    /__count 0 def
+    {
+        __count MAX-DAILY-WALK ge { exit } if
+        __curr __pred exec { /__found __curr def exit } if
+        /__curr __curr 1 date-add-days def
+        /__count __count 1 add def
+    } loop
+    __found
+} def
+
+% Monthly walker: iterate (y, m) starting from (curr's y, m), call
+% candidate-proc each step.  candidate-proc receives `y m`, returns a
+% udate-or-0u (0u = no candidate this month, skip; else compared to curr).
+% The first udate >= curr wins.
+% curr candidate-proc -- udate-or-0u
+/walk-months-for-candidate {
+    /__cand exch def
+    /__curr exch def
+    /__y __curr date-year def
+    /__m __curr date-month def
+    /__found 0u def
+    /__walks 0 def
+    {
+        __walks MAX-MONTH-WALK ge { exit } if
+        /__c __y __m __cand exec def
+        __c 0u ne __c __curr ge and
+            { /__found __c def exit } if
+        __y __m 1 advance-months
+        /__m exch def /__y exch def
+        /__walks __walks 1 add def
+    } loop
+    __found
+} def
+
+% Yearly walker: iterate y starting from curr's year.  candidate-proc
+% receives y, returns udate-or-0u; first >= curr wins.
+% curr candidate-proc -- udate-or-0u
+/walk-years-for-candidate {
+    /__cand exch def
+    /__curr exch def
+    /__y __curr date-year def
+    /__found 0u def
+    /__walks 0 def
+    {
+        __walks MAX-YEAR-WALK ge { exit } if
+        /__c __y __cand exec def
+        __c 0u ne __c __curr ge and
+            { /__found __c def exit } if
+        /__y __y 1 add def
+        /__walks __walks 1 add def
+    } loop
+    __found
+} def
+
+/next-daily-weekday {
+    exch pop
+    { weekday-of /weekday day-type-matches? } walk-days-while-not
+} def
+
+/next-daily-weekend {
+    exch pop
+    { weekday-of /weekend day-type-matches? } walk-days-while-not
+} def
+
+/next-daily-n {
+    /curr exch def
+    /rule exch def
+    /n rule /n get def
+    /s rule /start get def
+    /diff s curr date-diff-days def      % curr - s
+    diff 0 le { s }
+    {
+        /k diff n 1 sub add n div def
+        s k n mul date-add-days
+    } if-else
+} def
+
+/next-weekly {
+    /curr exch def
+    /rule exch def
+    /n rule /every-n-weeks get def
+    /days rule /days get def
+    /anchor rule /anchor get def
+    /found 0u def
+    /cnt 0 def
+    {
+        cnt MAX-DAILY-WALK 7 mul ge { exit } if
+        /wd curr weekday-of def
+        days wd set-member? {
+            % Compute week-index relative to anchor and check cadence.
+            % week-index(d) = floor((d - anchor) / 7).  Both anchor and d are
+            % udates -- date-diff-days gives day delta.
+            /delta anchor curr date-diff-days def
+            /widx delta 7 div def
+            % Anchor the cadence on anchor's own week so widx mod n yields 0
+            % at anchor.  Negative widx safe: -1 mod n in trix -- normalize.
+            /m widx n mod def
+            m 0 lt { /m m n add def } if
+            m 0 eq { /found curr def exit } if
+        } if
+        /curr curr 1 date-add-days def
+        /cnt cnt 1 add def
+    } loop
+    found
+} def
+
+% Yields the udate of "the day-of-month D in (y,m), clamped to the
+% month's last day if D > days-in-month".
+/clamped-day-of-month {
+    /d exch def
+    /m exch def
+    /y exch def
+    /maxd y m days-in-month def
+    d maxd gt { /d maxd def } if
+    y m d make-date
+} def
+
+/next-monthly-day {
+    /curr exch def
+    /rule exch def
+    /target-d rule /day get def
+    /n rule /every-n-months get def
+    /ay rule /anchor-y get def
+    /am rule /anchor-m get def
+    curr {
+        % y m -- udate-or-0u
+        /m exch def /y exch def
+        ay am y m months-between n mod 0 eq
+            { y m target-d clamped-day-of-month }
+            { 0u }
+            if-else
+    } walk-months-for-candidate
+} def
+
+/next-monthly-ordinal {
+    /curr exch def
+    /rule exch def
+    /ord rule /ordinal get def
+    /dt rule /day-type get def
+    /n rule /every-n-months get def
+    /off rule /offset get def
+    /ay rule /anchor-y get def
+    /am rule /anchor-m get def
+    curr {
+        /m exch def /y exch def
+        ay am y m months-between n mod 0 eq {
+            /base y m ord dt nth-day-type-in-month def
+            base 0u eq { 0u } { base off date-add-days } if-else
+        }{
+            0u
+        } if-else
+    } walk-months-for-candidate
+} def
+
+/next-monthly-wkday-on-day {
+    /curr exch def
+    /rule exch def
+    /target-w rule /weekday get def
+    /target-d rule /day get def
+    curr {
+        /m exch def /y exch def
+        target-d y m days-in-month gt { 0u }
+        {
+            /cand y m target-d make-date def
+            cand weekday-of target-w eq { cand } { 0u } if-else
+        } if-else
+    } walk-months-for-candidate
+} def
+
+/next-yearly-fixed {
+    /curr exch def
+    /rule exch def
+    /tm rule /month get def
+    /td rule /day get def
+    curr { tm td clamped-day-of-month } walk-years-for-candidate
+} def
+
+/next-yearly-ordinal {
+    /curr exch def
+    /rule exch def
+    /ord rule /ordinal get def
+    /dt rule /day-type get def
+    /tm rule /month get def
+    /off rule /offset get def
+    curr {
+        /base exch tm ord dt nth-day-type-in-month def
+        base 0u eq { 0u } { base off date-add-days } if-else
+    } walk-years-for-candidate
+} def
+
+% Dispatcher.  rule curr -- next-or-0u.
+/next-on-or-after {
+    /curr exch def
+    /rule exch def
+    /k rule /kind get def
+    rule curr k
+    [
+        { /daily-weekday eq }       { pop next-daily-weekday }
+        { /daily-weekend eq }       { pop next-daily-weekend }
+        { /daily-n eq }             { pop next-daily-n }
+        { /weekly eq }              { pop next-weekly }
+        { /monthly-day eq }         { pop next-monthly-day }
+        { /monthly-ordinal eq }     { pop next-monthly-ordinal }
+        { /monthly-wkday-on-day eq } { pop next-monthly-wkday-on-day }
+        { /yearly-fixed eq }        { pop next-yearly-fixed }
+        { /yearly-ordinal eq }      { pop next-yearly-ordinal }
+    ] match
+} def
+
+% =====================================================================
+% Enumeration loop.
+% =====================================================================
+
+/enumerate-occurrences {|rule start-d end-spec|#10
+    /occs [] local-def
+    /cur start-d local-def
+    /n-occ 0 local-def
+    /next-d 0u local-def
+    {
+        rule cur next-on-or-after
+        dup 0u eq { pop exit } if
+        /next-d exch local-def
+        end-spec /kind get /by eq {
+            next-d end-spec /by get gt { exit } if
+        } if
+        /occs occs next-d append local-def
+        /n-occ n-occ 1 add local-def
+        end-spec /kind get /after eq {
+            n-occ end-spec /cnt get ge { exit } if
+        } if
+        n-occ limit-flag ge { exit } if
+        /cur next-d 1 date-add-days local-def
+    } loop
+    occs
+} def
+
+% =====================================================================
+% Output: table, CSV, calendar.
+% =====================================================================
+
+% n unit-singular unit-plural -- string  ("every <unit>" or "every N <units>")
+% Special-cases N=1 to elide "1": "every month" instead of "every 1 month(s)".
+/every-n-units {
+    /__plural exch def
+    /__sing exch def
+    /__n exch def
+    __n 1 eq {
+        256 string (every {0}) mark __sing sprint-fmt pop
+    }{
+        256 string (every {0:d} {1}) mark __n __plural sprint-fmt pop
+    } if-else
+} def
+
+% offset-int -- string  ("" if 0, " plus N days" / " minus N days" otherwise).
+% Singular "day" when |offset| == 1.
+/offset-prose {
+    /__off exch def
+    __off 0 eq { () }
+    { /__abs __off 0 lt { __off neg } { __off } if-else def
+      /__sign __off 0 lt { (minus) } { (plus) } if-else def
+      /__unit __abs 1 eq { (day) } { (days) } if-else def
+      256 string ( {0} {1:d} {2}) mark __sign __abs __unit sprint-fmt pop
+    } if-else
+} def
+
+% n -- "1st" | "2nd" | "3rd" | "Nth" English ordinal suffix.
+/ordinal-day-string {
+    /__n exch def
+    /__r100 __n 100 mod def
+    /__r10  __n 10 mod def
+    /__suf
+        __r100 11 ge __r100 13 le and { (th) }
+        { __r10 1 eq { (st) }
+        { __r10 2 eq { (nd) }
+        { __r10 3 eq { (rd) }
+        { (th) } if-else } if-else } if-else } if-else
+    def
+    256 string ({0:d}{1}) mark __n __suf sprint-fmt pop
+} def
+
+% Render the /days weekday-num set as English: "every day", "Mon, Wed, Fri", etc.
+% set -- string
+/days-set-prose {
+    /__set exch def
+    /__all true def
+    0 1 6 { /__i exch def __set __i set-member? not { /__all false def } if } for
+    __all { (every day) }
+    {
+        /__names [] def
+        0 1 6 {
+            /__i exch def
+            __set __i set-member? {
+                /__names __names weekday-short __i get append def
+            } if
+        } for
+        __names (, ) join
+    } if-else
+} def
+
+/print-rule-summary {
+    (Rule:    ) print
+    rule /kind get
+    [
+        { /daily-weekday eq }       { pop (every weekday) print }
+        { /daily-weekend eq }       { pop (every weekend day) print }
+        { /daily-n eq }             { pop rule /n get (day) (days) every-n-units print }
+        { /weekly eq }              { pop rule /every-n-weeks get (week) (weeks) every-n-units print
+                                          ( on {0}) mark rule /days get days-set-prose print-fmt pop pop }
+        { /monthly-day eq }         { pop (day {0:d} of ) mark rule /day get print-fmt pop pop
+                                          rule /every-n-months get (month) (months) every-n-units print }
+        { /monthly-ordinal eq }     { pop
+                                      (the {0} {1} of {2}{3}) mark
+                                          ordinal-names rule /ordinal get get
+                                          rule /day-type get day-type-prose
+                                          rule /every-n-months get (month) (months) every-n-units
+                                          rule /offset get offset-prose
+                                      print-fmt pop pop }
+        { /monthly-wkday-on-day eq } { pop ({0} the {1} of every month) mark
+                                          weekday-long rule /weekday get get
+                                          rule /day get ordinal-day-string print-fmt pop pop }
+        { /yearly-fixed eq }        { pop ({0} {1:d} every year) mark
+                                          month-long rule /month get get
+                                          rule /day get print-fmt pop pop }
+        { /yearly-ordinal eq }      { pop
+                                      (the {0} {1} of {2}{3}) mark
+                                          ordinal-names rule /ordinal get get
+                                          rule /day-type get day-type-prose
+                                          month-long rule /month get get
+                                          rule /offset get offset-prose
+                                      print-fmt pop pop }
+    ] match
+    nl
+    (Start:   ) print 256 string ({0:D%Y-%m-%d (%a)}) mark start sprint-fmt pop print nl
+    end-spec /kind get
+    [
+        { /by eq }    { pop (End:     by ) print
+                        256 string ({0:D%Y-%m-%d}) mark end-spec /by get sprint-fmt pop print
+                        nl }
+        { /after eq } { pop (End:     after {0:d} occurrence(s)\n) mark end-spec /cnt get print-fmt pop pop }
+    ] match
+    nl
+} def
+
+/print-table {
+    /occs exch def
+    print-rule-summary
+    occs length 0 eq { (No occurrences in range.\n) print return } if
+    256 string ({0:>4}  {1:<10}  {2:<3}  {3:>5}\n) mark
+        (#) (Date) (Day) (+days) sprint-fmt pop print
+    256 string (----  ----------  ---  -----\n) mark () sprint-fmt pop print
+    /i 1 def
+    occs {|d|
+        /diff start d date-diff-days def
+        256 string ({0:>4d}  {1:D%Y-%m-%d}  {2}  {3:>5d}\n) mark
+            i d weekday-short d weekday-of get diff sprint-fmt pop print
+        /i i 1 add def
+    } for-all
+    occs length 1 gt {
+        (\nTotal: {0:d} occurrence(s) spanning {1:d} day(s).\n) mark
+            occs length
+            occs 0 get occs occs length 1 sub get date-diff-days
+            print-fmt pop pop
+    } if
+} def
+
+/print-csv {
+    /occs exch def
+    (#,date,weekday,days_from_start\n) print
+    /i 1 def
+    occs {|d|
+        /diff start d date-diff-days def
+        ({0:d},{1:D%Y-%m-%d},{2},{3:d}\n) mark
+            i d weekday-long d weekday-of get diff print-fmt pop pop
+        /i i 1 add def
+    } for-all
+} def
+
+% True iff `occs` contains a udate matching (year, month, day-of-month).
+% occs y m d -- bool
+/occs-has-day? {
+    /__d exch def
+    /__m exch def
+    /__y exch def
+    /__hit false def
+    {
+        /__u exch def
+        __u date-year __y eq __u date-month __m eq and __u date-day __d eq and
+            { /__hit true def } if
+    } for-all
+    __hit
+} def
+
+/print-one-month-grid {
+    /m exch def
+    /y exch def
+    /occs exch def
+    /maxd y m days-in-month def
+    /first-w y m 1 make-date weekday-of def
+    /col 0 def
+
+    256 string (             {0} {1:d}\n) mark
+        month-long m get y sprint-fmt pop print
+    (Su  Mo  Tu  We  Th  Fr  Sa\n) print
+
+    first-w 0 ne {
+        0 1 first-w 1 sub { pop (    ) print /col col 1 add def } for
+    } if
+
+    1 1 maxd {
+        /d exch def
+        occs y m d occs-has-day? {
+            256 string (\e[7m{0:>2d}\e[0m  ) mark d sprint-fmt pop print
+        }{
+            256 string ({0:>2d}  ) mark d sprint-fmt pop print
+        } if-else
+        /col col 1 add def
+        col 7 ge { nl /col 0 def } if
+    } for
+    col 0 ne { nl } if
+    nl
+} def
+
+/print-calendar {
+    /occs exch def
+    print-rule-summary
+    occs length 0 eq { (No occurrences in range.\n) print return } if
+
+    % Render only months that actually contain an occurrence -- yearly
+    % rules would otherwise span 12+ blank months between hits.  Build a
+    % de-duped list of (year, month) pairs in occurrence order.
+    /seen-keys [] def
+    /months-to-render [] def
+    occs {
+        /__u exch def
+        /__y __u date-year def
+        /__m __u date-month def
+        /__key __y 100 mul __m add def
+        /__already false def
+        seen-keys { /__k exch def __k __key eq { /__already true def } if } for-all
+        __already not {
+            /seen-keys seen-keys __key append def
+            /months-to-render months-to-render [__y __m] append def
+        } if
+    } for-all
+
+    months-to-render {
+        /__pair exch def
+        occs __pair 0 get __pair 1 get print-one-month-grid
+    } for-all
+
+    (Total: {0:d} occurrence(s) across {1:d} month(s).\n) mark
+        occs length months-to-render length print-fmt pop pop
+} def
+
+% =====================================================================
+% Main.
+% =====================================================================
+
+parse-args
+kind /none eq { (schedule: --kind is required (try --help)\n)#= print quit } if
+/start build-start def
+/end-spec build-end-spec def
+/rule build-rule def
+
+/occs rule start end-spec enumerate-occurrences def
+
+calendar-flag { occs print-calendar }
+{ csv-flag { occs print-csv } { occs print-table } if-else }
+if-else

@@ -1,0 +1,3 @@
+% status-name-buckets.trx -- print the live bucket count so
+% run_cli_tests.sh can pin --name-buckets prime snapping.
+//:status:name-bucket-count =

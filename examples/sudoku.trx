@@ -1,0 +1,580 @@
+% ======================================================================
+%  Sudoku solver (showcase example)
+%
+%  Demonstrates Trix's logic / backtracking primitives:
+%      logic-var   create an unbound logic variable
+%      unify       bind a logic variable (structural match)
+%      deref       get the value a logic variable is bound to
+%      bound?    test whether a logic variable has a value yet
+%      guard       on false, raise Error::Fail -> backtrack
+%      choice      try an array of alternatives with automatic rollback
+%
+%  ... plus the two escape hatches that let DATA cross the rollback:
+%      ${...}      build composites in global VM (restore does not
+%                  reclaim global-VM storage)
+%      def-persist bind without journaling (a plain def made between
+%                  save and restore is reverted by the restore)
+%
+%  The solver itself runs entirely inside save/restore transactions
+%  (that is the showcase), but the solved grid is copied out through
+%  a `${...}` snapshot bound via `def-persist`, so after the
+%  per-puzzle rollback an independent 27-unit permutation check can
+%  re-verify the solution -- see verify-solution below.
+%
+%  Each empty cell of the 9x9 grid is a fresh logic variable.  The
+%  solver walks cells recursively: for each empty cell it offers
+%  values 1..9 as a choice, and a constraint check fails the guard
+%  if the candidate conflicts with a peer already bound in the same
+%  row, column, or 3x3 box.  On failure, Trix's save/restore
+%  mechanism automatically rolls back the binding and tries the
+%  next value.
+%
+%  The solver is written recursively (not as a sequential loop) so
+%  every cell's choice point stays nested inside the previous cell's
+%  alternative: a dead-end anywhere in the grid unwinds back through
+%  every pending choice point, and the most recent one with an
+%  untried alternative picks up the search.  See docs/logic.md
+%  section 2.5 ("Choices Commit on Success") for why the sequential
+%  shape does not work.
+%
+%  To run:
+%      ./trix examples/sudoku.trx                  # shipped puzzle catalog
+%      yes '' | ./trix examples/sudoku.trx         # batch: skip the prompts
+%
+%  Long solves print a live one-line search status every ~2 s and
+%  the current SPECULATIVE grid every ~10 s ("marching ants" -- see
+%  the progress-display comment below): hints render solid, the
+%  candidate digits currently under trial render ANSI-dim, so you
+%  watch the backtracker think.  Short solves never reach the first
+%  interval, so quick puzzles print exactly what they always did.
+%
+%  Save-level budget: the solver nests one choice save level per
+%  empty cell, so a puzzle needs about (empty cells + 2) levels.
+%  Every catalog puzzle fits the default --save-depth=64; only the
+%  17-clue stress puzzles in examples/sudoku-stress-tests.txt (64
+%  empties) need the flag -- run those with --save-depth=200.
+%
+%  Custom puzzle from a file:
+%      If the file `examples/sudoku-input.txt` exists, the solver
+%      replaces its built-in library with the puzzle in that file
+%      and solves it instead.  The expected format is nine lines,
+%      each nine characters, `.` for empty and 1-9 for hints.
+%      Trailing whitespace and `\r` are stripped.  Create or edit
+%      the file to try your own puzzle.
+% ======================================================================
+
+% ----------------------------------------------------------------------
+%  Puzzle catalog.  Loaded from examples/sudoku-puzzles.txt by
+%  parse-puzzles below.  The catalog file is a plain text format
+%  described at the top of that file; add puzzles there rather than
+%  editing this script.
+%
+%  Timings in the catalog are measured on the reference dev box
+%  (aarch64 Apple Silicon via Parallels VM, release binary -O2
+%  -DNDEBUG, no sanitizers).  x86_64 and bare-metal should be
+%  comparable or faster.
+%
+%  The solver itself is naive backtracking (left-to-right,
+%  top-to-bottom) without constraint propagation or
+%  most-constrained-variable heuristics.  A production solver would
+%  add those and cut search time by orders of magnitude; keeping the
+%  structure purely mechanical is what showcases the logic
+%  primitives at work.
+% ----------------------------------------------------------------------
+/parse-puzzles {
+    /path exch def
+    /strm path (r)#b stream def
+    /raw strm read-all def
+    strm close-stream
+
+    % Keep non-empty lines, retaining `##` name markers and puzzle
+    % rows, dropping single-`#` comment lines.
+    /filtered [
+        /lines raw (\n) split def
+        0 1 lines length 1 sub {
+            /i exch def
+            /ln lines i get trim-right def
+            ln length 0 gt
+            {
+                ln 0 get 35b eq
+                {
+                    ln length 2 ge { ln 1 get 35b eq { ln } if } if
+                }
+                { ln }
+                if-else
+            } if
+        } for
+    ] def
+
+    % Walk: each `## Name` line is followed by exactly 9 row lines.
+    [
+        /len filtered length def
+        /i 0 def
+        { i len lt }
+        {
+            /ln filtered i get def
+            ln 0 get 35b eq
+            {
+                /name ln length 2 gt
+                    { ln 2 ln length 2 sub get-interval trim-left }
+                    { () }
+                    if-else def
+                i 9 add len lt
+                {
+                    /rows [
+                        1 1 9 {
+                            /off exch def
+                            filtered i off add get
+                        } for
+                    ] def
+                    [ name rows ]
+                    /i i 10 add def
+                }
+                { /i i 1 add def }
+                if-else
+            }
+            { /i i 1 add def }
+            if-else
+        } while
+    ]
+} def
+
+/puzzles (examples/sudoku-puzzles.txt) parse-puzzles def
+
+% ----------------------------------------------------------------------
+%  check-peers: given a cell index and a candidate value, fail if any
+%  already-bound peer (same row, column, or 3x3 box) holds the same
+%  value.  Called inside each choice alternative after unification;
+%  a failed guard triggers choice's backtrack and the next value is
+%  tried.  Reads `grid` from the surrounding scope.
+% ----------------------------------------------------------------------
+/check-peers {
+    % stack: idx v
+    /v exch def
+    /idx exch def
+    /row idx 9 div def
+    /col idx 9 mod def
+    /box-r0 row 3 div 3 mul def
+    /box-c0 col 3 div 3 mul def
+
+    % row peers
+    0 1 8 {
+        /c2 exch def
+        /pidx row 9 mul c2 add def
+        pidx idx ne {
+            /p grid pidx get def
+            p bound? { p deref v ne guard } if
+        } if
+    } for
+
+    % column peers
+    0 1 8 {
+        /r2 exch def
+        /pidx r2 9 mul col add def
+        pidx idx ne {
+            /p grid pidx get def
+            p bound? { p deref v ne guard } if
+        } if
+    } for
+
+    % 3x3 box peers
+    0 1 2 {
+        /dr exch def
+        0 1 2 {
+            /dc exch def
+            /pidx box-r0 dr add 9 mul box-c0 add dc add def
+            pidx idx ne {
+                /p grid pidx get def
+                p bound? { p deref v ne guard } if
+            } if
+        } for
+    } for
+} def
+
+% ----------------------------------------------------------------------
+%  solve-from: recursive solver.  For cell idx, either skip (if
+%  already bound as a hint), or offer each value 1..9 as a choice
+%  alternative.  Each surviving alternative recurses to the next
+%  cell.  Recursion keeps choice points nested, which is what makes
+%  deep dead-ends unwind back to the most recent untried branch.
+% ----------------------------------------------------------------------
+/solve-from {
+    /idx exch def
+    idx deepest gt { /deepest idx def-persist } if
+    idx 81 eq
+    {
+        % base case: all cells placed
+    }
+    {
+        /cell-val grid idx get def
+        cell-val bound?
+        {
+            idx 1 add solve-from
+        }
+        {
+            [
+                { maybe-progress cell-val 1 unify pop  idx 1 check-peers  idx 1 add solve-from }
+                { maybe-progress cell-val 2 unify pop  idx 2 check-peers  idx 1 add solve-from }
+                { maybe-progress cell-val 3 unify pop  idx 3 check-peers  idx 1 add solve-from }
+                { maybe-progress cell-val 4 unify pop  idx 4 check-peers  idx 1 add solve-from }
+                { maybe-progress cell-val 5 unify pop  idx 5 check-peers  idx 1 add solve-from }
+                { maybe-progress cell-val 6 unify pop  idx 6 check-peers  idx 1 add solve-from }
+                { maybe-progress cell-val 7 unify pop  idx 7 check-peers  idx 1 add solve-from }
+                { maybe-progress cell-val 8 unify pop  idx 8 check-peers  idx 1 add solve-from }
+                { maybe-progress cell-val 9 unify pop  idx 9 check-peers  idx 1 add solve-from }
+            ] choice
+        } if-else
+    } if-else
+} def
+
+% ----------------------------------------------------------------------
+%  Grid helpers: build a fresh grid from a rows array and populate
+%  hint cells.
+% ----------------------------------------------------------------------
+/make-grid {
+    /rows exch def
+    /g [ 81 { logic-var } repeat ] def
+    % hint-mask: byte 1 where the puzzle supplied the digit.  Lets the
+    % marching-ants grid render hints solid and speculation dim.
+    /hint-mask 81 string def
+    0 1 8 {
+        /r exch def
+        0 1 8 {
+            /c exch def
+            /ch rows r get c get def
+            ch 46b ne {
+                /v ch 48b sub 0 promote pop def
+                g r 9 mul c add get v unify pop
+                hint-mask r 9 mul c add 1b put
+            } if
+        } for
+    } for
+    g
+} def
+
+% ----------------------------------------------------------------------
+%  Printing: render the solved 9x9 with box-group separators.  Reads
+%  `grid` from the surrounding scope.
+% ----------------------------------------------------------------------
+/band-sep (+-------+-------+-------+\n) def
+
+% Print a single cell's value, tolerating unbound logic variables
+% (shown as `.`).  Deref-if-bound lets us use the same routine for
+% the unsolved starting grid and the fully-bound solution.
+/print-cell {
+    /cell-val exch def
+    cell-val bound?
+    {
+        ({0}) mark cell-val deref print-fmt pop pop
+    }
+    {
+        (.) print
+    } if-else
+} def
+
+/print-grid {
+    band-sep print
+    0 1 8 {
+        /r exch def
+        (| ) print
+        0 1 8 {
+            /c exch def
+            grid r 9 mul c add get print-cell
+            ( ) print
+            c 2 eq c 5 eq or { (| ) print } if
+        } for
+        (|\n) print
+        r 3 mod 2 eq { band-sep print } if
+    } for
+} def
+
+% Speculative-grid printer for the marching-ants display.  Mid-search,
+% the bound non-hint cells ARE the live speculation -- the exact value
+% prefix the backtracker is currently committed to.  Hints render
+% solid; speculative digits render ANSI-dim (SGR 2/22), so a terminal
+% shows the puzzle's fixed skeleton with ghostly candidates marching
+% through it; unbound cells print '.'.
+/print-cell-spec {
+    /i exch def
+    /cell-val grid i get def
+    cell-val bound?
+    {
+        hint-mask i get 0b ne
+        { ({0}) mark cell-val deref print-fmt pop pop }
+        {
+            (\x1b[2m) print
+            ({0}) mark cell-val deref print-fmt pop pop
+            (\x1b[22m) print
+        }
+        if-else
+    }
+    { (.) print } if-else
+} def
+
+/print-spec-grid {
+    band-sep print
+    0 1 8 {
+        /r exch def
+        (| ) print
+        0 1 8 {
+            /c exch def
+            r 9 mul c add print-cell-spec
+            ( ) print
+            c 2 eq c 5 eq or { (| ) print } if
+        } for
+        (|\n) print
+        r 3 mod 2 eq { band-sep print } if
+    } for
+} def
+
+% ----------------------------------------------------------------------
+%  verify-solution: independently re-check a solved grid -- a plain
+%  array of 81 integers, NOT logic variables.  Every row, column,
+%  and 3x3 box must be a permutation of 1..9: fold each unit's nine
+%  values into a bitmask via bit-set and require exactly bits 1-9,
+%  i.e. 0b1111111110 = 1022.  Raises /verify-failed on any bad unit.
+%
+%  This runs AFTER the per-puzzle restore, against the `${...}`
+%  global-VM snapshot -- proof that the data genuinely escaped the
+%  rollback rather than riding on still-open save levels.
+% ----------------------------------------------------------------------
+/verify-solution {
+    /sol exch def
+    /ok-units 0 def
+
+    % rows and columns (unit u = row u and column u)
+    0 1 8 {
+        /u exch def
+        /rm 0 def
+        /cm 0 def
+        0 1 8 {
+            /k exch def
+            /rm rm sol u 9 mul k add get bit-set def
+            /cm cm sol k 9 mul u add get bit-set def
+        } for
+        rm 1022 eq cm 1022 eq and { /ok-units ok-units 2 add def } if
+    } for
+
+    % 3x3 boxes
+    0 3 6 {
+        /br exch def
+        0 3 6 {
+            /bc exch def
+            /bm 0 def
+            0 1 2 {
+                /dr exch def
+                0 1 2 {
+                    /dc exch def
+                    /bm bm sol br dr add 9 mul bc add dc add get bit-set def
+                } for
+            } for
+            bm 1022 eq { /ok-units ok-units 1 add def } if
+        } for
+    } for
+
+    ok-units 27 ne { /verify-failed throw } if
+} def
+
+% Userdict-backed carry-over slots.  Pre-defined at save level 0 so
+% the def-persist writes inside the per-puzzle save bracket have a
+% binding to overwrite (def-persist bypasses the save journal but
+% does not create new bindings).
+/solution     null def
+/solved-count 0    def
+/total-us     0ul  def
+
+% ----------------------------------------------------------------------
+%  Solve-progress display ("marching ants").  Long solves print a
+%  one-line search status every ~2 s and the live speculative grid
+%  ("watch it think"; see print-spec-grid) every ~10 s.  Counters are
+%  bumped via
+%  def-persist: a plain def would be journaled and unwound by every
+%  backtrack, so unjournaled writes are the only way to observe the
+%  search from inside it.  Integer bumps are immediates; the clock
+%  ULong must be built inside ${...} (a local wide value above the
+%  save barrier would dangle -- def-persist rejects it), and each
+%  status print runs vm-global-gc to reclaim the dead global clock
+%  cells the previous intervals left behind.
+%
+%  The wall clock is only consulted every 2048 attempts, so the
+%  per-attempt cost is one def-persist and one mod.  Short solves
+%  never reach the first 2 s interval: the catalog output is
+%  unchanged.
+% ----------------------------------------------------------------------
+/attempts          0   def
+/deepest           0   def
+/last-progress-us  0ul def
+/last-grid-us      0ul def
+/progress-interval-us  2000000ul def
+/grid-interval-us     10000000ul def
+
+/print-ants {
+    /now-us exch def
+    /el-us now-us start-us sub def
+    (  [thinking] {0:.1f} s   {1} tried \({2}/s\)   deepest cell {3}/81\n)
+    mark
+        el-us 1000000.0d promote div
+        attempts
+        attempts 1000000ul promote mul el-us div
+        deepest
+    print-fmt pop pop flush
+} def
+
+/maybe-progress {
+    /attempts attempts 1 add def-persist
+    attempts 2048 mod 0 eq {
+        /now-us ${ clock } def
+        now-us last-progress-us sub progress-interval-us ge {
+            now-us print-ants
+            /last-progress-us ${ clock } def-persist
+            now-us last-grid-us sub grid-interval-us ge {
+                print-spec-grid flush
+                /last-grid-us ${ clock } def-persist
+            } if
+            vm-global-gc pop
+        } if
+    } if
+} def
+
+% ----------------------------------------------------------------------
+%  Solve and print a single puzzle entry: [ name rows ]
+%
+%  Interactive flow per puzzle:
+%    1. Print the starting grid (so the user can try solving it).
+%    2. Prompt and wait for the user to press enter.
+%    3. Time the solve, print the solution, print elapsed time.
+%    4. Roll back, then re-verify the escaped `${...}` snapshot.
+%
+%  To skip all prompts in one go (batch / CI), pipe enough blank
+%  lines to satisfy each prompt:
+%
+%      yes '' | ./trix --save-depth=200 examples/sudoku.trx
+%
+%  Wraps the solve in save/restore so the save levels consumed by
+%  choice commits are reclaimed before the next puzzle starts.
+%  Without this, each puzzle's successful choices leave ~50 save
+%  levels behind and the second puzzle exhausts the 64-level budget.
+%  Print output survives restore (stdout is not journaled).
+% ----------------------------------------------------------------------
+/prompt-and-wait {
+    (\nPress ENTER to solve (try it yourself first if you like)... ) print flush
+    stdin 256 string read-line
+    pop   % discard the read string
+    % If stdin hit EOF (piped input exhausted), the returned bool is
+    % false; we still want to proceed -- the user is clearly in
+    % batch mode.
+    pop
+    nl flush
+} def
+
+/solve-and-print {
+    /entry exch def
+    /name entry 0 get def
+    /rows entry 1 get def
+
+    (\n==================================================\n) print
+    (Puzzle: ) print name print nl
+    (==================================================\n) print flush
+
+    save /checkpoint exch def
+    /grid rows make-grid def
+
+    (Starting grid:\n) print flush
+    print-grid
+
+    prompt-and-wait
+
+    (Solving...\n) print flush
+    /start-us clock def
+    % Reset the marching-ants counters for this puzzle (def-persist:
+    % the bracket is already inside `save`, and the clock cells must
+    % live in global VM -- see the progress-display comment above).
+    /attempts 0 def-persist
+    /deepest  0 def-persist
+    /last-progress-us ${ clock } def-persist
+    /last-grid-us     ${ clock } def-persist
+    0 solve-from
+    /elapsed-us clock start-us sub def
+
+    % Extract the solution NOW, while the choice save levels are
+    % still open and every cell is bound (a successful raw `choice`
+    % keeps its save level open by design).  The 81 deref'd values
+    % are copied into an array built inside `${...}` -- global VM,
+    % which the upcoming restore does not reclaim -- and the binding
+    % skips the journal via def-persist; a plain `def` here would be
+    % reverted along with the cell bindings.
+    /solution ${ [ 0 1 80 { grid exch get deref } for ] } def-persist
+    /solved-count solved-count 1 add def-persist
+    % The running total needs the same treatment as the array: ULong
+    % is a wide value whose 8-byte payload lives in VM heap, so the
+    % `add` result must be allocated in global VM too -- def-persist
+    % rejects a value allocated above the save barrier (it would
+    % dangle on restore).  solved-count needs no wrap: small Integers
+    % are self-contained immediates.
+    /total-us ${ total-us elapsed-us add } def-persist
+
+    (\nSolution:\n) print
+    print-grid
+    % `clock` returns microseconds; divide by 1e6 for seconds and
+    % by 1e3 for milliseconds.
+    (Solved in {0:.3f} s \({1} ms\)\n)
+    mark
+        elapsed-us 1000000.0d promote div
+        elapsed-us 1000ul promote div
+    print-fmt pop pop flush
+
+    checkpoint restore
+
+    % The grid's logic-var bindings are gone -- rolled back with the
+    % choice save levels -- but `solution` survived.  Re-verify it
+    % from scratch.
+    solution verify-solution
+    (Verified: all 27 units are 1..9 permutations\n) print flush
+} def
+
+% ----------------------------------------------------------------------
+%  Optional file override: if examples/sudoku-input.txt exists, the
+%  built-in library is replaced by the puzzle in that file.  Format
+%  is 9 lines of 9 characters (`.` for empty, 1-9 for hints);
+%  trailing `\r` or whitespace on each line is tolerated.
+% ----------------------------------------------------------------------
+/load-file-rows {
+    /path exch def
+    /strm path (r)#b stream def
+    /raw strm read-all def
+    strm close-stream    % idempotent: no-op if read-all auto-closed on EOF
+    /lines raw (\n) split def
+    [
+        0 1 8 {
+            /i exch def
+            lines i get trim-right
+        } for
+    ]
+} def
+
+(examples/sudoku-input.txt) file-exists?
+{
+    (examples/sudoku-input.txt) load-file-rows
+    /user-rows exch def
+    /puzzles [
+        [ (user input from examples/sudoku-input.txt) user-rows ]
+    ] def
+} if
+
+% ----------------------------------------------------------------------
+%  Main: solve each puzzle in the (possibly overridden) library.
+% ----------------------------------------------------------------------
+0 1 puzzles length 1 sub {
+    /i exch def
+    puzzles i get solve-and-print
+} for
+
+% Run totals: solved-count and total-us were accumulated across the
+% per-puzzle save/restore brackets via def-persist -- with plain
+% def's, each puzzle's restore would have zeroed them again.
+(\n==================================================\n) print
+({0} puzzle\(s\) solved and verified in {1:.3f} s total\n)
+mark
+    solved-count
+    total-us 1000000.0d promote div
+print-fmt pop pop flush

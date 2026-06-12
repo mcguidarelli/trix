@@ -1,0 +1,1005 @@
+% ====================================================================
+% Supervisor Operator Tests
+% Tests the supervisor, supervisor-which-children, and @supervisor-check
+% operators.  Reuses a small set of global variables.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+/yield-many { 0 1 49 { pop 0 coroutine-sleep } for } def
+(VM free at start: ) print /vm-free query-status =
+
+% Shared result variables
+/R null def  /R2 null def  /R3 null def  /R4 null def
+
+% -- A counter in userdict that child actors can bump --
+/COUNTER 0 def
+
+% =================================================================
+% SECTION 1: supervisor returns a coroutine (actor)
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /w1  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /permanent >>
+    ]
+>> supervisor /R exch def
+R is-coroutine   (sup-returns-coroutine: is coroutine) rt-ok
+R is-actor       (sup-returns-actor: is actor) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 2: one-for-one + permanent — child restarts on abnormal exit
+/COUNTER 0 def
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /crash-once  /start {
+            /COUNTER COUNTER 1 add def
+            COUNTER 1 eq { /boom actor-exit } if
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+    ]
+>> supervisor /R exch def
+% Let the supervisor spawn child, child crashes, supervisor restarts it
+yield-many yield-many yield-many
+% After restart, COUNTER should be 2 (first run crashed, second run survived)
+COUNTER 2 ge   (one-for-one-perm: child restarted) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 3: one-for-one + temporary — child NOT restarted
+/COUNTER 0 def
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /temp-child  /start {
+            /COUNTER COUNTER 1 add def
+            /boom actor-exit
+        }  /restart /temporary >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many yield-many
+COUNTER 1 eq   (one-for-one-temp: child not restarted) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 4: one-for-one + transient — restart on abnormal, not on normal
+/COUNTER 0 def
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /trans-child  /start {
+            /COUNTER COUNTER 1 add def
+            COUNTER 1 eq { /crash actor-exit } if
+            COUNTER 2 eq { /normal actor-exit } if
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /transient >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many yield-many
+% 1st run: abnormal exit (/crash) -> restarted (counter=2)
+% 2nd run: normal exit (/normal) -> NOT restarted (counter stays 2)
+COUNTER 2 eq   (one-for-one-transient: restart abnormal, skip normal) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 5: one-for-all strategy — all children restart when one fails
+/COUNTER 0 def
+/R2 0 def
+<<
+    /strategy /one-for-all  /intensity 5  /period 30000
+    /children [
+        << /id /stable  /start {
+            /R2 R2 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+        << /id /crasher  /start {
+            /COUNTER COUNTER 1 add def
+            COUNTER 1 eq { /boom actor-exit } if
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many yield-many
+% crasher ran twice (crash + restart), stable was killed and restarted
+COUNTER 2 ge   (one-for-all: crasher restarted) rt-ok
+R2 1 ge        (one-for-all: stable restarted) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 6: rest-for-one strategy — children after failed one restart
+/COUNTER 0 def
+/R2 0 def
+/R3 0 def
+<<
+    /strategy /rest-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /before  /start {
+            /COUNTER COUNTER 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+        << /id /crasher  /start {
+            /R2 R2 1 add def
+            R2 1 eq { /boom actor-exit } if
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+        << /id /after  /start {
+            /R3 R3 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many yield-many
+% /before: started once (NOT restarted, it's before the crasher)
+COUNTER 1 eq   (rest-for-one: before NOT restarted) rt-ok
+% /crasher: started twice (crash + restart)
+R2 2 ge        (rest-for-one: crasher restarted) rt-ok
+% /after: started twice (killed by rest-for-one + restart)
+R3 2 ge        (rest-for-one: after restarted) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 7: restart intensity exceeded — supervisor dies with /shutdown
+/R null def
+/W [ {
+    <<
+        /strategy /one-for-one  /intensity 2  /period 30000
+        /children [
+            << /id /always-crash  /start { /crash actor-exit }  /restart /permanent >>
+        ]
+    >> supervisor /S exch def
+    S monitor pop
+    % child will crash repeatedly; after 2 restarts, supervisor should die
+    yield-many yield-many yield-many yield-many
+    yield-many yield-many yield-many yield-many
+    /R actor-recv tag-value /reason get def
+} actor-spawn def
+W coroutine-join pop pop  % wait for wrapper to finish (sets R)
+R /shutdown eq  (intensity-exceeded: supervisor dies /shutdown) rt-ok  clear
+
+% =================================================================
+% SECTION 8: supervisor-which-children returns active children
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /a  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /permanent >>
+        << /id /b  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /temporary >>
+    ]
+>> supervisor /R exch def
+/R2 R supervisor-which-children def
+R2 length 2 eq            (which-children: 2 active children) rt-ok
+R2 0 get /id get /a eq    (which-children: first child is /a) rt-ok
+R2 1 get /id get /b eq    (which-children: second child is /b) rt-ok
+R2 0 get /restart get /permanent eq  (which-children: first restart is /permanent) rt-ok
+R2 1 get /restart get /temporary eq  (which-children: second restart is /temporary) rt-ok
+R2 0 get /actor get is-actor         (which-children: first has actor handle) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 9: spec validation errors
+{ << >> supervisor } try /no-error ne
+    (spec-error: missing /strategy) rt-ok  clear
+{ << /strategy /bad /intensity 5 /period 10000 /children [ << /id /x /start { } /restart /permanent >> ] >> supervisor } try /no-error ne
+    (spec-error: bad strategy) rt-ok  clear
+{ << /strategy /one-for-one /intensity -1 /period 10000 /children [ << /id /x /start { } /restart /permanent >> ] >> supervisor } try /no-error ne
+    (spec-error: negative intensity) rt-ok  clear
+{ << /strategy /one-for-one /intensity 5 /period 0 /children [ << /id /x /start { } /restart /permanent >> ] >> supervisor } try /no-error ne
+    (spec-error: zero period) rt-ok  clear
+{ << /strategy /one-for-one /intensity 5 /period 10000 /children [ ] >> supervisor } try /no-error ne
+    (spec-error: empty children) rt-ok  clear
+{ << /strategy /one-for-one /intensity 5 /period 10000 /children [ << /id /x /restart /permanent >> ] >> supervisor } try /no-error ne
+    (spec-error: missing /start) rt-ok  clear
+{ << /strategy /one-for-one /intensity 5 /period 10000 /children [ << /id /x /start { } /restart /bogus >> ] >> supervisor } try /no-error ne
+    (spec-error: bad restart policy) rt-ok  clear
+
+% =================================================================
+% SECTION 10: supervisor monitors child (monitoring, not linking)
+% When supervisor is killed externally, children are orphaned (not killed)
+/R false def
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /orphan  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /permanent >>
+    ]
+>> supervisor /R2 exch def
+/R3 R2 supervisor-which-children 0 get /actor get def
+R2 coroutine-kill yield-many yield-many
+R3 coroutine-status /dead ne  (orphan: child survives supervisor kill) rt-ok
+R3 coroutine-kill yield-many  clear
+
+% =================================================================
+% SECTION 11: supervisor with /capacity on child
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /cap  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /permanent  /capacity 32 >>
+    ]
+>> supervisor /R exch def
+/R2 R supervisor-which-children def
+R2 length 1 eq   (capacity-child: one active child) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 12: intensity 0 — supervisor dies on first child crash (no restarts)
+/R null def
+/W [ {
+    <<
+        /strategy /one-for-one  /intensity 0  /period 30000
+        /children [
+            << /id /doomed  /start { /crash actor-exit }  /restart /permanent >>
+        ]
+    >> supervisor /S exch def
+    S monitor pop
+    yield-many yield-many
+    /R actor-recv tag-value /reason get def
+} actor-spawn def
+yield-many yield-many yield-many
+R /shutdown eq  (intensity-zero: supervisor dies immediately) rt-ok  clear
+
+% =================================================================
+% SECTION 13: multiple consecutive restarts — child crashes 3 times
+/COUNTER 0 def
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /multi-crash  /start {
+            /COUNTER COUNTER 1 add def
+            COUNTER 3 le { /boom actor-exit } if
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many yield-many yield-many yield-many
+% Child crashed 3 times, restarted 3 times, 4th run survives: COUNTER=4
+COUNTER 4 eq  (multi-restart: child ran 4 times) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 14: child crashes on startup — restart cascade hits intensity
+/COUNTER 0 def
+/R null def
+/W [ {
+    <<
+        /strategy /one-for-one  /intensity 3  /period 30000
+        /children [
+            << /id /always-crash  /start {
+                /COUNTER COUNTER 1 add def
+                /startup-fail actor-exit
+            }  /restart /permanent >>
+        ]
+    >> supervisor /S exch def
+    S monitor pop
+    yield-many yield-many yield-many yield-many
+    /R actor-recv tag-value /reason get def
+} actor-spawn def
+yield-many yield-many yield-many yield-many yield-many
+R /shutdown eq            (startup-crash: supervisor dies /shutdown) rt-ok
+% Child ran: 1 (initial) + 3 (restarts) = 4 times, then intensity exceeded
+COUNTER 4 eq              (startup-crash: child ran 4 times total) rt-ok  clear
+
+% =================================================================
+% SECTION 15: which-children after temporary child dies — fewer active
+/COUNTER 0 def
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /alive  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /permanent >>
+        << /id /temp   /start { /COUNTER COUNTER 1 add def /bye actor-exit }  /restart /temporary >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many yield-many
+/R2 R supervisor-which-children def
+R2 length 1 eq            (which-children-temp: only 1 active after temp dies) rt-ok
+R2 0 get /id get /alive eq  (which-children-temp: alive child remains) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 16: which-children on non-supervisor — error
+/R null def
+[ { { actor-recv pop 0 coroutine-sleep } loop } actor-spawn /R2 exch def
+{ R2 supervisor-which-children } try /R exch def
+R /no-error ne            (which-children-error: rejects non-supervisor) rt-ok
+R2 coroutine-kill yield-many  clear
+
+% =================================================================
+% SECTION 17: temporary child crash does NOT trigger one-for-all
+/COUNTER 0 def
+/R2 0 def
+<<
+    /strategy /one-for-all  /intensity 5  /period 30000
+    /children [
+        << /id /stable  /start {
+            /R2 R2 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+        << /id /temp-crash  /start {
+            /COUNTER COUNTER 1 add def
+            /boom actor-exit
+        }  /restart /temporary >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many yield-many
+% Temporary child crashed but should_restart=false → no one-for-all triggered
+% Stable should have started exactly once
+R2 1 eq  (temp-trigger-ofa: stable NOT restarted) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 18: one-for-all with mixed policies — permanent triggers, all restart
+/COUNTER 0 def
+/R2 0 def
+/R3 0 def
+<<
+    /strategy /one-for-all  /intensity 5  /period 30000
+    /children [
+        << /id /perm  /start {
+            /COUNTER COUNTER 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+        << /id /trans  /start {
+            /R2 R2 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /transient >>
+        << /id /crasher  /start {
+            /R3 R3 1 add def
+            R3 1 eq { /boom actor-exit } if
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many yield-many yield-many
+% Crasher (permanent) triggers one-for-all: all 3 children restart
+R3 2 ge  (ofa-mixed: crasher restarted) rt-ok
+COUNTER 1 ge  (ofa-mixed: perm child was respawned) rt-ok
+R2 1 ge  (ofa-mixed: transient child was respawned) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 19: rest-for-one — crasher is LAST child (nothing after)
+/COUNTER 0 def
+/R2 0 def
+<<
+    /strategy /rest-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /before  /start {
+            /COUNTER COUNTER 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+        << /id /last-crash  /start {
+            /R2 R2 1 add def
+            R2 1 eq { /boom actor-exit } if
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many yield-many
+% Crasher is last: only it restarts, before stays untouched
+COUNTER 1 eq  (rfo-last: before NOT restarted) rt-ok
+R2 2 ge       (rfo-last: last-crash restarted) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 20: rest-for-one — crasher is FIRST child (all after restart)
+/COUNTER 0 def
+/R2 0 def
+/R3 0 def
+<<
+    /strategy /rest-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /first-crash  /start {
+            /COUNTER COUNTER 1 add def
+            COUNTER 1 eq { /boom actor-exit } if
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+        << /id /mid  /start {
+            /R2 R2 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+        << /id /last  /start {
+            /R3 R3 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many yield-many
+% Crasher is first: all three restart (mid and last are "after" it)
+COUNTER 2 ge  (rfo-first: first-crash restarted) rt-ok
+R2 1 ge       (rfo-first: mid restarted) rt-ok
+R3 1 ge       (rfo-first: last restarted) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 21: nested supervision — child supervisor escalates to parent
+% child-sup links to the inner supervisor so when inner dies (intensity
+% exceeded), child-sup dies via link propagation, which the parent detects.
+/R null def
+/W [ {
+    <<
+        /strategy /one-for-one  /intensity 2  /period 60000
+        /children [
+            << /id /child-sup  /start {
+                <<
+                    /strategy /one-for-one  /intensity 1  /period 30000
+                    /children [
+                        << /id /always-crash  /start { /crash actor-exit }  /restart /permanent >>
+                    ]
+                >> supervisor /S exch def
+                S link   % die when inner supervisor dies
+                { actor-recv pop 0 coroutine-sleep } loop
+            }  /restart /transient >>
+        ]
+    >> supervisor /S exch def
+    S monitor pop
+    yield-many yield-many yield-many yield-many yield-many yield-many
+    yield-many yield-many yield-many yield-many yield-many yield-many
+    /R actor-recv tag-value /reason get def
+} actor-spawn def
+yield-many yield-many yield-many yield-many yield-many yield-many
+yield-many yield-many yield-many yield-many yield-many yield-many
+yield-many yield-many yield-many yield-many
+R /shutdown eq  (nested-sup: parent supervisor dies /shutdown) rt-ok  clear
+
+% =================================================================
+% SECTION 22: monitor supervisor for escalation /down
+/R null def  /R2 null def
+/W [ {
+    <<
+        /strategy /one-for-one  /intensity 1  /period 30000
+        /children [
+            << /id /crasher  /start { /crash actor-exit }  /restart /permanent >>
+        ]
+    >> supervisor /S exch def
+    S monitor pop
+    yield-many yield-many yield-many
+    actor-recv /R over tag-name def /R2 exch tag-value /reason get def
+} actor-spawn def
+yield-many yield-many yield-many yield-many
+R /down eq      (monitor-sup: got /down for supervisor) rt-ok
+R2 /shutdown eq (monitor-sup: reason is /shutdown) rt-ok  clear
+
+% =================================================================
+% SECTION 23: linked supervised children — cascade death + supervisor handles
+/COUNTER 0 def
+/R2 0 def
+<<
+    /strategy /one-for-one  /intensity 10  /period 30000
+    /children [
+        << /id /a  /start {
+            /COUNTER COUNTER 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+        << /id /b  /start {
+            /R2 R2 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many
+% Get child handles and link them externally
+/R3 R supervisor-which-children def
+/R4 R3 0 get /actor get def   % child A
+% Kill child A externally — supervisor should restart it
+R4 coroutine-kill
+yield-many yield-many yield-many
+% A should have been restarted by supervisor (COUNTER was 1, now 2+)
+COUNTER 2 ge  (linked-children: child A restarted) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 24: actor-exit with integer reason
+/R null def
+/W [ {
+    /T [ { 0 coroutine-sleep 42 actor-exit } actor-spawn def
+    T monitor pop yield-many /R actor-recv tag-value /reason get def
+} actor-spawn def
+yield-many yield-many
+R 42 eq  (int-reason: integer reason preserved in /down) rt-ok  clear
+
+% =================================================================
+% SECTION 25: stress — 5 children, 2 crash once
+/COUNTER 0 def
+/R2 0 def
+<<
+    /strategy /one-for-one  /intensity 10  /period 30000
+    /children [
+        << /id /s1  /start {
+            /COUNTER COUNTER 1 add def
+            COUNTER 1 eq { /boom actor-exit } if
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+        << /id /s2  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /permanent >>
+        << /id /s3  /start {
+            /R2 R2 1 add def
+            R2 1 eq { /boom actor-exit } if
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+        << /id /s4  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /permanent >>
+        << /id /s5  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /permanent >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many yield-many yield-many
+/R3 R supervisor-which-children def
+R3 length 5 eq   (stress-5: all 5 children active) rt-ok
+COUNTER 2 ge     (stress-5: s1 restarted) rt-ok
+R2 2 ge          (stress-5: s3 restarted) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 26: rapid supervisor create/destroy cycles
+/R 0 def
+1 1 5 { pop
+    <<
+        /strategy /one-for-one  /intensity 5  /period 30000
+        /children [
+            << /id /w  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /permanent >>
+        ]
+    >> supervisor /R2 exch def
+    yield-many
+    R2 is-actor { /R R 1 add def } if
+    R2 coroutine-kill yield-many
+} for
+R 5 eq  (rapid-create-destroy: 5 cycles successful) rt-ok  clear
+
+% =================================================================
+% SECTION 27: re-link after unlink (primitive coverage)
+/R false def
+/A [ { { 200 coroutine-sleep } loop } actor-spawn def
+/B [ { true actor-trap-exit
+    A link A unlink A link
+    A coroutine-kill yield-many
+    /R actor-recv tag-name /exit eq def
+} actor-spawn def
+yield-many yield-many
+R  (relink: re-link after unlink works) rt-ok  clear
+
+% =================================================================
+% SECTION 28: unlink dead target (no crash)
+/R false def
+/A [ { } actor-spawn def
+yield-many   % A is dead now
+/B [ { A unlink /R true def } actor-spawn def
+yield-many yield-many
+R  (unlink-dead: no crash on unlinking dead actor) rt-ok  clear
+
+% =================================================================
+% SECTION 29: transient normal exit with one-for-all — no trigger
+/COUNTER 0 def
+/R2 0 def
+<<
+    /strategy /one-for-all  /intensity 5  /period 30000
+    /children [
+        << /id /stable  /start {
+            /R2 R2 1 add def
+            { actor-recv pop 0 coroutine-sleep } loop
+        }  /restart /permanent >>
+        << /id /trans-normal  /start {
+            /COUNTER COUNTER 1 add def
+            /normal actor-exit
+        }  /restart /transient >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many yield-many
+% Transient exits normally → should_restart=false → one-for-all NOT triggered
+R2 1 eq  (trans-normal-ofa: stable NOT restarted) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 30: trap-exit with multiple linked partners dying
+/R 0 def
+/A [ { 0 coroutine-sleep /crash-a actor-exit } actor-spawn def
+/B [ { 0 coroutine-sleep 0 coroutine-sleep /crash-b actor-exit } actor-spawn def
+/W [ { true actor-trap-exit A link B link
+    actor-recv pop /R R 1 add def
+    actor-recv pop /R R 1 add def
+} actor-spawn def
+yield-many yield-many yield-many
+R 2 eq  (multi-link-trap: received 2 /exit messages) rt-ok  clear
+
+% =================================================================
+% SECTION 31: intensity exceeded with multiple live children — all killed
+/COUNTER 0 def
+/R2 0 def
+/R null def
+/W [ {
+    <<
+        /strategy /one-for-one  /intensity 1  /period 30000
+        /children [
+            << /id /alive1  /start {
+                /COUNTER COUNTER 1 add def
+                { actor-recv pop 0 coroutine-sleep } loop
+            }  /restart /permanent >>
+            << /id /alive2  /start {
+                /R2 R2 1 add def
+                { actor-recv pop 0 coroutine-sleep } loop
+            }  /restart /permanent >>
+            << /id /crasher  /start { /crash actor-exit }  /restart /permanent >>
+        ]
+    >> supervisor /S exch def
+    S monitor pop
+    yield-many yield-many yield-many yield-many
+    /R actor-recv tag-value /reason get def
+} actor-spawn def
+yield-many yield-many yield-many yield-many yield-many
+R /shutdown eq  (intensity-multi: supervisor dies /shutdown) rt-ok  clear
+
+% =================================================================
+% SECTION 32: which-children after all temp children die — empty array
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /t1  /start { /bye actor-exit }  /restart /temporary >>
+        << /id /t2  /start { /bye actor-exit }  /restart /temporary >>
+    ]
+>> supervisor /R exch def
+yield-many yield-many yield-many
+/R2 R supervisor-which-children def
+R2 length 0 eq  (which-children-empty: no active after all temp die) rt-ok
+R coroutine-kill yield-many yield-many  clear
+
+% =================================================================
+% SECTION 33: which-children on dead supervisor — error
+/R null def
+<<
+    /strategy /one-for-one  /intensity 1  /period 30000
+    /children [
+        << /id /crasher  /start { /crash actor-exit }  /restart /permanent >>
+    ]
+>> supervisor /R2 exch def
+yield-many yield-many yield-many yield-many
+% supervisor should be dead (intensity exceeded)
+{ R2 supervisor-which-children } try /R exch def
+R /no-error ne  (which-children-dead: error on dead supervisor) rt-ok  clear
+
+% =================================================================
+% SECTION 34: vm-validate (mid-suite checkpoint)
+/vm-validate query-status true eq (vm-validate: heap integrity mid-suite) rt-ok  clear
+
+% =================================================================
+% SECTION 35: supervisor-start-child basic
+% =================================================================
+
+<<
+    /strategy /one-for-one  /intensity 3  /period 30000
+    /children [
+        << /id /w1  /start { { actor-recv pop } loop }  /restart /permanent >>
+    ]
+>> supervisor /sup exch def
+yield-many
+sup supervisor-which-children length 1 eq
+    (start-child: initial 1 child) rt-ok
+
+% Add a second child dynamically
+sup << /id /w2  /start { { actor-recv pop } loop }  /restart /permanent >> supervisor-start-child
+yield-many
+sup supervisor-which-children length 2 eq
+    (start-child: now 2 children) rt-ok
+
+% Add a third child
+sup << /id /w3  /start { { actor-recv pop } loop }  /restart /temporary >> supervisor-start-child
+yield-many
+sup supervisor-which-children length 3 eq
+    (start-child: now 3 children) rt-ok
+
+% Verify ids
+sup supervisor-which-children { /id get } map
+dup /w1 index-of -1 ne (start-child: has w1) rt-ok
+dup /w2 index-of -1 ne (start-child: has w2) rt-ok
+/w3 index-of -1 ne (start-child: has w3) rt-ok
+
+% Cleanup
+sup supervisor-stop
+yield-many yield-many clear
+
+% =================================================================
+% SECTION 36: supervisor-terminate-child basic
+% =================================================================
+
+<<
+    /strategy /one-for-one  /intensity 3  /period 30000
+    /children [
+        << /id /a  /start { { actor-recv pop } loop }  /restart /permanent >>
+        << /id /b  /start { { actor-recv pop } loop }  /restart /permanent >>
+        << /id /c  /start { { actor-recv pop } loop }  /restart /permanent >>
+    ]
+>> supervisor /sup exch def
+yield-many
+sup supervisor-which-children length 3 eq
+    (term-child: initial 3 children) rt-ok
+
+% Terminate child /b
+sup /b supervisor-terminate-child
+yield-many
+sup supervisor-which-children length 2 eq
+    (term-child: now 2 after terminate /b) rt-ok
+
+% Verify /b is gone
+sup supervisor-which-children { /id get } map
+dup /a index-of -1 ne (term-child: /a still active) rt-ok
+dup /b index-of -1 eq (term-child: /b terminated) rt-ok
+/c index-of -1 ne (term-child: /c still active) rt-ok
+
+% Terminate non-existent child — no error
+sup /nonexistent supervisor-terminate-child
+yield-many
+sup supervisor-which-children length 2 eq
+    (term-child: still 2 after terminate unknown) rt-ok
+
+% Cleanup
+sup supervisor-stop
+yield-many yield-many clear
+
+% =================================================================
+% SECTION 37: supervisor-stop basic
+% =================================================================
+
+<<
+    /strategy /one-for-one  /intensity 3  /period 30000
+    /children [
+        << /id /x  /start { { actor-recv pop } loop }  /restart /permanent >>
+        << /id /y  /start { { actor-recv pop } loop }  /restart /permanent >>
+    ]
+>> supervisor /sup exch def
+yield-many
+sup supervisor-which-children length 2 eq
+    (sup-stop: initial 2 children) rt-ok
+
+% Stop the supervisor
+sup supervisor-stop
+yield-many yield-many
+
+% Supervisor should be dead
+{ sup supervisor-which-children } try /no-error ne
+    (sup-stop: supervisor is dead) rt-ok clear
+
+% =================================================================
+% SECTION 38: supervisor-stop monitored from parent
+% =================================================================
+
+mark {
+    <<
+        /strategy /one-for-one  /intensity 3  /period 30000
+        /children [
+            << /id /w  /start { { actor-recv pop } loop }  /restart /permanent >>
+        ]
+    >> supervisor /sup exch def
+    sup monitor pop
+    yield-many
+    sup supervisor-stop
+    % Receive /down message from supervisor dying
+    { is-tagged } actor-recv-match
+    dup tag-name /down eq (sup-stop-mon: got /down) rt-ok
+    tag-value /reason get /shutdown eq (sup-stop-mon: reason = /shutdown) rt-ok
+} actor-spawn coroutine-join pop clear
+
+% =================================================================
+% SECTION 39: supervisor-start-child + terminate cycle
+% =================================================================
+
+<<
+    /strategy /one-for-one  /intensity 3  /period 30000
+    /children [
+        << /id /seed  /start { { actor-recv pop } loop }  /restart /permanent >>
+    ]
+>> supervisor /sup exch def
+yield-many
+
+% Add child, terminate, add again
+sup << /id /dyn  /start { { actor-recv pop } loop }  /restart /permanent >> supervisor-start-child
+yield-many
+sup supervisor-which-children length 2 eq
+    (cycle: added /dyn) rt-ok
+
+sup /dyn supervisor-terminate-child
+yield-many
+sup supervisor-which-children length 1 eq
+    (cycle: terminated /dyn) rt-ok
+
+% Add a different child
+sup << /id /dyn2  /start { { actor-recv pop } loop }  /restart /temporary >> supervisor-start-child
+yield-many
+sup supervisor-which-children length 2 eq
+    (cycle: added /dyn2) rt-ok
+
+sup supervisor-stop
+yield-many yield-many clear
+
+% =================================================================
+% SECTION 40: supervisor-start-child duplicate id silently ignored
+% =================================================================
+
+<<
+    /strategy /one-for-one  /intensity 3  /period 30000
+    /children [
+        << /id /orig  /start { { actor-recv pop } loop }  /restart /permanent >>
+    ]
+>> supervisor /sup exch def
+yield-many
+
+% Try to add another child with same id
+sup << /id /orig  /start { { actor-recv pop } loop }  /restart /permanent >> supervisor-start-child
+yield-many
+sup supervisor-which-children length 1 eq
+    (dup-id: still 1 child) rt-ok
+
+sup supervisor-stop
+yield-many yield-many clear
+
+% =================================================================
+% SECTION 41: error cases for new operators
+% =================================================================
+
+{ 42 /foo supervisor-terminate-child } try /type-check eq
+    (term-err: non-coroutine target) rt-ok clear
+{ 42 << >> supervisor-start-child } try /type-check eq
+    (start-err: non-coroutine target) rt-ok clear
+{ 42 supervisor-stop } try /type-check eq
+    (stop-err: non-coroutine target) rt-ok clear
+
+% =================================================================
+% SECTION 42: supervisor-count-children basic
+% =================================================================
+
+<<
+    /strategy /one-for-one  /intensity 3  /period 30000
+    /children [
+        << /id /a  /start { { actor-recv pop } loop }  /restart /permanent >>
+        << /id /b  /start { { actor-recv pop } loop }  /restart /permanent >>
+        << /id /c  /start { { actor-recv pop } loop }  /restart /permanent >>
+    ]
+>> supervisor /sup exch def
+yield-many
+sup supervisor-count-children 3 eq
+    (count-children: 3 active) rt-ok
+
+% Terminate one, count drops
+sup /b supervisor-terminate-child
+yield-many
+sup supervisor-count-children 2 eq
+    (count-children: 2 after terminate) rt-ok
+
+% Add one, count rises
+sup << /id /d  /start { { actor-recv pop } loop }  /restart /permanent >> supervisor-start-child
+yield-many
+sup supervisor-count-children 3 eq
+    (count-children: 3 after start-child) rt-ok
+
+sup supervisor-stop
+yield-many yield-many clear
+
+% =================================================================
+% SECTION 43: supervisor-count-children error cases
+% =================================================================
+
+{ 42 supervisor-count-children } try /type-check eq
+    (count-err: non-coroutine) rt-ok clear
+
+% =================================================================
+% SECTION 44: supervisor-get-child basic
+% =================================================================
+
+<<
+    /strategy /one-for-one  /intensity 3  /period 30000
+    /children [
+        << /id /alpha  /start { { actor-recv pop } loop }  /restart /permanent >>
+        << /id /beta   /start { { actor-recv pop } loop }  /restart /permanent >>
+    ]
+>> supervisor /sup exch def
+yield-many
+
+% Get existing child
+sup /alpha supervisor-get-child
+    (get-child: alpha found) rt-ok
+is-actor
+    (get-child: alpha is actor) rt-ok
+
+% Get other child
+sup /beta supervisor-get-child
+    (get-child: beta found) rt-ok
+is-actor
+    (get-child: beta is actor) rt-ok
+
+% Get non-existent child
+sup /gamma supervisor-get-child not
+    (get-child: gamma not found) rt-ok
+
+% Terminate and re-check
+sup /alpha supervisor-terminate-child
+yield-many
+sup /alpha supervisor-get-child not
+    (get-child: alpha gone after terminate) rt-ok
+
+sup supervisor-stop
+yield-many yield-many clear
+
+% =================================================================
+% SECTION 45: supervisor-get-child error cases
+% =================================================================
+
+{ 42 /foo supervisor-get-child } try /type-check eq
+    (get-child-err: non-coroutine) rt-ok clear
+
+% =================================================================
+% SECTION 46: supervisor-restart-child basic
+% =================================================================
+
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /worker  /start { { actor-recv pop } loop }  /restart /permanent >>
+    ]
+>> supervisor /sup exch def
+yield-many
+sup supervisor-count-children 1 eq
+    (restart: initial 1) rt-ok
+
+% Terminate worker
+sup /worker supervisor-terminate-child
+yield-many
+sup supervisor-count-children 0 eq
+    (restart: 0 after terminate) rt-ok
+sup /worker supervisor-get-child not
+    (restart: worker gone) rt-ok
+
+% Restart worker
+sup /worker supervisor-restart-child
+yield-many
+sup supervisor-count-children 1 eq
+    (restart: 1 after restart) rt-ok
+sup /worker supervisor-get-child
+    (restart: worker found again) rt-ok
+is-actor
+    (restart: worker is actor) rt-ok
+
+sup supervisor-stop
+yield-many yield-many clear
+
+% =================================================================
+% SECTION 47: supervisor-restart-child on active child — no-op
+% =================================================================
+
+<<
+    /strategy /one-for-one  /intensity 3  /period 30000
+    /children [
+        << /id /w  /start { { actor-recv pop } loop }  /restart /permanent >>
+    ]
+>> supervisor /sup exch def
+yield-many
+
+% Get the actor handle before restart attempt
+sup /w supervisor-get-child pop /handle1 exch def
+
+% Restart an already-active child — should be silently ignored
+sup /w supervisor-restart-child
+yield-many
+
+% Should still be the same actor
+sup /w supervisor-get-child pop /handle2 exch def
+handle1 handle2 eq
+    (restart-active: same actor, no-op) rt-ok
+
+sup supervisor-stop
+yield-many yield-many clear
+
+% =================================================================
+% SECTION 48: supervisor-restart-child error cases
+% =================================================================
+
+{ 42 /foo supervisor-restart-child } try /type-check eq
+    (restart-err: non-coroutine) rt-ok clear
+
+% =================================================================
+% SECTION 49: vm-validate
+% =================================================================
+
+/vm-validate query-status true eq (vm-validate: heap integrity after supervisor tests) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_supervisor: ALL TESTS PASSED) =
+(__test_ok__) =

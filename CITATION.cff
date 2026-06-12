@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use Trix in academic work, please cite it as below."
+type: software
+title: "Trix"
+abstract: >-
+  An embeddable stack-based scripting virtual machine written as a
+  single-header C++23 library.  Provides cooperative concurrency
+  (coroutines, pipelines, actors, Erlang/OTP-style supervision),
+  logic programming (unification, backtracking, choice points),
+  reactive cells (incremental computation), lazy sequences,
+  transactional save/restore, and whole-VM snapshot/thaw.
+authors:
+  - family-names: "Guidarelli"
+    given-names: "Mark"
+    email: "guido@grumpy-cat.com"
+version: "0.9.0"
+date-released: "2026-06-06"
+license: Apache-2.0
+repository-code: "https://github.com/mcguidarelli/trix"
+url: "https://github.com/mcguidarelli/trix"
+keywords:
+  - scripting-language
+  - virtual-machine
+  - stack-based
+  - postscript
+  - forth
+  - actors
+  - supervision
+  - logic-programming
+  - cpp23
+  - embedded

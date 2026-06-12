@@ -1,0 +1,21 @@
+% ====================================================================
+% test_bestagon_proto_pathfind.trx -- run examples/bestagon-proto/
+% proto-pathfind.trx via the tests/ harness.
+% ====================================================================
+%
+% Thin wrapper: loads proto-pathfind.trx (Phase 0.6G: reachable-hexes
+% with terrain + ZOC + impassable + indirect-fire range bracket-check
+% per GDD sections 4 + 7.7 + 7.9).
+%
+% 20 assertions across 5 sections:
+%   A: clear 7x7 plain, Tank at [3,3] move=6 covers all 49 cells
+%   B: corridor map, ZOC halt + mountain walls block east-of-enemy
+%   C: Mountain at [4,3] impassable to Tank (tread class)
+%   D: indirect-range-ok? bracket-check for Artillery 2-3 + Rocket 3-5
+%   E: section 7.9 Phase 5 invariant -- Recon halts on enter-ZOC
+%
+% Throws on any assertion mismatch.  Runs on default 1 MB VM in < 1 s.
+% ====================================================================
+
+(examples/bestagon-proto/proto-pathfind.trx) run
+(__test_ok__) =

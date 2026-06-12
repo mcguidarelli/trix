@@ -1,0 +1,66 @@
+% test_read_key.trx -- read-key-byte / read-key-byte-timeout / key-ready? Phase 2 tests
+%
+% Real-tty-only paths (raw-mode + read-key-byte happily reading single keystrokes)
+% need a pty or interactive terminal; gated behind TRIX_TEST_TTY for manual runs.
+% The CI-runnable paths exercised here:
+%   - key-ready? returns boolean
+%   - read-key-byte-timeout 0 returns cleanly (no hang)
+%   - read-key-byte-timeout returns false on EOF/no-data within timeout
+%   - all three ops run outside raw mode (no termios required for read paths)
+%
+% raw-mode-required paths (single keystroke without Enter, ESC sequences, etc.)
+% need a real terminal and live in examples/keytest.trx for manual smoke testing.
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+%% === key-ready? ===
+
+key-ready? type /boolean-type eq (key-ready?: returns bool) rt-ok
+
+%% === read-key-byte-timeout 0 (pure poll, no trampoline) ===
+
+% After the script body has been consumed, stdin is at EOF.
+% read-key-byte-timeout 0 returns either (byte true) or (false).
+% Drain whichever shape lands and verify no error.
+0 read-key-byte-timeout
+{ pop } { } if-else      % data path: drop the byte; empty path: nothing
+true (read-key-byte-timeout 0: returned cleanly) rt-ok
+
+%% === read-key-byte-timeout with small ms (timer path) ===
+
+% Timer-based timeout: blocks ~10 ms then returns false.  Cannot busy-loop;
+% scheduler must poll stdin alongside the timer.  Verifies trampoline integration.
+clock
+10 read-key-byte-timeout
+{ pop } { } if-else
+clock exch sub
+1000000000ul lt (read-key-byte-timeout 10: returns within 1s) rt-ok
+
+%% === key-ready? after the reads ===
+
+key-ready? type /boolean-type eq (key-ready?: type after reads) rt-ok
+
+%% === Results ===
+
+failed 0 eq
+{ total (read-key: all tests passed) = = }
+{ (read-key: FAILURES = ) print failed = } if-else
+failed 0 eq { } { /assert-failed throw } if-else
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

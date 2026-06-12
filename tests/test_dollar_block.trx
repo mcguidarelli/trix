@@ -1,0 +1,195 @@
+% ====================================================================
+% test_dollar_block.trx -- ${...} global allocation scope block
+% ====================================================================
+% ${ body } scans the body with m_curr_alloc_global=true so literal
+% Name allocations inside go to global VM (and survive save/restore),
+% AND runs the body with the runtime flag set so future global-honoring
+% allocations also land in global.
+%
+% Error safety: if the body throws, the unwinder restores the prior
+% flag value via the err-stack-saved Boolean (mirror of @with-stream).
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: scanner-time effect -- Name interned in body goes to global
+% ====================================================================
+
+${ 8 dict } /g exch def
+g 0 100 put
+
+save /sv1 exch def
+${ /alpha-key } pop                         % /alpha-key interned at scan time, flag was true
+g /alpha-key 42 put
+g /alpha-key get 42 eq                      (db1: in-save /alpha-key visible) rt-ok
+sv1 restore
+
+% Name struct lives in global VM, dict's entry references it -- both survive restore.
+g /alpha-key known? true eq                 (db1: post-restore /alpha-key known) rt-ok
+g /alpha-key get 42 eq                      (db1: post-restore /alpha-key get) rt-ok
+
+% Contrast: a Name interned outside ${...} at sl > 0 is local-fragile;
+% R6 pointer-hygiene rejects storing it into a global dict at write time
+% (would otherwise leave a dangling entry after restore).
+${ 8 dict } /g2 exch def
+save /sv2 exch def
+mark { g2 /local-key 99 put } try
+/invalid-access eq                          (db1: R6 rejects local Name into global) rt-ok
+clear
+sv2 restore
+
+% ====================================================================
+% SECTION 2: runtime flag is set inside the block
+% ====================================================================
+
+current-global false eq                      (db2: current-global false at top) rt-ok
+${ current-global } true eq                  (db2: current-global true inside) rt-ok
+current-global false eq                      (db2: current-global false after) rt-ok
+
+% ====================================================================
+% SECTION 3: nested ${...} preserves the outer flag
+% ====================================================================
+
+${
+    current-global /outer-saw exch def
+    ${ current-global /inner-saw exch def }
+    current-global /post-inner-saw exch def
+    outer-saw true eq                       (db3: outer block sees true) rt-ok
+    inner-saw true eq                       (db3: nested inner sees true) rt-ok
+    post-inner-saw true eq                  (db3: post-nested still true) rt-ok
+}
+current-global false eq                      (db3: outer flag restored) rt-ok
+
+% ====================================================================
+% SECTION 4: error inside ${...} restores the flag
+% ====================================================================
+
+current-global false eq                      (db4: pre-throw false) rt-ok
+mark { ${ current-global /seen exch def /sample-error throw } } try
+clear
+current-global false eq                      (db4: post-throw flag restored) rt-ok
+seen true eq                                (db4: body did see true before throw) rt-ok
+
+% ====================================================================
+% SECTION 5: ${...} inside a proc literal -- emit pattern works in nested context
+% ====================================================================
+
+${ 8 dict } /g5 exch def
+
+% Define a proc that uses ${...} internally.  The scanner should scan
+% the proc body, see ${...}, and emit body-proc + @in-global into the
+% surrounding proc body so calling /populate at runtime fires both.
+/populate {
+    ${
+        /beta-key /gamma-key
+    } pop pop
+    g5 /beta-key  101 put
+    g5 /gamma-key 202 put
+} def
+
+save /sv5 exch def
+populate
+g5 /beta-key  get 101 eq                    (db5: pre-restore /beta-key) rt-ok
+g5 /gamma-key get 202 eq                    (db5: pre-restore /gamma-key) rt-ok
+sv5 restore
+
+g5 /beta-key  known? true eq                (db5: post-restore /beta-key known) rt-ok
+g5 /gamma-key known? true eq                (db5: post-restore /gamma-key known) rt-ok
+g5 /beta-key  get 101 eq                    (db5: post-restore /beta-key value) rt-ok
+g5 /gamma-key get 202 eq                    (db5: post-restore /gamma-key value) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 6: per-coroutine isolation of m_curr_alloc_global (C2 fix)
+% --------------------------------------------------------------------
+% Pre-2026-05-10: m_curr_alloc_global was process-wide.  Coroutine A
+% entering ${...} and yielding (e.g. via coroutine-join blocking on
+% B) left the flag = true while B ran; B's allocations routed to
+% global VM unintentionally.
+%
+% Post-fix: CoroutineContext::m_curr_alloc_global is saved at every
+% context-switch flush and restored at load.  New coroutines start
+% with the flag = false (per-coroutine isolation; ${...} is purely
+% lexical to its body).
+%
+% This test launches B from inside ${...} and joins it; B must
+% report current-global = false even though A is mid-${...}.
+
+/coro-b-saw-flag-c2 false def
+
+${
+    [ { /coro-b-saw-flag-c2 current-global store } coroutine-launch coroutine-join pop
+}
+
+coro-b-saw-flag-c2 false eq                 (db6: B saw current-global=false despite A in ${...}) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 7: $${...} force-local block
+% --------------------------------------------------------------------
+% $${ body } is the symmetric inverse of ${ body }: it scans + runs
+% the body with m_curr_alloc_global=false even when an enclosing
+% ${...} or set-global true had flipped it true.  Same closer op
+% (@end-in-global) -- the saved Boolean carries whichever value was
+% captured at the matching opener.
+
+% ---- 7a: $${...} at top level is a no-op (was already local) ----
+current-global false eq                      (db7: $${...} pre: flag false) rt-ok
+$${ current-global } false eq                (db7: $${...} body sees false at top) rt-ok
+current-global false eq                      (db7: $${...} post: flag still false) rt-ok
+
+% ---- 7b: $${...} inside ${...} forces local for the inner body ----
+${
+    current-global /db7-outer-saw exch def
+    $${ current-global /db7-inner-saw exch def }
+    current-global /db7-post-saw exch def
+    db7-outer-saw true eq                    (db7: outer ${...} sees true) rt-ok
+    db7-inner-saw false eq                   (db7: inner $${...} sees false) rt-ok
+    db7-post-saw  true eq                    (db7: post-inner restored to true) rt-ok
+}
+current-global false eq                      (db7: outer flag restored after both) rt-ok
+
+% ---- 7c: ${...} inside $${...} re-enters global ----
+$${
+    current-global /db7-il-outer exch def
+    ${ current-global /db7-il-inner exch def }
+    current-global /db7-il-post  exch def
+    db7-il-outer false eq                    (db7: outer $${...} sees false) rt-ok
+    db7-il-inner true  eq                    (db7: inner ${...} sees true) rt-ok
+    db7-il-post  false eq                    (db7: post-inner $${...} restored to false) rt-ok
+}
+
+% ---- 7d: error inside $${...} restores the flag ----
+${
+    mark { $${ current-global /db7e-seen exch def /db7e-error throw } } try
+    clear
+    current-global true eq                   (db7: error unwind out of $${...} restored to outer true) rt-ok
+    db7e-seen false eq                       (db7: body did see false before throw) rt-ok
+}
+current-global false eq                      (db7: outer flag restored after error unwind) rt-ok
+
+% ---- 7e: $${...} inside ${...} stops global allocation for inner names ----
+//:status:vm-global-used /db7f-vg0 exch def
+${
+    $${ /db7f-local-name pop }
+}
+//:status:vm-global-used /db7f-vg1 exch def
+% The Name interned inside $${...} should land locally; only the outer
+% ${...}'s block infrastructure contributes to the delta.  We don't
+% assert an exact byte count (block overhead varies by build options),
+% but a force-local Name should NOT add the ~100+ bytes a global Name
+% would.  Delta of < 256 bytes is generous headroom for block overhead
+% only.
+db7f-vg1 db7f-vg0 sub /db7f-delta exch def
+db7f-delta 256 lt true eq                    (db7: $${...} inside ${...} blocks global name growth) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_dollar_block: ALL TESTS PASSED) =
+(__test_ok__) =

@@ -1,0 +1,427 @@
+% =====================================================================
+% vet-distribution.trx -- Vet-tier curve sim (Phase 0.5E)
+% =====================================================================
+%
+% Tier 1.4 of plan_bestagon_balance_prototyping.md.  Greedy-AI-lite
+% arena: 4 factions x 6 ground units, all in range of all enemies
+% (no map / no terrain — pure combat-rate test), 30-turn games, 1000
+% games.  Tracks (kills, vet-tier) distribution among surviving units.
+%
+% Methodology (per plan §0.5E):
+%   - 6 fixed unit types per faction: Inf, Mech, Recon, Tank, HTank,
+%     Artillery (mix of soft + hard targets, foot + vehicle, direct +
+%     indirect)
+%   - Each faction randomly assigned one of 6 COs at game start
+%   - Greedy-AI: per-unit, pick target maximizing
+%     (dealt_damage - received_counter) using luck-off predictions
+%   - Actual resolve-attack uses luck-on (uniform [0,9])
+%   - Terrain: Plain (1 star non-foot / 2 stars foot per §4)
+%   - No Power / no Super
+%   - Game ends after 30 turns OR when only one faction is alive
+%
+% Outputs (gitignored under examples/bestagon-sim/out/):
+%   vet-distribution.csv             per surviving unit: faction, co,
+%                                    type, kills, vet-tier, game-id
+%   vet-distribution-summary.md      vet-tier % among survivors;
+%                                    avg kills per surviving unit;
+%                                    success-criterion checks
+%
+% Success criteria (per plan):
+%   - Vet-3 incidence >= 3% of surviving units
+%   - Vet-1 incidence >= 30% of surviving units
+%   - If too rare: drop §7.8 thresholds from 8 -> 6 kills
+%
+% Caveat: this is a stub AI.  Real AI v1 (M5) makes different combat
+% decisions; Phase 5.5A re-runs this with real AI v1.
+%
+% Memory: per-turn save/restore wraps reclaim resolve-attack's per-call
+% counter-spec dicts.  Game state mutations use put-persist to survive
+% the rollback.  No --vm-size override needed.
+%
+% Run with the prod build:
+%   ./trix.opt examples/bestagon-sim/vet-distribution.trx
+% =====================================================================
+
+(examples/bestagon-sim/combat-core.trx) run
+
+
+% ====================================================================
+% Section 1: configuration
+% ====================================================================
+
+/n-games           1000 def
+/n-turns             30 def
+/n-factions           4 def
+/units-per-faction    6 def
+/n-units              n-factions  units-per-faction  mul def
+
+/unit-roster  [ /infantry /mech /recon /tank /heavy-tank /artillery ] def
+/all-cos      [ /bishop /hammer /hawk /boots /veil /talon ] def
+
+
+% ====================================================================
+% Section 2: per-unit state (allocated once, mutated per game)
+% ====================================================================
+
+/make-unit-dict {
+    << /faction       0       /co       /bishop
+       /type          /tank   /hp       10
+       /vet-tier      0       /kills    0
+       /alive         true
+       /power-active  false   /super-active false
+       /terrain       /plain
+    >>
+} def
+
+/all-units  n-units array def
+
+0 1 n-units 1 sub  {
+    /i exch def
+    all-units i  make-unit-dict  put
+} for
+
+% Faction -> CO assignment (regenerated each game).
+/faction-cos n-factions array def
+
+% Hot-loop ctx dicts -- allocated once at sl=0 so per-call save/restore
+% brackets don't have to re-allocate.
+/ctx-off  << /luck-mode /off  /weather-current /clear
+             /attacker-can-see-defender true >>#r def
+/ctx-on   << /luck-mode /on   /weather-current /clear
+             /attacker-can-see-defender true >>#r def
+
+% Per-faction alive flags (array of bool[n-factions]) -- pre-allocated.
+/faction-alive  n-factions array def
+
+
+% ====================================================================
+% Section 3: game-state reset
+% ====================================================================
+
+/reset-game {||#+3
+    % Random CO assignment per faction.
+    0 1 n-factions 1 sub  {
+        /f exch def
+        /co-idx  6u rand-bounded-uinteger /integer-type cast  def
+        faction-cos f  all-cos co-idx get  put
+    } for
+
+    % Reset each unit.  Type assignment: faction f's slot s gets
+    % unit-roster[s].  (Symmetric composition; each faction has 1 of
+    % each.)
+    0 1 n-units 1 sub  {
+        /i exch def
+        /u     all-units i get   def
+        /f     i units-per-faction div   def
+        /s     i units-per-faction mod   def
+        /t     unit-roster s get  def
+
+        u /faction      f                       put
+        u /co           faction-cos f get       put
+        u /type         t                       put
+        u /hp           10                      put
+        u /vet-tier     0                       put
+        u /kills        0                       put
+        u /alive        true                    put
+    } for
+} def
+
+
+% ====================================================================
+% Section 4: vet-tier recompute (§7.8: 0/3/5/8)
+% ====================================================================
+
+/recompute-vet {|unit|
+    % Defer to combat-core's compute-vet-tier so this sim auto-tracks
+    % whatever the canonical §7.8 thresholds currently are.
+    unit /vet-tier  unit /kills get compute-vet-tier  put
+} def
+
+
+% ====================================================================
+% Section 5: targeting (greedy: max (dealt - counter) under luck-off)
+% ====================================================================
+%
+% Stack at call: unit-idx
+% Returns: best-target-idx (or -1 if no legal target)
+%
+% Iterates every alive enemy unit, calls predict-damage (luck-off) to
+% get the attacker's deterministic dealt-damage, then runs resolve-
+% attack inside save/restore for the counter computation.  Counter-
+% spec dicts from speculation are reclaimed; game state untouched.
+
+/best-target-for {|atkr-idx|#+10
+    /a            all-units atkr-idx get  local-def
+    /a-type       a /type get             local-def
+    /a-faction    a /faction get          local-def
+    /best-idx     -1     local-def
+    /best-util    -10000 local-def
+
+    0 1 n-units 1 sub  { |i|#+1
+        /d  all-units i get  local-def
+        d /alive get  d /faction get a-faction ne  and {
+            % Both alive and on different faction.  Check legality.
+            a-type d /type get lookup-base-damage
+            { |base|#+1
+                % |base| frame consumed the lookup's base value.
+                % Use resolve-attack under save/restore for utility.
+                save pop
+                a d ctx-off 0 resolve-attack
+                /counter exch def-persist
+                /dealt   exch def-persist
+                -1 restore
+
+                /util  $[ dealt - counter ]  local-def
+                util best-util gt {
+                    /best-idx  i     store
+                    /best-util util  store
+                } if
+            } if
+        } if
+    } for
+
+    best-idx
+} def
+
+
+% ====================================================================
+% Section 6: execute one attack (with luck-on, mutate state)
+% ====================================================================
+
+/execute-attack {|atkr-idx defr-idx|#+8
+    /a  all-units atkr-idx get  local-def
+    /d  all-units defr-idx get  local-def
+
+    save pop
+    /luck-pp  10u rand-bounded-uinteger /integer-type cast  local-def
+    a d  ctx-on  luck-pp  resolve-attack
+    /counter exch def-persist
+    /dealt   exch def-persist
+    -1 restore
+
+    % Apply damage to defender + counter to attacker, via put-persist
+    % (these mutations must survive the outer save/restore boundary).
+    /new-d-hp  d /hp get  dealt sub  dup 0 lt { pop 0 } if  local-def
+    d /hp  new-d-hp  put-persist
+    new-d-hp 0 le {
+        d /alive false put-persist
+        a /kills  a /kills get 1 add  put-persist
+        a recompute-vet
+    } if
+
+    /new-a-hp  a /hp get  counter sub  dup 0 lt { pop 0 } if  local-def
+    a /hp  new-a-hp  put-persist
+    new-a-hp 0 le {
+        a /alive false put-persist
+        d /alive get {
+            d /kills  d /kills get 1 add  put-persist
+            d recompute-vet
+        } if
+    } if
+} def
+
+
+% ====================================================================
+% Section 7: per-turn loop
+% ====================================================================
+
+/run-turn {
+    0 1 n-units 1 sub  { |i|#+2
+        /a all-units i get local-def
+        a /alive get {
+            /best  i best-target-for  local-def
+            best 0 ge {
+                i best execute-attack
+            } if
+        } if
+    } for
+} def
+
+
+% ====================================================================
+% Section 8: game-over check (only one faction alive?)
+% ====================================================================
+
+/alive-factions {||#+1
+    0 1 n-factions 1 sub  { |f|
+        faction-alive f false put
+    } for
+    0 1 n-units 1 sub  { |i|#+1
+        /u all-units i get local-def
+        u /alive get {
+            faction-alive u /faction get true put
+        } if
+    } for
+    /count 0 local-def
+    0 1 n-factions 1 sub  { |f|
+        faction-alive f get { /count count 1 add store } if
+    } for
+    count
+} def
+
+
+% ====================================================================
+% Section 9: per-game run + stats accumulator
+% ====================================================================
+%
+% Cumulative stats (across all 1000 games):
+%   - vet-tier histogram: 4 buckets (0..3) for surviving units
+%   - per-CO kill totals + survivor counts
+
+/vet-hist  4 array def
+0 1 3  { /i exch def vet-hist i 0 put } for
+
+/co-survivor-count <<
+    /bishop 0  /hammer 0  /hawk 0  /boots 0  /veil 0  /talon 0
+>> def
+/co-kill-total <<
+    /bishop 0  /hammer 0  /hawk 0  /boots 0  /veil 0  /talon 0
+>> def
+
+% Per-game CSV writer.
+/csv-stream null def
+
+/dump-survivors {|game-id|
+    0 1 n-units 1 sub  { |i|#+4
+        /u  all-units i get  local-def
+        u /alive get {
+            /co  u /co get        local-def
+            /vt  u /vet-tier get  local-def
+            /k   u /kills get     local-def
+
+            % CSV row
+            csv-stream
+                ({0},{1},{2:s},{3:s},{4},{5}\n)
+                mark
+                game-id
+                u /faction get
+                co
+                u /type get
+                k
+                vt
+                fprint-fmt pop pop
+
+            % Update aggregates
+            vet-hist vt  vet-hist vt get 1 add  put
+            co-survivor-count co  co-survivor-count co get 1 add  put
+            co-kill-total     co  co-kill-total co get  k add   put
+        } if
+    } for
+} def
+
+/run-game {|game-id|#+2
+    reset-game
+
+    /turn-i 0 local-def
+    { turn-i n-turns lt } {
+        run-turn
+        alive-factions 1 le { exit } if
+        /turn-i turn-i 1 add store
+    } while
+
+    game-id dump-survivors
+} def
+
+
+% ====================================================================
+% Section 10: orchestration
+% ====================================================================
+
+% Pre-intern persist-family target Names at sl=0 so they survive the
+% per-AI save/restore brackets (Names first interned inside save are
+% reverted on restore — feedback_global_name_keys.md).
+/dealt   0 def
+/counter 0 def
+
+2026051503ul rand-seed
+
+/out-csv       (examples/bestagon-sim/out/vet-distribution.csv)         def
+/out-summary   (examples/bestagon-sim/out/vet-distribution-summary.md)  def
+
+(=== vet-distribution sim starting ===\n) print
+(  games: {0}  turns/game: {1}  units/game: {2}\n)
+    mark n-games n-turns n-units print-fmt pop pop
+
+/csv-stream  out-csv (w)#b stream  store
+
+csv-stream (game_id,faction,co,unit_type,kills,vet_tier\n) write-string
+
+0 1 n-games 1 sub  { |g|
+    g run-game
+} for
+
+csv-stream close-stream
+(  CSV written: {0:s}\n) mark out-csv print-fmt pop pop
+
+
+% ====================================================================
+% Section 11: summary
+% ====================================================================
+
+/total-survivors  vet-hist 0 get  vet-hist 1 get add  vet-hist 2 get add  vet-hist 3 get add  def
+
+/pct-of  {|n d|
+    d 0 le { 0.0 } { $[ (n * 100.0) / d ] } if-else
+} def
+
+/s  out-summary (w)#b stream  def
+
+s (# Bestagon vet-distribution sim summary\n\n) write-string
+s ({0} games x {1} turns x {2} units/game.\n)
+    mark n-games n-turns n-units fprint-fmt pop pop
+s (Arena model: no map, no terrain effects, all enemies in range.\n)
+    write-string
+s (Greedy-AI stub picks target with max [dealt - counter] under) write-string
+s ( luck-off; resolves with luck-on.\n\n) write-string
+
+s (## Vet-tier distribution among survivors\n\n) write-string
+s (Total survivors across all games: {0}\n\n)
+    mark total-survivors fprint-fmt pop pop
+s (| vet_tier | count | % of survivors |\n) write-string
+s (|---|---|---|\n) write-string
+0 1 3  { |i|#+2
+    /n  vet-hist i get  local-def
+    /p  n total-survivors pct-of  local-def
+    s (| {0} | {1} | {2:.2f}% |\n)
+        mark i n p fprint-fmt pop pop
+} for
+
+s (\n## Success criteria\n\n) write-string
+/vet-3-pct  vet-hist 3 get total-survivors pct-of  def
+/vet-1plus
+    vet-hist 1 get  vet-hist 2 get add  vet-hist 3 get add  def
+/vet-1-pct  vet-1plus total-survivors pct-of  def
+
+s (- Vet-3 incidence >= 3%:  )  write-string
+vet-3-pct 3.0 ge {
+    s (PASS ({0:.2f}%)\n) mark vet-3-pct fprint-fmt pop pop
+} {
+    s (FAIL ({0:.2f}%) -- consider dropping §7.8 threshold from 8 -> 6 kills\n)
+        mark vet-3-pct fprint-fmt pop pop
+} if-else
+s (- Vet-1+ incidence >= 30%: )  write-string
+vet-1-pct 30.0 ge {
+    s (PASS ({0:.2f}%)\n) mark vet-1-pct fprint-fmt pop pop
+} {
+    s (FAIL ({0:.2f}%) -- consider dropping §7.8 first tier from 3 -> 2 kills\n)
+        mark vet-1-pct fprint-fmt pop pop
+} if-else
+
+s (\n## Per-CO survivor + kill totals\n\n) write-string
+s (| co | survivors | total kills | kills/survivor |\n) write-string
+s (|---|---|---|---|\n) write-string
+all-cos { |co|#+3
+    /n  co-survivor-count co get  local-def
+    /k  co-kill-total co get      local-def
+    /avg  k n pct-of  100.0 div   local-def
+    s (| {0:s} | {1} | {2} | {3:.2f} |\n)
+        mark co n k avg fprint-fmt pop pop
+} for-all
+
+s close-stream
+(  summary written: {0:s}\n) mark out-summary print-fmt pop pop
+
+(\n=== summary ===\n) print
+(  total survivors:  {0}\n)         mark total-survivors print-fmt pop pop
+(  vet-3 incidence:  {0:.2f}%\n)    mark vet-3-pct       print-fmt pop pop
+(  vet-1+ incidence: {0:.2f}%\n)    mark vet-1-pct       print-fmt pop pop

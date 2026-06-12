@@ -1,0 +1,2 @@
+% array-store-persist: bulk array fill (any0 ... anyN arr -- arr).
+3 array /a exch def save /sv exch def 10 20 30 a array-store-persist pop sv restore a 0 get a 1 get a 2 get

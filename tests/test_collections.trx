@@ -1,0 +1,2717 @@
+% ====================================================================
+% test_collections.trx -- tests for collection/array/string operators
+% ====================================================================
+% map, filter, find, reduce, all, any, sort, unique, sum, min-of,
+% max-of, contains?, index-of, take, join, split, chars, repeat-string,
+% starts-with?, ends-with?, remove-prefix, remove-suffix, trim,
+% replace, known-get, array-load, array-store, concat, to-string,
+% to-number, to-name, cast, reinterpret, explode/implode (if exist)
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+/approx-eq {
+  3 1 roll sub abs ge
+} def
+
+% ====================================================================
+% SECTION 1: map
+% ====================================================================
+
+[1 2 3] { 2 mul } map
+dup 0 get 2 eq  (map: elem 0 = 2) rt-ok
+dup 1 get 4 eq  (map: elem 1 = 4) rt-ok
+2 get 6 eq      (map: elem 2 = 6) rt-ok clear
+
+% map on empty array
+[] { 1 add } map length 0 eq  (map: empty array) rt-ok clear
+
+% map preserves length
+[10 20 30 40 50] { neg } map length 5 eq  (map: length preserved) rt-ok clear
+
+% ====================================================================
+% SECTION 2: filter
+% ====================================================================
+
+[1 2 3 4 5 6] { 2 mod 0 eq } filter
+dup length 3 eq  (filter: length = 3) rt-ok
+dup 0 get 2 eq   (filter: elem 0 = 2) rt-ok
+dup 1 get 4 eq   (filter: elem 1 = 4) rt-ok
+2 get 6 eq       (filter: elem 2 = 6) rt-ok clear
+
+% filter nothing matches
+[1 3 5] { 2 mod 0 eq } filter length 0 eq  (filter: none match) rt-ok clear
+
+% filter all match
+[2 4 6] { 2 mod 0 eq } filter length 3 eq  (filter: all match) rt-ok clear
+
+% filter on empty
+[] { true } filter length 0 eq  (filter: empty) rt-ok clear
+
+% ====================================================================
+% SECTION 3: find
+% ====================================================================
+
+[10 20 30 40] { 30 eq } find
+true eq  (find: found flag = true) rt-ok
+30 eq    (find: found value = 30) rt-ok clear
+
+[10 20 30] { 99 eq } find
+false eq  (find: not found = false) rt-ok clear
+
+[] { true } find
+false eq  (find: empty = false) rt-ok clear
+
+% ====================================================================
+% SECTION 4: reduce
+% ====================================================================
+
+[1 2 3 4] 0 { add } reduce 10 eq  (reduce: sum 1+2+3+4 = 10) rt-ok clear
+[1 2 3 4] 1 { mul } reduce 24 eq  (reduce: product 1*2*3*4 = 24) rt-ok clear
+[5] 0 { add } reduce 5 eq         (reduce: single elem) rt-ok clear
+
+% ====================================================================
+% SECTION 5: all / any
+% ====================================================================
+
+[1 2 3] { 0 gt } all true eq   (all: all positive) rt-ok clear
+[1 -1 3] { 0 gt } all false eq (all: not all positive) rt-ok clear
+[] { true } all true eq         (all: empty = true) rt-ok clear
+
+[1 -1 3] { 0 gt } any true eq  (any: some positive) rt-ok clear
+[-1 -2 -3] { 0 gt } any false eq (any: none positive) rt-ok clear
+[] { true } any false eq        (any: empty = false) rt-ok clear
+
+% ====================================================================
+% SECTION 6: sort
+% ====================================================================
+
+[3 1 4 1 5 9 2 6] sort
+dup 0 get 1 eq  (sort: first = 1) rt-ok
+dup 1 get 1 eq  (sort: second = 1) rt-ok
+dup dup length 1 sub get 9 eq  (sort: last = 9) rt-ok
+length 8 eq     (sort: length preserved) rt-ok clear
+
+% sort empty
+[] sort length 0 eq  (sort: empty) rt-ok clear
+
+% sort single
+[42] sort 0 get 42 eq  (sort: single) rt-ok clear
+
+% sort already sorted
+[1 2 3] sort
+dup 0 get 1 eq  (sort-sorted: 0 = 1) rt-ok
+dup 1 get 2 eq  (sort-sorted: 1 = 2) rt-ok
+2 get 3 eq      (sort-sorted: 2 = 3) rt-ok clear
+
+% ====================================================================
+% SECTION 7: unique
+% ====================================================================
+
+[1 2 2 3 3 3 1] unique
+dup length 3 eq      (unique: length = 3) rt-ok
+dup { 1 eq } find pop 1 eq  (unique: contains 1) rt-ok
+dup { 2 eq } find pop 2 eq  (unique: contains 2) rt-ok
+{ 3 eq } find pop 3 eq      (unique: contains 3) rt-ok clear
+
+[] unique length 0 eq  (unique: empty) rt-ok clear
+[42] unique length 1 eq  (unique: single) rt-ok clear
+
+% ====================================================================
+% SECTION 8: sum, min-of, max-of
+% ====================================================================
+
+[1 2 3 4 5] sum 15 eq  (sum: 1..5 = 15) rt-ok clear
+[1 2 3 4 5] min-of 1 eq  (min-of: 1..5 = 1) rt-ok clear
+[1 2 3 4 5] max-of 5 eq  (max-of: 1..5 = 5) rt-ok clear
+[-3 -1 -2] min-of -3 eq  (min-of: negatives) rt-ok clear
+[-3 -1 -2] max-of -1 eq  (max-of: negatives) rt-ok clear
+
+% single element
+[42] sum 42 eq     (sum: single) rt-ok clear
+[42] min-of 42 eq  (min-of: single) rt-ok clear
+[42] max-of 42 eq  (max-of: single) rt-ok clear
+
+% real arrays
+[1.5 2.5 3.0] sum 7.0 0.001 approx-eq  (sum: reals) rt-ok clear
+
+% ====================================================================
+% SECTION 9: string contains? / array find / index-of
+% ====================================================================
+
+% string contains?
+(hello world) (world) contains? true eq   (contains?: str found) rt-ok clear
+(hello world) (xyz) contains? false eq    (contains?: str not found) rt-ok clear
+(hello) () contains? true eq              (contains?: empty needle) rt-ok clear
+
+% array find (acts as "contains?" for arrays)
+[10 20 30] { 20 eq } find
+true eq  (array-contains: found flag) rt-ok
+20 eq    (array-contains: found value) rt-ok clear
+
+[10 20 30] { 99 eq } find
+false eq  (array-contains: not found) rt-ok clear
+
+% index-of (array): returns index or -1
+[10 20 30] 20 index-of 1 eq   (index-of: found = 1) rt-ok clear
+[10 20 30] 99 index-of -1 eq  (index-of: not found = -1) rt-ok clear
+[] 1 index-of -1 eq            (index-of: empty = -1) rt-ok clear
+
+% string-index-of
+(hello) (ell) string-index-of 1 eq  (string-index-of: found = 1) rt-ok clear
+(hello) (xyz) string-index-of -1 eq (string-index-of: not found = -1) rt-ok clear
+
+% ====================================================================
+% SECTION 10: take / append / reverse / concat
+% ====================================================================
+
+[1 2 3 4 5] 3 take
+dup length 3 eq  (take: length = 3) rt-ok
+dup 0 get 1 eq   (take: elem 0) rt-ok
+2 get 3 eq       (take: elem 2) rt-ok clear
+
+[1 2 3 4 5] 0 take length 0 eq  (take: 0 = empty) rt-ok clear
+
+[1 2 3] 99 append
+dup length 4 eq  (append: length = 4) rt-ok
+3 get 99 eq      (append: last = 99) rt-ok clear
+
+[1 2 3] reverse
+dup 0 get 3 eq  (reverse: first = 3) rt-ok
+2 get 1 eq      (reverse: last = 1) rt-ok clear
+
+[] reverse length 0 eq  (reverse: empty) rt-ok clear
+
+% string concat
+(hello) ( world) concat (hello world) eq  (concat: strings) rt-ok clear
+() (hello) concat (hello) eq              (concat: empty + str) rt-ok clear
+(hello) () concat (hello) eq              (concat: str + empty) rt-ok clear
+
+% ====================================================================
+% SECTION 11: String ops -- split, join, chars, repeat-string
+% ====================================================================
+
+(hello world) ( ) split
+dup length 2 eq       (split: 2 parts) rt-ok
+dup 0 get (hello) eq  (split: part 0) rt-ok
+1 get (world) eq      (split: part 1) rt-ok clear
+
+(a,b,c) (,) split
+dup length 3 eq  (split-comma: 3 parts) rt-ok
+dup 0 get (a) eq (split-comma: part 0) rt-ok
+2 get (c) eq     (split-comma: part 2) rt-ok clear
+
+% split with no delimiter found
+(hello) (,) split length 1 eq  (split: no delim) rt-ok clear
+
+% join
+[(a) (b) (c)] (,) join (a,b,c) eq  (join: comma) rt-ok clear
+[(hello) (world)] ( ) join (hello world) eq  (join: space) rt-ok clear
+[] (,) join () eq  (join: empty) rt-ok clear
+
+% chars
+(hello) chars
+dup length 5 eq  (chars: length = 5) rt-ok
+dup 0 get 104b eq  (chars: h = 104) rt-ok
+4 get 111b eq      (chars: o = 111) rt-ok clear
+
+() chars length 0 eq  (chars: empty string) rt-ok clear
+
+% repeat-string
+(ab) 3 repeat-string (ababab) eq  (repeat-string: ab*3) rt-ok clear
+(x) 0 repeat-string () eq  (repeat-string: x*0) rt-ok clear
+(x) 1 repeat-string (x) eq  (repeat-string: x*1) rt-ok clear
+
+% ====================================================================
+% SECTION 12: starts-with? / ends-with? / remove-prefix / remove-suffix
+% ====================================================================
+
+(hello world) (hello) starts-with? true eq  (starts-with?: match) rt-ok clear
+(hello world) (world) starts-with? false eq (starts-with?: no match) rt-ok clear
+(hello) () starts-with? true eq             (starts-with?: empty prefix) rt-ok clear
+
+(hello world) (world) ends-with? true eq    (ends-with?: match) rt-ok clear
+(hello world) (hello) ends-with? false eq   (ends-with?: no match) rt-ok clear
+(hello) () ends-with? true eq               (ends-with?: empty suffix) rt-ok clear
+
+(hello world) (hello ) remove-prefix (world) eq  (remove-prefix: match) rt-ok clear
+(hello world) (xyz) remove-prefix (hello world) eq  (remove-prefix: no match) rt-ok clear
+
+(hello world) ( world) remove-suffix (hello) eq  (remove-suffix: match) rt-ok clear
+(hello world) (xyz) remove-suffix (hello world) eq  (remove-suffix: no match) rt-ok clear
+
+% ====================================================================
+% SECTION 13: trim / trim-left / trim-right / replace
+% ====================================================================
+
+(  hello  ) trim (hello) eq  (trim: both sides) rt-ok clear
+(hello) trim (hello) eq      (trim: nothing to trim) rt-ok clear
+() trim () eq                 (trim: empty) rt-ok clear
+
+(  hello) trim-left (hello) eq   (trim-left: leading spaces) rt-ok clear
+(hello  ) trim-right (hello) eq  (trim-right: trailing spaces) rt-ok clear
+
+(hello world) (world) (earth) replace (hello earth) eq  (replace: simple) rt-ok clear
+(aaa) (a) (bb) replace (bbbbbb) eq  (replace: all occurrences) rt-ok clear
+(hello) (xyz) (abc) replace (hello) eq  (replace: no match) rt-ok clear
+
+% ====================================================================
+% SECTION 14: Type conversion -- to-string, to-number, to-name, cast
+% ====================================================================
+
+% to-string: value buffer to-string -> string
+42 =string to-string (42) eq  (to-string: int) rt-ok clear
+true =string to-string (true) eq  (to-string: bool) rt-ok clear
+
+% to-number: string -> number (or throws)
+(42) to-number 42 eq  (to-number: int) rt-ok clear
+(3.14) to-number 3.14 0.001 approx-eq  (to-number: real) rt-ok clear
+(-7) to-number -7 eq  (to-number: negative) rt-ok clear
+
+% to-number error on invalid
+{ (notanumber) to-number } try /type-check eq  (to-number: invalid throws) rt-ok clear
+
+% to-name: string to name
+(hello) to-name type /name-type eq  (to-name: type is name) rt-ok clear
+
+% cast: numeric type conversions
+42 /real-type cast type /real-type eq  (cast: int -> real type) rt-ok clear
+42 /real-type cast 42.0 eq             (cast: int -> real value) rt-ok clear
+3.7 /integer-type cast 3 eq           (cast: real -> int truncates) rt-ok clear
+42 /byte-type cast type /byte-type eq  (cast: int -> byte type) rt-ok clear
+42 /long-type cast type /long-type eq  (cast: int -> long type) rt-ok clear
+42u /integer-type cast 42 eq           (cast: uint -> int) rt-ok clear
+true /integer-type cast 1 eq           (cast: bool -> int) rt-ok clear
+false /integer-type cast 0 eq          (cast: false -> int = 0) rt-ok clear
+0 /boolean-type cast false eq          (cast: 0 -> false) rt-ok clear
+1 /boolean-type cast true eq           (cast: 1 -> true) rt-ok clear
+
+% cast: same type is no-op
+42 /integer-type cast 42 eq  (cast: int -> int noop) rt-ok clear
+
+% cast: error on non-type-name
+{ 42 /not-a-type cast } try /type-check eq  (cast: bad type name) rt-ok clear
+
+% ====================================================================
+% SECTION 15: known-get
+% ====================================================================
+
+<< /a 1 /b 2 /c 3 >>
+dup /a known-get
+true eq  (known-get: found flag) rt-ok
+1 eq     (known-get: found value) rt-ok
+clear
+
+<< /a 1 >> /z known-get
+false eq  (known-get: not found) rt-ok clear
+
+% ====================================================================
+% SECTION 16: array-load / array-store
+% ====================================================================
+
+% array-load: pushes all elements then the array itself
+[10 20 30] array-load
+type /array-type eq (array-load: array on top) rt-ok
+30 eq (array-load: elem 2 = 30) rt-ok
+20 eq (array-load: elem 1 = 20) rt-ok
+10 eq (array-load: elem 0 = 10) rt-ok
+clear
+
+3 array
+dup 0 100 put
+dup 1 200 put
+dup 2 300 put
+dup 0 get 100 eq (array-store: elem 0) rt-ok
+dup 1 get 200 eq (array-store: elem 1) rt-ok
+2 get 300 eq     (array-store: elem 2) rt-ok clear
+
+% ====================================================================
+% SECTION 17: for-all on arrays, strings, dicts
+% ====================================================================
+
+% array for-all
+0 [1 2 3 4] { add } for-all 10 eq  (for-all: array sum) rt-ok clear
+
+% string for-all (iterates bytes)
+0b (ABC) { add } for-all 198b eq  (for-all: string byte sum A+B+C) rt-ok clear
+
+% dict for-all (key-value pairs)
+0 << /a 1 /b 2 >> { exch pop add } for-all 3 eq  (for-all: dict value sum) rt-ok clear
+
+% ====================================================================
+% SECTION 18: range / step-range / iota-like patterns
+% ====================================================================
+
+1 5 range-from
+dup length 4 eq (range: 1..5 length = 4) rt-ok
+dup 0 get 1 eq  (range: first = 1) rt-ok
+3 get 4 eq      (range: last = 4) rt-ok clear
+
+0 10 3 step-range
+dup length 4 eq (step-range: 0..10 step 3 length) rt-ok
+dup 0 get 0 eq  (step-range: first = 0) rt-ok
+dup 1 get 3 eq  (step-range: second = 3) rt-ok
+3 get 9 eq      (step-range: last = 9) rt-ok clear
+
+% empty range
+5 5 range-from length 0 eq  (range: empty 5..5) rt-ok clear
+
+% ====================================================================
+% SECTION 19: search (string substring search)
+% ====================================================================
+
+% search: string seek search -> post match pre true | string false
+(hello world) (world) search
+true eq  (search: found flag) rt-ok
+(hello ) eq (search: pre) rt-ok
+(world) eq (search: match) rt-ok
+() eq (search: post) rt-ok clear
+
+(hello) (xyz) search
+false eq  (search: not found flag) rt-ok
+(hello) eq (search: not found original) rt-ok clear
+
+% ====================================================================
+% SECTION 20: lowercase / uppercase
+% ====================================================================
+
+(Hello World) lowercase (hello world) eq  (lowercase: mixed) rt-ok clear
+(HELLO) lowercase (hello) eq              (lowercase: all upper) rt-ok clear
+(hello) lowercase (hello) eq              (lowercase: already lower) rt-ok clear
+() lowercase () eq                         (lowercase: empty) rt-ok clear
+
+(Hello World) uppercase (HELLO WORLD) eq  (uppercase: mixed) rt-ok clear
+(hello) uppercase (HELLO) eq              (uppercase: all lower) rt-ok clear
+() uppercase () eq                         (uppercase: empty) rt-ok clear
+
+% ====================================================================
+% SECTION 21: Error paths for collection ops
+% ====================================================================
+
+[] sum 0 eq  (sum: empty array = 0) rt-ok clear
+{ [] min-of } try /range-check eq  (min-of: empty array error) rt-ok clear
+{ [] max-of } try /range-check eq  (max-of: empty array error) rt-ok clear
+{ [1 2 3] -1 take } try /limit-check eq  (take: negative error) rt-ok clear
+{ (hello) -1 repeat-string } try /range-check eq  (repeat-string: negative) rt-ok clear
+
+% type checks
+{ 42 { } map } try /type-check eq  (map: non-array type-check) rt-ok clear
+{ 42 { } filter } try /type-check eq  (filter: non-array type-check) rt-ok clear
+{ 42 sort } try /type-check eq  (sort: non-array type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 22: flatten
+% ====================================================================
+
+[] flatten [] deep-eq                           (flatten: empty) rt-ok clear
+[1 2 3] flatten [1 2 3] deep-eq                 (flatten: flat no-op) rt-ok clear
+[[1 2] [3 4]] flatten [1 2 3 4] deep-eq         (flatten: one level) rt-ok clear
+[[1 [2 3]] [4]] flatten [1 2 3 4] deep-eq       (flatten: two levels) rt-ok clear
+[[[1]] [[2]] [[3]]] flatten [1 2 3] deep-eq     (flatten: three levels) rt-ok clear
+[[1 (hello)] [true 2.0]] flatten length 4 eq    (flatten: mixed leaf types) rt-ok clear
+[[] [1] [] [2] []] flatten [1 2] deep-eq        (flatten: empty sub-arrays) rt-ok clear
+[[] [] []] flatten [] deep-eq                   (flatten: all empty) rt-ok clear
+[[1]] flatten [1] deep-eq                       (flatten: single element) rt-ok clear
+[1 [2 3] 4] flatten [1 2 3 4] deep-eq          (flatten: non-array leaves mixed) rt-ok clear
+
+% flatMap idiom: map then flatten
+[[1 1] [2 2] [3 3]] flatten
+  [1 1 2 2 3 3] deep-eq                        (flatten+map: pre-built dup pairs) rt-ok clear
+[[1 2] [3 4]] { { 10 mul } map } map flatten
+  [10 20 30 40] deep-eq                        (flatten+map: map-of-maps) rt-ok clear
+[1 2 3] { pop [] } map flatten [] deep-eq     (flatten+map: all empty) rt-ok clear
+
+% ExtValue leaves (Long/Double use ExtValue, must be cloned correctly)
+[[1000l 2000l] [3000l]] flatten
+  dup 0 get 1000l eq
+  over 1 get 2000l eq and
+  over 2 get 3000l eq and exch pop             (flatten: extvalue long leaves) rt-ok clear
+[[1.5d] [2.5d 3.5d]] flatten
+  dup length 3 eq
+  over 0 get 1.5d eq and exch pop             (flatten: extvalue double leaves) rt-ok clear
+
+% stress: large flat array (500 elements, no nesting)
+/stress-arr 500 array def
+0 1 499 { dup stress-arr exch dup put } for
+stress-arr flatten length 500 eq               (flatten: stress 500 flat) rt-ok clear
+
+% stress: wide nesting (100 single-element sub-arrays)
+/nest-arr 100 array def
+0 1 99 {
+  /i exch def
+  /subarr 1 array def
+  subarr 0 i put
+  nest-arr i subarr put
+} for
+nest-arr flatten length 100 eq                 (flatten: stress 100 sub-arrays) rt-ok clear
+
+% boundary: depth limit error
+% Build nesting 65 levels deep (exceeds MaxDeepEqualDepth=64)
+/deep [0] def
+1 1 65 {
+  pop
+  /wrapper 1 array def
+  wrapper 0 deep put
+  /deep wrapper def
+} for
+{ deep flatten } try /limit-check eq           (flatten: depth limit-check) rt-ok clear
+
+% error paths
+{ 42 flatten } try /type-check eq               (flatten: type-check) rt-ok clear
+{ flatten } try /opstack-underflow eq           (flatten: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 23: flat-map
+% ====================================================================
+
+% basic: each element expands to a pair
+[[1 2] [3 4]] { { 10 mul } map } flat-map
+  [10 20 30 40] deep-eq                        (flat-map: map-of-maps) rt-ok clear
+
+% identity: proc returns scalars (flatten is a no-op on leaves)
+[1 2 3] { 2 mul } flat-map [2 4 6] deep-eq    (flat-map: scalar proc) rt-ok clear
+
+% proc returns empty arrays — all vanish
+[1 2 3] { pop [] } flat-map [] deep-eq         (flat-map: all empty) rt-ok clear
+
+% variable-length output: some elements expand, some don't
+[[1] [2 3] [4]] { } flat-map
+  [1 2 3 4] deep-eq                            (flat-map: variable-length) rt-ok clear
+
+% empty input
+[] { } flat-map [] deep-eq                     (flat-map: empty input) rt-ok clear
+
+% nested output: proc returns nested arrays — fully flattened
+[[1 [2]] [[3] 4]] { } flat-map
+  [1 2 3 4] deep-eq                            (flat-map: nested output) rt-ok clear
+
+% equivalence: flat-map matches map flatten
+[[1 2] [3] [4 5 6]] { { 1 add } map } flat-map
+  [[1 2] [3] [4 5 6]] { { 1 add } map } map flatten
+  deep-eq                                      (flat-map: equiv map+flatten) rt-ok clear
+
+% error paths
+{ 42 { } flat-map } try /type-check eq         (flat-map: type-check) rt-ok clear
+{ flat-map } try /opstack-underflow eq         (flat-map: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 25: count-if
+% ====================================================================
+
+[1 2 3 4 5] { 2 mod 0 eq } count-if 2 eq      (count-if: evens) rt-ok clear
+[1 2 3 4 5] { 0 gt } count-if 5 eq             (count-if: all match) rt-ok clear
+[1 2 3] { 10 gt } count-if 0 eq                (count-if: none match) rt-ok clear
+[] { true } count-if 0 eq                       (count-if: empty) rt-ok clear
+[-3 -1 0 1 3] { 0 lt } count-if 2 eq           (count-if: negatives) rt-ok clear
+[1] { true } count-if 1 eq                      (count-if: single true) rt-ok clear
+[1] { false } count-if 0 eq                     (count-if: single false) rt-ok clear
+
+% equivalence: count-if == filter length
+[1 2 3 4 5 6 7 8 9 10] { 3 mod 0 eq } count-if
+  [1 2 3 4 5 6 7 8 9 10] { 3 mod 0 eq } filter length eq
+                                                (count-if: equiv filter+length) rt-ok clear
+
+% error paths
+{ 42 { } count-if } try /type-check eq          (count-if: type-check) rt-ok clear
+{ count-if } try /opstack-underflow eq           (count-if: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 27: partition
+% ====================================================================
+
+% basic: split evens and odds
+% stack after partition: ... pass-arr fail-arr
+[1 2 3 4 5] { 2 mod 0 eq } partition
+  /fail exch def /pass exch def
+  pass [2 4] deep-eq       (partition: pass = evens) rt-ok
+  fail [1 3 5] deep-eq     (partition: fail = odds) rt-ok clear
+
+% all match: everything in pass, fail is empty
+[1 2 3] { 0 gt } partition
+  /fail exch def /pass exch def
+  pass [1 2 3] deep-eq     (partition: all pass) rt-ok
+  fail [] deep-eq           (partition: none fail) rt-ok clear
+
+% none match: everything in fail, pass is empty
+[1 2 3] { 10 gt } partition
+  /fail exch def /pass exch def
+  pass [] deep-eq           (partition: none pass) rt-ok
+  fail [1 2 3] deep-eq     (partition: all fail) rt-ok clear
+
+% empty input
+[] { true } partition
+  /fail exch def /pass exch def
+  pass [] deep-eq           (partition: empty pass) rt-ok
+  fail [] deep-eq           (partition: empty fail) rt-ok clear
+
+% single element — matches
+[42] { true } partition
+  /fail exch def /pass exch def
+  pass [42] deep-eq         (partition: single pass) rt-ok
+  fail [] deep-eq           (partition: single fail) rt-ok clear
+
+% single element — doesn't match
+[42] { false } partition
+  /fail exch def /pass exch def
+  pass [] deep-eq           (partition: single no-pass) rt-ok
+  fail [42] deep-eq         (partition: single no-fail) rt-ok clear
+
+% order preservation
+[5 3 1 4 2] { 3 gt } partition
+  /fail exch def /pass exch def
+  pass [5 4] deep-eq        (partition: order preserved pass) rt-ok
+  fail [3 1 2] deep-eq      (partition: order preserved fail) rt-ok clear
+
+% mixed types: partition strings from non-strings
+[1 (hello) true 2.0 (world) false] { type /string-type eq } partition
+  /fail exch def /pass exch def
+  pass length 2 eq           (partition: strings count) rt-ok
+  fail length 4 eq           (partition: non-strings count) rt-ok clear
+
+% equivalence: partition pass == filter, partition fail == filter-not
+[1 2 3 4 5 6 7 8] { 3 mod 0 eq } partition
+  /fail exch def /pass exch def
+  pass  [1 2 3 4 5 6 7 8] { 3 mod 0 eq } filter  deep-eq
+                             (partition: pass equiv filter) rt-ok
+  fail  [1 2 3 4 5 6 7 8] { 3 mod 0 ne } filter  deep-eq
+                             (partition: fail equiv filter-not) rt-ok clear
+
+% ExtValue leaves (Long uses ExtValue)
+[100l 200l 300l 400l] { 250l gt } partition
+  /fail exch def /pass exch def
+  pass [300l 400l] deep-eq   (partition: extvalue pass) rt-ok
+  fail [100l 200l] deep-eq   (partition: extvalue fail) rt-ok clear
+
+% stress: 200 elements
+/stress-arr 200 array def
+0 1 199 { dup stress-arr exch dup put } for
+stress-arr { 2 mod 0 eq } partition
+  /fail exch def /pass exch def
+  pass length 100 eq         (partition: stress 200 pass count) rt-ok
+  fail length 100 eq         (partition: stress 200 fail count) rt-ok clear
+
+% partition + reduce: sum of each partition
+[1 2 3 4 5 6] { 2 mod 0 eq } partition
+  sum  /fail-sum exch def
+  sum  /pass-sum exch def
+  pass-sum 12 eq             (partition+reduce: pass sum) rt-ok
+  fail-sum 9 eq              (partition+reduce: fail sum) rt-ok clear
+
+% partition + sort: sort each half
+[5 2 8 1 7 3] { 4 gt } partition
+  sort /fail exch def
+  sort /pass exch def
+  pass [5 7 8] deep-eq      (partition+sort: pass sorted) rt-ok
+  fail [1 2 3] deep-eq      (partition+sort: fail sorted) rt-ok clear
+
+% error paths
+{ 42 { } partition } try /type-check eq       (partition: type-check) rt-ok clear
+{ partition } try /opstack-underflow eq       (partition: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 28: operator chaining -- realistic multi-step pipelines
+% ====================================================================
+
+% --- filter + map: select then transform ---
+% "double the even numbers"
+[1 2 3 4 5 6] { 2 mod 0 eq } filter { 2 mul } map
+  [4 8 12] deep-eq                             (chain: filter+map evens doubled) rt-ok clear
+
+% --- map + filter: transform then select ---
+% "square all, keep those > 10"
+[1 2 3 4 5] { dup mul } map { 10 gt } filter
+  [16 25] deep-eq                              (chain: map+filter squares gt 10) rt-ok clear
+
+% --- filter + reduce: select then aggregate ---
+% "sum of positive numbers"
+[-3 4 -1 7 -2 5] { 0 gt } filter sum
+  16 eq                                        (chain: filter+sum positives) rt-ok clear
+
+% --- map + sort: transform then order ---
+% "sort absolute values"
+[3 -1 4 -1 5 -9] { abs } map sort
+  [1 1 3 4 5 9] deep-eq                       (chain: map+sort abs values) rt-ok clear
+
+% --- sort + unique: canonicalize ---
+% "sorted unique elements"
+[3 1 4 1 5 9 2 6 5 3] sort unique
+  [1 2 3 4 5 6 9] deep-eq                     (chain: sort+unique canonical) rt-ok clear
+
+% --- filter + flatten: select nested then flatten ---
+% "flatten only non-empty sub-lists"
+[[] [1 2] [] [3] [] [4 5 6]] { length 0 gt } filter flatten
+  [1 2 3 4 5 6] deep-eq                       (chain: filter+flatten skip empties) rt-ok clear
+
+% --- flatten + sort + unique: normalize nested data ---
+[[5 3] [1 3] [5 2 1]] flatten sort unique
+  [1 2 3 5] deep-eq                           (chain: flatten+sort+unique) rt-ok clear
+
+% --- map + flatten + reduce: flatMap then aggregate ---
+% "sum all elements from mapped sub-arrays"
+[[1 2] [3 4] [5 6]] { { 10 mul } map } flat-map sum
+  210 eq                                       (chain: flat-map+sum) rt-ok clear
+
+% --- filter + map + reduce: classic ETL pipeline ---
+% "total cost of items over $5" (prices as integers)
+[3 8 2 12 5 7] { 5 gt } filter { 100 mul } map sum
+  2700 eq                                      (chain: filter+map+sum ETL) rt-ok clear
+
+% --- take + sort: top-N pattern (sort then take) ---
+[9 3 7 1 5] sort 3 take
+  [1 3 5] deep-eq                              (chain: sort+take top-3) rt-ok clear
+
+% --- filter + all/any: validate subset ---
+[1 2 3 4 5 6 7 8] { 2 mod 0 eq } filter
+  dup { 0 gt } all                             (chain: filter+all evens>0) rt-ok
+  { 5 gt } any                                 (chain: filter+any even>5) rt-ok clear
+
+% --- map + find: transform then search ---
+[1 2 3 4 5] { dup mul } map { 10 gt } find
+  exch 16 eq exch                              (chain: map+find first square>10) rt-ok
+  true eq                                      (chain: map+find found=true) rt-ok clear
+
+% --- sort + drop + take: middle slice ---
+[50 10 40 20 30] sort 1 drop 3 take
+  [20 30 40] deep-eq                           (chain: sort+drop+take middle) rt-ok clear
+
+% --- unique + sort + map: dedupe-normalize-transform ---
+[3 1 2 1 3 2] unique sort { 10 add } map
+  [11 12 13] deep-eq                           (chain: unique+sort+map) rt-ok clear
+
+% --- flatten + filter + sum: aggregate from nested ---
+[[1 -2 3] [-4 5] [6 -7 8]] flatten { 0 gt } filter sum
+  23 eq                                        (chain: flatten+filter+sum positives) rt-ok clear
+
+% --- empty propagation: chain with empty intermediate ---
+[1 2 3] { 10 gt } filter { 2 mul } map
+  [] deep-eq                                   (chain: empty propagates through map) rt-ok clear
+[1 2 3] { 10 gt } filter sum
+  0 eq                                         (chain: empty filter into sum) rt-ok clear
+[] flatten sort unique
+  [] deep-eq                                   (chain: empty through flatten+sort+unique) rt-ok clear
+
+% ====================================================================
+% SECTION 29: zip
+% ====================================================================
+
+% basic: two equal-length arrays
+[1 2 3] [10 20 30] zip
+  dup length 3 eq                              (zip: length = 3) rt-ok
+  dup 0 get 0 get 1 eq                         (zip: pair0[0] = 1) rt-ok
+  dup 0 get 1 get 10 eq                        (zip: pair0[1] = 10) rt-ok
+  dup 1 get 0 get 2 eq                         (zip: pair1[0] = 2) rt-ok
+  dup 2 get 1 get 30 eq                        (zip: pair2[1] = 30) rt-ok
+pop clear
+
+% truncation: unequal lengths (first shorter)
+[1 2] [10 20 30] zip
+  dup length 2 eq                              (zip: truncate to shorter len) rt-ok
+  dup 1 get 1 get 20 eq                        (zip: truncated pair1[1]) rt-ok
+pop clear
+
+% truncation: unequal lengths (second shorter)
+[1 2 3] [10 20] zip
+  dup length 2 eq                              (zip: truncate second shorter) rt-ok
+  dup 0 get 0 get 1 eq                         (zip: truncate pair0[0]) rt-ok
+pop clear
+
+% empty arrays
+[] [] zip
+  [] deep-eq                                   (zip: both empty) rt-ok clear
+[1 2 3] [] zip
+  [] deep-eq                                   (zip: second empty) rt-ok clear
+[] [1 2 3] zip
+  [] deep-eq                                   (zip: first empty) rt-ok clear
+
+% mixed types
+[1 (hello) true] [2.0 (world) false] zip
+  dup length 3 eq                              (zip: mixed types len) rt-ok
+  dup 0 get 0 get 1 eq                         (zip: mixed int) rt-ok
+  dup 0 get 1 get 2.0 eq                       (zip: mixed real) rt-ok
+  dup 1 get 0 get (hello) eq                   (zip: mixed str1) rt-ok
+  dup 1 get 1 get (world) eq                   (zip: mixed str2) rt-ok
+pop clear
+
+% single element
+[42] [99] zip
+  dup length 1 eq                              (zip: single len) rt-ok
+  dup 0 get [42 99] deep-eq                    (zip: single pair) rt-ok
+pop clear
+
+% stress: 50 elements (zip allocates N sub-arrays, conserve VM)
+0 50 range-from dup zip
+  dup length 50 eq                             (zip: stress 50 len) rt-ok
+  dup 0 get [0 0] deep-eq                      (zip: stress first) rt-ok
+  dup 49 get [49 49] deep-eq                   (zip: stress last) rt-ok
+pop clear
+
+% zip + map pipeline: dot product
+[1 2 3] [4 5 6] zip { dup 0 get exch 1 get mul } map sum
+  32 eq                                        (zip: dot product 1*4+2*5+3*6=32) rt-ok clear
+
+% zip + filter pipeline: matching pairs
+[1 2 3 4 5] [1 0 3 0 5] zip { dup 0 get exch 1 get eq } filter length
+  3 eq                                         (zip: filter matching pairs) rt-ok clear
+
+% error: not arrays
+{ 42 [1] zip } try /type-check eq              (zip: type error arg1) rt-ok clear
+{ [1] 42 zip } try /type-check eq              (zip: type error arg2) rt-ok clear
+
+% error: underflow
+{ zip } try /opstack-underflow eq              (zip: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 30: enumerate
+% ====================================================================
+
+% basic
+[(a) (b) (c)] enumerate
+  dup length 3 eq                              (enum: length = 3) rt-ok
+  dup 0 get [0 (a)] deep-eq                    (enum: pair 0) rt-ok
+  dup 1 get [1 (b)] deep-eq                    (enum: pair 1) rt-ok
+  dup 2 get [2 (c)] deep-eq                    (enum: pair 2) rt-ok
+pop clear
+
+% empty
+[] enumerate
+  [] deep-eq                                   (enum: empty) rt-ok clear
+
+% single element
+[42] enumerate
+  dup length 1 eq                              (enum: single len) rt-ok
+  dup 0 get [0 42] deep-eq                     (enum: single pair) rt-ok
+pop clear
+
+% mixed types
+[1 (hello) true 2.0] enumerate
+  dup 0 get 0 get 0 eq                         (enum: idx 0) rt-ok
+  dup 0 get 1 get 1 eq                         (enum: val int) rt-ok
+  dup 1 get 1 get (hello) eq                   (enum: val str) rt-ok
+  dup 2 get 0 get 2 eq                         (enum: idx 2) rt-ok
+  dup 3 get 1 get 2.0 eq                       (enum: val real) rt-ok
+pop clear
+
+% indices are correct for larger arrays
+0 50 range-from enumerate
+  dup length 50 eq                             (enum: 50 elements) rt-ok
+  dup 0 get [0 0] deep-eq                      (enum: first pair) rt-ok
+  dup 49 get [49 49] deep-eq                   (enum: last pair) rt-ok
+pop clear
+
+% enumerate + filter: find indices of matches
+[10 20 30 20 40] enumerate { 1 get 20 eq } filter { 0 get } map
+  [1 3] deep-eq                                (enum: find indices of 20) rt-ok clear
+
+% enumerate + map: index-weighted sum
+[(a) (b) (c)] enumerate { dup 0 get 1 add exch 1 get length mul } map sum
+  6 eq                                         (enum: weighted sum 1*1+2*1+3*1=6) rt-ok clear
+
+% stress: 50 elements (enumerate allocates N sub-arrays, conserve VM)
+0 50 range-from enumerate
+  dup length 50 eq                             (enum: stress 50 len) rt-ok
+  dup 25 get [25 25] deep-eq                   (enum: stress middle) rt-ok
+  dup 49 get [49 49] deep-eq                   (enum: stress last) rt-ok
+pop clear
+
+% error: not array
+{ 42 enumerate } try /type-check eq            (enum: type error) rt-ok clear
+
+% error: underflow
+{ enumerate } try /opstack-underflow eq        (enum: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 31: min-by / max-by
+% ====================================================================
+
+% basic: shortest string
+[(banana) (fig) (cherry)] { length } min-by
+  (fig) eq                                     (min-by: shortest string) rt-ok clear
+
+% basic: longest string
+[(banana) (fig) (cherry)] { length } max-by
+  (banana) eq                                  (max-by: longest string) rt-ok clear
+
+% numeric key function
+[[3 (c)] [1 (a)] [2 (b)]] { 0 get } min-by
+  [1 (a)] deep-eq                              (min-by: smallest first elem) rt-ok clear
+
+[[3 (c)] [1 (a)] [2 (b)]] { 0 get } max-by
+  [3 (c)] deep-eq                              (max-by: largest first elem) rt-ok clear
+
+% single element: returned without proc evaluation
+[42] { 999 mul } min-by
+  42 eq                                        (min-by: single element) rt-ok clear
+[42] { 999 mul } max-by
+  42 eq                                        (max-by: single element) rt-ok clear
+
+% two elements
+[5 3] { dup mul } min-by
+  3 eq                                         (min-by: two elements smaller) rt-ok clear
+[5 3] { dup mul } max-by
+  5 eq                                         (max-by: two elements larger) rt-ok clear
+
+% all equal keys: returns first occurrence
+[10 20 30] { pop 1 } min-by
+  10 eq                                        (min-by: equal keys returns first) rt-ok clear
+[10 20 30] { pop 1 } max-by
+  10 eq                                        (max-by: equal keys returns first) rt-ok clear
+
+% negative keys
+[-3 -1 -2] { neg } min-by
+  -1 eq                                        (min-by: neg key => largest abs) rt-ok clear
+[-3 -1 -2] { neg } max-by
+  -3 eq                                        (max-by: neg key => smallest abs) rt-ok clear
+
+% mixed numeric types: key function produces reals
+[1 2 3 4 5] { 3 sub dup mul } min-by
+  3 eq                                         (min-by: quadratic key center) rt-ok clear
+
+% string comparison as key
+[(cherry) (apple) (banana)] { } min-by
+  (apple) eq                                   (min-by: string key comparison) rt-ok clear
+
+% identity key: equivalent to min-of / max-of
+[7 2 9 4 1 8] { } min-by
+  1 eq                                         (min-by: identity = min-of) rt-ok clear
+[7 2 9 4 1 8] { } max-by
+  9 eq                                         (max-by: identity = max-of) rt-ok clear
+
+% pipeline: partition + min-by
+[5 -3 8 -1 2] { 0 ge } partition
+  /negatives exch def /positives exch def
+  positives { } min-by 2 eq                   (min-by: min of positives) rt-ok clear
+  negatives { 0 exch sub } min-by -1 eq       (min-by: closest to zero neg) rt-ok clear
+
+% stress: 100 elements, find element with smallest square
+0 100 range-from { 50 sub } map { dup mul } min-by
+  0 eq                                         (min-by: stress 100 elements) rt-ok clear
+
+% stress: max-by on 100 elements
+0 100 range-from { dup mul } max-by
+  99 eq                                        (max-by: stress 100 elements) rt-ok clear
+
+% error: empty array
+{ [] { length } min-by } try /range-check eq   (min-by: empty array error) rt-ok clear
+{ [] { length } max-by } try /range-check eq   (max-by: empty array error) rt-ok clear
+
+% error: type check
+{ 42 { } min-by } try /type-check eq           (min-by: type error) rt-ok clear
+{ 42 { } max-by } try /type-check eq           (max-by: type error) rt-ok clear
+
+% error: underflow
+{ { } min-by } try /opstack-underflow eq       (min-by: underflow) rt-ok clear
+{ { } max-by } try /opstack-underflow eq       (max-by: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 32: sort-by
+% ====================================================================
+
+% basic: sort strings by length
+[(cherry) (fig) (apple) (date)] { length } sort-by
+dup 0 get (fig) eq               (sort-by: shortest first) rt-ok
+dup 1 get (date) eq              (sort-by: second by length) rt-ok
+dup 3 get (cherry) eq            (sort-by: longest last) rt-ok
+pop clear
+
+% sort integers by absolute value (use dup mul as proxy for abs)
+[3 -1 4 -1 5 -9 2 6] { dup mul } sort-by
+dup 0 get -1 eq                  (sort-by: abs smallest first) rt-ok
+dup 1 get -1 eq                  (sort-by: abs equal preserves order) rt-ok
+dup 7 get -9 eq                  (sort-by: abs largest last) rt-ok
+pop clear
+
+% already sorted input
+[1 2 3 4 5] { } sort-by
+[1 2 3 4 5] deep-eq              (sort-by: already sorted) rt-ok clear
+
+% reverse sorted input
+[5 4 3 2 1] { } sort-by
+[1 2 3 4 5] deep-eq              (sort-by: reverse sorted) rt-ok clear
+
+% stability: equal keys preserve original order
+% pairs [value, key] sorted by second element
+[[1 3] [2 1] [3 1] [4 2] [5 3]] { 1 get } sort-by
+dup 0 get 0 get 2 eq             (sort-by: stable first) rt-ok
+dup 1 get 0 get 3 eq             (sort-by: stable second) rt-ok
+dup 2 get 0 get 4 eq             (sort-by: stable third) rt-ok
+dup 3 get 0 get 1 eq             (sort-by: stable fourth) rt-ok
+dup 4 get 0 get 5 eq             (sort-by: stable fifth) rt-ok
+pop clear
+
+% single element
+[42] { 2 mul } sort-by
+dup length 1 eq                  (sort-by: single length) rt-ok
+dup 0 get 42 eq                  (sort-by: single value) rt-ok
+pop clear
+
+% two elements
+[10 5] { } sort-by
+[5 10] deep-eq                   (sort-by: two elements) rt-ok clear
+
+% negative keys
+[3 1 4 1 5] { 0 exch sub } sort-by
+[5 4 3 1 1] deep-eq             (sort-by: negative keys reverses) rt-ok clear
+
+% sort by second character of name (alphabetic sub-key)
+% "bat" -> 'a', "bet" -> 'e', "bit" -> 'i'
+[(bit) (bat) (bet)] { 1 get } sort-by
+dup 0 get (bat) eq               (sort-by: char key 'a' first) rt-ok
+dup 1 get (bet) eq               (sort-by: char key 'e' second) rt-ok
+dup 2 get (bit) eq               (sort-by: char key 'i' last) rt-ok
+pop clear
+
+% pipeline: filter then sort-by
+[10 3 8 1 6 4 9 2 7 5] { 5 gt } filter { } sort-by
+[6 7 8 9 10] deep-eq            (sort-by: filter+sort-by pipeline) rt-ok clear
+
+% pipeline: sort-by then map
+[(cat) (elephant) (be)] { length } sort-by { length } map
+[2 3 8] deep-eq                 (sort-by: sort-by+map pipeline) rt-ok clear
+
+% stress: 100 elements sorted by negated value (reverses order)
+0 100 range-from { 0 exch sub } sort-by
+dup 0 get 99 eq                  (sort-by: stress first=99) rt-ok
+dup 99 get 0 eq                  (sort-by: stress last=0) rt-ok
+pop clear
+
+% empty array returns empty
+[] { } sort-by
+dup length 0 eq                  (sort-by: empty) rt-ok
+pop clear
+
+% large array: 500 elements (no longer limited to 256)
+0 500 range-from { neg } sort-by
+dup 0 get 499 eq                     (sort-by: large 500 first) rt-ok
+dup 499 get 0 eq                     (sort-by: large 500 last) rt-ok
+dup length 500 eq                    (sort-by: large 500 length) rt-ok
+pop clear
+
+% error: type check (non-array)
+{ 42 { } sort-by } try /type-check eq   (sort-by: type error) rt-ok clear
+
+% error: underflow
+{ { } sort-by } try /opstack-underflow eq  (sort-by: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 33: chunk
+% ====================================================================
+
+% basic: even split
+[1 2 3 4 5 6] 2 chunk
+dup length 3 eq                            (chunk: 6/2 = 3 groups) rt-ok
+dup 0 get [1 2] deep-eq                    (chunk: group 0) rt-ok
+dup 1 get [3 4] deep-eq                    (chunk: group 1) rt-ok
+dup 2 get [5 6] deep-eq                    (chunk: group 2) rt-ok
+pop clear
+
+% uneven split: last group shorter
+[1 2 3 4 5] 2 chunk
+dup length 3 eq                            (chunk: 5/2 = 3 groups) rt-ok
+dup 0 get [1 2] deep-eq                    (chunk: uneven group 0) rt-ok
+dup 1 get [3 4] deep-eq                    (chunk: uneven group 1) rt-ok
+dup 2 get [5] deep-eq                      (chunk: uneven last group) rt-ok
+pop clear
+
+% chunk size equals array length
+[1 2 3] 3 chunk
+dup length 1 eq                            (chunk: size=len gives 1 group) rt-ok
+dup 0 get [1 2 3] deep-eq                  (chunk: single group) rt-ok
+pop clear
+
+% chunk size larger than array
+[1 2] 5 chunk
+dup length 1 eq                            (chunk: size>len gives 1 group) rt-ok
+dup 0 get [1 2] deep-eq                    (chunk: oversized chunk) rt-ok
+pop clear
+
+% chunk size 1: each element becomes a group
+[10 20 30] 1 chunk
+dup length 3 eq                            (chunk: size=1 groups) rt-ok
+dup 0 get [10] deep-eq                     (chunk: size=1 group 0) rt-ok
+dup 2 get [30] deep-eq                     (chunk: size=1 group 2) rt-ok
+pop clear
+
+% single element
+[42] 1 chunk
+dup length 1 eq                            (chunk: single elem) rt-ok
+dup 0 get [42] deep-eq                     (chunk: single elem group) rt-ok
+pop clear
+
+% empty array
+[] 3 chunk
+dup length 0 eq                            (chunk: empty) rt-ok
+pop clear
+
+% mixed types
+[1 (hello) true 2.5] 2 chunk
+dup 0 get length 2 eq                      (chunk: mixed group 0 len) rt-ok
+dup 1 get length 2 eq                      (chunk: mixed group 1 len) rt-ok
+pop clear
+
+% pipeline: chunk + map (sum each group)
+[1 2 3 4 5 6 7 8 9 10] 5 chunk { sum } map
+[15 40] deep-eq                            (chunk: chunk+map sum groups) rt-ok clear
+
+% pipeline: chunk + flat-map (identity = original)
+[1 2 3 4 5 6] 2 chunk flatten
+[1 2 3 4 5 6] deep-eq                     (chunk: chunk+flatten roundtrip) rt-ok clear
+
+% stress: 50 elements in groups of 7
+0 50 range-from 7 chunk
+dup length 8 eq                            (chunk: stress 50/7 = 8 groups) rt-ok
+dup 0 get length 7 eq                      (chunk: stress first group full) rt-ok
+dup 7 get length 1 eq                      (chunk: stress last group = 1) rt-ok
+pop clear
+
+% error: zero chunk size
+{ [1 2 3] 0 chunk } try /range-check eq   (chunk: zero size error) rt-ok clear
+
+% error: negative chunk size
+{ [1 2 3] -1 chunk } try /range-check eq  (chunk: negative size error) rt-ok clear
+
+% error: type check (non-array)
+{ 42 2 chunk } try /type-check eq          (chunk: type error) rt-ok clear
+
+% error: type check (non-integer size)
+{ [1 2] 2.5 chunk } try /type-check eq    (chunk: float size error) rt-ok clear
+
+% error: underflow
+{ 2 chunk } try /opstack-underflow eq      (chunk: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 34: scan
+% ====================================================================
+
+% basic: running sum
+[1 2 3] 0 { add } scan
+[0 1 3 6] deep-eq                          (scan: running sum) rt-ok clear
+
+% running product
+[1 2 3 4] 1 { mul } scan
+[1 1 2 6 24] deep-eq                       (scan: running product) rt-ok clear
+
+% empty array: result is [init]
+[] 0 { add } scan
+[0] deep-eq                                (scan: empty = [init]) rt-ok clear
+
+% single element
+[5] 0 { add } scan
+[0 5] deep-eq                              (scan: single element) rt-ok clear
+
+% running max
+[3 1 4 1 5 9 2 6] 0 { max } scan
+[0 3 3 4 4 5 9 9 9] deep-eq               (scan: running max) rt-ok clear
+
+% string concatenation
+[(a) (b) (c)] () { concat } scan
+dup length 4 eq                            (scan: string concat len) rt-ok
+dup 0 get () eq                            (scan: string init empty) rt-ok
+dup 1 get (a) eq                           (scan: string after first) rt-ok
+dup 3 get (abc) eq                         (scan: string final) rt-ok
+pop clear
+
+% result length is always N+1
+[10 20 30 40 50] 0 { add } scan
+dup length 6 eq                            (scan: length = N+1) rt-ok
+pop clear
+
+% scan with subtraction (non-commutative)
+[1 2 3] 10 { sub } scan
+[10 9 7 4] deep-eq                         (scan: 10-1=9, 9-2=7, 7-3=4) rt-ok clear
+
+% pipeline: scan + map (double all running sums)
+[1 2 3] 0 { add } scan { 2 mul } map
+[0 2 6 12] deep-eq                         (scan: scan+map pipeline) rt-ok clear
+
+% pipeline: range + scan (prefix sums of 1..5)
+1 6 range-from 0 { add } scan
+[0 1 3 6 10 15] deep-eq                   (scan: prefix sums 1..5) rt-ok clear
+
+% stress: 50 elements prefix sum
+0 50 range-from 0 { add } scan
+dup length 51 eq                           (scan: stress length = 51) rt-ok
+dup 50 get 1225 eq                         (scan: stress final = sum 0..49) rt-ok
+pop clear
+
+% error: type check (non-array)
+{ 42 0 { add } scan } try /type-check eq   (scan: type error) rt-ok clear
+
+% error: underflow
+{ 0 { add } scan } try /opstack-underflow eq  (scan: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 35: sliding-window
+% ====================================================================
+
+% basic: window of 3
+[1 2 3 4 5] 3 sliding-window
+dup length 3 eq                            (slide: 5 win 3 = 3 windows) rt-ok
+dup 0 get [1 2 3] deep-eq                  (slide: window 0) rt-ok
+dup 1 get [2 3 4] deep-eq                  (slide: window 1) rt-ok
+dup 2 get [3 4 5] deep-eq                  (slide: window 2) rt-ok
+pop clear
+
+% window of 2 (pairs)
+[10 20 30 40] 2 sliding-window
+dup length 3 eq                            (slide: 4 win 2 = 3 pairs) rt-ok
+dup 0 get [10 20] deep-eq                  (slide: pair 0) rt-ok
+dup 2 get [30 40] deep-eq                  (slide: pair 2) rt-ok
+pop clear
+
+% window equals array length: single window
+[1 2 3] 3 sliding-window
+dup length 1 eq                            (slide: win=len gives 1) rt-ok
+dup 0 get [1 2 3] deep-eq                  (slide: full window) rt-ok
+pop clear
+
+% window of 1: each element wrapped
+[5 10 15] 1 sliding-window
+dup length 3 eq                            (slide: win=1 groups) rt-ok
+dup 0 get [5] deep-eq                      (slide: win=1 first) rt-ok
+dup 2 get [15] deep-eq                     (slide: win=1 last) rt-ok
+pop clear
+
+% window larger than array: empty result
+[1 2] 5 sliding-window
+dup length 0 eq                            (slide: win>len = empty) rt-ok
+pop clear
+
+% single element with window 1
+[42] 1 sliding-window
+dup length 1 eq                            (slide: single elem) rt-ok
+dup 0 get [42] deep-eq                     (slide: single window) rt-ok
+pop clear
+
+% mixed types
+[1 (hello) true] 2 sliding-window
+dup length 2 eq                            (slide: mixed len) rt-ok
+dup 0 get length 2 eq                      (slide: mixed win 0 len) rt-ok
+pop clear
+
+% pipeline: sliding-window + map (moving average)
+[10 20 30 40 50] 3 sliding-window { sum } map
+[60 90 120] deep-eq                        (slide: moving sum) rt-ok clear
+
+% pipeline: sliding-window + filter (find increasing pairs)
+[3 1 4 1 5 9] 2 sliding-window { dup 0 get exch 1 get lt } filter
+dup length 3 eq                            (slide: increasing pairs count) rt-ok
+pop clear
+
+% stress: 50 elements, window 5
+0 50 range-from 5 sliding-window
+dup length 46 eq                           (slide: stress 50 win 5 = 46) rt-ok
+dup 0 get [0 1 2 3 4] deep-eq             (slide: stress first window) rt-ok
+dup 45 get [45 46 47 48 49] deep-eq        (slide: stress last window) rt-ok
+pop clear
+
+% error: zero window
+{ [1 2 3] 0 sliding-window } try /range-check eq  (slide: zero error) rt-ok clear
+
+% error: negative window
+{ [1 2 3] -1 sliding-window } try /range-check eq (slide: negative error) rt-ok clear
+
+% error: type check
+{ 42 2 sliding-window } try /type-check eq (slide: type error) rt-ok clear
+
+% error: underflow
+{ 2 sliding-window } try /opstack-underflow eq (slide: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 36: frequencies
+% ====================================================================
+
+% basic: count characters
+[(a) (b) (a) (c) (b) (a)] frequencies
+dup /a get 3 eq                            (freq: a=3) rt-ok
+dup /b get 2 eq                            (freq: b=2) rt-ok
+dup /c get 1 eq                            (freq: c=1) rt-ok
+dup length 3 eq                            (freq: 3 distinct) rt-ok
+pop clear
+
+% integers
+[1 2 2 3 3 3] frequencies
+dup 1 get 1 eq                             (freq: 1 appears once) rt-ok
+dup 2 get 2 eq                             (freq: 2 appears twice) rt-ok
+dup 3 get 3 eq                             (freq: 3 appears thrice) rt-ok
+pop clear
+
+% all same element
+[7 7 7 7] frequencies
+dup length 1 eq                            (freq: all same = 1 key) rt-ok
+dup 7 get 4 eq                             (freq: 7 appears 4x) rt-ok
+pop clear
+
+% all unique
+[10 20 30] frequencies
+dup length 3 eq                            (freq: all unique = 3 keys) rt-ok
+dup 10 get 1 eq                            (freq: each appears once) rt-ok
+pop clear
+
+% single element
+[42] frequencies
+dup length 1 eq                            (freq: single key) rt-ok
+dup 42 get 1 eq                            (freq: single count) rt-ok
+pop clear
+
+% empty array
+[] frequencies
+dup length 0 eq                            (freq: empty = 0 keys) rt-ok
+pop clear
+
+% booleans
+[true false true true false] frequencies
+dup true get 3 eq                          (freq: true=3) rt-ok
+dup false get 2 eq                         (freq: false=2) rt-ok
+pop clear
+
+% pipeline: frequencies + filter on dict (keep count > 1)
+% (dict operations are manual — just verify counts)
+[1 2 2 3 3 3 4 4 4 4] frequencies
+dup 4 get 4 eq                             (freq: pipeline max count) rt-ok
+dup 1 get 1 eq                             (freq: pipeline min count) rt-ok
+pop clear
+
+% stress: 100 elements, 10 distinct values
+0 100 range-from { 10 mod } map frequencies
+dup length 10 eq                           (freq: stress 10 distinct) rt-ok
+dup 0 get 10 eq                            (freq: stress each=10) rt-ok
+dup 9 get 10 eq                            (freq: stress last=10) rt-ok
+pop clear
+
+% error: type check
+{ 42 frequencies } try /type-check eq      (freq: type error) rt-ok clear
+
+% error: underflow
+{ frequencies } try /opstack-underflow eq  (freq: underflow) rt-ok clear
+
+% error: NaN/Inf/null not valid dict keys
+{ [1.0 nan 2.0] frequencies } try /numerical-nan eq  (freq: NaN key) rt-ok clear
+{ [1.0 inf 2.0] frequencies } try /numerical-inf eq  (freq: Inf key) rt-ok clear
+{ [1 null 2] frequencies } try /type-check eq        (freq: null key) rt-ok clear
+
+% ====================================================================
+% SECTION 37: take-while -- prefix while predicate is true
+% ====================================================================
+
+% basic: take odd numbers from front
+[1 3 5 6 7 9] { 2 mod 1 eq } take-while
+[1 3 5] deep-eq                              (take-while: basic odds) rt-ok clear
+
+% all true: returns entire array
+[2 4 6 8] { 2 mod 0 eq } take-while
+[2 4 6 8] deep-eq                            (take-while: all true) rt-ok clear
+
+% first false: returns empty
+[1 2 3] { 10 gt } take-while
+[] deep-eq                                   (take-while: first false) rt-ok clear
+
+% empty input
+[] { true } take-while
+[] deep-eq                                   (take-while: empty) rt-ok clear
+
+% single element true
+[42] { 0 gt } take-while
+[42] deep-eq                                 (take-while: single true) rt-ok clear
+
+% single element false
+[42] { 0 lt } take-while
+[] deep-eq                                   (take-while: single false) rt-ok clear
+
+% two elements, stop at second
+[1 -1 3] { 0 gt } take-while
+[1] deep-eq                                  (take-while: stop at second) rt-ok clear
+
+% take while less than threshold
+[1 2 3 4 5 6 7 8 9 10] { 5 lt } take-while
+[1 2 3 4] deep-eq                            (take-while: less than 5) rt-ok clear
+
+% mixed types (strings by length)
+[(hi) (hey) (hello) (a)] { length 4 lt } take-while
+[(hi) (hey)] deep-eq                         (take-while: string length) rt-ok clear
+
+% pipeline: take-while + sum
+[1 2 3 10 4 5] { 5 lt } take-while sum
+6 eq                                         (take-while: pipeline sum) rt-ok clear
+
+% pipeline: map + take-while
+[1 2 3 4 5] { 2 mul } map { 6 le } take-while
+[2 4 6] deep-eq                              (take-while: map then take-while) rt-ok clear
+
+% stress: 100 elements, take first 50
+0 100 range-from { 50 lt } take-while
+dup length 50 eq                             (take-while: stress len) rt-ok
+dup 0 get 0 eq                               (take-while: stress first) rt-ok
+49 get 49 eq                                 (take-while: stress last) rt-ok clear
+
+% error: type check (not array)
+{ 42 { true } take-while } try /type-check eq   (take-while: type error) rt-ok clear
+
+% error: underflow
+{ { true } take-while } try /opstack-underflow eq (take-while: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 38: drop-while -- drop prefix while predicate is true
+% ====================================================================
+
+% basic: drop odd numbers from front
+[1 3 5 6 7 9] { 2 mod 1 eq } drop-while
+[6 7 9] deep-eq                              (drop-while: basic odds) rt-ok clear
+
+% all true: returns empty
+[2 4 6 8] { 2 mod 0 eq } drop-while
+[] deep-eq                                   (drop-while: all true) rt-ok clear
+
+% first false: returns entire array
+[1 2 3] { 10 gt } drop-while
+[1 2 3] deep-eq                              (drop-while: first false) rt-ok clear
+
+% empty input
+[] { true } drop-while
+[] deep-eq                                   (drop-while: empty) rt-ok clear
+
+% single element true
+[42] { 0 gt } drop-while
+[] deep-eq                                   (drop-while: single true) rt-ok clear
+
+% single element false
+[42] { 0 lt } drop-while
+[42] deep-eq                                 (drop-while: single false) rt-ok clear
+
+% two elements, stop at second
+[1 -1 3] { 0 gt } drop-while
+[-1 3] deep-eq                               (drop-while: stop at second) rt-ok clear
+
+% drop while less than threshold
+[1 2 3 4 5 6 7 8 9 10] { 5 lt } drop-while
+[5 6 7 8 9 10] deep-eq                       (drop-while: ge 5) rt-ok clear
+
+% mixed types (strings by length)
+[(hi) (hey) (hello) (a)] { length 4 lt } drop-while
+[(hello) (a)] deep-eq                        (drop-while: string length) rt-ok clear
+
+% pipeline: drop-while + sum
+[1 2 3 10 4 5] { 5 lt } drop-while sum
+19 eq                                        (drop-while: pipeline sum) rt-ok clear
+
+% pipeline: map + drop-while
+[1 2 3 4 5] { 2 mul } map { 6 lt } drop-while
+[6 8 10] deep-eq                             (drop-while: map then drop-while) rt-ok clear
+
+% complementary: take-while length + drop-while length = original length
+[1 3 5 6 7 9] { 2 mod 1 eq } take-while length
+[1 3 5 6 7 9] { 2 mod 1 eq } drop-while length
+add 6 eq                                    (take/drop-while: complement) rt-ok clear
+
+% stress: 100 elements, drop first 50
+0 100 range-from { 50 lt } drop-while
+dup length 50 eq                             (drop-while: stress len) rt-ok
+dup 0 get 50 eq                              (drop-while: stress first) rt-ok
+49 get 99 eq                                 (drop-while: stress last) rt-ok clear
+
+% error: type check (not array)
+{ 42 { true } drop-while } try /type-check eq   (drop-while: type error) rt-ok clear
+
+% error: underflow
+{ { true } drop-while } try /opstack-underflow eq (drop-while: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 39: group-by -- group elements by key function
+% ====================================================================
+
+% basic: group by even/odd
+[1 2 3 4 5 6] { 2 mod } group-by
+dup 1 get [1 3 5] deep-eq                   (group-by: odd group) rt-ok
+0 get [2 4 6] deep-eq                       (group-by: even group) rt-ok clear
+
+% group strings by first character
+[(apple) (ant) (banana) (bat)] { 0 get } group-by
+dup 97b get [(apple) (ant)] deep-eq          (group-by: a-group) rt-ok
+98b get [(banana) (bat)] deep-eq             (group-by: b-group) rt-ok clear
+
+% group by length
+[(a) (bb) (c) (dd) (eee)] { length } group-by
+dup 1 get [(a) (c)] deep-eq                 (group-by: len 1) rt-ok
+dup 2 get [(bb) (dd)] deep-eq               (group-by: len 2) rt-ok
+3 get [(eee)] deep-eq                       (group-by: len 3) rt-ok clear
+
+% all same group
+[1 1 1] { 2 mod } group-by
+1 get [1 1 1] deep-eq                       (group-by: all same) rt-ok clear
+
+% all unique groups
+[1 2 3] { } group-by
+dup 1 get [1] deep-eq                       (group-by: unique 1) rt-ok
+dup 2 get [2] deep-eq                       (group-by: unique 2) rt-ok
+3 get [3] deep-eq                           (group-by: unique 3) rt-ok clear
+
+% single element
+[42] { 2 mod } group-by
+0 get [42] deep-eq                          (group-by: single) rt-ok clear
+
+% empty input
+[] { } group-by
+length 0 eq                                 (group-by: empty) rt-ok clear
+
+% group by boolean predicate
+[1 2 3 4 5 6 7 8] { 5 gt } group-by
+dup true get [6 7 8] deep-eq                (group-by: gt5 true) rt-ok
+false get [1 2 3 4 5] deep-eq               (group-by: gt5 false) rt-ok clear
+
+% group preserves order within groups
+[5 3 1 4 2 6] { 2 mod } group-by
+dup 1 get [5 3 1] deep-eq                   (group-by: order odd) rt-ok
+0 get [4 2 6] deep-eq                       (group-by: order even) rt-ok clear
+
+% pipeline: group-by + get group + sum
+[1 2 3 4 5 6 7 8 9 10] { 2 mod } group-by
+0 get sum 30 eq                             (group-by: evens sum) rt-ok clear
+
+% pipeline: group-by + get group + length
+[(cat) (car) (dog) (cow) (deer)] { 0 get } group-by
+99b get length 3 eq                         (group-by: c-count) rt-ok clear
+
+% stress: 50 elements, 5 groups
+0 50 range-from { 5 mod } group-by
+dup length 5 eq                             (group-by: stress 5 groups) rt-ok
+dup 0 get length 10 eq                      (group-by: stress group size) rt-ok
+0 get 0 get 0 eq                            (group-by: stress first elem) rt-ok clear
+
+% error: type check (not array)
+{ 42 { true } group-by } try /type-check eq (group-by: type error) rt-ok clear
+
+% error: underflow
+{ { true } group-by } try /opstack-underflow eq (group-by: underflow) rt-ok clear
+
+% error: NaN key (regression: NaN != NaN would slip past put() and fail get())
+{ [1.0 nan 2.0] { } group-by } try /numerical-nan eq (group-by: NaN real key) rt-ok clear
+{ [1.0d nan#d 2.0d] { } group-by } try /numerical-nan eq (group-by: NaN double key) rt-ok clear
+
+% error: +Inf key
+{ [1.0 inf 2.0] { } group-by } try /numerical-inf eq (group-by: +Inf real key) rt-ok clear
+{ [1.0d inf#d 2.0d] { } group-by } try /numerical-inf eq (group-by: +Inf double key) rt-ok clear
+
+% error: -Inf key
+{ [1.0 inf neg 2.0] { } group-by } try /numerical-inf eq (group-by: -Inf real key) rt-ok clear
+
+% error: null key (proc returns nothing so element-as-key includes null)
+{ [1 null 2] { } group-by } try /type-check eq (group-by: null key) rt-ok clear
+
+% ====================================================================
+% SECTION 40: interpose -- insert separator between elements
+% ====================================================================
+
+% basic: integers
+[1 2 3] 0 interpose
+[1 0 2 0 3] deep-eq                          (interpose: basic ints) rt-ok clear
+
+% strings
+[(a) (b) (c)] (,) interpose
+[(a) (,) (b) (,) (c)] deep-eq               (interpose: strings) rt-ok clear
+
+% single element: no separator
+[42] 0 interpose
+[42] deep-eq                                 (interpose: single) rt-ok clear
+
+% empty: returns empty
+[] 0 interpose
+[] deep-eq                                   (interpose: empty) rt-ok clear
+
+% two elements
+[1 2] 99 interpose
+[1 99 2] deep-eq                             (interpose: two) rt-ok clear
+
+% result length = 2N-1
+[1 2 3 4 5] 0 interpose
+length 9 eq                                  (interpose: length 2N-1) rt-ok clear
+
+% mixed types: array elements with int separator
+[(hello) true 42] 0 interpose
+dup length 5 eq                              (interpose: mixed len) rt-ok
+dup 0 get (hello) eq                         (interpose: mixed first) rt-ok
+dup 1 get 0 eq                               (interpose: mixed sep) rt-ok
+2 get true eq                                (interpose: mixed mid) rt-ok clear
+
+% boolean separator
+[1 2 3] false interpose
+[1 false 2 false 3] deep-eq                  (interpose: bool sep) rt-ok clear
+
+% pipeline: interpose + flatten (no-op since already flat)
+[1 2 3] 0 interpose flatten
+[1 0 2 0 3] deep-eq                          (interpose: flatten idempotent) rt-ok clear
+
+% pipeline: interpose + filter (remove separators)
+[1 2 3] 0 interpose { 0 ne } filter
+[1 2 3] deep-eq                              (interpose: filter roundtrip) rt-ok clear
+
+% stress: 50 elements
+0 50 range-from 99 interpose
+dup length 99 eq                             (interpose: stress len) rt-ok
+dup 0 get 0 eq                               (interpose: stress first) rt-ok
+dup 1 get 99 eq                              (interpose: stress sep) rt-ok
+98 get 49 eq                                 (interpose: stress last) rt-ok clear
+
+% error: type check (not array)
+{ 42 0 interpose } try /type-check eq        (interpose: type error) rt-ok clear
+
+% error: underflow
+{ 0 interpose } try /opstack-underflow eq    (interpose: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 41: type predicates -- is-integer, is-string, etc.
+% ====================================================================
+
+% is-integer
+42 is-integer                                (is-integer: int true) rt-ok clear
+(hello) is-integer not                       (is-integer: string false) rt-ok clear
+3.14 is-integer not                          (is-integer: real false) rt-ok clear
+
+% is-string
+(hello) is-string                            (is-string: string true) rt-ok clear
+42 is-string not                             (is-string: int false) rt-ok clear
+
+% is-array
+[1 2 3] is-array                             (is-array: array true) rt-ok clear
+(hello) is-array not                         (is-array: string false) rt-ok clear
+[] is-array                                  (is-array: empty array true) rt-ok clear
+
+% is-dict
+<< /a 1 >> is-dict                           (is-dict: dict true) rt-ok clear
+42 is-dict not                               (is-dict: int false) rt-ok clear
+
+% is-null
+null is-null                                 (is-null: null true) rt-ok clear
+0 is-null not                                (is-null: zero false) rt-ok clear
+false is-null not                            (is-null: false false) rt-ok clear
+
+% is-boolean
+true is-boolean                              (is-boolean: true true) rt-ok clear
+false is-boolean                             (is-boolean: false true) rt-ok clear
+0 is-boolean not                             (is-boolean: zero false) rt-ok clear
+
+% is-name
+/foo is-name                                 (is-name: name true) rt-ok clear
+(foo) is-name not                            (is-name: string false) rt-ok clear
+
+% is-operator
+//add is-operator                            (is-operator: add true) rt-ok clear
+42 is-operator not                           (is-operator: int false) rt-ok clear
+
+% is-number (true for all 6 numeric types)
+42 is-number                                 (is-number: int true) rt-ok clear
+42u is-number                                (is-number: uint true) rt-ok clear
+42l is-number                                (is-number: long true) rt-ok clear
+42ul is-number                               (is-number: ulong true) rt-ok clear
+3.14 is-number                               (is-number: real true) rt-ok clear
+3.14d is-number                              (is-number: double true) rt-ok clear
+(hello) is-number not                        (is-number: string false) rt-ok clear
+true is-number not                           (is-number: bool false) rt-ok clear
+
+% is-real (true for Real only), is-float (true for Real and Double)
+3.14 is-real                                 (is-real: real true) rt-ok clear
+3.14d is-real not                            (is-real: double false) rt-ok clear
+3.14 is-float                               (is-float: real true) rt-ok clear
+3.14d is-float                              (is-float: double true) rt-ok clear
+42 is-float not                             (is-float: int false) rt-ok clear
+42l is-float not                            (is-float: long false) rt-ok clear
+
+% is-byte
+0b is-byte                                   (is-byte: byte true) rt-ok clear
+42 is-byte not                               (is-byte: int false) rt-ok clear
+
+% is-uinteger
+42u is-uinteger                              (is-uinteger: uint true) rt-ok clear
+42 is-uinteger not                           (is-uinteger: int false) rt-ok clear
+
+% is-long
+42l is-long                                  (is-long: long true) rt-ok clear
+42 is-long not                               (is-long: int false) rt-ok clear
+
+% is-ulong
+42ul is-ulong                                (is-ulong: ulong true) rt-ok clear
+42l is-ulong not                             (is-ulong: long false) rt-ok clear
+
+% is-double
+3.14d is-double                              (is-double: double true) rt-ok clear
+3.14 is-double not                           (is-double: real false) rt-ok clear
+
+% is-address
+null is-address not                          (is-address: null false) rt-ok clear
+
+% is-packed
+1 2 3 3 packed is-packed                     (is-packed: packed true) rt-ok clear
+[1 2 3] is-packed not                        (is-packed: array false) rt-ok clear
+
+% is-stream
+stdout is-stream                             (is-stream: stdout true) rt-ok clear
+42 is-stream not                             (is-stream: int false) rt-ok clear
+
+% is-mark
+mark is-mark                                 (is-mark: mark true) rt-ok clear
+42 is-mark not                               (is-mark: int false) rt-ok clear
+clear
+
+% save-token: save returns Integer, restore consumes it
+save dup is-integer exch restore             (save: returns integer) rt-ok clear
+
+% is-signed (Integer, Long)
+42 is-signed                                 (is-signed: int true) rt-ok clear
+42l is-signed                                (is-signed: long true) rt-ok clear
+42u is-signed not                            (is-signed: uint false) rt-ok clear
+42ul is-signed not                           (is-signed: ulong false) rt-ok clear
+0b is-signed not                             (is-signed: byte false) rt-ok clear
+3.14 is-signed not                           (is-signed: real false) rt-ok clear
+
+% is-unsigned (Byte, UInteger, ULong)
+0b is-unsigned                               (is-unsigned: byte true) rt-ok clear
+42u is-unsigned                              (is-unsigned: uint true) rt-ok clear
+42ul is-unsigned                             (is-unsigned: ulong true) rt-ok clear
+42 is-unsigned not                           (is-unsigned: int false) rt-ok clear
+42l is-unsigned not                          (is-unsigned: long false) rt-ok clear
+3.14 is-unsigned not                         (is-unsigned: real false) rt-ok clear
+
+% pipeline: filter by type
+[1 (two) 3 (four) 5] { is-integer } filter
+[1 3 5] deep-eq                              (is-*: filter integers) rt-ok clear
+
+[1 (two) true null 3.14] { is-string } filter
+[(two)] deep-eq                              (is-*: filter strings) rt-ok clear
+
+% error: underflow
+{ is-integer } try /opstack-underflow eq     (is-integer: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 42: merge -- combine two dicts
+% ====================================================================
+
+% basic: disjoint dicts
+<< /a 1 /b 2 >> << /c 3 /d 4 >> merge
+dup /a get 1 eq                              (merge: disjoint a) rt-ok
+dup /b get 2 eq                              (merge: disjoint b) rt-ok
+dup /c get 3 eq                              (merge: disjoint c) rt-ok
+/d get 4 eq                                  (merge: disjoint d) rt-ok clear
+
+% overlap: dict2 wins
+<< /a 1 /b 2 >> << /a 99 /c 3 >> merge
+dup /a get 99 eq                             (merge: overlap a=99) rt-ok
+dup /b get 2 eq                              (merge: overlap b=2) rt-ok
+/c get 3 eq                                  (merge: overlap c=3) rt-ok clear
+
+% empty + dict
+<< >> << /a 1 >> merge
+/a get 1 eq                                  (merge: empty+dict) rt-ok clear
+
+% dict + empty
+<< /a 1 >> << >> merge
+/a get 1 eq                                  (merge: dict+empty) rt-ok clear
+
+% empty + empty
+<< >> << >> merge
+length 0 eq                                  (merge: empty+empty) rt-ok clear
+
+% all overlap
+<< /x 1 /y 2 >> << /x 10 /y 20 >> merge
+dup /x get 10 eq                             (merge: all-overlap x) rt-ok
+/y get 20 eq                                 (merge: all-overlap y) rt-ok clear
+
+% result length
+<< /a 1 /b 2 >> << /c 3 /d 4 >> merge
+length 4 eq                                  (merge: disjoint len=4) rt-ok clear
+
+<< /a 1 /b 2 >> << /a 99 /c 3 >> merge
+length 3 eq                                  (merge: overlap len=3) rt-ok clear
+
+% originals unchanged
+<< /a 1 >> /d1 exch def
+<< /a 2 >> /d2 exch def
+d1 d2 merge pop
+d1 /a get 1 eq                               (merge: original d1 intact) rt-ok clear
+d2 /a get 2 eq                               (merge: original d2 intact) rt-ok clear
+
+% mixed value types
+<< /n 42 /s (hello) /b true >> << /a [1 2] >> merge
+dup /n get 42 eq                             (merge: mixed int) rt-ok
+dup /s get (hello) eq                        (merge: mixed string) rt-ok
+dup /b get true eq                           (merge: mixed bool) rt-ok
+/a get [1 2] deep-eq                         (merge: mixed array) rt-ok clear
+
+% error: type check
+{ 42 << >> merge } try /type-check eq        (merge: type error) rt-ok clear
+
+% error: underflow
+{ << >> merge } try /opstack-underflow eq    (merge: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 43: negative indexing -- get and put with negative indices
+% ====================================================================
+
+% get: -1 = last element
+[10 20 30] -1 get 30 eq                     (neg-idx: get -1 last) rt-ok clear
+
+% get: -2 = second-to-last
+[10 20 30] -2 get 20 eq                     (neg-idx: get -2) rt-ok clear
+
+% get: -length = first
+[10 20 30] -3 get 10 eq                     (neg-idx: get -len first) rt-ok clear
+
+% get: positive still works
+[10 20 30] 0 get 10 eq                      (neg-idx: get 0 still works) rt-ok clear
+[10 20 30] 2 get 30 eq                      (neg-idx: get 2 still works) rt-ok clear
+
+% get: string negative indexing
+(abc) -1 get 99b eq                          (neg-idx: string -1) rt-ok clear
+(abc) -3 get 97b eq                          (neg-idx: string -3) rt-ok clear
+
+% put: negative indexing
+/neg-arr [10 20 30] def
+neg-arr -1 99 put
+neg-arr -1 get 99 eq                         (neg-idx: put -1) rt-ok clear
+neg-arr 2 get 99 eq                          (neg-idx: put -1 = idx 2) rt-ok clear
+
+% put: string negative indexing
+/neg-str (abc) def
+neg-str -1 122b put
+neg-str -1 get 122b eq                       (neg-idx: str put -1) rt-ok clear
+
+% get: out of range negative
+{ [1 2 3] -4 get } try /limit-check eq       (neg-idx: get -4 error) rt-ok clear
+
+% pipeline: take last element via negative index
+[10 20 30 40 50] -1 get 50 eq               (neg-idx: pipeline last) rt-ok clear
+
+% ====================================================================
+% SECTION 44: pad-left / pad-right -- string padding
+% ====================================================================
+
+% pad-left: basic
+(hi) 5 32b pad-left (   hi) eq              (pad-left: basic) rt-ok clear
+
+% pad-left: zero-fill
+(42) 5 48b pad-left (00042) eq              (pad-left: zero-fill) rt-ok clear
+
+% pad-left: already wide enough
+(hello) 3 32b pad-left (hello) eq           (pad-left: no-op) rt-ok clear
+
+% pad-left: exact width
+(hi) 2 32b pad-left (hi) eq                 (pad-left: exact) rt-ok clear
+
+% pad-left: single char
+(x) 4 46b pad-left (...x) eq               (pad-left: dots) rt-ok clear
+
+% pad-left: empty string
+() 3 42b pad-left (***) eq                  (pad-left: empty src) rt-ok clear
+
+% pad-right: basic
+(hi) 5 32b pad-right (hi   ) eq            (pad-right: basic) rt-ok clear
+
+% pad-right: exact width
+(hi) 2 32b pad-right (hi) eq               (pad-right: exact) rt-ok clear
+
+% pad-right: already wide
+(hello) 3 32b pad-right (hello) eq          (pad-right: no-op) rt-ok clear
+
+% pad-right: empty string
+() 3 45b pad-right (---) eq                 (pad-right: empty src) rt-ok clear
+
+% pad-right: single char
+(x) 4 46b pad-right (x...) eq              (pad-right: dots) rt-ok clear
+
+% combined: center-like effect
+(hi) 4 32b pad-left 6 32b pad-right
+(  hi  ) eq                                 (pad: centered) rt-ok clear
+
+% error: type check
+{ 42 5 32b pad-left } try /type-check eq    (pad-left: type error) rt-ok clear
+
+% error: underflow
+{ 5 32b pad-left } try /opstack-underflow eq (pad-left: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 45: map-dict -- apply proc to each dict value
+% ====================================================================
+
+% basic: double all values
+<< /a 1 /b 2 /c 3 >> { 2 mul } map-dict
+dup /a get 2 eq                              (map-dict: a doubled) rt-ok
+dup /b get 4 eq                              (map-dict: b doubled) rt-ok
+/c get 6 eq                                  (map-dict: c doubled) rt-ok clear
+
+% identity proc
+<< /x 42 /y 99 >> { } map-dict
+dup /x get 42 eq                             (map-dict: identity x) rt-ok
+/y get 99 eq                                 (map-dict: identity y) rt-ok clear
+
+% multiply by 10
+<< /a 1 /b 2 >> { 10 mul } map-dict
+dup /a get 10 eq                             (map-dict: mul10 a) rt-ok
+/b get 20 eq                                 (map-dict: mul10 b) rt-ok clear
+
+% single entry
+<< /only 5 >> { 10 add } map-dict
+/only get 15 eq                              (map-dict: single) rt-ok clear
+
+% empty dict
+<< >> { 2 mul } map-dict
+length 0 eq                                 (map-dict: empty) rt-ok clear
+
+% string values
+<< /name (alice) /city (paris) >> { uppercase } map-dict
+dup /name get (ALICE) eq                     (map-dict: uppercase name) rt-ok
+/city get (PARIS) eq                         (map-dict: uppercase city) rt-ok clear
+
+% original unchanged
+<< /a 1 >> /d exch def
+d { 10 mul } map-dict pop
+d /a get 1 eq                                (map-dict: original intact) rt-ok clear
+
+% pipeline: map-dict + merge
+<< /a 1 /b 2 >> { 10 mul } map-dict
+<< /c 3 >> merge
+dup /a get 10 eq                             (map-dict: pipeline a) rt-ok
+dup /b get 20 eq                             (map-dict: pipeline b) rt-ok
+/c get 3 eq                                  (map-dict: pipeline c) rt-ok clear
+
+% error: type check
+{ 42 { } map-dict } try /type-check eq      (map-dict: type error) rt-ok clear
+
+% error: underflow
+{ { } map-dict } try /opstack-underflow eq   (map-dict: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 46: type-case -- dispatch on type
+% ====================================================================
+
+% integer
+42 << /integer-type { (int) } >> type-case
+(int) eq                                     (type-case: integer) rt-ok clear
+
+% string
+(hello) << /string-type { (str) } >> type-case
+(str) eq                                     (type-case: string) rt-ok clear
+
+% array
+[1 2] << /array-type { (arr) } >> type-case
+(arr) eq                                     (type-case: array) rt-ok clear
+
+% boolean
+true << /boolean-type { (bool) } >> type-case
+(bool) eq                                    (type-case: boolean) rt-ok clear
+
+% null
+null << /null-type { (nil) } >> type-case
+(nil) eq                                     (type-case: null) rt-ok clear
+
+% dict
+<< /a 1 >> << /dict-type { (dict) } >> type-case
+(dict) eq                                    (type-case: dict) rt-ok clear
+
+% default fallback
+3.14 << /integer-type { (int) } /default { (other) } >> type-case
+(other) eq                                   (type-case: default) rt-ok clear
+
+% real
+3.14 << /real-type { (real) } >> type-case
+(real) eq                                    (type-case: real) rt-ok clear
+
+% name
+/foo << /name-type { (name) } >> type-case
+(name) eq                                    (type-case: name) rt-ok clear
+
+% pipeline: classify array elements
+[42 (hi) true] { << /integer-type { (I) } /string-type { (S) } /boolean-type { (B) } >> type-case } map
+[(I) (S) (B)] deep-eq                        (type-case: classify) rt-ok clear
+
+% error: underflow
+{ << /integer-type { } >> type-case } try /opstack-underflow eq (type-case: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 47: zip-longest -- zip with fill value for shorter array
+% ====================================================================
+
+% basic: equal length arrays
+[1 2 3] [4 5 6] null zip-longest
+[[1 4] [2 5] [3 6]] deep-eq                   (zip-longest: equal length) rt-ok clear
+
+% arr1 longer
+[1 2 3] [4 5] 0 zip-longest
+[[1 4] [2 5] [3 0]] deep-eq                   (zip-longest: arr1 longer) rt-ok clear
+
+% arr2 longer
+[1 2] [4 5 6] 0 zip-longest
+[[1 4] [2 5] [0 6]] deep-eq                   (zip-longest: arr2 longer) rt-ok clear
+
+% null fill
+[1 2 3] [4] null zip-longest
+dup length 3 eq                                (zip-longest: null fill length) rt-ok
+dup 0 get [1 4] deep-eq                        (zip-longest: null fill pair 0) rt-ok
+dup 1 get dup 0 get 2 eq exch 1 get type /null-type eq and
+                                               (zip-longest: null fill pair 1) rt-ok
+pop clear
+
+% both empty
+[] [] 0 zip-longest
+[] deep-eq                                     (zip-longest: both empty) rt-ok clear
+
+% one empty
+[1 2] [] 99 zip-longest
+[[1 99] [2 99]] deep-eq                        (zip-longest: one empty) rt-ok clear
+
+% empty first
+[] [4 5] 99 zip-longest
+[[99 4] [99 5]] deep-eq                        (zip-longest: empty first) rt-ok clear
+
+% string fill
+[1 2 3] [4] (x) zip-longest
+dup 2 get dup 0 get 3 eq exch 1 get (x) eq and
+                                               (zip-longest: string fill) rt-ok clear
+
+% packed input
+{ 1 2 3 } { 4 5 } 0 zip-longest
+[[1 4] [2 5] [3 0]] deep-eq                   (zip-longest: packed input) rt-ok clear
+
+% single element arrays
+[1] [2] null zip-longest
+[[1 2]] deep-eq                                (zip-longest: single elements) rt-ok clear
+
+% large difference in length
+[1] [10 20 30 40 50] 0 zip-longest
+dup length 5 eq                                (zip-longest: large diff length) rt-ok
+dup 0 get [1 10] deep-eq                       (zip-longest: large diff first) rt-ok
+dup 4 get [0 50] deep-eq                       (zip-longest: large diff last) rt-ok
+pop clear
+
+% error: underflow
+{ [1] zip-longest } try /opstack-underflow eq  (zip-longest: underflow) rt-ok clear
+
+% error: type check
+{ 1 2 3 zip-longest } try /type-check eq       (zip-longest: type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 48: intersect -- elements in both arrays
+% ====================================================================
+
+% basic
+[1 2 3 4] [3 4 5 6] intersect
+[3 4] deep-eq                                  (intersect: basic) rt-ok clear
+
+% preserves arr1 order
+[4 3 2 1] [1 2 5] intersect
+[2 1] deep-eq                                  (intersect: arr1 order) rt-ok clear
+
+% no overlap
+[1 2 3] [4 5 6] intersect
+[] deep-eq                                     (intersect: no overlap) rt-ok clear
+
+% complete overlap
+[1 2 3] [1 2 3] intersect
+[1 2 3] deep-eq                                (intersect: complete overlap) rt-ok clear
+
+% empty arr1
+[] [1 2 3] intersect
+[] deep-eq                                     (intersect: empty arr1) rt-ok clear
+
+% empty arr2
+[1 2 3] [] intersect
+[] deep-eq                                     (intersect: empty arr2) rt-ok clear
+
+% both empty
+[] [] intersect
+[] deep-eq                                     (intersect: both empty) rt-ok clear
+
+% removes duplicates from arr1
+[1 2 2 3 3 3] [2 3] intersect
+[2 3] deep-eq                                  (intersect: dedup arr1) rt-ok clear
+
+% string elements
+[(a) (b) (c)] [(b) (c) (d)] intersect
+[(b) (c)] deep-eq                              (intersect: strings) rt-ok clear
+
+% mixed types
+[1 (a) true 2] [true 2 (b)] intersect
+[true 2] deep-eq                               (intersect: mixed types) rt-ok clear
+
+% single element
+[42] [42] intersect
+[42] deep-eq                                   (intersect: single match) rt-ok clear
+
+% single element no match
+[42] [99] intersect
+[] deep-eq                                     (intersect: single no match) rt-ok clear
+
+% packed input
+{ 1 2 3 4 } { 3 4 5 } intersect
+[3 4] deep-eq                                  (intersect: packed input) rt-ok clear
+
+% large arrays
+save
+[1 1 200 { } for] [50 1 250 { } for] intersect
+dup length 151 eq                              (intersect: large length) rt-ok
+dup 0 get 50 eq                                (intersect: large first) rt-ok
+dup 150 get 200 eq                             (intersect: large last) rt-ok
+pop
+restore clear
+
+% error: underflow
+{ intersect } try /opstack-underflow eq        (intersect: underflow) rt-ok clear
+
+% error: type check
+{ 1 2 intersect } try /type-check eq           (intersect: type-check) rt-ok clear
+
+% error: NaN/Inf/null keys
+{ [1.0 nan] [1.0] intersect } try /numerical-nan eq (intersect: NaN in arr1) rt-ok clear
+{ [1.0] [1.0 nan] intersect } try /numerical-nan eq (intersect: NaN in arr2) rt-ok clear
+{ [1.0 inf] [1.0] intersect } try /numerical-inf eq (intersect: Inf in arr1) rt-ok clear
+
+% ====================================================================
+% SECTION 49: union -- unique elements from both arrays
+% ====================================================================
+
+% basic
+[1 2 3] [3 4 5] union
+[1 2 3 4 5] deep-eq                            (union: basic) rt-ok clear
+
+% no overlap
+[1 2] [3 4] union
+[1 2 3 4] deep-eq                              (union: no overlap) rt-ok clear
+
+% complete overlap
+[1 2 3] [1 2 3] union
+[1 2 3] deep-eq                                (union: complete overlap) rt-ok clear
+
+% empty arr1
+[] [1 2 3] union
+[1 2 3] deep-eq                                (union: empty arr1) rt-ok clear
+
+% empty arr2
+[1 2 3] [] union
+[1 2 3] deep-eq                                (union: empty arr2) rt-ok clear
+
+% both empty
+[] [] union
+[] deep-eq                                     (union: both empty) rt-ok clear
+
+% removes duplicates within arr1
+[1 1 2 2 3] [4] union
+[1 2 3 4] deep-eq                              (union: dedup arr1) rt-ok clear
+
+% removes duplicates within arr2
+[1] [2 2 3 3] union
+[1 2 3] deep-eq                                (union: dedup arr2) rt-ok clear
+
+% preserves order: arr1 first, then new from arr2
+[3 1] [2 1 4] union
+[3 1 2 4] deep-eq                              (union: order preserved) rt-ok clear
+
+% string elements
+[(a) (b)] [(b) (c)] union
+[(a) (b) (c)] deep-eq                          (union: strings) rt-ok clear
+
+% mixed types
+[1 (a)] [true (a) 2] union
+[1 (a) true 2] deep-eq                         (union: mixed types) rt-ok clear
+
+% packed input
+{ 1 2 3 } { 3 4 5 } union
+[1 2 3 4 5] deep-eq                            (union: packed input) rt-ok clear
+
+% large arrays
+save
+[1 1 100 { } for] [50 1 150 { } for] union
+dup length 150 eq                              (union: large length) rt-ok
+dup 0 get 1 eq                                 (union: large first) rt-ok
+dup 149 get 150 eq                             (union: large last) rt-ok
+pop
+restore clear
+
+% error: underflow
+{ union } try /opstack-underflow eq            (union: underflow) rt-ok clear
+
+% error: type check
+{ 1 2 union } try /type-check eq              (union: type-check) rt-ok clear
+
+% error: NaN/Inf keys
+{ [1.0 nan] [2.0] union } try /numerical-nan eq (union: NaN in arr1) rt-ok clear
+{ [1.0] [2.0 inf] union } try /numerical-inf eq (union: Inf in arr2) rt-ok clear
+
+% ====================================================================
+% SECTION 50: difference -- elements in arr1 not in arr2
+% ====================================================================
+
+% basic
+[1 2 3 4 5] [3 4 5 6] difference
+[1 2] deep-eq                                  (difference: basic) rt-ok clear
+
+% no overlap
+[1 2 3] [4 5 6] difference
+[1 2 3] deep-eq                                (difference: no overlap) rt-ok clear
+
+% complete overlap
+[1 2 3] [1 2 3] difference
+[] deep-eq                                     (difference: complete overlap) rt-ok clear
+
+% empty arr1
+[] [1 2 3] difference
+[] deep-eq                                     (difference: empty arr1) rt-ok clear
+
+% empty arr2 (nothing to remove)
+[1 2 3] [] difference
+[1 2 3] deep-eq                                (difference: empty arr2) rt-ok clear
+
+% both empty
+[] [] difference
+[] deep-eq                                     (difference: both empty) rt-ok clear
+
+% removes duplicates
+[1 1 2 2 3] [2] difference
+[1 3] deep-eq                                  (difference: dedup) rt-ok clear
+
+% preserves arr1 order
+[5 4 3 2 1] [2 4] difference
+[5 3 1] deep-eq                                (difference: arr1 order) rt-ok clear
+
+% string elements
+[(a) (b) (c) (d)] [(b) (d)] difference
+[(a) (c)] deep-eq                              (difference: strings) rt-ok clear
+
+% arr2 has extras that don't matter
+[1 2] [1 2 3 4 5] difference
+[] deep-eq                                     (difference: arr2 superset) rt-ok clear
+
+% packed input
+{ 1 2 3 4 5 } { 2 4 } difference
+[1 3 5] deep-eq                                (difference: packed input) rt-ok clear
+
+% single element removed
+[1 2 3] [2] difference
+[1 3] deep-eq                                  (difference: single removed) rt-ok clear
+
+% single element kept
+[1 2 3] [99] difference
+[1 2 3] deep-eq                                (difference: single kept) rt-ok clear
+
+% large arrays: [1..200] - [50..150] = [1..49] ++ [151..200] = 99 elements
+save
+[1 1 200 { } for] [50 1 150 { } for] difference
+dup length 99 eq                               (difference: large length) rt-ok
+dup 0 get 1 eq                                 (difference: large first) rt-ok
+dup 98 get 200 eq                              (difference: large last) rt-ok
+pop
+restore clear
+
+% asymmetry: A-B != B-A
+[1 2 3] [2 3 4] difference [1] deep-eq         (difference: A-B) rt-ok clear
+[2 3 4] [1 2 3] difference [4] deep-eq         (difference: B-A) rt-ok clear
+
+% error: underflow
+{ difference } try /opstack-underflow eq       (difference: underflow) rt-ok clear
+
+% error: type check
+{ 1 2 difference } try /type-check eq          (difference: type-check) rt-ok clear
+
+% error: NaN/Inf keys
+{ [1.0 nan] [2.0] difference } try /numerical-nan eq (difference: NaN in arr1) rt-ok clear
+{ [1.0] [2.0 inf] difference } try /numerical-inf eq (difference: Inf in arr2) rt-ok clear
+
+% ====================================================================
+% SECTION 51: set operations -- stress and boundary tests
+% ====================================================================
+
+% identity: A intersect A = unique(A)
+[3 1 2 1 3] dup intersect
+[3 1 2] deep-eq                                (set-id: A intersect A = unique A) rt-ok clear
+
+% identity: A union A = unique(A)
+[3 1 2 1 3] dup union
+[3 1 2] deep-eq                                (set-id: A union A = unique A) rt-ok clear
+
+% identity: A difference A = []
+[1 2 3] dup difference
+[] deep-eq                                     (set-id: A difference A = empty) rt-ok clear
+
+% set identity: (A intersect B) union (A difference B) = unique(A)
+[1 2 3 4 5] [3 4 5 6 7] intersect
+[1 2 3 4 5] [3 4 5 6 7] difference
+union { } sort-by
+[1 2 3 4 5] deep-eq                            (set-id: isect + diff = A) rt-ok clear
+
+% commutativity of intersect
+[1 2 3] [2 3 4] intersect { } sort-by
+[2 3 4] [1 2 3] intersect { } sort-by
+deep-eq                                        (set-comm: intersect) rt-ok clear
+
+% commutativity of union
+[1 2 3] [3 4 5] union { } sort-by
+[3 4 5] [1 2 3] union { } sort-by
+deep-eq                                        (set-comm: union) rt-ok clear
+
+% boolean elements
+[true false] [false] intersect
+[false] deep-eq                                (set: boolean intersect) rt-ok clear
+
+[true false] [false] difference
+[true] deep-eq                                 (set: boolean difference) rt-ok clear
+
+% negative integers
+[-3 -2 -1 0 1 2 3] [-1 0 1] intersect
+[-1 0 1] deep-eq                               (set: negative integers) rt-ok clear
+
+% real numbers
+[1.0 2.0 3.0] [2.0 3.0 4.0] intersect
+[2.0 3.0] deep-eq                              (set: reals) rt-ok clear
+
+% ====================================================================
+% SECTION 52: ExtValue lifecycle stress — Long/Double through callbacks
+% ====================================================================
+% Long and Double types use ExtValues (8-byte heap extensions).
+% These tests exercise callback operators with 64-bit elements to verify
+% no ExtValue leaks or corruption after the audit fixes.
+
+% for-all with Long elements
+save
+/sum 0l def
+[1000000000l 2000000000l 3000000000l] { sum add /sum exch def } for-all
+sum 6000000000l eq                           (extval: for-all long sum) rt-ok
+restore clear
+
+% map with Double elements
+save
+[1.0d 2.0d 3.0d] { 10.0d mul } map
+dup 0 get 10.0d eq                           (extval: map double elem 0) rt-ok
+dup 2 get 30.0d eq                           (extval: map double elem 2) rt-ok
+pop
+restore clear
+
+% filter with Long elements
+save
+[1000000000l 2000000000l 3000000000l 4000000000l] { 2500000000l gt } filter
+dup length 2 eq                              (extval: filter long length) rt-ok
+dup 0 get 3000000000l eq                     (extval: filter long first) rt-ok
+pop
+restore clear
+
+% any/all with Long elements
+save
+[1000000000l 2000000000l] { 1500000000l gt } any
+                                             (extval: any long) rt-ok
+[1000000000l 2000000000l] { 0l gt } all
+                                             (extval: all long) rt-ok
+restore clear
+
+% count-if with Double elements
+save
+[1.0d 2.0d 3.0d 4.0d 5.0d] { 3.0d gt } count-if
+2 eq                                         (extval: count-if double) rt-ok
+restore clear
+
+% min-by/max-by with Long elements
+save
+[100l 300l 200l] { } min-by
+100l eq                                      (extval: min-by long) rt-ok
+[100l 300l 200l] { } max-by
+300l eq                                      (extval: max-by long) rt-ok
+restore clear
+
+% sort-by single Long element
+save
+[42l] { } sort-by
+dup length 1 eq                              (extval: sort-by single long length) rt-ok
+dup 0 get 42l eq                             (extval: sort-by single long value) rt-ok
+pop
+restore clear
+
+% partition with Double elements
+save
+[1.0d 2.0d 3.0d 4.0d] { 2.5d gt } partition
+dup length 2 eq                              (extval: partition double fail length) rt-ok
+pop
+dup length 2 eq                              (extval: partition double pass length) rt-ok
+dup 0 get 3.0d eq                            (extval: partition double pass first) rt-ok
+pop
+restore clear
+
+% take-while with Long elements
+save
+[1000000000l 2000000000l 3000000000l] { 2500000000l lt } take-while
+dup length 2 eq                              (extval: take-while long length) rt-ok
+dup 1 get 2000000000l eq                     (extval: take-while long last) rt-ok
+pop
+restore clear
+
+% drop-while with Long elements
+save
+[1000000000l 2000000000l 3000000000l] { 2500000000l lt } drop-while
+dup length 1 eq                              (extval: drop-while long length) rt-ok
+dup 0 get 3000000000l eq                     (extval: drop-while long first) rt-ok
+pop
+restore clear
+
+% group-by with Long keys
+save
+[10l 20l 10l 30l 20l 10l] { } group-by
+dup length 3 eq                              (extval: group-by long key count) rt-ok
+dup 10l get length 3 eq                      (extval: group-by long group size) rt-ok
+pop
+restore clear
+
+% find with Double element
+save
+[1.0d 2.0d 3.0d] { 2.0d eq } find
+(extval: find double found) rt-ok
+2.0d eq                                      (extval: find double value) rt-ok
+restore clear
+
+% scan with Long elements
+save
+[1l 2l 3l] 0l { add } scan
+dup length 4 eq                              (extval: scan long length) rt-ok
+dup 3 get 6l eq                              (extval: scan long final) rt-ok
+pop
+restore clear
+
+% ====================================================================
+% SECTION 53: Source-array integrity -- ExtValue aliasing guard
+% ====================================================================
+% Every collection operator that iterates via a callback must not corrupt
+% the source array.  The bug pattern: array_pop_head returns a raw Object
+% sharing the source element's ExtValue.  If the callback's arithmetic
+% frees that ExtValue, the source element becomes a dangling reference.
+%
+% Each test: create a Long array, run the operator with arithmetic that
+% consumes the element, then verify the source array is intact.
+
+% --- map: source intact after Long arithmetic ---
+[1l 2l 3l] /src exch def
+src { 10l mul } map pop
+src 0 get 1l eq    (srcguard: map source[0] intact) rt-ok
+src 1 get 2l eq    (srcguard: map source[1] intact) rt-ok
+src 2 get 3l eq    (srcguard: map source[2] intact) rt-ok clear
+
+% --- map: source intact after Double arithmetic ---
+[1.0d 2.0d 3.0d] /src exch def
+src { 10.0d mul } map pop
+src 0 get 1.0d eq  (srcguard: map double source[0] intact) rt-ok
+src 2 get 3.0d eq  (srcguard: map double source[2] intact) rt-ok clear
+
+% --- filter: source intact after Long predicate ---
+[10l 20l 30l 40l] /src exch def
+src { 25l gt } filter pop
+src 0 get 10l eq   (srcguard: filter source[0] intact) rt-ok
+src 3 get 40l eq   (srcguard: filter source[3] intact) rt-ok clear
+
+% --- find: source intact after Long predicate ---
+[10l 20l 30l] /src exch def
+src { 20l eq } find pop pop
+src 0 get 10l eq   (srcguard: find source[0] intact) rt-ok
+src 1 get 20l eq   (srcguard: find source[1] intact) rt-ok clear
+
+% --- reduce: source intact after Long accumulation ---
+[1l 2l 3l 4l] /src exch def
+src 0l { add } reduce pop
+src 0 get 1l eq    (srcguard: reduce source[0] intact) rt-ok
+src 3 get 4l eq    (srcguard: reduce source[3] intact) rt-ok clear
+
+% --- all: source intact after Long predicate ---
+[10l 20l 30l] /src exch def
+src { 0l gt } all pop
+src 0 get 10l eq   (srcguard: all source[0] intact) rt-ok
+src 2 get 30l eq   (srcguard: all source[2] intact) rt-ok clear
+
+% --- any: source intact after Long predicate ---
+[10l 20l 30l] /src exch def
+src { 25l gt } any pop
+src 0 get 10l eq   (srcguard: any source[0] intact) rt-ok
+src 2 get 30l eq   (srcguard: any source[2] intact) rt-ok clear
+
+% --- count-if: source intact after Double predicate ---
+[1.0d 2.0d 3.0d 4.0d] /src exch def
+src { 2.5d gt } count-if pop
+src 0 get 1.0d eq  (srcguard: count-if source[0] intact) rt-ok
+src 3 get 4.0d eq  (srcguard: count-if source[3] intact) rt-ok clear
+
+% --- for-all: source intact after Long callback ---
+[10l 20l 30l] /src exch def
+src { pop } for-all
+src 0 get 10l eq   (srcguard: for-all source[0] intact) rt-ok
+src 2 get 30l eq   (srcguard: for-all source[2] intact) rt-ok clear
+
+% --- sort-by: source intact after Long key extraction ---
+[30l 10l 20l] /src exch def
+src { } sort-by pop
+src 0 get 30l eq   (srcguard: sort-by source[0] intact) rt-ok
+src 1 get 10l eq   (srcguard: sort-by source[1] intact) rt-ok clear
+
+% --- min-by: source intact after Long comparison ---
+[30l 10l 20l] /src exch def
+src { } min-by pop
+src 0 get 30l eq   (srcguard: min-by source[0] intact) rt-ok
+src 2 get 20l eq   (srcguard: min-by source[2] intact) rt-ok clear
+
+% --- max-by: source intact after Long comparison ---
+[30l 10l 20l] /src exch def
+src { } max-by pop
+src 0 get 30l eq   (srcguard: max-by source[0] intact) rt-ok
+src 2 get 20l eq   (srcguard: max-by source[2] intact) rt-ok clear
+
+% --- partition: source intact after Long predicate ---
+[10l 20l 30l 40l] /src exch def
+src { 25l gt } partition pop pop
+src 0 get 10l eq   (srcguard: partition source[0] intact) rt-ok
+src 3 get 40l eq   (srcguard: partition source[3] intact) rt-ok clear
+
+% --- take-while: source intact after Long predicate ---
+[10l 20l 30l] /src exch def
+src { 25l lt } take-while pop
+src 0 get 10l eq   (srcguard: take-while source[0] intact) rt-ok
+src 2 get 30l eq   (srcguard: take-while source[2] intact) rt-ok clear
+
+% --- drop-while: source intact after Long predicate ---
+[10l 20l 30l] /src exch def
+src { 25l lt } drop-while pop
+src 0 get 10l eq   (srcguard: drop-while source[0] intact) rt-ok
+src 2 get 30l eq   (srcguard: drop-while source[2] intact) rt-ok clear
+
+% --- group-by: source intact after Long key function ---
+[10l 20l 10l 30l] /src exch def
+src { } group-by pop
+src 0 get 10l eq   (srcguard: group-by source[0] intact) rt-ok
+src 1 get 20l eq   (srcguard: group-by source[1] intact) rt-ok
+src 3 get 30l eq   (srcguard: group-by source[3] intact) rt-ok clear
+
+% --- scan: source intact after Long accumulation ---
+[1l 2l 3l] /src exch def
+src 0l { add } scan pop
+src 0 get 1l eq    (srcguard: scan source[0] intact) rt-ok
+src 2 get 3l eq    (srcguard: scan source[2] intact) rt-ok clear
+
+% --- map with save/restore: source restored after map ---
+save
+[1l 2l 3l] /src exch def
+save
+src { 10l mul } map pop
+restore
+src 0 get 1l eq    (srcguard: map+restore source[0] recovered) rt-ok
+src 2 get 3l eq    (srcguard: map+restore source[2] recovered) rt-ok
+restore clear
+
+% --- map result independent of source (no shared ExtValue) ---
+[1l 2l 3l] /src exch def
+src { 0l add } map /result exch def
+result 0 999l put
+src 0 get 1l eq    (srcguard: map result put doesn't affect source) rt-ok clear
+
+% --- filter result independent of source ---
+[10l 20l 30l] /src exch def
+src { 15l gt } filter /result exch def
+result 0 999l put
+src 1 get 20l eq   (srcguard: filter result put doesn't affect source) rt-ok clear
+
+% --- scan result independent of source ---
+[1l 2l 3l] /src exch def
+src 0l { add } scan /result exch def
+result 0 999l put
+src 0 get 1l eq    (srcguard: scan result put doesn't affect source) rt-ok clear
+
+% ====================================================================
+% SECTION 60: Packed-input coverage for expand_packed_to_temp helper
+% ====================================================================
+
+% zip with packed inputs
+{ 1 2 3 } { 4 5 6 } zip
+dup length 3 eq                          (pk-zip: length 3) rt-ok
+dup 0 get dup 0 get 1 eq exch 1 get 4 eq and
+                                         (pk-zip: pair 0 = [1,4]) rt-ok
+dup 2 get dup 0 get 3 eq exch 1 get 6 eq and
+                                         (pk-zip: pair 2 = [3,6]) rt-ok
+pop clear
+
+% zip mixed: one packed, one array
+{ 10 20 } [30 40] zip
+dup 0 get dup 0 get 10 eq exch 1 get 30 eq and
+                                         (pk-zip: packed+array pair 0) rt-ok
+pop clear
+
+% interpose with packed input
+{ 1 2 3 } 0 interpose
+[1 0 2 0 3] deep-eq                     (pk-interpose: basic) rt-ok clear
+
+% interpose with packed singleton
+{ 42 } 0 interpose
+[42] deep-eq                             (pk-interpose: singleton) rt-ok clear
+
+% enumerate with packed input
+{ 10 20 30 } enumerate
+dup length 3 eq                          (pk-enumerate: length) rt-ok
+dup 0 get dup 0 get 0 eq exch 1 get 10 eq and
+                                         (pk-enumerate: pair 0 = [0,10]) rt-ok
+dup 2 get dup 0 get 2 eq exch 1 get 30 eq and
+                                         (pk-enumerate: pair 2 = [2,30]) rt-ok
+pop clear
+
+% chunk with packed input
+{ 1 2 3 4 5 } 2 chunk
+dup length 3 eq                          (pk-chunk: 5/2 = 3 groups) rt-ok
+dup 0 get [1 2] deep-eq                  (pk-chunk: group 0) rt-ok
+dup 2 get [5] deep-eq                    (pk-chunk: last group) rt-ok
+pop clear
+
+% sliding-window with packed input
+{ 1 2 3 4 } 2 sliding-window
+dup length 3 eq                          (pk-window: 4 elems, size 2 = 3 windows) rt-ok
+dup 0 get [1 2] deep-eq                  (pk-window: window 0) rt-ok
+dup 2 get [3 4] deep-eq                  (pk-window: window 2) rt-ok
+pop clear
+
+% frequencies with packed input
+{ 1 2 2 3 3 3 } frequencies
+dup length 3 eq                          (pk-freq: 3 unique keys) rt-ok
+dup 1 get 1 eq                           (pk-freq: 1 appears once) rt-ok
+dup 3 get 3 eq                           (pk-freq: 3 appears thrice) rt-ok
+pop clear
+
+% zip with packed ExtValue inputs (Long values)
+{ 1l 2l 3l } { 4l 5l 6l } zip
+dup 0 get dup 0 get 1l eq exch 1 get 4l eq and
+                                         (pk-zip: Long pair 0) rt-ok
+dup 2 get dup 0 get 3l eq exch 1 get 6l eq and
+                                         (pk-zip: Long pair 2) rt-ok
+pop clear
+
+% chunk with packed ExtValue input
+{ 10l 20l 30l 40l } 2 chunk
+dup 0 get dup 0 get 10l eq exch 1 get 20l eq and
+                                         (pk-chunk: Long group 0) rt-ok
+pop clear
+
+% ====================================================================
+% SECTION 61: Packed-input coverage for arrays_pop_clone_head helper
+% ====================================================================
+
+% any with packed input
+{ 1 2 3 } { 2 eq } any true eq          (pk-any: found) rt-ok clear
+{ 1 2 3 } { 9 eq } any false eq         (pk-any: not found) rt-ok clear
+
+% all with packed input
+{ 2 4 6 } { 2 mod 0 eq } all true eq    (pk-all: all even) rt-ok clear
+{ 2 3 6 } { 2 mod 0 eq } all false eq   (pk-all: not all even) rt-ok clear
+
+% count-if with packed input
+{ 1 2 3 4 5 } { 3 gt } count-if 2 eq    (pk-count-if: >3) rt-ok clear
+
+% scan with packed input
+{ 1 2 3 4 } 0 { add } scan
+[0 1 3 6 10] deep-eq                     (pk-scan: running sum) rt-ok clear
+
+% filter with packed input
+{ 1 2 3 4 5 } { 2 mod 0 eq } filter
+[2 4] deep-eq                            (pk-filter: evens) rt-ok clear
+
+% take-while with packed input
+{ 1 2 3 4 5 } { 4 lt } take-while
+[1 2 3] deep-eq                          (pk-take-while: <4) rt-ok clear
+
+% drop-while with packed input
+{ 1 2 3 4 5 } { 3 lt } drop-while
+[3 4 5] deep-eq                          (pk-drop-while: >=3) rt-ok clear
+
+% map with packed input
+{ 1 2 3 } { dup mul } map
+[1 4 9] deep-eq                          (pk-map: squares) rt-ok clear
+
+% sort-by with packed input
+{ 3 1 4 1 5 } { } sort-by
+[1 1 3 4 5] deep-eq                      (pk-sort-by: identity) rt-ok clear
+
+% group-by with packed input
+{ 1 2 3 4 5 6 } { 2 mod } group-by
+dup length 2 eq                          (pk-group-by: 2 groups) rt-ok
+pop clear
+
+% reduce with packed input
+{ 1 2 3 4 } 0 { add } reduce 10 eq      (pk-reduce: sum) rt-ok clear
+
+% ====================================================================
+% SECTION 62: Packed-input coverage for push_forall_frame helper
+% ====================================================================
+
+% sum with packed input
+{ 1 2 3 4 5 } sum 15 eq                 (pk-sum: 1..5) rt-ok clear
+
+% min-of with packed input
+{ 3 1 4 1 5 } min-of 1 eq               (pk-min-of: min=1) rt-ok clear
+
+% max-of with packed input
+{ 3 1 4 1 5 } max-of 5 eq               (pk-max-of: max=5) rt-ok clear
+
+% sum with packed ExtValue input
+{ 10l 20l 30l } sum 60l eq              (pk-sum: Long) rt-ok clear
+
+% min-of with packed ExtValue input
+{ 30l 10l 20l } min-of 10l eq           (pk-min-of: Long) rt-ok clear
+
+% max-of with packed ExtValue input
+{ 10l 30l 20l } max-of 30l eq           (pk-max-of: Long) rt-ok clear
+
+% ====================================================================
+% SECTION 63: Null-element rejection in dict-keyed array ops
+% Regression: fuzz/crashes/crash-424217e4 tripped Dict::get's null-key
+% assert via `difference` over an array containing null.  All dict-keyed
+% array ops must now reject null elements with a TypeCheck error rather
+% than abort.
+% ====================================================================
+
+% intersect: null in arr1 / arr2
+{ [1 null 2] [1 2] intersect } try /type-check eq
+(intersect: null in arr1 rejected) rt-ok clear
+{ [1 2] [1 null 2] intersect } try /type-check eq
+(intersect: null in arr2 rejected) rt-ok clear
+
+% difference: null in arr1 / arr2 (the original fuzz-found crash path)
+{ [1 null 2] [3] difference } try /type-check eq
+(difference: null in arr1 rejected) rt-ok clear
+{ [1 2] [null 3] difference } try /type-check eq
+(difference: null in arr2 rejected) rt-ok clear
+
+% union: null in arr1 / arr2
+{ [1 null] [2] union } try /type-check eq
+(union: null in arr1 rejected) rt-ok clear
+{ [1] [null 2] union } try /type-check eq
+(union: null in arr2 rejected) rt-ok clear
+
+% frequencies: null element
+{ [1 2 null 1] frequencies } try /type-check eq
+(frequencies: null rejected) rt-ok clear
+
+% group-by: proc produces null key
+{ [1 2 3] { pop null } group-by } try /type-check eq
+(group-by: null key rejected) rt-ok clear
+
+% happy paths still work after all the rejection tests
+[1 2 3] [2 3 4] intersect [2 3] deep-eq
+(intersect: happy path still works) rt-ok clear
+[1 2 3] [4 5] union [1 2 3 4 5] deep-eq
+(union: happy path still works) rt-ok clear
+[1 2 3] [2] difference [1 3] deep-eq
+(difference: happy path still works) rt-ok clear
+[1 1 2 3 3 3] frequencies
+<< 1 2 2 1 3 3 >> deep-eq
+(frequencies: happy path still works) rt-ok clear
+
+% ====================================================================
+% Final ExtValue free-list integrity check
+% ====================================================================
+
+//:status:extvalue-validate
+(extvalue free-list integrity after all collection tests) rt-ok clear
+
+//:status:vm-validate
+(vm heap integrity after all collection tests) rt-ok clear
+
+(Collection operator tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

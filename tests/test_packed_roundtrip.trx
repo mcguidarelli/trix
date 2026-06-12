@@ -1,0 +1,586 @@
+% ====================================================================
+% test_packed_roundtrip.trx -- Array <-> Packed round-trip tests
+% ====================================================================
+% Systematic coverage of packed array compression/decompression.
+% Tests that every PackedType opcode survives the round-trip:
+%   Array -> Packed (make_packed_data) -> deep-eq (cross-type)
+%
+% deep-eq treats Array and Packed as the same abstract sequence,
+% comparing element-by-element regardless of container representation.
+% The packed format compresses Objects into a variable-length byte
+% encoding (PackedType enum, ~32 opcodes).  These tests verify that
+% every reachable encoding round-trips correctly.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% Round-trip helper: array -> packed -> deep-eq (cross-type)
+% Takes an array, packs it, compares packed directly against original array.
+/pk-n 0 def
+/pk-rt {
+  dup                              % arr arr
+  dup length /pk-n exch def        % arr arr
+  array-load pop                   % arr elem1 elem2 ... elemN  (W07: splat without leak)
+  pk-n packed                      % arr packed
+  deep-eq                          % bool (cross-type Array vs Packed)
+} def
+
+% ====================================================================
+% SECTION 1: Empty and single-element arrays
+% ====================================================================
+
+[] pk-rt                           (pk: empty array) rt-ok clear
+[null] pk-rt                       (pk: [null]) rt-ok clear
+[true] pk-rt                       (pk: [true]) rt-ok clear
+[false] pk-rt                      (pk: [false]) rt-ok clear
+[mark] pk-rt                       (pk: [mark]) rt-ok clear
+[0] pk-rt                          (pk: [0]) rt-ok clear
+[42] pk-rt                         (pk: [42]) rt-ok clear
+[(hello)] pk-rt                    (pk: [(hello)]) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Byte values
+% ====================================================================
+
+[0b] pk-rt                         (pk: byte [0]) rt-ok clear
+[1b] pk-rt                         (pk: byte [1]) rt-ok clear
+[127b] pk-rt                       (pk: byte [127]) rt-ok clear
+[128b] pk-rt                       (pk: byte [128]) rt-ok clear
+[255b] pk-rt                       (pk: byte [255]) rt-ok clear
+[42b 100b 200b] pk-rt              (pk: byte [42 100 200]) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Integer values -- positive and negative encoding
+% ====================================================================
+
+% Small positive integers
+[0 1 2 3 4 5 6 7 8 9 10] pk-rt    (pk: int [0..10]) rt-ok clear
+
+% Larger positive integers
+[100 255 256 1000 32767 65535] pk-rt  (pk: int positive range) rt-ok clear
+
+% Maximum integer
+[//:systemdict:numbers:integer-type:max] pk-rt  (pk: int max) rt-ok clear
+
+% Negative integers (sign-aware byte stripping)
+[-1 -2 -10 -100 -1000] pk-rt      (pk: int negative) rt-ok clear
+[-128 -129 -32768 -32769] pk-rt    (pk: int negative boundaries) rt-ok clear
+
+% Minimum integer
+[//:systemdict:numbers:integer-type:min] pk-rt  (pk: int min) rt-ok clear
+
+% ====================================================================
+% SECTION 4: UInteger values
+% ====================================================================
+
+[0u 1u 100u 255u 256u] pk-rt      (pk: uint range) rt-ok clear
+[65535u 65536u 1000000u] pk-rt     (pk: uint larger) rt-ok clear
+[//:systemdict:numbers:uinteger-type:max] pk-rt  (pk: uint max) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Long values (ExtValue -- 64-bit)
+% ====================================================================
+
+[0l 1l -1l] pk-rt                  (pk: long basics) rt-ok clear
+[100l -100l 32767l -32768l] pk-rt  (pk: long medium) rt-ok clear
+[2147483647l -2147483648l] pk-rt   (pk: long 32-bit bounds) rt-ok clear
+[3000000000l -3000000000l] pk-rt   (pk: long 64-bit values) rt-ok clear
+[//:systemdict:numbers:long-type:min] pk-rt   (pk: long min) rt-ok clear
+[//:systemdict:numbers:long-type:max] pk-rt   (pk: long max) rt-ok clear
+
+% ====================================================================
+% SECTION 6: ULong values (ExtValue -- 64-bit unsigned)
+% ====================================================================
+
+[0ul 1ul 255ul 65536ul] pk-rt     (pk: ulong range) rt-ok clear
+[4294967295ul 4294967296ul] pk-rt  (pk: ulong 32-bit boundary) rt-ok clear
+[//:systemdict:numbers:ulong-type:max] pk-rt  (pk: ulong max) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Real values (IEEE 754 single)
+% ====================================================================
+
+[0. 1. -1. 0.5 -0.5] pk-rt        (pk: real basics) rt-ok clear
+[3.14 2.71828 -99.99] pk-rt        (pk: real general) rt-ok clear
+[//:systemdict:numbers:real-type:e //:systemdict:numbers:real-type:pi] pk-rt
+                                    (pk: real constants) rt-ok clear
+[//:systemdict:numbers:real-type:infinity] pk-rt  (pk: real +inf) rt-ok clear
+
+% Negative zero
+[-0.] pk-rt                         (pk: real -0.0) rt-ok clear
+
+% Negative infinity
+[//:systemdict:numbers:real-type:infinity neg] pk-rt  (pk: real -inf) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Double values (IEEE 754 double, ExtValue)
+% ====================================================================
+
+[0.d 1.d -1.d] pk-rt              (pk: double basics) rt-ok clear
+[3.141592653589793d -2.718281828459045d] pk-rt  (pk: double precise) rt-ok clear
+[//:systemdict:numbers:double-type:e //:systemdict:numbers:double-type:pi] pk-rt
+                                    (pk: double constants) rt-ok clear
+[//:systemdict:numbers:double-type:infinity] pk-rt  (pk: double +inf) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Boolean, Null, Mark (Simple PackedType encoding)
+% ====================================================================
+
+[null null null] pk-rt             (pk: [null null null]) rt-ok clear
+[true true false] pk-rt            (pk: [true true false]) rt-ok clear
+[false true null mark] pk-rt       (pk: [false true null mark]) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Names -- system and user
+% ====================================================================
+
+% System literal names
+[/null /true /false] pk-rt         (pk: sysnames low-index) rt-ok clear
+[/add /sub /mul /div] pk-rt        (pk: sysnames arithmetic) rt-ok clear
+[/to-binary-token /snap-shot] pk-rt  (pk: sysnames high-index) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Strings
+% ====================================================================
+
+[()] pk-rt                          (pk: string empty) rt-ok clear
+[(hello)] pk-rt                     (pk: string hello) rt-ok clear
+[(a) (bb) (ccc)] pk-rt              (pk: string multiple) rt-ok clear
+[(\x00\x81\xFF)] pk-rt              (pk: string binary bytes) rt-ok clear
+
+% Longer string (>255 bytes triggers long string encoding)
+(ABCDEFGHIJ) dup concat dup concat dup concat dup concat
+dup concat dup concat                % 640 bytes
+1 array dup 0 4 -1 roll put         % wrap in array
+pk-rt                                (pk: string 640 bytes) rt-ok clear
+
+% ====================================================================
+% SECTION 12: Operators (PosOperator / NegOperator encoding)
+% ====================================================================
+% Operators in packed arrays use a special compact encoding.
+% { 1 2 add } is a packed proc containing the operator 'add'.
+% For procs (already packed), unpack and repack, then deep-eq against original.
+/pk-proc-rt {
+  dup                               % proc proc
+  dup length /pk-n exch def
+  array-load pop pk-n packed           % proc packed2
+  deep-eq                           % bool (Packed vs Packed)
+} def
+
+% Single operator
+{ //add } pk-proc-rt                (pk: operator add) rt-ok clear
+
+% Multiple operators
+{ //add //sub //mul //div } pk-proc-rt  (pk: operators arith) rt-ok clear
+
+% Operators with operands (realistic proc)
+{ 1 2 //add 3 //mul } pk-proc-rt   (pk: proc 1 2 add 3 mul) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Mixed types
+% ====================================================================
+
+[1 2.0 (three) true null 5l 6ul 7b] pk-rt
+                                    (pk: mixed 8 types) rt-ok clear
+
+[0 0u 0l 0ul 0. 0.d 0b false null] pk-rt
+                                    (pk: mixed all-zeros) rt-ok clear
+
+[-1 -1l -1. -1.d true (negative)] pk-rt
+                                    (pk: mixed negatives) rt-ok clear
+
+[//:systemdict:numbers:integer-type:max
+ //:systemdict:numbers:uinteger-type:max
+ //:systemdict:numbers:long-type:max
+ //:systemdict:numbers:ulong-type:max
+ //:systemdict:numbers:real-type:infinity
+ //:systemdict:numbers:double-type:infinity] pk-rt
+                                    (pk: mixed max values) rt-ok clear
+
+% ====================================================================
+% SECTION 14: Nested arrays in packed
+% ====================================================================
+
+[[1 2] [3 4]] pk-rt                (pk: nested [[1 2][3 4]]) rt-ok clear
+[[] [1] [1 2]] pk-rt               (pk: nested varying lengths) rt-ok clear
+[[1 [2 [3]]]] pk-rt                (pk: nested 3 deep) rt-ok clear
+[1 [2 3] 4] pk-rt                  (pk: mixed flat and nested) rt-ok clear
+
+% ====================================================================
+% SECTION 15: Packed-to-packed deep-eq
+% ====================================================================
+% Pack the same array twice independently, compare packed vs packed.
+% Helper: array -- packed (leaves packed on stack)
+/pk-make {
+  dup length /pk-n exch def array-load pop pk-n packed
+} def
+
+[] pk-make [] pk-make deep-eq                    (pk-eq: empty) rt-ok clear
+[1 2 3] pk-make [1 2 3] pk-make deep-eq         (pk-eq: [1 2 3]) rt-ok clear
+[1l 2.d (hello) true null] pk-make
+[1l 2.d (hello) true null] pk-make deep-eq       (pk-eq: mixed) rt-ok clear
+[[1 2] [3 4]] pk-make [[1 2] [3 4]] pk-make deep-eq
+                                                  (pk-eq: nested) rt-ok clear
+
+% ====================================================================
+% SECTION 15b: Cross-type Array vs Packed deep-eq
+% ====================================================================
+% deep-eq treats Array and Packed as the same abstract sequence type.
+
+% Array deep-eq Packed (and vice versa)
+[1 2 3]  { 1 2 3 }  deep-eq       (pk-cross: [1 2 3] deep-eq {1 2 3}) rt-ok clear
+{ 1 2 3 }  [1 2 3]  deep-eq       (pk-cross: {1 2 3} deep-eq [1 2 3]) rt-ok clear
+
+% Empty
+[]  { }  deep-eq                   (pk-cross: [] deep-eq {}) rt-ok clear
+{ }  []  deep-eq                   (pk-cross: {} deep-eq []) rt-ok clear
+
+% Mixed element types: array vs packed copy
+[1 2.0 (three) true null] dup
+dup length /pk-n exch def array-load pop pk-n packed
+deep-eq                            (pk-cross: mixed types) rt-ok clear
+
+% Nested: array vs packed copy
+[[1 2] [3 4]] dup
+dup length /pk-n exch def array-load pop pk-n packed
+deep-eq                            (pk-cross: nested [[1 2][3 4]]) rt-ok clear
+
+% Single element: array vs packed
+[42] dup
+dup length /pk-n exch def array-load pop pk-n packed
+deep-eq                            (pk-cross: single element) rt-ok clear
+
+% deep-ne should also work cross-type
+[1 2 3] { 1 2 4 } deep-ne         (pk-cross: deep-ne detects difference) rt-ok clear
+[1 2] { 1 2 3 } deep-ne           (pk-cross: deep-ne length mismatch) rt-ok clear
+
+% Confirm value types are NOT cross-type equal (the line we don't cross)
+1 1l deep-eq not                   (pk-cross: 1 != 1l [value types distinct]) rt-ok clear
+1 1b deep-eq not                   (pk-cross: 1 != 1b [value types distinct]) rt-ok clear
+0 0u deep-eq not                   (pk-cross: 0 != 0u [value types distinct]) rt-ok clear
+
+% ====================================================================
+% SECTION 16: Executable packed arrays (procedures)
+% ====================================================================
+% { ... } creates an executable packed array.  Verify that the contents
+% survive a round-trip through for-all and repacking.
+
+% Simple proc
+{ 1 2 //add } pk-proc-rt           (pk: proc {1 2 add}) rt-ok clear
+
+% Proc with names
+{ /x 1 //def /x } pk-proc-rt       (pk: proc with names) rt-ok clear
+
+% ====================================================================
+% SECTION 17: Boundary values at encoding transitions
+% ====================================================================
+
+% Integer encoding boundaries in packed format
+% Small integers may use fewer bytes; larger ones use more.
+[0 1 2 126 127 128 255 256 32767 32768 65535 65536] pk-rt
+                                    (pk: fuzz positive int transitions) rt-ok clear
+
+[-1 -2 -127 -128 -129 -256 -32768 -32769] pk-rt
+                                    (pk: fuzz negative int transitions) rt-ok clear
+
+% UInteger boundaries
+[0u 1u 127u 128u 255u 256u 65535u 65536u] pk-rt
+                                    (pk: fuzz uint transitions) rt-ok clear
+
+% Long boundaries
+[0l 127l 128l 32767l 32768l 2147483647l 2147483648l] pk-rt
+                                    (pk: fuzz long transitions) rt-ok clear
+
+[-1l -128l -129l -32768l -32769l -2147483648l -2147483649l] pk-rt
+                                    (pk: fuzz neg long transitions) rt-ok clear
+
+% ULong boundaries
+[0ul 255ul 256ul 65535ul 65536ul 4294967295ul 4294967296ul] pk-rt
+                                    (pk: fuzz ulong transitions) rt-ok clear
+
+% ====================================================================
+% SECTION 18: Stress -- large arrays
+% ====================================================================
+
+% 100-element integer array
+mark
+100 { 42 } repeat
+count-to-mark array
+pk-rt                               (pk: stress 100 integers) rt-ok clear
+
+% 200-element mixed array
+mark
+100 { 42 } repeat
+100 { 3.14 } repeat
+count-to-mark array
+pk-rt                               (pk: stress 200 mixed) rt-ok clear
+
+% Array of 50 strings
+mark
+50 { (test-string) } repeat
+count-to-mark array
+pk-rt                               (pk: stress 50 strings) rt-ok clear
+
+% Array with 50 different integers (0..49)
+0 1 49 { } for
+50 array
+pk-rt                               (pk: stress 50 sequential ints) rt-ok clear
+
+% ====================================================================
+% SECTION 19: Repeated pack/unpack cycles
+% ====================================================================
+
+% Pack and unpack 5 times, verify still equal to original.
+% Each cycle: packed -> for-all -> packed (stays as packed throughout).
+% Final compare: original array vs packed (cross-type deep-eq).
+[1 2.0 (three) true 5l]
+dup
+5 {
+  dup length /pk-n exch def
+  array-load pop pk-n packed
+} repeat
+deep-eq                             (pk: 5x round-trip) rt-ok clear
+
+% ====================================================================
+% SECTION 20: CommonOp encoding (8 hot operators)
+% ====================================================================
+% The packed format has a special 1-byte encoding for the 8 most
+% common operators.  Test that procs using these round-trip correctly.
+
+{ //pop } pk-proc-rt               (pk: common-op pop) rt-ok clear
+{ //dup } pk-proc-rt               (pk: common-op dup) rt-ok clear
+{ //exch } pk-proc-rt              (pk: common-op exch) rt-ok clear
+{ //add } pk-proc-rt               (pk: common-op add) rt-ok clear
+{ //def } pk-proc-rt               (pk: common-op def) rt-ok clear
+
+% ====================================================================
+% SECTION 21: Functional verification
+% ====================================================================
+% Verify packed procs actually execute correctly after round-trip.
+
+% Pack a proc, execute it, verify result
+{ 2 3 add } dup length /pk-n exch def
+array-load pop pk-n packed make-executable
+exec 5 eq                           (pk: exec packed {2 3 add} = 5) rt-ok clear
+
+% Verify that a proc round-tripped through array still executes correctly
+{ 10 5 add }
+{ } map                             % convert packed -> array
+make-executable exec 15 eq          (pk: exec array-from-packed = 15) rt-ok clear
+
+% Verify that map preserves proc behavior
+[1 2 3] { 10 mul } map
+[10 20 30] deep-eq                  (pk: map with packed proc) rt-ok clear
+
+% ====================================================================
+% SECTION 22: Error cases
+% ====================================================================
+
+% packed with negative count
+{ -1 packed } try /range-check eq   (pk: err negative count) rt-ok clear
+
+% packed with insufficient operands
+{ 1 5 packed } try /opstack-underflow eq  (pk: err insufficient operands) rt-ok clear
+
+% ====================================================================
+% SECTION 23: Procedure binding modes (#e, #l, #a suffixes)
+% ====================================================================
+% Early binding (#e) resolves executable names to operators at scan time.
+% Late binding (#l, default) resolves names at execution time.
+% Array mode (#a) stores the procedure as an Array instead of Packed.
+
+% --- Basic early binding: resolves operators at scan time ---
+save
+{ 3 4 add }#e exec 7 eq                (pk: early-bound add executes correctly) rt-ok
+{ 10 3 sub }#e exec 7 eq               (pk: early-bound sub executes correctly) rt-ok
+{ 2 3 mul 1 add }#e exec 7 eq          (pk: early-bound multi-op chain) rt-ok
+restore clear
+
+% --- Early binding freezes operator resolution ---
+% Redefine 'add' after creating an early-bound proc.
+% The early-bound proc should use the ORIGINAL add operator.
+save
+{ 3 4 add }#e /frozen-add exch def
+/add { sub } def          % shadow add with sub
+frozen-add exec 7 eq                   (pk: early-bound ignores later redefinition) rt-ok
+% Late-bound (default) proc should see the redefinition
+{ 3 4 add } /late-add exch def
+late-add exec -1 eq                    (pk: late-bound sees redefinition) rt-ok
+restore clear
+
+% --- Early binding reaches THROUGH a |locals| preamble (recursive bind) ---
+% The locals transform wraps the body into a nested packed proc; bind recurses
+% into it, so #e freezes the body's operators even for a |...| procedure.
+save
+{ |x| x 1 add }#e /frozen-loc exch def
+{ |x| x 1 add }   /late-loc   exch def
+/add { sub } def
+5 frozen-loc exec 6 eq      (pk: #e binds operators inside a |locals| body) rt-ok
+5 late-loc   exec 4 eq      (pk: late-bound |locals| body sees the redefinition) rt-ok
+restore clear
+
+% --- HAZARD: a |locals| name that shadows an operator, plus #e ---
+% At scan time the local does not exist, so #e freezes the body reference to the
+% OPERATOR (not the future local); the proc then mis-dispatches.  This is the
+% exact foot-gun tests/check_operator_shadows.py guards against -- early binding
+% an operator-named local is NOT the same as the late-bound (correct) proc.
+save
+{ |max| max }   /late-max  exch def
+{ |max| max }#e /early-max exch def
+42 late-max exec 42 eq                  (pk: late-bound operator-named local pushes the local value) rt-ok
+{ 42 early-max exec } try /no-error ne  (pk: #e froze operator-named local 'max' to the operator -> errors) rt-ok
+restore clear
+
+% --- Empty body + #e (regression: bind on an empty packed body crashed) ---
+% A proc with an empty body, early-bound.  The |locals| transform nests an empty
+% packed element ([/x K N {} begin-locals]); #e/bind recursing into that empty
+% packed proc previously dereferenced a null data offset (the scanner aborted
+% with "offset_to_ptr: null offset").  An empty packed proc has no data offset,
+% so bind must treat it as a no-op -- both the bare empty proc and the
+% |locals|-wrapped empty body must scan, bind, and execute cleanly.
+save
+1 { }#e exec 1 eq                       (pk: #e on an empty proc binds + execs as a no-op) rt-ok
+1 2 { |x| }#e exec 1 eq                 (pk: #e on an empty |locals| body does not crash bind) rt-ok
+restore clear
+
+% --- Explicit late binding suffix (#l) ---
+save
+{ 5 3 add }#l exec 8 eq               (pk: explicit late-bound #l executes) rt-ok
+restore clear
+
+% --- Array mode (#a): stores proc as Array, not Packed ---
+save
+{ 1 2 add }#a
+dup type /array-type eq                (pk: #a suffix produces Array type) rt-ok
+exec 3 eq                              (pk: #a array proc executes correctly) rt-ok
+restore clear
+
+% --- Early binding + array mode (#ae) ---
+save
+{ 10 5 add }#ae
+dup type /array-type eq                (pk: #ae produces Array type) rt-ok
+exec 15 eq                             (pk: #ae early-bound array executes) rt-ok
+restore clear
+
+% --- Early binding + read-only (#er) ---
+save
+{ 7 8 add }#er exec 15 eq             (pk: #er early read-only executes) rt-ok
+restore clear
+
+% --- Array + read-only (#ar) ---
+save
+{ 4 5 add }#ar
+dup type /array-type eq                (pk: #ar produces Array type) rt-ok
+exec 9 eq                              (pk: #ar read-only array executes) rt-ok
+restore clear
+
+save
+% Verify read-only arrays reject put
+% W04: try rolls back the 0 99 residue pushed inside the proc body
+% on the error path.  The [4,5]#r value was pushed BEFORE the try
+% call so it survives, sitting just below the /read-only error name.
+[4 5]#r { 0 99 put } try
+/read-only eq                          (pk: read-only array rejects put) rt-ok
+pop                                    % drop the surviving [4,5]#r
+restore clear
+
+% --- Array + early + read-only (#aer) ---
+save
+{ 2 3 mul }#aer
+dup type /array-type eq                (pk: #aer produces Array type) rt-ok
+exec 6 eq                              (pk: #aer early read-only executes) rt-ok
+restore clear
+
+% --- Temp proc (#=) uses scratch storage ---
+save
+{ 100 200 add }#= exec 300 eq         (pk: #= temp proc executes) rt-ok
+restore clear
+
+% --- Nested procs with early binding ---
+save
+{ { 3 4 add } exec 1 add }#e exec 8 eq (pk: early-bound nested proc) rt-ok
+restore clear
+
+% --- Early binding with user-defined names (not operators) ---
+% User-defined names should NOT be bound early (only operators are).
+save
+/myval 42 def
+{ myval 1 add }#e exec 43 eq          (pk: early-bound preserves user name lookup) rt-ok
+/myval 100 def
+{ myval 1 add }#e exec 101 eq         (pk: early-bound user name sees redefinition) rt-ok
+restore clear
+
+% --- Explicit packed suffix (#p) ---
+save
+{ 6 7 add }#p
+dup type /packed-type eq               (pk: #p suffix produces Packed type) rt-ok
+exec 13 eq                             (pk: #p packed proc executes) rt-ok
+restore clear
+
+% --- Explicit writable array (#aw) ---
+save
+{ 9 1 add }#aw
+dup type /array-type eq                (pk: #aw produces Array type) rt-ok
+exec 10 eq                             (pk: #aw writable array executes) rt-ok
+restore clear
+
+% --- Writable array allows put (#aw) ---
+save
+[10 20 30]#w dup 1 99 put
+1 get 99 eq                            (pk: #w array accepts put) rt-ok
+restore clear
+
+% --- Packed + writable (#pw) is unsupported ---
+% Must use string+token since error occurs during scanning, not execution.
+{ ({ 1 2 add }#pw) token } try /unsupported eq (pk: #pw rejected as unsupported) rt-ok clear
+
+% --- Bare #w on packed (default) is unsupported ---
+{ ({ 1 2 add }#w) token } try /unsupported eq  (pk: #w on packed rejected) rt-ok clear
+
+% --- Temp proc + early binding (#=e) ---
+save
+{ 5 6 mul }#=e exec 30 eq             (pk: #=e temp early-bound executes) rt-ok
+restore clear
+
+% --- Temp proc + array mode (#=a) ---
+save
+{ 3 3 add }#=a
+dup type /array-type eq                (pk: #=a temp array type) rt-ok
+exec 6 eq                              (pk: #=a temp array executes) rt-ok
+restore clear
+
+% --- Explicit packed + early binding (#pe) ---
+save
+{ 4 4 mul }#pe
+dup type /packed-type eq               (pk: #pe produces Packed type) rt-ok
+exec 16 eq                             (pk: #pe early-bound packed executes) rt-ok
+restore clear
+
+% --- Explicit packed + late binding (#pl) ---
+save
+{ 2 8 add }#pl exec 10 eq             (pk: #pl late-bound packed executes) rt-ok
+restore clear
+
+% --- Array + late + read-only (#alr) ---
+save
+{ 7 3 sub }#alr
+dup type /array-type eq                (pk: #alr produces Array type) rt-ok
+exec 4 eq                              (pk: #alr late read-only array executes) rt-ok
+restore clear
+
+% --- Invalid suffix rejected (scanner returns false) ---
+({ 1 2 add }#z) token false eq        (pk: invalid suffix #z rejected) rt-ok clear
+
+% --- Suffix order violation rejected ---
+({ 1 2 add }#re) token false eq       (pk: wrong order #re rejected) rt-ok clear
+
+(Packed array round-trip tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

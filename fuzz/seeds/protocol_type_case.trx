@@ -1,0 +1,1 @@
+42 << /integer-type { (int) } /string-type { (str) } >> type-case

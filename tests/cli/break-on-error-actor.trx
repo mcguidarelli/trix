@@ -1,0 +1,9 @@
+% break-on-error-actor.trx -- break-on-error halts on a dying actor.
+% The /error event fires on the actor's own stacks; after the callback
+% returns the actor dies exactly as without the halt (kill + reschedule,
+% join sees the abnormal flag) and main exits cleanly.
+{ /e exch def (halt-in-actor=) print e tag-name = debug-continue } debug-on-event
+true debug-break-on-error
+mark { (actor-running) = actor-zzz-undefined } actor-spawn
+coroutine-join clear
+(main-survives) =

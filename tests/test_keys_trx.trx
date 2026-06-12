@@ -1,0 +1,129 @@
+% test_keys_trx.trx -- exercises lib/keys.trx with synthetic byte source.
+%
+% Drives decode-key by feeding it pre-recorded byte arrays.  No tty needed --
+% the whole point of having the decoder in Trix is testability without a pty.
+
+(lib/keys.trx) run
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+% --- Synthetic byte source --------------------------------------------------
+
+/test-bytes [] def
+/test-cursor 0 def
+
+/feed {
+    % arr -- ; install a byte sequence as the source for the next decode call
+    /test-bytes exch store
+    /test-cursor 0 store
+} def
+
+/source {
+    % -- byte true | false ; pulls next byte from test-bytes, returns false at end
+    test-cursor test-bytes length lt
+    {
+        test-bytes test-cursor get
+        /test-cursor test-cursor 1 add store
+        true
+    }
+    { false } if-else
+} def
+
+% Run decode-key with both block and poll bound to /source, so the synthetic
+% sequence flows through both phases (initial read + continuation reads).
+/decode {
+    { source } { source } decode-key
+} def
+
+% --- Single-byte tests -------------------------------------------------------
+
+[97]   feed decode /a    eq (printable: 'a')         rt-ok
+[81]   feed decode /Q    eq (printable: 'Q')         rt-ok
+[33]   feed decode /!    eq (printable: '!')         rt-ok
+[126]  feed decode /~    eq (printable: '~')         rt-ok
+
+[9]    feed decode /tab       eq (special: tab)       rt-ok
+[10]   feed decode /enter     eq (special: enter LF)  rt-ok
+[13]   feed decode /enter     eq (special: enter CR)  rt-ok
+[127]  feed decode /backspace eq (special: backspace) rt-ok
+
+[1]    feed decode /ctrl-a eq (control: ctrl-a)  rt-ok
+[3]    feed decode /ctrl-c eq (control: ctrl-c)  rt-ok
+[26]   feed decode /ctrl-z eq (control: ctrl-z)  rt-ok
+
+% --- Bare ESC -> /escape (poll returns false on next read) -------------------
+
+[27]   feed decode /escape eq (bare ESC -> /escape) rt-ok
+
+% --- CSI single-letter sequences ---------------------------------------------
+
+[27 91 65] feed decode /up    eq (CSI: up)    rt-ok
+[27 91 66] feed decode /down  eq (CSI: down)  rt-ok
+[27 91 67] feed decode /right eq (CSI: right) rt-ok
+[27 91 68] feed decode /left  eq (CSI: left)  rt-ok
+[27 91 72] feed decode /home  eq (CSI: home)  rt-ok
+[27 91 70] feed decode /end   eq (CSI: end)   rt-ok
+
+% --- CSI 1-digit tilde codes -------------------------------------------------
+
+[27 91 49 126] feed decode /home      eq (CSI: 1~ home)      rt-ok
+[27 91 50 126] feed decode /insert    eq (CSI: 2~ insert)    rt-ok
+[27 91 51 126] feed decode /delete    eq (CSI: 3~ delete)    rt-ok
+[27 91 52 126] feed decode /end       eq (CSI: 4~ end)       rt-ok
+[27 91 53 126] feed decode /page-up   eq (CSI: 5~ page-up)   rt-ok
+[27 91 54 126] feed decode /page-down eq (CSI: 6~ page-down) rt-ok
+
+% --- CSI 2-digit tilde codes (function keys F5..F12) -------------------------
+
+[27 91 49 53 126] feed decode /f5  eq (CSI: 15~ F5)  rt-ok
+[27 91 49 55 126] feed decode /f6  eq (CSI: 17~ F6)  rt-ok
+[27 91 49 56 126] feed decode /f7  eq (CSI: 18~ F7)  rt-ok
+[27 91 49 57 126] feed decode /f8  eq (CSI: 19~ F8)  rt-ok
+[27 91 50 48 126] feed decode /f9  eq (CSI: 20~ F9)  rt-ok
+[27 91 50 49 126] feed decode /f10 eq (CSI: 21~ F10) rt-ok
+[27 91 50 51 126] feed decode /f11 eq (CSI: 23~ F11) rt-ok
+[27 91 50 52 126] feed decode /f12 eq (CSI: 24~ F12) rt-ok
+
+% --- SS3 (function keys F1..F4) ----------------------------------------------
+
+[27 79 80] feed decode /f1 eq (SS3: F1) rt-ok
+[27 79 81] feed decode /f2 eq (SS3: F2) rt-ok
+[27 79 82] feed decode /f3 eq (SS3: F3) rt-ok
+[27 79 83] feed decode /f4 eq (SS3: F4) rt-ok
+
+% --- Unknowns ---------------------------------------------------------------
+
+[27 91 90]    feed decode /unknown eq (CSI: unknown letter)  rt-ok
+[27 91 99]    feed decode /unknown eq (CSI: non-digit non-letter) rt-ok
+[27 91 49 90] feed decode /unknown eq (CSI: digit + letter no ~) rt-ok
+[27 88]       feed decode /unknown eq (post-ESC: unknown intro)  rt-ok
+[200]         feed decode /unknown eq (high-bit byte: unknown)  rt-ok
+
+% --- EOF ---------------------------------------------------------------------
+
+[] feed decode /eof eq (empty source -> /eof) rt-ok
+
+%% === Results ===
+
+failed 0 eq
+{ total (keys-trx: all tests passed) = = }
+{ (keys-trx: FAILURES = ) print failed = } if-else
+failed 0 eq { } { /assert-failed throw } if-else
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

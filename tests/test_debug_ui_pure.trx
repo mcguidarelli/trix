@@ -1,0 +1,1131 @@
+% test_debug_ui_pure.trx -- headless regression suite for the Phase D
+% debugger UI helpers (plan_debugger_tui.md).
+%
+% Tests dbg-render-source / dbg-render-stacks / dbg-render-status-bar
+% by rendering to a memory-backed Screen + screen-render-to a string-
+% stream and asserting on the captured bytes.  Tests dbg-key-to-action
+% mapping, dbg-focus-next cycling, color-theme switching.
+%
+% No TTY required.
+
+/passed 0 def
+/failed 0 def
+/total  0 def
+/expect {                           % cond label --
+    total 1 add /total exch def
+    exch
+    { pop passed 1 add /passed exch def }
+    { (FAILED: ) print = failed 1 add /failed exch def }
+    if-else
+} def
+
+(lib/debugger.trx) require
+
+% --- SECTION 1: dbg-key-to-action ----------------------------------------
+
+/s    dbg-key-to-action /step       eq      (key /s    -> /step)        expect
+/n    dbg-key-to-action /step-over  eq      (key /n    -> /step-over)   expect
+/o    dbg-key-to-action /step-out   eq      (key /o    -> /step-out)    expect
+/c    dbg-key-to-action /continue   eq      (key /c    -> /continue)    expect
+/q    dbg-key-to-action /quit       eq      (key /q    -> /quit)        expect
+/b    dbg-key-to-action /break      eq      (key /b    -> /break)       expect
+/tab  dbg-key-to-action /focus-next eq      (key /tab  -> /focus-next)  expect
+/f5   dbg-key-to-action /continue   eq      (key /f5   -> /continue)    expect
+/f9   dbg-key-to-action /break      eq      (key /f9   -> /break)       expect
+/f10  dbg-key-to-action /step-over  eq      (key /f10  -> /step-over)   expect
+/f11  dbg-key-to-action /step       eq      (key /f11  -> /step)        expect
+/f12  dbg-key-to-action /step-out   eq      (key /f12  -> /step-out)    expect
+/x    dbg-key-to-action /unknown    eq      (key /x    -> /unknown)     expect
+
+% --- SECTION 2: dbg-render-source ---------------------------------------
+
+80 24 make-screen
+dup
+[
+    (line one)
+    (line two)
+    (line three)
+    (line four)
+    (line FIVE)
+    (line six)
+    (line seven)
+    (line eight)
+    (line nine)
+    (line ten)
+] 5 dbg-render-source
+
+4096 make-string-stream /capture exch def
+capture screen-render-to pop
+/captured capture get-string-stream def
+
+captured length 0 gt                        (render-source: produced bytes)    expect
+captured (line FIVE)    count-substring 0 gt  (source: PC line text)           expect
+captured (line one)     count-substring 0 gt  (source: first line)             expect
+captured (>)            count-substring 0 gt  (source: PC marker)              expect
+
+% --- SECTION 3: dbg-render-stacks ---------------------------------------
+
+% Stack-pane render on a fresh screen.  Pre-push some operands so the op
+% snapshot has content; the screen on top is what dbg-render-stacks
+% consumes.
+1 2 3
+80 24 make-screen
+dup /screen3 exch def
+dbg-render-stacks
+
+8192 make-string-stream /capture3 exch def
+screen3 capture3 screen-render-to pop
+/captured3 capture3 get-string-stream def
+
+captured3 length 0 gt                       (render-stacks: produced bytes)    expect
+captured3 (op[) count-substring 0 gt        (stacks: op pane header)           expect
+captured3 (exec[) count-substring 0 gt      (stacks: exec pane header)         expect
+captured3 (dict[) count-substring 0 gt      (stacks: dict pane header)         expect
+captured3 (err[) count-substring 0 gt       (stacks: err pane header)          expect
+captured3 ( op: ) count-substring 0 gt      (stacks: op label)                 expect
+captured3 (exec: ) count-substring 0 gt     (stacks: exec label)               expect
+captured3 (dict: ) count-substring 0 gt     (stacks: dict label)               expect
+captured3 ( err: ) count-substring 0 gt     (stacks: err label)                expect
+% op pane should show "1i 2i 3i" -- the three integers we pushed.
+captured3 (1i 2i 3i) count-substring 0 gt   (stacks: op pane shows integers)   expect
+
+% --- SECTION 4: dbg-render-status-bar -----------------------------------
+
+80 24 make-screen
+dup /screen4 exch def
+dbg-render-status-bar
+8192 make-string-stream /capture4 exch def
+screen4 capture4 screen-render-to pop
+/captured4 capture4 get-string-stream def
+
+captured4 (F11=step) count-substring 0 gt   (status: F11=step hint)            expect
+captured4 (F10=over) count-substring 0 gt   (status: F10=over hint)            expect
+captured4 (F9=break) count-substring 0 gt   (status: F9=break hint)            expect
+captured4 (Tab=focus) count-substring 0 gt  (status: Tab=focus hint)           expect
+captured4 (q=quit)   count-substring 0 gt   (status: quit hint)                expect
+
+% --- SECTION 5: dbg-focus-next ------------------------------------------
+
+dbg-current-focus /source eq                (focus: starts at /source)         expect
+dbg-focus-next dbg-current-focus /op eq     (focus: source -> op)              expect
+dbg-focus-next dbg-current-focus /exec eq   (focus: op -> exec)                expect
+dbg-focus-next dbg-current-focus /dict eq   (focus: exec -> dict)              expect
+dbg-focus-next dbg-current-focus /err eq    (focus: dict -> err)               expect
+dbg-focus-next dbg-current-focus /source eq (focus: err -> source (wrap))      expect
+
+% --- SECTION 6: color theme switching -----------------------------------
+
+% Capture render output with color theme; switch to mono; render again;
+% mono should have NO color SGR codes for fg > 7 (or only "0" reset).
+
+dbg-set-color-theme
+80 24 make-screen
+dup /screen5 exch def
+dbg-render-status-bar
+8192 make-string-stream /capture5 exch def
+screen5 capture5 screen-render-to pop
+/captured-color capture5 get-string-stream def
+
+dbg-set-mono-theme
+80 24 make-screen
+dup /screen6 exch def
+dbg-render-status-bar
+8192 make-string-stream /capture6 exch def
+screen6 capture6 screen-render-to pop
+/captured-mono capture6 get-string-stream def
+
+% Both render some bytes.
+captured-color length 0 gt                  (theme: color produces bytes)      expect
+captured-mono  length 0 gt                  (theme: mono produces bytes)       expect
+
+% Mono should not emit dim attr (SGR 2).  The status bar's color tuple
+% uses attrs=2 (dim) in color theme, attrs=0 in mono.  Check the
+% string-stream contents differ.
+captured-color captured-mono eq not         (theme: color != mono output)      expect
+
+% Restore color theme for any downstream usage.
+dbg-set-color-theme
+
+% --- SECTION 7: _dbg-fmt-lineno -----------------------------------------
+
+1     _dbg-fmt-lineno (   1) eq             (fmt-lineno: 1)                    expect
+42    _dbg-fmt-lineno (  42) eq             (fmt-lineno: 42)                   expect
+1234  _dbg-fmt-lineno (1234) eq             (fmt-lineno: 1234)                 expect
+99999 _dbg-fmt-lineno (99999) eq            (fmt-lineno: 99999)                expect
+
+% --- SECTION 8: _dbg-get-line -------------------------------------------
+
+[(a) (b) (c)] 1 _dbg-get-line (a) eq        (get-line: idx 1)                  expect
+[(a) (b) (c)] 2 _dbg-get-line (b) eq        (get-line: idx 2)                  expect
+[(a) (b) (c)] 3 _dbg-get-line (c) eq        (get-line: idx 3)                  expect
+[(a) (b) (c)] 4 _dbg-get-line () eq         (get-line: idx 4 out-of-bounds)    expect
+[(a) (b) (c)] 0 _dbg-get-line () eq         (get-line: idx 0 out-of-bounds)    expect
+
+% --- SECTION 9: dbg-key-to-action -- new keys for Slice B --------------
+
+/:    dbg-key-to-action /enter-cmd  eq      (key /:    -> /enter-cmd)   expect
+
+% --- SECTION 10: _dbg-cmd-line-edit -----------------------------------
+
+% Stack effect: key buf -- buf' status
+
+/a () _dbg-cmd-line-edit                   % append 'a' to empty buf
+/status1 exch def
+/buf1    exch def
+status1 /editing eq                         (line-edit: /a status)         expect
+buf1 (a) eq                                 (line-edit: /a buf)            expect
+
+/backspace (abc) _dbg-cmd-line-edit         % delete last
+/status2 exch def
+/buf2    exch def
+status2 /editing eq                         (line-edit: backspace status)  expect
+buf2 (ab) eq                                (line-edit: backspace buf)     expect
+
+/backspace () _dbg-cmd-line-edit            % backspace on empty: no-op
+/status3 exch def
+/buf3    exch def
+buf3 () eq                                  (line-edit: backspace on empty) expect
+
+/space (hi) _dbg-cmd-line-edit              % space appends
+/status4 exch def
+/buf4    exch def
+buf4 (hi ) eq                               (line-edit: space appends)     expect
+
+/enter (foo) _dbg-cmd-line-edit             % enter terminates with /done
+/status5 exch def
+/buf5    exch def
+status5 /done eq                            (line-edit: enter -> /done)    expect
+buf5 (foo) eq                               (line-edit: enter preserves buf) expect
+
+/escape (foo) _dbg-cmd-line-edit            % esc terminates with /cancel
+/status6 exch def
+/buf6    exch def
+status6 /cancel eq                          (line-edit: esc -> /cancel)    expect
+
+/up (foo) _dbg-cmd-line-edit                % multi-char name: ignored
+/status7 exch def
+/buf7    exch def
+status7 /editing eq                         (line-edit: /up status)        expect
+buf7 (foo) eq                               (line-edit: /up buf unchanged) expect
+
+% --- SECTION 11: dbg-execute-command -----------------------------------
+
+(help) dbg-execute-command (cmds:) count-substring 0 gt   (cmd: help)     expect
+
+(b foo) dbg-execute-command (bp set @ /foo) eq            (cmd: b foo)    expect
+/foo debug-unbreak                                                        % cleanup
+
+(b /bar) dbg-execute-command (bp set @ /bar) eq           (cmd: b /bar)   expect
+/bar debug-unbreak
+
+% p EXPR: simple integer expression
+(p 1 2 add) dbg-execute-command (3i) eq                   (cmd: p 1 2 add) expect
+
+% p EXPR: string literal
+(p (hi)) dbg-execute-command dup =
+length 0 gt                                               (cmd: p string) expect
+
+% p EXPR: undefined name surfaces error
+(p undefined-zxyz) dbg-execute-command
+(error) count-substring 0 gt                              (cmd: p undefined) expect
+
+% --- :p sandbox behavior ----------------------------------------------------
+
+% Blocklisted ops are rejected pre-eval and return "sandbox: NAME".
+(p quit) dbg-execute-command
+(sandbox: quit) count-substring 0 gt                      (cmd: p quit blocklisted)        expect
+
+(p restore) dbg-execute-command
+(sandbox: restore) count-substring 0 gt                   (cmd: p restore blocklisted)     expect
+
+(p snap-shot) dbg-execute-command
+(sandbox: snap-shot) count-substring 0 gt                 (cmd: p snap-shot blocklisted)   expect
+
+(p uninstall-debugger) dbg-execute-command
+(sandbox: uninstall-debugger) count-substring 0 gt        (cmd: p uninstall blocklisted)   expect
+
+(p set-stdout) dbg-execute-command
+(sandbox: set-stdout) count-substring 0 gt                (cmd: p set-stdout blocklisted)  expect
+
+% Side effects in the eval are rolled back via save/restore.  /foo-sand-1
+% is undefined before AND after a :p that defines it.
+userdict /foo-sand-1 known? not                           (sand: /foo-sand-1 absent pre)   expect
+(p /foo-sand-1 99 def) dbg-execute-command pop
+userdict /foo-sand-1 known? not                           (sand: /foo-sand-1 absent post)  expect
+
+% No-value evals (e.g., just `1 pop`) return "ok".
+(p 1 pop) dbg-execute-command
+(ok) eq                                                   (cmd: p ok no value)             expect
+
+% Deep residue cleanup: an eval that pushes many values keeps only the
+% topmost as the formatted result.
+(p 10 20 30 40 50) dbg-execute-command
+(50i) eq                                                  (cmd: p deep residue)            expect
+
+% bp with no breakpoints set
+(bp) dbg-execute-command length 0 gt                      (cmd: bp output) expect
+
+% Unknown verb
+(zzz-not-a-verb) dbg-execute-command
+(unknown) count-substring 0 gt                            (cmd: unknown verb) expect
+
+% --- SECTION 12: dbg-render-cmd-line + dbg-render-cmd-result -----------
+
+/_dbg-cmd-buf (b foo) store
+80 6 make-screen dup /screen-cmd exch def
+dbg-render-cmd-line
+8192 make-string-stream /capture-cmd exch def
+screen-cmd capture-cmd screen-render-to pop
+/captured-cmd capture-cmd get-string-stream def
+
+captured-cmd (: b foo_) count-substring 0 gt   (cmd-line render: prompt + buf) expect
+
+/_dbg-cmd-result (3i) store
+80 6 make-screen dup /screen-res exch def
+dbg-render-cmd-result
+8192 make-string-stream /capture-res exch def
+screen-res capture-res screen-render-to pop
+/captured-res capture-res get-string-stream def
+
+captured-res (3i) count-substring 0 gt        (cmd-result render: shows result) expect
+
+% Reset state for downstream sections.
+/_dbg-cmd-buf () store
+/_dbg-cmd-result () store
+
+% --- SECTION 13: clear-all + bp-list verbs (Phase D-2 Slice C) ----------
+
+% Initial state: no breakpoints
+(bp) dbg-execute-command (no breakpoints) eq    (cmd: bp empty)              expect
+
+% Set three; `bp` should list all three
+(b alpha) dbg-execute-command pop
+(b beta)  dbg-execute-command pop
+(b gamma) dbg-execute-command pop
+(bp) dbg-execute-command
+dup (alpha) count-substring 0 gt                (cmd: bp lists alpha)        expect
+dup (beta)  count-substring 0 gt                (cmd: bp lists beta)         expect
+dup (gamma) count-substring 0 gt                (cmd: bp lists gamma)        expect
+pop
+
+% clear-all removes all three
+(clear-all) dbg-execute-command (cleared 3) count-substring 0 gt
+                                                (cmd: clear-all returns count) expect
+(bp) dbg-execute-command (no breakpoints) eq    (cmd: bp empty after clear-all) expect
+
+debug-continue
+
+% --- SECTION 14: multi-file source caching (Phase D-2 Slice C) ----------
+
+% _dbg-read-source-file loads an existing file.
+(tests/test_debug_ui_pure.trx) _dbg-read-source-file
+dup length 0 gt                                 (read-source-file: lines)     expect
+pop
+
+% _dbg-load-source-for-sid for an unknown sid returns []
+99 _dbg-load-source-for-sid length 0 eq         (load-source: unknown sid -> []) expect
+
+% Seed cache + verify cache hit
+(tests/test_debug_ui_pure.trx) _dbg-read-source-file
+/seeded-lines exch def
+_dbg-source-cache 42 seeded-lines put
+42 _dbg-load-source-for-sid length seeded-lines length eq
+                                                (load-source: cache hit)      expect
+
+% --- SECTION 15: Phase E install variants present -----------------------
+
+% Three install variants must be defined.  We don't actually CALL them
+% (raw-mode requires a tty), but verify their bindings exist so a future
+% --inspect / --inspect-on-error / --inspect-at can resolve them at boot.
+
+userdict /install-debugger          known?     (install-debugger defined)         expect
+userdict /install-debugger-on-error known?     (install-debugger-on-error defined) expect
+userdict /install-debugger-at       known?     (install-debugger-at defined)       expect
+
+% --- SECTION 16: _dbg-set-breakpoint-at-pc -------------------------------
+
+% Helper relies on /_dbg-last-pc-name being populated by the cb from the
+% event payload.  Manually populate for headless testing.
+
+/_dbg-last-pc-name null store
+_dbg-set-breakpoint-at-pc                   % null PC: no-op
+true                                        (set-bp: null pc -> no-op)         expect
+
+/_dbg-last-pc-name /sample-pc-name store
+_dbg-set-breakpoint-at-pc                   % should add /sample-pc-name to bp set
+/sample-pc-name debug-unbreak               % verify it was added (no error)
+true                                        (set-bp: name pc -> added)         expect
+
+debug-continue
+null debug-on-event
+
+% --- SECTION 17: _dbg-drain-into-lines (Phase F output capture) ----------
+
+% Reset state.
+/_dbg-output-lines     [] store
+/_dbg-output-partial   () store
+/_dbg-output-truncated false store
+
+% Empty drained -- no-op.
+() _dbg-drain-into-lines
+_dbg-output-lines length 0 eq               (drain: empty leaves lines empty)  expect
+_dbg-output-partial length 0 eq             (drain: empty leaves partial empty) expect
+
+% Single complete line.
+(hello\n) _dbg-drain-into-lines
+_dbg-output-lines length 1 eq               (drain: one full line appended)    expect
+_dbg-output-lines 0 get (hello) eq          (drain: line content matches)      expect
+_dbg-output-partial length 0 eq             (drain: trailing \\n empties partial) expect
+
+% Two complete lines.
+(one\ntwo\n) _dbg-drain-into-lines
+_dbg-output-lines length 3 eq               (drain: 1+2 = 3 completed lines)   expect
+_dbg-output-lines 1 get (one) eq            (drain: second line correct)       expect
+_dbg-output-lines 2 get (two) eq            (drain: third line correct)        expect
+
+% Partial line (no trailing \n).
+(par) _dbg-drain-into-lines
+_dbg-output-partial (par) eq                (drain: partial line accumulates)  expect
+_dbg-output-lines length 3 eq               (drain: partial not promoted)      expect
+
+% Append more partial, still no \n.
+(tial) _dbg-drain-into-lines
+_dbg-output-partial (partial) eq            (drain: partial grows)             expect
+
+% Now terminate the partial with \n.
+(\nnext) _dbg-drain-into-lines
+_dbg-output-lines length 4 eq               (drain: partial -> completed)      expect
+_dbg-output-lines 3 get (partial) eq        (drain: promoted partial content)  expect
+_dbg-output-partial (next) eq               (drain: post-\\n becomes new partial) expect
+
+% --- SECTION 18: ring-buffer trim + truncated flag -----------------------
+
+/_dbg-output-lines     [] store
+/_dbg-output-partial   () store
+/_dbg-output-truncated false store
+/_dbg-output-max-lines 4 store
+
+(a\nb\nc\nd\n) _dbg-drain-into-lines
+_dbg-output-lines length 4 eq               (ring: at-cap not truncated)       expect
+_dbg-output-truncated false eq              (ring: truncated flag still false) expect
+
+(e\n) _dbg-drain-into-lines
+_dbg-output-lines length 4 eq               (ring: overflow trims to cap)      expect
+_dbg-output-lines 0 get (b) eq              (ring: oldest dropped)             expect
+_dbg-output-lines 3 get (e) eq              (ring: newest kept)                expect
+_dbg-output-truncated true eq               (ring: truncated flag set)         expect
+
+% Restore default max-lines so later runs aren't affected.
+/_dbg-output-max-lines 128 store
+/_dbg-output-lines     [] store
+/_dbg-output-partial   () store
+/_dbg-output-truncated false store
+
+% --- SECTION 19: dbg-render-output ---------------------------------------
+
+% Seed some output lines, render to a memory screen, capture into a
+% string-stream and assert.
+/_dbg-output-lines     [(first) (second) (third)] store
+/_dbg-output-partial   (partial-tail) store
+/_dbg-output-truncated false store
+
+80 24 make-screen
+dup /screen-out exch def
+dbg-render-output
+
+8192 make-string-stream /capture-out exch def
+screen-out capture-out screen-render-to pop
+/captured-out capture-out get-string-stream def
+
+captured-out length 0 gt                    (render-output: produced bytes)    expect
+captured-out (-- output --) count-substring 0 gt
+                                            (render-output: header present)    expect
+captured-out (third)        count-substring 0 gt
+                                            (render-output: newest completed line) expect
+captured-out (partial-tail) count-substring 0 gt
+                                            (render-output: partial line visible) expect
+
+% Toggle the truncated flag and re-render -- header should change.
+/_dbg-output-truncated true store
+80 24 make-screen
+dup /screen-out2 exch def
+dbg-render-output
+
+8192 make-string-stream /capture-out2 exch def
+screen-out2 capture-out2 screen-render-to pop
+/captured-out2 capture-out2 get-string-stream def
+
+captured-out2 (-- output (truncated) --) count-substring 0 gt
+                                            (render-output: truncated header)  expect
+
+% Reset.
+/_dbg-output-lines     [] store
+/_dbg-output-partial   () store
+/_dbg-output-truncated false store
+
+% --- SECTION 20: watch state + pane height ------------------------------
+
+% Clean slate.
+/_dbg-watch-exprs   [] store
+/_dbg-watch-results [] store
+
+_dbg-watch-pane-height 0 eq           (watch: height = 0 when empty)         expect
+
+% Add one watch via the command surface.
+(w 1 2 add) dbg-execute-command
+(watch [0] added: 1 2 add) eq         (watch: add returns confirmation)      expect
+
+_dbg-watch-exprs length 1 eq          (watch: list grew to 1)                expect
+_dbg-watch-results 0 get (3i) eq      (watch: eval-at-add result)            expect
+_dbg-watch-pane-height 2 eq           (watch: height = n+1 with 1 entry)     expect
+
+% Add a second watch.
+(w 10 20 add) dbg-execute-command pop
+_dbg-watch-exprs length 2 eq          (watch: list grew to 2)                expect
+_dbg-watch-results 1 get (30i) eq     (watch: second result)                 expect
+_dbg-watch-pane-height 3 eq           (watch: height = n+1 with 2 entries)   expect
+
+% List watches.
+(watches) dbg-execute-command
+dup ([0]) count-substring 0 gt        (watch: list contains [0])             expect
+dup ([1]) count-substring 0 gt        (watch: list contains [1])             expect
+( | ) count-substring 0 gt            (watch: list separator)                expect
+
+% --- SECTION 21: watch eval refresh -------------------------------------
+
+% Reload-via-_dbg-eval-watches should recompute results (no side effects
+% required -- this verifies the proc runs and refills the array).
+_dbg-eval-watches
+_dbg-watch-results length 2 eq        (watch: eval refreshed length)         expect
+_dbg-watch-results 0 get (3i)  eq     (watch: eval refreshed [0])            expect
+_dbg-watch-results 1 get (30i) eq     (watch: eval refreshed [1])            expect
+
+% --- SECTION 22: clear-watch by index -----------------------------------
+
+% Drop index 0; the remaining entry shifts down.
+(clear-watch 0) dbg-execute-command
+(watch [0] cleared) eq                (watch: clear-watch confirmation)      expect
+
+_dbg-watch-exprs length 1 eq          (watch: cleared shrinks to 1)          expect
+_dbg-watch-exprs 0 get (10 20 add) eq (watch: surviving entry is [10 20 add]) expect
+_dbg-watch-results 0 get (30i) eq     (watch: surviving result matches)      expect
+
+% Out-of-range index.
+(clear-watch 99) dbg-execute-command
+(no watch at index) count-substring 0 gt  (watch: clear-watch oob)           expect
+
+% Non-integer arg.
+(clear-watch foo) dbg-execute-command
+(no watch at index) count-substring 0 gt  (watch: clear-watch non-int)       expect
+
+% --- SECTION 23: clear-watches ------------------------------------------
+
+(clear-watches) dbg-execute-command
+(cleared 1 watches) count-substring 0 gt  (watch: clear-watches summary)     expect
+
+_dbg-watch-exprs length 0 eq          (watch: cleared to empty)              expect
+_dbg-watch-results length 0 eq        (watch: results cleared too)           expect
+_dbg-watch-pane-height 0 eq           (watch: height back to 0)              expect
+
+(watches) dbg-execute-command (no watches) eq  (watch: list empty)            expect
+
+% --- SECTION 24: usage hints --------------------------------------------
+
+(w) dbg-execute-command (usage: w EXPR) eq    (watch: w needs EXPR)          expect
+
+(clear-watch) dbg-execute-command
+(usage: clear-watch N) eq                     (watch: clear-watch needs N)   expect
+
+% --- SECTION 25: max-cap rejection --------------------------------------
+
+% Fill to the cap, then attempt one more.
+/_dbg-watch-exprs   [] store
+/_dbg-watch-results [] store
+/i 0 def
+{ i _dbg-watch-max ge { exit } if
+  (w 1) dbg-execute-command pop
+  /i i 1 add def
+} loop
+
+_dbg-watch-exprs length _dbg-watch-max eq    (watch: filled to max)          expect
+
+(w extra) dbg-execute-command
+(watch list full) count-substring 0 gt        (watch: max-cap rejection)     expect
+
+_dbg-watch-exprs length _dbg-watch-max eq    (watch: still at max)           expect
+
+/_dbg-watch-exprs   [] store
+/_dbg-watch-results [] store
+
+% --- SECTION 26: dbg-render-watches -------------------------------------
+
+% Empty pane should not write a header.
+80 24 make-screen dup /screen-w0 exch def
+dbg-render-watches
+8192 make-string-stream /capture-w0 exch def
+screen-w0 capture-w0 screen-render-to pop
+/captured-w0 capture-w0 get-string-stream def
+
+captured-w0 (-- watches --) count-substring 0 eq  (watch: no header when empty) expect
+
+% Add two watches and re-render.
+/_dbg-watch-exprs   [(40 2 add) (100 50 sub)] store
+/_dbg-watch-results [(42i) (50i)] store
+
+80 24 make-screen dup /screen-w1 exch def
+dbg-render-watches
+8192 make-string-stream /capture-w1 exch def
+screen-w1 capture-w1 screen-render-to pop
+/captured-w1 capture-w1 get-string-stream def
+
+captured-w1 (-- watches --) count-substring 0 gt (watch: pane header)           expect
+captured-w1 (40 2 add)      count-substring 0 gt (watch: row 0 expr)            expect
+captured-w1 (=> 42i)        count-substring 0 gt (watch: row 0 result)          expect
+captured-w1 (100 50 sub)    count-substring 0 gt (watch: row 1 expr)            expect
+captured-w1 (=> 50i)        count-substring 0 gt (watch: row 1 result)          expect
+
+% --- SECTION 27: watch eval rolls back side effects ---------------------
+
+userdict /watch-side-1 known? not             (watch-sand: side-1 absent pre)  expect
+
+/_dbg-watch-exprs   [(/watch-side-1 99 def)] store
+/_dbg-watch-results [] store
+_dbg-eval-watches
+
+userdict /watch-side-1 known? not             (watch-sand: side-1 absent post) expect
+
+/_dbg-watch-exprs   [] store
+/_dbg-watch-results [] store
+
+% --- SECTION 28: watch blocklist rejection ------------------------------
+
+(w quit) dbg-execute-command pop
+_dbg-watch-results 0 get
+(sandbox: quit) count-substring 0 gt          (watch-sand: blocklist rejection) expect
+
+/_dbg-watch-exprs   [] store
+/_dbg-watch-results [] store
+
+% --- SECTION 29: _dbg-cmd-eval-bool -------------------------------------
+
+% Truthy / falsy values.
+(true)            _dbg-cmd-eval-bool      (eval-bool: literal true)              expect
+(false)           _dbg-cmd-eval-bool not  (eval-bool: literal false)             expect
+(null)            _dbg-cmd-eval-bool not  (eval-bool: null is false)             expect
+
+% Predicate that pushes a Boolean from a computation.
+(1 2 lt)          _dbg-cmd-eval-bool      (eval-bool: 1 2 lt -> true)            expect
+(5 2 lt)          _dbg-cmd-eval-bool not  (eval-bool: 5 2 lt -> false)           expect
+
+% Non-bool, non-null values coerce to true (Integer, String).
+(42)              _dbg-cmd-eval-bool      (eval-bool: integer coerces true)      expect
+((hi))            _dbg-cmd-eval-bool      (eval-bool: string coerces true)       expect
+
+% No value pushed -> false.
+(1 pop)           _dbg-cmd-eval-bool not  (eval-bool: empty stack -> false)      expect
+
+% Errors swallowed -> false.
+(undefined-xyz-1) _dbg-cmd-eval-bool not  (eval-bool: undefined -> false)        expect
+
+% Blocklist rejects -> false.
+(quit)            _dbg-cmd-eval-bool not  (eval-bool: blocklist quit)            expect
+(restore)         _dbg-cmd-eval-bool not  (eval-bool: blocklist restore)         expect
+
+% Side effects roll back (verify via userdict probe).
+userdict /eb-side-1 known? not             (eval-bool: side-1 pre)               expect
+(/eb-side-1 99 def true) _dbg-cmd-eval-bool pop
+userdict /eb-side-1 known? not             (eval-bool: side-1 rolled back)       expect
+
+% Operand-stack residue cleaned up (top + below).
+count /eb-before exch def
+(1 2 3 true) _dbg-cmd-eval-bool pop
+count eb-before sub 0 eq                   (eval-bool: residue cleaned)          expect
+/eb-before /erased def
+userdict /eb-before undef
+
+% --- SECTION 30: conditional bp grammar parse ---------------------------
+
+% Plain `b /name` is unchanged.
+(b cond-foo) dbg-execute-command
+(bp set @ /cond-foo) eq                    (cond-bp: plain b stores no condition) expect
+_dbg-bp-conditions /cond-foo known? not    (cond-bp: no condition entry)         expect
+/cond-foo debug-unbreak
+
+% `b /name when {pred}` parses and stores.
+(b cond-foo when {i 10 gt}) dbg-execute-command
+dup (cond-foo) count-substring 0 gt         (cond-bp: result mentions name)      expect
+    ( when {i 10 gt}) count-substring 0 gt  (cond-bp: result mentions pred)      expect
+_dbg-bp-conditions /cond-foo known?         (cond-bp: condition stored)          expect
+_dbg-bp-conditions /cond-foo get (i 10 gt) eq
+                                            (cond-bp: predicate text matches)    expect
+
+% Re-set without `when` clears the condition.
+(b cond-foo) dbg-execute-command pop
+_dbg-bp-conditions /cond-foo known? not     (cond-bp: re-set clears condition)   expect
+
+% Restore the condition for the next sections.
+(b cond-foo when {1 2 lt}) dbg-execute-command pop
+
+% `clear /name` removes both bp AND condition.
+(clear cond-foo) dbg-execute-command pop
+_dbg-bp-conditions /cond-foo known? not     (cond-bp: clear removes condition)   expect
+
+% --- SECTION 31: bp listing renders condition --------------------------
+
+% Empty registry first.
+debug-breakpoints length 0 eq               (cond-bp: registry clean pre-list)   expect
+
+(b a-cond when {true})  dbg-execute-command pop
+(b b-uncond)            dbg-execute-command pop
+
+(bp) dbg-execute-command
+dup (/a-cond) count-substring 0 gt          (cond-bp: list shows /a-cond)        expect
+dup ( when {true}) count-substring 0 gt     (cond-bp: list shows condition)      expect
+    (/b-uncond) count-substring 0 gt        (cond-bp: list shows /b-uncond)      expect
+
+% --- SECTION 32: clear-all wipes conditions -----------------------------
+
+(clear-all) dbg-execute-command pop
+_dbg-bp-conditions /a-cond known? not       (cond-bp: clear-all wiped /a-cond)   expect
+_dbg-bp-conditions /b-uncond known? not     (cond-bp: clear-all (b-uncond never had condition)) expect
+debug-breakpoints length 0 eq               (cond-bp: registry empty post-clear-all) expect
+
+% --- SECTION 33: _dbg-last-mode tracking --------------------------------
+
+% Initial install-time mode is set per variant.  Force /continue here.
+/_dbg-last-mode /continue store
+
+% _dbg-resume-prior-mode reads /_dbg-last-mode and re-arms the C++ side
+% via the corresponding debug-* op.  Verify the binding round-trips.
+_dbg-last-mode /continue eq                 (last-mode: /continue round-trip)    expect
+
+/_dbg-last-mode /step store
+_dbg-last-mode /step eq                     (last-mode: /step round-trip)        expect
+
+% --- SECTION 34: _dbg-should-silent-skip --------------------------------
+
+% No PC name: never skips.
+/_dbg-last-pc-name null store
+_dbg-should-silent-skip not                 (skip: null PC name = no skip)       expect
+
+% PC name with no condition: never skips (falls through to halt).
+/_dbg-last-pc-name /no-condition-name store
+_dbg-should-silent-skip not                 (skip: no condition = no skip)       expect
+
+% PC name with a true predicate: don't skip (halt as normal).
+/_dbg-last-pc-name /pred-true store
+_dbg-bp-conditions /pred-true (true) put
+_dbg-should-silent-skip not                 (skip: true predicate = no skip)     expect
+
+% PC name with a false predicate: skip.
+/_dbg-last-pc-name /pred-false store
+_dbg-bp-conditions /pred-false (false) put
+_dbg-should-silent-skip                     (skip: false predicate = skip)       expect
+
+% PC name with a predicate that ERRORS: silent-skip (don't halt unexpectedly).
+/_dbg-last-pc-name /pred-error store
+_dbg-bp-conditions /pred-error (undefined-zxy) put
+_dbg-should-silent-skip                     (skip: error predicate = skip)       expect
+
+% Cleanup.
+_dbg-bp-conditions /pred-true   undef
+_dbg-bp-conditions /pred-false  undef
+_dbg-bp-conditions /pred-error  undef
+/_dbg-last-pc-name null store
+
+% --- SECTION 35: modal open / close lifecycle ---------------------------
+
+% Clean slate.
+dbg-modal-close
+
+dbg-modal-active? not                       (modal: inactive at start)            expect
+
+% Source focus: dbg-modal-open is a no-op.
+/_dbg-focus /source store
+dbg-modal-open
+dbg-modal-active? not                       (modal: source focus = no-op)         expect
+
+% Stack focus: opens the modal.
+/_dbg-focus /op store
+1 2 3
+dbg-modal-open
+dbg-modal-active?                           (modal: open succeeds on /op focus)   expect
+_dbg-modal-pane /op eq                      (modal: pane = /op)                    expect
+_dbg-modal-lines length 3 ge               (modal: snapped 3+ op-stack entries)  expect
+_dbg-modal-scroll 0 eq                      (modal: scroll starts at 0)           expect
+
+% Close.
+dbg-modal-close
+dbg-modal-active? not                       (modal: close inactivates)            expect
+_dbg-modal-pane null eq                     (modal: pane null after close)         expect
+_dbg-modal-lines length 0 eq                (modal: lines cleared)                 expect
+clear
+
+% --- SECTION 36: modal renders title + content --------------------------
+
+/_dbg-focus /op store
+40 41 42 43
+dbg-modal-open
+
+80 24 make-screen dup /screen-modal exch def
+dbg-render-modal
+
+8192 make-string-stream /capture-modal exch def
+screen-modal capture-modal screen-render-to pop
+/captured-modal capture-modal get-string-stream def
+
+captured-modal (-- op) count-substring 0 gt    (modal-render: title shows pane)      expect
+captured-modal (Esc) count-substring 0 gt      (modal-render: title shows Esc hint)  expect
+captured-modal (40)  count-substring 0 gt      (modal-render: item 40 visible)       expect
+captured-modal (41)  count-substring 0 gt      (modal-render: item 41 visible)       expect
+
+dbg-modal-close
+clear
+
+% --- SECTION 37: scroll clamps to bounds --------------------------------
+
+% Synthesize a long modal-lines array so we can scroll meaningfully.
+/_dbg-modal-pane /op store
+/_dbg-modal-lines [
+    (l0) (l1) (l2) (l3) (l4) (l5) (l6) (l7) (l8) (l9)
+] store
+/_dbg-modal-scroll 0 store
+
+% Scroll up at the top: clamped to 0.
+-1 dbg-modal-scroll
+_dbg-modal-scroll 0 eq                       (modal-scroll: clamp at 0)            expect
+
+% Scroll down by 1.
+1 dbg-modal-scroll
+_dbg-modal-scroll 1 eq                       (modal-scroll: +1 = 1)                expect
+
+% Scroll down past the end: clamped to length-1.
+100 dbg-modal-scroll
+_dbg-modal-scroll 9 eq                       (modal-scroll: clamp at length-1)     expect
+
+% Scroll up past the start: clamped to 0.
+-100 dbg-modal-scroll
+_dbg-modal-scroll 0 eq                       (modal-scroll: clamp from large -)    expect
+
+dbg-modal-close
+
+% --- SECTION 38: empty stack handled --------------------------------
+
+/_dbg-focus /err store     % err stack is empty in this test process
+dbg-modal-open
+dbg-modal-active?                            (modal: opens even on empty stack)    expect
+_dbg-modal-lines length 0 eq                 (modal: 0-line content for empty)     expect
+
+% Scroll clamps at 0 for empty content.
+1 dbg-modal-scroll
+_dbg-modal-scroll 0 eq                       (modal-scroll: empty stays at 0)      expect
+
+dbg-modal-close
+
+% --- SECTION 39: key map for modal control ------------------------------
+
+/enter      dbg-key-to-action /expand      eq    (key: enter -> expand)         expect
+/escape     dbg-key-to-action /collapse    eq    (key: escape -> collapse)      expect
+/up         dbg-key-to-action /scroll-up   eq    (key: up -> scroll-up)         expect
+/down       dbg-key-to-action /scroll-down eq    (key: down -> scroll-down)     expect
+/page-up    dbg-key-to-action /page-up     eq    (key: page-up -> page-up)      expect
+/page-down  dbg-key-to-action /page-down   eq    (key: page-down -> page-down)  expect
+
+/_dbg-focus /source store
+
+% --- SECTION 40: one-shot breakpoints -----------------------------------
+
+% Clean slate.
+debug-breakpoints { debug-unbreak } for-all
+_dbg-bp-conditions { pop _dbg-bp-conditions exch undef } for-all
+_dbg-bp-oneshot    { pop _dbg-bp-oneshot    exch undef } for-all
+
+% b1 /name registers AND tags one-shot.
+(b1 oneshot-a) dbg-execute-command
+(once: ) count-substring 0 gt              (oneshot: confirm prefix)              expect
+
+debug-breakpoints length 1 eq              (oneshot: bp registered)               expect
+_dbg-bp-oneshot /oneshot-a known?          (oneshot: tag set)                     expect
+_dbg-bp-conditions /oneshot-a known? not   (oneshot: no condition attached)       expect
+
+% bp listing includes (once) marker.
+(bp) dbg-execute-command
+dup (/oneshot-a) count-substring 0 gt      (oneshot: list shows name)             expect
+    ((once)) count-substring 0 gt          (oneshot: list shows marker)           expect
+
+% Simulate firing: set pc-name + call handle-oneshot.
+/_dbg-last-pc-name /oneshot-a store
+_dbg-handle-oneshot
+
+debug-breakpoints length 0 eq              (oneshot: bp cleared after fire)       expect
+_dbg-bp-oneshot /oneshot-a known? not      (oneshot: tag cleared after fire)      expect
+/_dbg-last-pc-name null store
+
+% --- SECTION 41: one-shot + conditional combo ---------------------------
+
+(b1 oneshot-b when {1 2 lt}) dbg-execute-command pop
+_dbg-bp-oneshot /oneshot-b known?          (oneshot+cond: tag set)                 expect
+_dbg-bp-conditions /oneshot-b known?       (oneshot+cond: condition set)           expect
+
+% Predicate-false case: silent-skip leaves bp + tag in place.
+/_dbg-last-pc-name /oneshot-b store
+_dbg-bp-conditions /oneshot-b (false) put          % force predicate to false
+_dbg-should-silent-skip                            (oneshot+cond: false predicate skips) expect
+% Note: handle-oneshot is NOT called when silent-skipping.  Verify state.
+debug-breakpoints length 1 eq              (oneshot+cond: bp still set after silent-skip) expect
+_dbg-bp-oneshot /oneshot-b known?          (oneshot+cond: tag still set after silent-skip) expect
+
+% Now simulate predicate-true halt: handle-oneshot fires, clears everything.
+_dbg-bp-conditions /oneshot-b (true) put
+_dbg-should-silent-skip not                (oneshot+cond: true predicate halts)   expect
+_dbg-handle-oneshot
+debug-breakpoints length 0 eq              (oneshot+cond: bp cleared after halt)   expect
+_dbg-bp-oneshot /oneshot-b known? not      (oneshot+cond: tag cleared after halt)  expect
+_dbg-bp-conditions /oneshot-b known? not   (oneshot+cond: condition cleared after halt) expect
+/_dbg-last-pc-name null store
+
+% --- SECTION 42: clear-all wipes oneshot tags ---------------------------
+
+(b1 oneshot-c) dbg-execute-command pop
+(b  oneshot-d) dbg-execute-command pop
+_dbg-bp-oneshot /oneshot-c known?          (oneshot: tag for c)                   expect
+_dbg-bp-oneshot /oneshot-d known? not      (oneshot: no tag for permanent d)      expect
+
+(clear-all) dbg-execute-command pop
+debug-breakpoints length 0 eq              (oneshot: clear-all empties bp)        expect
+_dbg-bp-oneshot /oneshot-c known? not      (oneshot: clear-all wipes oneshot tag) expect
+
+% --- SECTION 43: clear /name drops oneshot tag --------------------------
+
+(b1 oneshot-e) dbg-execute-command pop
+_dbg-bp-oneshot /oneshot-e known?          (oneshot: tag pre-clear)               expect
+
+(clear oneshot-e) dbg-execute-command pop
+debug-breakpoints length 0 eq              (oneshot: clear /name removes bp)      expect
+_dbg-bp-oneshot /oneshot-e known? not      (oneshot: clear /name removes tag)     expect
+
+% --- SECTION 44: frame navigation commands ------------------------------
+
+% Synthetic frame list to exercise the navigation logic.
+/_dbg-frame-locs [
+    [6 30 0 /inner-callee]
+    [6 22 0 /middle]
+    [6 15 0 /outer]
+] store
+/_dbg-frame-idx 0 store
+
+% :frames lists all frames with current selection.
+(frames) dbg-execute-command
+dup (/inner-callee) count-substring 0 gt   (frames: list shows inner-callee)      expect
+dup (/middle) count-substring 0 gt         (frames: list shows middle)            expect
+    (/outer) count-substring 0 gt          (frames: list shows outer)             expect
+
+% :up moves to older frame.  Test verifies _dbg-frame-idx incremented
+% (string content is implementation detail; the side effect is the key).
+(up) dbg-execute-command pop
+_dbg-frame-idx 1 eq                        (frames: :up advanced to middle)       expect
+
+(up) dbg-execute-command pop
+_dbg-frame-idx 2 eq                        (frames: :up advanced to outer)        expect
+
+% At oldest -- :up returns sentinel string but doesn't move.
+(up) dbg-execute-command
+(already at oldest frame) count-substring 0 gt
+                                            (frames: :up caps at oldest)           expect
+_dbg-frame-idx 2 eq                         (frames: idx unchanged at cap)         expect
+
+% :down moves back toward newer frame.
+(down) dbg-execute-command pop
+_dbg-frame-idx 1 eq                        (frames: :down stepped back)           expect
+
+(down) dbg-execute-command pop
+_dbg-frame-idx 0 eq                        (frames: :down back at deepest)        expect
+
+(down) dbg-execute-command
+(already at newest frame) count-substring 0 gt
+                                            (frames: :down caps at newest)         expect
+
+% :frame N jumps directly.
+(frame 2) dbg-execute-command pop
+_dbg-frame-idx 2 eq                        (frames: :frame 2 jumped)              expect
+
+(frame 0) dbg-execute-command pop
+_dbg-frame-idx 0 eq                        (frames: :frame 0 jumped back)         expect
+
+% Out-of-range index.
+(frame 99) dbg-execute-command
+(no frame at index) count-substring 0 gt   (frames: oob index rejected)           expect
+
+% Empty index -- usage hint.
+(frame) dbg-execute-command
+(usage: frame N) count-substring 0 gt      (frames: missing index = usage)        expect
+
+% Empty frame list.
+/_dbg-frame-locs [] store
+(frames) dbg-execute-command (no frames) eq    (frames: empty list)               expect
+(up) dbg-execute-command (no frames available) eq  (frames: :up on empty)         expect
+
+% --- SECTION 45: frame-source-locs op presence --------------------------
+
+frame-source-locs /fsl exch def
+fsl type /array-type eq                    (frame-source-locs: returns Array)     expect
+% Outside a proc body the result is empty (no @call frames).
+fsl length 0 eq                            (frame-source-locs: empty at top-level) expect
+clear
+
+% --- SECTION 46: width-adaptive pretty-print ----------------------------
+
+% _dbg-stack-item-width(cols) = clamp((cols-9)/4, 10, 30).
+60  _dbg-stack-item-width 12 eq            (width-adaptive: 60 cols -> 12)        expect
+80  _dbg-stack-item-width 17 eq            (width-adaptive: 80 cols -> 17)        expect
+100 _dbg-stack-item-width 22 eq            (width-adaptive: 100 cols -> 22)       expect
+120 _dbg-stack-item-width 27 eq            (width-adaptive: 120 cols -> 27)       expect
+40  _dbg-stack-item-width 10 eq            (width-adaptive: 40 cols clamps to 10) expect
+200 _dbg-stack-item-width 30 eq            (width-adaptive: 200 cols clamps to 30) expect
+
+% --- SECTION 47: bp hit count -------------------------------------------
+
+% Clean slate.
+debug-breakpoints { debug-unbreak } for-all
+
+% Initial count for any name is 0.
+/never-registered debug-bp-hits 0 eq        (hits: unregistered name = 0)         expect
+
+% Register a bp on a proc that we'll call repeatedly.
+/hits-target { 1 2 add pop } def
+/hits-target debug-break
+
+/hits-target debug-bp-hits 0 eq             (hits: fresh bp = 0)                  expect
+
+% Call the proc -- each call hits the bp via name resolution.
+hits-target
+/hits-target debug-bp-hits 1 eq             (hits: after 1 call = 1)              expect
+
+hits-target hits-target hits-target
+/hits-target debug-bp-hits 4 eq             (hits: after 4 calls = 4)             expect
+
+% Re-setting an existing bp PRESERVES the count.
+/hits-target debug-break
+/hits-target debug-bp-hits 4 eq             (hits: re-break preserves count)      expect
+
+% Listing renders the hit count.
+(bp) dbg-execute-command
+dup (/hits-target) count-substring 0 gt    (hits: list shows name)               expect
+    ([4 hits]) count-substring 0 gt        (hits: list shows count)              expect
+
+% Unbreak drops the entry; count goes to 0 (entry no longer exists).
+/hits-target debug-unbreak
+/hits-target debug-bp-hits 0 eq             (hits: unbreak clears count)          expect
+
+% Cleanup.
+debug-continue
+
+% --- SECTION 48: command history (up/down arrow nav) -----------------------
+
+% Clean slate.
+/_dbg-cmd-history [] store
+/_dbg-cmd-history-idx -1 store
+/_dbg-cmd-buf-saved   () store
+
+% Initial state.
+_dbg-cmd-history length 0 eq              (history: empty after reset)         expect
+_dbg-cmd-history-idx -1 eq                (history: idx=-1 after reset)        expect
+
+% Push first entry.
+(b /foo) _dbg-history-push
+_dbg-cmd-history length 1 eq              (history: push grows by 1)           expect
+_dbg-cmd-history 0 get (b /foo) eq        (history: push stores buffer)        expect
+_dbg-cmd-history-idx -1 eq                (history: push resets idx)           expect
+
+% Adjacent-duplicate skip.
+(b /foo) _dbg-history-push
+_dbg-cmd-history length 1 eq              (history: dedup adjacent)            expect
+
+% Different entry IS pushed.
+(p 1 2 add) _dbg-history-push
+_dbg-cmd-history length 2 eq              (history: distinct entries appended) expect
+
+% Empty buffer is skipped.
+() _dbg-history-push
+_dbg-cmd-history length 2 eq              (history: empty buf skipped)         expect
+
+% Up-arrow from idx=-1: stash live buf, move to newest entry.
+(live-edit) _dbg-history-up
+/up-status exch def
+/up-buf exch def
+up-status /editing eq                     (history: up returns /editing)       expect
+up-buf (p 1 2 add) eq                     (history: up surfaces newest entry)  expect
+_dbg-cmd-history-idx 1 eq                 (history: up bumps idx to length-1)  expect
+_dbg-cmd-buf-saved (live-edit) eq         (history: live buf stashed on first up) expect
+
+% Up again: walk to older entry.
+up-buf _dbg-history-up
+pop /up-buf2 exch def
+up-buf2 (b /foo) eq                       (history: up walks to older entry)   expect
+_dbg-cmd-history-idx 0 eq                 (history: idx decremented)           expect
+
+% Up at oldest is idempotent.
+up-buf2 _dbg-history-up
+pop /up-buf3 exch def
+up-buf3 (b /foo) eq                       (history: up at oldest stays)        expect
+_dbg-cmd-history-idx 0 eq                 (history: idx pinned at 0)           expect
+
+% Down: walk forward.
+up-buf3 _dbg-history-down
+pop /dn-buf exch def
+dn-buf (p 1 2 add) eq                     (history: down walks newer)          expect
+_dbg-cmd-history-idx 1 eq                 (history: idx incremented)           expect
+
+% Down past newest: restore live buf, idx back to -1.
+dn-buf _dbg-history-down
+pop /dn-buf2 exch def
+dn-buf2 (live-edit) eq                    (history: down past newest restores live) expect
+_dbg-cmd-history-idx -1 eq                (history: idx back to -1)            expect
+
+% Down with idx=-1 is a no-op.
+(some-buf) _dbg-history-down
+pop /dn-noop exch def
+dn-noop (some-buf) eq                     (history: down at -1 is no-op)       expect
+_dbg-cmd-history-idx -1 eq                (history: idx unchanged on no-op)    expect
+
+% Up with empty history is a no-op.
+/_dbg-cmd-history [] store
+/_dbg-cmd-history-idx -1 store
+(stay-put) _dbg-history-up
+pop /up-empty exch def
+up-empty (stay-put) eq                    (history: up on empty buffer no-op)  expect
+_dbg-cmd-history-idx -1 eq                (history: idx unchanged with empty)  expect
+
+% Non-nav key (printable) resets the history idx.
+(seed) _dbg-history-push
+(seed2) _dbg-history-push
+(live) _dbg-history-up
+pop pop
+_dbg-cmd-history-idx 1 eq                 (history: idx >=0 after up)          expect
+/x (junk) _dbg-cmd-line-edit
+pop pop                                   % discard buf' status
+_dbg-cmd-history-idx -1 eq                (history: printable resets idx)      expect
+
+% Push trim: exceed cap, oldest entries drop.
+/_dbg-cmd-history [] store
+/_dbg-cmd-history-idx -1 store
+% Push 35 distinct entries; cap is 32 so oldest 3 should drop.
+/i 0 def
+{
+    i 35 ge { exit } if
+    (e) i (                    ) to-string concat _dbg-history-push
+    /i i 1 add def
+} loop
+_dbg-cmd-history length 32 eq             (history: trimmed to cap)            expect
+_dbg-cmd-history 0 get (e3) eq            (history: oldest 3 dropped)          expect
+_dbg-cmd-history 31 get (e34) eq          (history: newest preserved)          expect
+
+% --- Wrap up ------------------------------------------------------------
+
+(passed: ) print passed = clear
+(failed: ) print failed = clear
+(total:  ) print total  = clear
+
+failed 0 eq                                 (test-debug-ui-pure: all green)    expect
+
+(__test_ok__) =

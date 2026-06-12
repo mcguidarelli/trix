@@ -1,0 +1,601 @@
+% ====================================================================
+% ExtValue (64-bit heap-allocated values) comprehensive tests
+% Types: Long, ULong, Double, Address
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Basic ExtValue creation and value preservation
+% ====================================================================
+
+% --- Long creation and type ---
+42l type /long-type eq  (long: type is long-type) rt-ok  clear
+42l 42l eq  (long: value preserved) rt-ok  clear
+-1l -1l eq  (long: negative value) rt-ok  clear
+0l 0l eq  (long: zero) rt-ok  clear
+1l 1l eq  (long: one) rt-ok  clear
+-100l -100l eq  (long: negative hundred) rt-ok  clear
+
+% --- ULong creation and type ---
+42ul type /ulong-type eq  (ulong: type is ulong-type) rt-ok  clear
+42ul 42ul eq  (ulong: value preserved) rt-ok  clear
+0ul 0ul eq  (ulong: zero) rt-ok  clear
+1ul 1ul eq  (ulong: one) rt-ok  clear
+
+% --- Double creation and type ---
+3.14d type /double-type eq  (double: type is double-type) rt-ok  clear
+3.14d 3.14d eq  (double: value preserved) rt-ok  clear
+0.0d 0.0d eq  (double: zero) rt-ok  clear
+-1.5d -1.5d eq  (double: negative) rt-ok  clear
+1.0d 1.0d eq  (double: one) rt-ok  clear
+
+% --- Address creation and type ---
+16#1000#a type /address-type eq  (address: type is address-type) rt-ok  clear
+0a 0a eq  (address: null) rt-ok  clear
+
+% --- Large values ---
+9223372036854775807l 9223372036854775807l eq  (long: LONG_MAX preserved) rt-ok  clear
+9223372036854775807l //:systemdict:numbers:long-type:max eq  (long: LONG_MAX matches numbers dict) rt-ok  clear
+//:systemdict:numbers:long-type:min //:systemdict:numbers:long-type:min eq  (long: LONG_MIN preserved) rt-ok  clear
+18446744073709551614ul 18446744073709551614ul eq  (ulong: near-max preserved) rt-ok  clear
+
+% ====================================================================
+% SECTION 2: ExtValue dup/copy behavior
+% ====================================================================
+
+% --- dup a Long ---
+42l dup  42l eq  (dup long: top copy correct) rt-ok
+42l eq  (dup long: second copy correct) rt-ok  clear
+
+% --- dup independence: modify one, other unchanged ---
+42l dup  1l add  43l eq  (dup long indep: modified copy is 43) rt-ok
+42l eq  (dup long indep: original unchanged at 42) rt-ok  clear
+
+% --- dup a Double ---
+3.14d dup  3.14d eq  (dup double: top copy correct) rt-ok
+3.14d eq  (dup double: second copy correct) rt-ok  clear
+
+% --- dup Double independence ---
+1.0d dup  2.0d add  3.0d eq  (dup double indep: modified is 3.0) rt-ok
+1.0d eq  (dup double indep: original is 1.0) rt-ok  clear
+
+% --- dup a ULong ---
+99ul dup  99ul eq  (dup ulong: top copy correct) rt-ok
+99ul eq  (dup ulong: second copy correct) rt-ok  clear
+
+% --- dup Address ---
+16#ABCD#a dup  16#ABCD#a eq  (dup address: top copy correct) rt-ok
+16#ABCD#a eq  (dup address: second copy correct) rt-ok  clear
+
+% --- index with Longs on stack ---
+10l 20l
+1 index  10l eq  (index long: copies second) rt-ok
+20l eq  (index long: original top intact) rt-ok
+10l eq  (index long: original second intact) rt-ok  clear
+
+% --- copy array with Long values ---
+[10l 20l 30l]  3 array  copy
+dup 0 get  10l eq  (copy array long: elem 0) rt-ok
+dup 1 get  20l eq  (copy array long: elem 1) rt-ok
+dup 2 get  30l eq  (copy array long: elem 2) rt-ok
+pop clear
+
+% ====================================================================
+% SECTION 3: ExtValue in arrays
+% ====================================================================
+
+% --- Create array with Long values ---
+[1l 2l 3l]
+dup 0 get  1l eq  (array long: elem 0) rt-ok
+dup 1 get  2l eq  (array long: elem 1) rt-ok
+dup 2 get  3l eq  (array long: elem 2) rt-ok
+pop clear
+
+% --- put a Long value in array ---
+[10l 20l 30l]
+dup 1  99l put
+dup 1 get  99l eq  (array long put: elem 1 updated) rt-ok
+dup 0 get  10l eq  (array long put: elem 0 unchanged) rt-ok
+dup 2 get  30l eq  (array long put: elem 2 unchanged) rt-ok
+pop clear
+
+% --- Mixed ExtValue types in array ---
+[1l 2.5d 3ul]
+dup 0 get  1l eq  (array mixed: long elem) rt-ok
+dup 1 get  2.5d eq  (array mixed: double elem) rt-ok
+dup 2 get  3ul eq  (array mixed: ulong elem) rt-ok
+pop clear
+
+% --- Array length with Longs ---
+[1l 2l 3l 4l 5l] length  5 eq  (array long: length is 5) rt-ok  clear
+
+% --- reverse with Longs ---
+[1l 2l 3l] reverse
+dup 0 get  3l eq  (array long reverse: first is 3) rt-ok
+dup 1 get  2l eq  (array long reverse: second is 2) rt-ok
+dup 2 get  1l eq  (array long reverse: third is 1) rt-ok
+pop clear
+
+% --- sort with Longs ---
+[3l 1l 2l] sort
+dup 0 get  1l eq  (array long sort: first is 1) rt-ok
+dup 1 get  2l eq  (array long sort: second is 2) rt-ok
+dup 2 get  3l eq  (array long sort: third is 3) rt-ok
+pop clear
+
+% --- sort with Doubles ---
+[3.0d 1.0d 2.0d] sort
+dup 0 get  1.0d eq  (array double sort: first is 1.0) rt-ok
+dup 1 get  2.0d eq  (array double sort: second is 2.0) rt-ok
+dup 2 get  3.0d eq  (array double sort: third is 3.0) rt-ok
+pop clear
+
+% --- for-all on array of Longs ---
+0l  [10l 20l 30l] { add } for-all  60l eq  (for-all array long: sum is 60) rt-ok  clear
+
+% --- map on array of Longs (add 1 to each) ---
+[1l 2l 3l] { 1l add } map
+dup 0 get  2l eq  (map long: first is 2) rt-ok
+dup 1 get  3l eq  (map long: second is 3) rt-ok
+dup 2 get  4l eq  (map long: third is 4) rt-ok
+pop clear
+
+% --- filter on array of Longs ---
+[1l 2l 3l 4l 5l] { 3l gt } filter
+dup length  2 eq  (filter long: length is 2) rt-ok
+dup 0 get  4l eq  (filter long: first is 4) rt-ok
+dup 1 get  5l eq  (filter long: second is 5) rt-ok
+pop clear
+
+% ====================================================================
+% SECTION 4: ExtValue in packed arrays
+% ====================================================================
+
+% --- Packed array with Long values ---
+0l  { 1l 2l 3l } { add } for-all  6l eq  (packed long: for-all sum is 6) rt-ok  clear
+
+% --- Packed array with Doubles ---
+0.0d  { 1.0d 2.0d 3.0d } { add } for-all  6.0d eq  (packed double: for-all sum is 6.0) rt-ok  clear
+
+% --- Packed array with mixed Long + Double ---
+% Just verify for-all iterates correctly
+/packed-mixed-count 0 def
+{ 1l 2.5d 3ul } { pop /packed-mixed-count packed-mixed-count 1 add def } for-all
+packed-mixed-count 3 eq  (packed mixed: for-all count is 3) rt-ok  clear
+
+% ====================================================================
+% SECTION 5: ExtValue in dictionaries
+% ====================================================================
+
+% --- Store and retrieve Long values in dict ---
+<< /a 42l /b 99l >>
+dup /a get  42l eq  (dict long: get /a) rt-ok
+dup /b get  99l eq  (dict long: get /b) rt-ok
+pop clear
+
+% --- Overwrite a Long value with another Long ---
+<< /x 10l >>
+dup /x  20l put
+dup /x get  20l eq  (dict long overwrite: /x updated to 20) rt-ok
+pop clear
+
+% --- Dict with Double values ---
+<< /pi 3.14d /e 2.72d >>
+dup /pi get  3.14d eq  (dict double: get /pi) rt-ok
+dup /e get  2.72d eq  (dict double: get /e) rt-ok
+pop clear
+
+% --- Dict with ULong values ---
+<< /big 999999999999ul >>
+dup /big get  999999999999ul eq  (dict ulong: get /big) rt-ok
+pop clear
+
+% --- Dict with mixed ExtValue types ---
+<< /l 42l /d 3.14d /u 100ul >>
+dup /l get  42l eq  (dict mixed: long) rt-ok
+dup /d get  3.14d eq  (dict mixed: double) rt-ok
+dup /u get  100ul eq  (dict mixed: ulong) rt-ok
+pop clear
+
+% ====================================================================
+% SECTION 6: ExtValue and save/restore
+% ====================================================================
+
+% --- save, create Longs, restore ---
+/sv-long-val 0l def
+save
+  /sv-long-val 42l def
+  sv-long-val 42l eq  (save long: modified inside save) rt-ok
+restore
+sv-long-val 0l eq  (save long: reverted after restore) rt-ok  clear
+
+% --- save, put Long in array, restore ---
+/sv-arr [1l 2l 3l] def
+save
+  sv-arr 1  99l put
+  sv-arr 1 get  99l eq  (save array long: modified inside save) rt-ok
+restore
+sv-arr 1 get  2l eq  (save array long: reverted after restore) rt-ok  clear
+
+% --- save, store Long in dict, restore ---
+/sv-dict << /val 10l >> def
+save
+  sv-dict /val  50l put
+  sv-dict /val get  50l eq  (save dict long: modified inside save) rt-ok
+restore
+sv-dict /val get  10l eq  (save dict long: reverted after restore) rt-ok  clear
+
+% --- nested saves with ExtValues ---
+/sv-nest 1l def
+save
+  /sv-nest 2l def
+  save
+    /sv-nest 3l def
+    sv-nest 3l eq  (nested save long: innermost is 3) rt-ok
+  restore
+  sv-nest 2l eq  (nested save long: middle is 2) rt-ok
+restore
+sv-nest 1l eq  (nested save long: outer is 1) rt-ok  clear
+
+% --- save/restore with Double ---
+/sv-dbl 1.0d def
+save
+  /sv-dbl 2.0d def
+  sv-dbl 2.0d eq  (save double: modified inside save) rt-ok
+restore
+sv-dbl 1.0d eq  (save double: reverted after restore) rt-ok  clear
+
+% --- save/restore with ULong ---
+/sv-ul 10ul def
+save
+  /sv-ul 20ul def
+  sv-ul 20ul eq  (save ulong: modified inside save) rt-ok
+restore
+sv-ul 10ul eq  (save ulong: reverted after restore) rt-ok  clear
+
+% ====================================================================
+% SECTION 7: status ExtValue tracking
+% ====================================================================
+
+% --- Check extvalue-free count is accessible ---
+//:status:extvalue-free type /integer-type eq  (vmprof: extvalue-free is integer) rt-ok  clear
+
+% --- Create Longs on stack, check free count changes ---
+//:status:extvalue-free
+/pre-alloc-free exch def
+1l 2l 3l 4l 5l
+//:status:extvalue-free
+/post-alloc-free exch def
+% 5 new ExtValues allocated from heap (may or may not reduce free count depending on recycling)
+% At minimum, verify the free count is non-negative
+post-alloc-free 0 ge  (vmprof: extvalue-free non-negative after alloc) rt-ok  clear
+
+% --- Pop ExtValues, check free count recovers ---
+//:status:extvalue-free
+/pre-pop-free exch def
+1l 2l 3l pop pop pop
+//:status:extvalue-free
+/post-pop-free exch def
+% After popping, freed ExtValues should increase free list
+post-pop-free pre-pop-free ge  (vmprof: extvalue-free recovers after pop) rt-ok  clear
+
+% --- save/restore cycle and free list ---
+//:status:extvalue-free
+/pre-save-free exch def
+save
+  1l 2l 3l 4l 5l pop pop pop pop pop
+restore
+//:status:extvalue-free
+/post-restore-free exch def
+% After restore, VM memory above barrier is reclaimed; free list is reset
+% The free count can be different but should still be valid
+post-restore-free 0 ge  (vmprof: extvalue-free valid after save/restore) rt-ok  clear
+
+% ====================================================================
+% SECTION 8: ExtValue arithmetic
+% ====================================================================
+
+% --- Long arithmetic ---
+1000000000l 2000000000l add  3000000000l eq  (arith long: 1B + 2B = 3B) rt-ok  clear
+5000000000l 3000000000l sub  2000000000l eq  (arith long: 5B - 3B = 2B) rt-ok  clear
+1000000l 1000000l mul  1000000000000l eq  (arith long: 1M * 1M = 1T) rt-ok  clear
+10l 3l div  3l eq  (arith long: 10 / 3 = 3 truncated) rt-ok  clear
+10l 3l mod  1l eq  (arith long: 10 mod 3 = 1) rt-ok  clear
+-42l neg  42l eq  (arith long: neg -42 = 42) rt-ok  clear
+42l neg  -42l eq  (arith long: neg 42 = -42) rt-ok  clear
+-5l abs  5l eq  (arith long: abs -5 = 5) rt-ok  clear
+
+% --- ULong arithmetic ---
+18446744073709551615ul 0ul add  18446744073709551615ul eq  (arith ulong: max + 0 = max) rt-ok  clear
+100ul 50ul sub  50ul eq  (arith ulong: 100 - 50 = 50) rt-ok  clear
+1000000ul 1000000ul mul  1000000000000ul eq  (arith ulong: 1M * 1M = 1T) rt-ok  clear
+
+% --- Double arithmetic ---
+1.0d 2.0d add  3.0d eq  (arith double: 1.0 + 2.0 = 3.0) rt-ok  clear
+5.0d 3.0d sub  2.0d eq  (arith double: 5.0 - 3.0 = 2.0) rt-ok  clear
+2.0d 3.0d mul  6.0d eq  (arith double: 2.0 * 3.0 = 6.0) rt-ok  clear
+10.0d 4.0d div  2.5d eq  (arith double: 10.0 / 4.0 = 2.5) rt-ok  clear
+2.5d neg  -2.5d eq  (arith double: neg 2.5 = -2.5) rt-ok  clear
+-3.14d abs  3.14d eq  (arith double: abs -3.14 = 3.14) rt-ok  clear
+2.0d sqrt  1.4142135623730951d eq  (arith double: sqrt 2.0) rt-ok  clear
+
+% --- Address arithmetic (Address + Integer -> Address) ---
+16#1000#a 16 add  16#1010#a eq  (arith addr: 0x1000 + 16 = 0x1010) rt-ok  clear
+16#2000#a 256 sub  16#1F00#a eq  (arith addr: 0x2000 - 256 = 0x1F00) rt-ok  clear
+
+% --- Address subtraction (Address - Address -> Long) ---
+16#2000#a 16#1000#a sub  16#1000#l eq  (arith addr sub: 0x2000 - 0x1000 = 0x1000) rt-ok  clear
+
+% ====================================================================
+% SECTION 9: ExtValue comparison
+% ====================================================================
+
+% --- Long comparisons ---
+42l 42l eq  true eq  (cmp long: 42 eq 42) rt-ok  clear
+42l 43l eq  false eq  (cmp long: 42 ne 43) rt-ok  clear
+42l 43l ne  true eq  (cmp long: 42 ne 43 explicit) rt-ok  clear
+1l 2l lt  true eq  (cmp long: 1 lt 2) rt-ok  clear
+2l 1l gt  true eq  (cmp long: 2 gt 1) rt-ok  clear
+1l 1l le  true eq  (cmp long: 1 le 1) rt-ok  clear
+1l 1l ge  true eq  (cmp long: 1 ge 1) rt-ok  clear
+-1l 1l lt  true eq  (cmp long: -1 lt 1) rt-ok  clear
+1l -1l gt  true eq  (cmp long: 1 gt -1) rt-ok  clear
+-5l -3l lt  true eq  (cmp long: -5 lt -3) rt-ok  clear
+
+% --- ULong comparisons ---
+42ul 42ul eq  true eq  (cmp ulong: eq) rt-ok  clear
+1ul 2ul lt  true eq  (cmp ulong: lt) rt-ok  clear
+2ul 1ul gt  true eq  (cmp ulong: gt) rt-ok  clear
+5ul 5ul le  true eq  (cmp ulong: le) rt-ok  clear
+5ul 5ul ge  true eq  (cmp ulong: ge) rt-ok  clear
+
+% --- Double comparisons ---
+1.0d 1.0d eq  true eq  (cmp double: eq) rt-ok  clear
+1.0d 2.0d lt  true eq  (cmp double: lt) rt-ok  clear
+2.0d 1.0d gt  true eq  (cmp double: gt) rt-ok  clear
+-1.0d 1.0d lt  true eq  (cmp double: negative lt positive) rt-ok  clear
+3.14d 3.14d le  true eq  (cmp double: le equal) rt-ok  clear
+3.14d 3.14d ge  true eq  (cmp double: ge equal) rt-ok  clear
+
+% --- Double NaN comparisons (NaN != NaN) ---
+//:systemdict:numbers:double-type:quiet-NaN dup eq  false eq  (cmp double: NaN ne NaN) rt-ok  clear
+//:systemdict:numbers:double-type:quiet-NaN nan?  true eq  (cmp double: nan? true) rt-ok  clear
+
+% --- Double infinity ---
+//:systemdict:numbers:double-type:infinity finite?  false eq  (cmp double: infinity not finite) rt-ok  clear
+//:systemdict:numbers:double-type:infinity dup eq  true eq  (cmp double: inf eq inf) rt-ok  clear
+
+% --- Address comparisons ---
+16#1000#a 16#1000#a eq  true eq  (cmp addr: eq) rt-ok  clear
+16#1000#a 16#2000#a ne  true eq  (cmp addr: ne) rt-ok  clear
+0a 0a eq  true eq  (cmp addr: null eq null) rt-ok  clear
+
+% ====================================================================
+% SECTION 10: ExtValue in control flow
+% ====================================================================
+
+% --- for loop with Long (sum via accumulator below loop var) ---
+0l  0l 1l 5l { add } for  15l eq  (for long: sum 0..5 = 15) rt-ok  clear
+
+% --- for loop with Double ---
+0.0d  0.0d 0.5d 2.0d { add } for  5.0d eq  (for double: sum 0+0.5+1.0+1.5+2.0=5.0) rt-ok  clear
+
+% --- repeat with Long count ---
+/rpt-long-count 0 def
+5l { /rpt-long-count rpt-long-count 1 add def } repeat
+rpt-long-count 5 eq  (repeat long: 5 iterations) rt-ok  clear
+
+% --- repeat with ULong count ---
+/rpt-ulong-count 0 def
+3ul { /rpt-ulong-count rpt-ulong-count 1 add def } repeat
+rpt-ulong-count 3 eq  (repeat ulong: 3 iterations) rt-ok  clear
+
+% --- for loop with Long, verify control variable values ---
+[  0l 1l 3l { } for  ]
+dup length  4 eq  (for long range: 4 elements) rt-ok
+dup 0 get  0l eq  (for long range: first is 0) rt-ok
+dup 1 get  1l eq  (for long range: second is 1) rt-ok
+dup 2 get  2l eq  (for long range: third is 2) rt-ok
+dup 3 get  3l eq  (for long range: fourth is 3) rt-ok
+pop clear
+
+% --- for loop with ULong ---
+0ul  0ul 1ul 4ul { add } for  10ul eq  (for ulong: sum 0..4 = 10) rt-ok  clear
+
+% ====================================================================
+% SECTION 11: ExtValue stress / free-list recycling
+% ====================================================================
+
+% --- Create many Long values in a loop, verify they survive ---
+/stress-arr 100 array def
+0 1 99 {
+  dup                        % idx idx
+  /long-type cast            % idx idx_as_long
+  1000l mul                  % idx (idx*1000)l
+  stress-arr  3 1 roll  put
+} for
+stress-arr 0 get  0l eq  (stress long: elem 0) rt-ok
+stress-arr 50 get  50000l eq  (stress long: elem 50) rt-ok
+stress-arr 99 get  99000l eq  (stress long: elem 99) rt-ok  clear
+
+% --- save, create many, restore, create many again (free list recycling) ---
+save
+  /stress-save-arr 50 array def
+  0 1 49 {
+    dup
+    /long-type cast
+    100l mul
+    stress-save-arr  3 1 roll  put
+  } for
+  stress-save-arr 25 get  2500l eq  (stress save: elem 25 before restore) rt-ok
+restore
+
+% After restore, create again to exercise free list
+/stress-recycle-arr 50 array def
+0 1 49 {
+  dup
+  /long-type cast
+  200l mul
+  stress-recycle-arr  3 1 roll  put
+} for
+stress-recycle-arr 25 get  5000l eq  (stress recycle: elem 25 after restore) rt-ok  clear
+
+% --- Nested save/restore with ExtValues at each level ---
+save
+  /sv-l1 100l def
+  save
+    /sv-l2 200l def
+    save
+      /sv-l3 300l def
+      sv-l3 300l eq  (nested stress: level 3) rt-ok
+    restore
+    sv-l2 200l eq  (nested stress: level 2 after inner restore) rt-ok
+  restore
+  sv-l1 100l eq  (nested stress: level 1 after mid restore) rt-ok
+restore
+clear
+
+% --- Array of 100 Longs, sort, verify order ---
+/sort-arr 100 array def
+0 1 99 {
+  dup
+  99 exch sub         % idx (99-idx)
+  /long-type cast     % idx (99-idx) as Long
+  sort-arr  3 1 roll  put
+} for
+sort-arr sort
+dup 0 get  0l eq  (sort 100 long: first is 0) rt-ok
+dup 49 get  49l eq  (sort 100 long: middle is 49) rt-ok
+dup 99 get  99l eq  (sort 100 long: last is 99) rt-ok
+pop clear
+
+% ====================================================================
+% SECTION 12: ExtValue edge cases
+% ====================================================================
+
+% --- Long zero ---
+0l 0l eq  (edge long: zero eq zero) rt-ok  clear
+0l type /long-type eq  (edge long: zero type) rt-ok  clear
+
+% --- Long max ---
+9223372036854775807l //:systemdict:numbers:long-type:max eq  (edge long: max value) rt-ok  clear
+
+% --- Long min ---
+//:systemdict:numbers:long-type:min //:systemdict:numbers:long-type:min eq  (edge long: min value) rt-ok  clear
+
+% --- ULong zero ---
+0ul 0ul eq  (edge ulong: zero eq zero) rt-ok  clear
+0ul type /ulong-type eq  (edge ulong: zero type) rt-ok  clear
+
+% --- ULong max ---
+//:systemdict:numbers:ulong-type:max //:systemdict:numbers:ulong-type:max eq  (edge ulong: max value) rt-ok  clear
+
+% --- Double zero ---
+0.0d 0.0d eq  (edge double: zero eq zero) rt-ok  clear
+
+% --- Double negative zero ---
+0.0d neg  0.0d eq  (edge double: neg zero eq zero) rt-ok  clear
+
+% --- Address null ---
+0a 0a eq  (edge addr: null eq null) rt-ok  clear
+0a type /address-type eq  (edge addr: null type) rt-ok  clear
+
+% --- Double NaN behavior ---
+//:systemdict:numbers:double-type:quiet-NaN dup ne  true eq  (edge double: NaN ne NaN) rt-ok  clear
+//:systemdict:numbers:double-type:quiet-NaN nan?  true eq  (edge double: nan? for NaN) rt-ok  clear
+
+% --- Double infinity behavior ---
+//:systemdict:numbers:double-type:infinity 0.0d gt  true eq  (edge double: infinity gt 0.0d) rt-ok  clear
+//:systemdict:numbers:double-type:infinity finite?  false eq  (edge double: infinity not finite) rt-ok  clear
+//:systemdict:numbers:double-type:infinity dup eq  true eq  (edge double: infinity eq infinity) rt-ok  clear
+
+% --- Arithmetic that produces/consumes ExtValues rapidly ---
+1l 2l add 3l add 4l add 5l add  15l eq  (edge long chain add: 1+2+3+4+5=15) rt-ok  clear
+1.0d 2.0d mul 3.0d mul  6.0d eq  (edge double chain mul: 1*2*3=6) rt-ok  clear
+
+% --- Long/ULong conversion via arithmetic ---
+% Long and ULong in same operation: type promotion
+42l 42l eq  (edge: long self-eq) rt-ok  clear
+42ul 42ul eq  (edge: ulong self-eq) rt-ok  clear
+
+% --- exch with ExtValues ---
+1l 2l exch
+1l eq  (edge exch long: top is 1) rt-ok
+2l eq  (edge exch long: second is 2) rt-ok  clear
+
+% --- roll with ExtValues ---
+1l 2l 3l  3 1 roll
+2l eq  (edge roll long: top is 2) rt-ok
+1l eq  (edge roll long: second is 1) rt-ok
+3l eq  (edge roll long: third is 3) rt-ok  clear
+
+% --- index with ExtValues ---
+10l 20l 30l
+2 index  10l eq  (edge index long: index 2 is 10) rt-ok
+clear
+
+% --- Double precision edge cases ---
+0.1d 0.2d add  0.30000000000000004d eq  (edge double precision: 0.1+0.2) rt-ok  clear
+
+% --- Multiple ExtValue types on stack simultaneously ---
+1l 2ul 3.14d 16#FF#a
+type /address-type eq  (multi-type stack: address on top) rt-ok
+type /double-type eq  (multi-type stack: double second) rt-ok
+type /ulong-type eq  (multi-type stack: ulong third) rt-ok
+type /long-type eq  (multi-type stack: long fourth) rt-ok
+clear
+
+% --- clear with many ExtValues (exercises free_extvalue) ---
+1l 2l 3l 4l 5l 6l 7l 8l 9l 10l
+1ul 2ul 3ul 4ul 5ul 6ul 7ul 8ul 9ul 10ul
+1.0d 2.0d 3.0d 4.0d 5.0d 6.0d 7.0d 8.0d 9.0d 10.0d
+count 30 eq  (mass clear: 30 ExtValues on stack) rt-ok
+clear
+count 0 eq  (mass clear: stack empty after clear) rt-ok  clear
+
+% --- try with ExtValue error recovery ---
+{ 1l 0l div } try  /div-by-zero eq  (try long: div by zero caught) rt-ok  clear
+{ 1.0d 0.0d div } try  /div-by-zero eq  (try double: div by zero caught) rt-ok  clear
+
+% --- Long in nested array ---
+[[1l 2l] [3l 4l]]
+dup 0 get 0 get  1l eq  (nested array long: [0][0] is 1) rt-ok
+dup 0 get 1 get  2l eq  (nested array long: [0][1] is 2) rt-ok
+dup 1 get 0 get  3l eq  (nested array long: [1][0] is 3) rt-ok
+dup 1 get 1 get  4l eq  (nested array long: [1][1] is 4) rt-ok
+pop clear
+
+% --- Double in nested array ---
+[[1.0d 2.0d] [3.0d 4.0d]]
+dup 0 get 1 get  2.0d eq  (nested array double: [0][1] is 2.0) rt-ok
+dup 1 get 0 get  3.0d eq  (nested array double: [1][0] is 3.0) rt-ok
+pop clear
+
+% --- Copy array containing ExtValues ---
+[10l 20l 30l]
+dup  % shallow copy reference
+0 get  10l eq  (copy array long: dup ref elem 0) rt-ok  clear
+
+% --- ExtValue survives exch in array context ---
+[1l] [2l] exch
+dup 0 get  1l eq  (exch arrays long: top has 1) rt-ok  pop
+dup 0 get  2l eq  (exch arrays long: second has 2) rt-ok  pop
+clear
+
+% --- status consistency check after all tests ---
+//:status:extvalue-free 0 ge  (final vmprof: extvalue-free non-negative) rt-ok  clear
+//:status:vm-used 0 gt  (final vmprof: vm-used positive) rt-ok  clear
+
+(ExtValue tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

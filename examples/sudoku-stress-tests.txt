@@ -1,0 +1,102 @@
+# Trix Sudoku stress-test set.
+#
+# The puzzles in this file are too heavy for the default catalog
+# experience (the original three exceeded a 15-second solve budget
+# during catalog preparation; the 2026-06-05 additions are in the
+# 13-14 s band; the anti-brute-force grid solves in ~3h20m -- see
+# its entry).  They are shipped as a separate file (rather than the
+# default catalog) so the default run stays snappy; this file is
+# opt-in.
+#
+# The solver in examples/sudoku.trx is naive backtracking (no
+# constraint propagation, no most-constrained-variable ordering).
+# A production solver that added arc consistency and naked-pair
+# elimination would crack these in milliseconds.  That is the
+# point: these are here to demonstrate where a plain backtracker
+# meets its ceiling, not to advertise a solver flaw.
+#
+# To run ANY stress test, copy its nine rows into
+# examples/sudoku-input.txt and run sudoku.trx as usual -- the
+# file-override mechanism solves just that single puzzle.  Expect
+# runs of 30 seconds to HOURS; the live marching-ants display
+# (status line every ~2 s, speculative grid every ~10 s) shows the
+# search thinking the whole way, and ctrl-C is always safe.
+#
+# The 17-clue anti-brute-force grid has 64 empty cells, which
+# exceeds the default 64 save-levels (one nested choice level per
+# empty cell + the per-puzzle wrapper): run it with
+# --save-depth=200.  The other entries fit the default.
+#
+# Sources: Project Euler problem 96 grids that exceeded the budget
+# (PE96 has an exact duplicate: Grid 41 == Grid 09.  Only Grid 09
+# is kept below.), plus the canonical anti-brute-force grid from
+# Wikipedia's "Sudoku solving algorithms" article -- a 17-clue
+# puzzle constructed specifically so ascending-value left-to-right
+# backtrackers (exactly this solver) explore an enormous prefix
+# space before the constraints bite.
+
+## Project Euler #96 grid 09
+...9....2
+.5.1234..
+.3....16.
+9.8......
+.7.....9.
+......2.5
+.91....5.
+..7439.2.
+4....7...
+
+## Project Euler #96 grid 13
+3........
+..5..9...
+2..5.4...
+.2....7..
+16.....58
+7.431.6..
+...89.1..
+....67.8.
+.....5437
+
+## Project Euler #96 grid 48
+..1..7.9.
+59..8...1
+.3.....8.
+.....58..
+.5..6..2.
+..41.....
+.8.....3.
+1...2..79
+.2.7..4..
+
+## Project Euler #96 grid 06 (~14 s release -- under the old 15 s line, but too heavy for the default catalog experience)
+1..92....
+524.1....
+.......7.
+.5...81.2
+.........
+4.27...9.
+.6.......
+....3.945
+....71..6
+
+## Project Euler #96 grid 14 (~13 s release -- ditto)
+63.......
+...5....8
+..5674...
+....2....
+..34.1.2.
+......345
+.....7..4
+.8.3..9.2
+9471...8.
+
+## Anti-brute-force 17-clue (Wikipedia, "Sudoku solving algorithms" -- designed against exactly this solver: near-empty top rows make the ascending-order backtracker enumerate a vast prefix space before the constraints bite.  Measured on the release binary: solved + verified in 12,032 s (~3h20m), 622.5M placements tried at ~51.8k/s, deepest speculative cell stuck at 71/81 nearly throughout.  17 clues = 64 empties: REQUIRES --save-depth=200.  The marching-ants display makes this run the show-piece: watch the speculative prefix march for as long as you care to leave it.)
+.........
+.....3.85
+..1.2....
+...5.7...
+..4...1..
+.9.......
+5......73
+..2.1....
+....4...9

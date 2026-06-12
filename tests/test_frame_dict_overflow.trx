@@ -1,0 +1,190 @@
+% ====================================================================
+% test_frame_dict_overflow.trx -- |locals|#N pool overflow chain
+% ====================================================================
+% Coverage for m_frame_dict_overflow (single chain, scanned linearly by
+% maxlength on alloc) which parks frame dicts whose maxlength exceeds
+% MaxDictPoolSize (currently 16).  Pre-fix these dicts were silently
+% dropped on recycle, leaking ~584+ bytes per call -- the symptom that
+% drove plan_oracle_search_leak.md.  Test sections:
+%   1. Indexed-pool sizes (1..16) ignore the overflow chain.
+%   2. Oversized sizes populate the chain.
+%   3. Repeated calls reuse the same slot (chain length stable).
+%   4. Mixed sizes coexist in the chain.
+%   5. Distinct sizes don't cross-pollute on alloc.
+%   6. Recycled-dict re-init zeroes prior contents.
+%   7. save/restore preserves below-barrier overflow entries; prunes
+%      above-barrier ones.
+%   8. Restore from BASE level keeps the overflow chain intact.
+%   9. Stress: many recycles + restores compound to zero leakage.
+%  10. Sad path: oversized #N proc with mismatched binding count errors.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: indexed-pool sizes leave overflow chain empty
+% ====================================================================
+
+% Capture baseline (the test runner may have populated the pool earlier).
+//:status:locals-overflow-count /ovr-base exch def
+
+/p3  { |a b c|#3       0 } def
+/p10 { |a b c|#10      0 } def
+/p16 { |a b c|#16      0 } def
+
+1 1 20 { pop 1 2 3 p3  pop } for
+1 1 20 { pop 1 2 3 p10 pop } for
+1 1 20 { pop 1 2 3 p16 pop } for
+
+//:status:locals-overflow-count ovr-base eq
+    (s1: indexed-pool sizes don't touch overflow) rt-ok
+
+% ====================================================================
+% SECTION 2: maxlength > 16 lands in overflow chain
+% ====================================================================
+
+/p17 { |a b c|#17 0 } def
+/p25 { |a b c|#25 0 } def
+
+% First call allocates fresh; recycle pushes onto chain.
+1 2 3 p17 pop
+//:status:locals-overflow-count ovr-base sub 1 ge
+    (s2: #17 recycled dict appears on overflow) rt-ok
+
+% ====================================================================
+% SECTION 3: repeated calls reuse the slot (chain doesn't grow)
+% ====================================================================
+
+//:status:locals-overflow-count /ovr-pre exch def
+1 1 50 { pop 1 2 3 p17 pop } for
+//:status:locals-overflow-count /ovr-post exch def
+ovr-pre ovr-post eq
+    (s3: 50 #17 calls reuse the same parked slot) rt-ok
+
+% ====================================================================
+% SECTION 4: distinct sizes both park (chain holds both)
+% ====================================================================
+
+//:status:locals-overflow-count /ovr-pre exch def
+1 2 3 p25 pop                                      % adds a #25 slot
+//:status:locals-overflow-count ovr-pre 1 add eq
+    (s4: distinct #25 adds a second overflow entry) rt-ok
+
+% ====================================================================
+% SECTION 5: alloc finds matching maxlength (no cross-pollution)
+% ====================================================================
+
+% Both #17 and #25 are parked.  Hot loop alternating between them must
+% reuse each slot from the chain rather than allocating fresh -- otherwise
+% the chain would grow unboundedly.
+//:status:locals-overflow-count /ovr-pre exch def
+1 1 30 { pop 1 2 3 p17 pop 1 2 3 p25 pop } for
+//:status:locals-overflow-count ovr-pre eq
+    (s5: alternating sizes match-and-reuse, chain stays flat) rt-ok
+
+% ====================================================================
+% SECTION 6: re-init zeroes prior frame contents (defs don't leak)
+% ====================================================================
+
+/p25-set { |a b c|#25 /sentinel 12345 local-def 0 } def
+/p25-get { |a b c|#25 /sentinel 99 where { /sentinel get } { -1 } if-else } def
+
+1 2 3 p25-set pop
+1 2 3 p25-get
+% Re-used dict must NOT carry /sentinel from prior call: lookup falls
+% back to user/system dict (not the recycled frame), so where returns
+% true if the binding cache is stale OR systemdict has /sentinel; in a
+% fresh tree where /sentinel is not defined globally, where returns
+% false and the frame returns -1.
+-1 eq
+    (s6: recycled #25 frame re-init clears prior defs) rt-ok
+
+% ====================================================================
+% SECTION 7: save/restore -- below-barrier survives, above-barrier drops
+% ====================================================================
+
+% Pre-save: ensure the chain has both #17 and #25 parked below barrier.
+1 2 3 p17 pop
+1 2 3 p25 pop
+//:status:locals-overflow-count /ovr-pre-save exch def
+ovr-pre-save 2 ge
+    (s7a: chain has at least 2 entries before save) rt-ok
+
+% Inside save: allocate a totally new size #40 (above-barrier alloc).
+/p40 { |a b c|#40 0 } def
+/sv save def
+1 2 3 p40 pop
+//:status:locals-overflow-count /ovr-during exch def
+ovr-during ovr-pre-save 1 add eq
+    (s7b: above-barrier #40 adds 1 to chain inside save) rt-ok
+
+% Restore: above-barrier #40 entry must be pruned, below-barrier
+% #17/#25 must remain.
+sv restore
+//:status:locals-overflow-count ovr-pre-save eq
+    (s7c: restore prunes above-barrier, keeps below-barrier) rt-ok
+
+% Verify the surviving slots are still usable (don't crash, return values).
+1 2 3 p17 pop
+1 2 3 p25 pop
+//:status:locals-overflow-count ovr-pre-save eq
+    (s7d: post-restore reuse of surviving slots works) rt-ok
+
+% ====================================================================
+% SECTION 8: nested save/restore preserves chain integrity
+% ====================================================================
+
+//:status:locals-overflow-count /ovr8-pre exch def
+/sv1 save def
+    1 2 3 p17 pop
+    /sv2 save def
+        1 2 3 p25 pop
+        % deepest level: oversized alloc above sv2 barrier
+        1 2 3 p40 pop
+    sv2 restore
+    1 2 3 p17 pop
+sv1 restore
+//:status:locals-overflow-count ovr8-pre eq
+    (s8: nested save/restore leaves chain unchanged) rt-ok
+
+% ====================================================================
+% SECTION 9: stress -- 200 oversized calls inside save/restore
+% ====================================================================
+
+//:status:vm-used /vm0 exch def
+1 1 200 { pop save 1 2 3 p25 pop restore } for
+//:status:vm-used /vm1 exch def
+% vm growth must be bounded -- this is the regression check for the
+% original 580 B/call leak (would have hit 116 KB here).
+vm1 vm0 sub 200 lt
+    (s9: 200 oversized save/restore cycles leak < 200 bytes total) rt-ok
+
+% ====================================================================
+% SECTION 10: oversized-locals binding-arity error (sad path)
+% ====================================================================
+
+% A proc declaring |a b c|#25 still requires only 3 stack args; the #25
+% changes capacity, not arity.  Run twice: once correctly, once with
+% wrong arity to verify the begin-locals error fires the same way as
+% the indexed-pool case.
+1 2 3 p25 pop
+(s10a: correct arity OK) =
+
+% Wrong arity: 2 args supplied for 3-name |a b c|.
+% Wrap in save/restore so any stack residue from prior sections doesn't
+% accidentally satisfy the begin-locals arity (and so the partial-bind
+% residue from this case doesn't leak into the next section).
+clear
+{ 1 2 p25 } try /opstack-underflow eq
+    (s10b: oversized #25 with 2 args raises opstack-underflow) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_frame_dict_overflow: ALL TESTS PASSED) =
+(__test_ok__) =

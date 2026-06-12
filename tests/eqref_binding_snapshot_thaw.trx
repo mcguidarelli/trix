@@ -1,0 +1,4 @@
+% eqref_binding_snapshot_thaw.trx -- phase 2: thaw the binding-cache snapshot.
+% Run test_eqref_binding_snapshot.trx first to produce
+% tests/eqref_binding_snapshot.img.
+(tests/eqref_binding_snapshot.img) thaw

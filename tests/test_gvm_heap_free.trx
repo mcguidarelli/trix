@@ -1,0 +1,361 @@
+% ====================================================================
+% test_gvm_heap_free.trx -- Phase 3b free + coalesce paths
+% ====================================================================
+% Phase 3b adds boundary-tag coalesce + sorted free list + top-edge
+% advance to the global allocator.  Internal frees (from ExtValue / WideValue
+% overwrites in global containers) now reclaim memory instead of
+% leaking it.  This file verifies:
+%
+%   - top-edge advance: freeing the topmost (lowest-addr) block
+%     advances m_vm_global up by its size.
+%   - forward coalesce: freeing X when X's higher-addr neighbour is
+%     free merges the two.
+%   - backward coalesce: freeing X when X's lower-addr neighbour is
+%     free merges the two.
+%   - free-list reuse: gvm_alloc's first-fit walks the free list
+%     before bumping m_vm_global.
+%   - vm-global-info /free-blocks and /free-bytes accurately track
+%     the free-list state.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: top-edge advance -- free the topmost global block
+% ====================================================================
+% Pre-intern /sink locally so the literal doesn't get interned globally
+% under set-global true (which would itself bump vm-global-used).
+
+/sink null def
+
+% Pre-warm: trigger the lazy GC scratch allocation so subsequent deltas
+% measure only the actual user blocks under test, not the one-time
+% scratch overhead.  Post main-context-local (2026-05-09), the global
+% region starts empty; ensure_gc_scratch fires on the first user gvm_alloc.
+${ 8 dict } /pre-warm-dict exch def
+
+vm-global-info /pre1 exch def
+
+true set-global
+12345l /sink exch def       % allocate global Long, put in userdict /sink slot
+false set-global
+
+vm-global-info /mid1 exch def
+
+% After the global Long alloc, vm-global-used grew by 32 bytes
+% (one ExtValue block: 16 header + 8 payload + 4 tail tag = 28, padded to 32).
+mid1 /total-bytes get pre1 /total-bytes get sub 32 eq
+    (s1: long alloc grew global by 32)             rt-ok
+mid1 /by-kind get /long get /count get
+pre1 /by-kind get /long get /count get sub 1 eq
+    (s1: /long count +1)                            rt-ok
+mid1 /free-blocks get 0 eq                          (s1: no free blocks yet) rt-ok
+
+% Overwrite /sink with a local Integer (0).  This frees the global Long
+% via maybe_free_extvalue -> ExtValue::free -> gvm_free.  The Long
+% block is at the top edge of the heap (lowest-addr), so gvm_free
+% takes the top-edge-advance branch and m_vm_global moves back up.
+/sink 0 def
+
+vm-global-info /post1 exch def
+
+post1 /total-bytes get pre1 /total-bytes get eq
+    (s1: top-edge advance reclaimed global region) rt-ok
+post1 /by-kind get /long get /count get
+pre1 /by-kind get /long get /count get eq
+    (s1: /long count back to baseline)              rt-ok
+post1 /free-blocks get 0 eq                         (s1: no free blocks left) rt-ok
+
+% ====================================================================
+% SECTION 2: forward coalesce -- mid-block free meets free neighbour above
+% ====================================================================
+% Allocate an anchor at the high addr (so mid frees aren't top-edge),
+% then alloc B and C globally; B is at higher addr, C is at lower addr
+% (m_vm_global = C's start after both allocs).
+
+/anchor null def
+/b-slot null def
+/c-slot null def
+
+vm-global-info /pre2 exch def
+
+% Anchor: allocate a global Long that we'll keep alive.  This sits at
+% the high addr so subsequent frees aren't at m_vm_global.
+true set-global
+99l /anchor exch def
+% At this point: layout (high->low): anchor.
+
+% B and C allocated next.  Layout (high->low): anchor, B, C.
+1000l /b-slot exch def
+2000l /c-slot exch def
+false set-global
+
+vm-global-info /alloc2 exch def
+
+alloc2 /by-kind get /long get /count get
+pre2   /by-kind get /long get /count get sub 3 eq
+    (s2: 3 longs alive after allocs)                rt-ok
+
+% Free B (mid block).  B's next-addr neighbour is anchor (live), prev-addr
+% neighbour is C (live).  No coalesce possible -- B goes solo into free list.
+/b-slot 0 def
+
+vm-global-info /free-b exch def
+free-b /free-blocks get 1 eq                        (s2: 1 free block after free B)  rt-ok
+free-b /by-kind get /long get /count get
+pre2   /by-kind get /long get /count get sub 2 eq
+    (s2: 2 longs alive after free B)                rt-ok
+
+% Free C (which is at m_vm_global).  C's higher-addr neighbour is B (free).
+% Forward coalesce: C+B merge into one block at C's offset.  After
+% coalesce, the merged block's start is at m_vm_global -> top-edge
+% advance.  m_vm_global moves up by C+B (== 64 bytes for two Long
+% blocks).  Free list ends empty.
+/c-slot 0 def
+
+vm-global-info /free-c exch def
+free-c /free-blocks get 0 eq                        (s2: forward coalesce + top-edge => 0 free blocks) rt-ok
+free-c /total-bytes get
+pre2   /total-bytes get 32 add eq                   (s2: only anchor remains globally)  rt-ok
+
+% Cleanup: free anchor too.
+/anchor 0 def
+
+vm-global-info /cleanup2 exch def
+cleanup2 /total-bytes get pre2 /total-bytes get eq  (s2: cleanup back to baseline)  rt-ok
+
+% ====================================================================
+% SECTION 3: backward coalesce -- low-addr neighbour already free
+% ====================================================================
+% Allocate anchor at high addr, then B (mid), C (low).  Free B first
+% (insert into free list), then free C: C's higher-addr neighbour is B
+% (free) -> forward coalesce.  Then we want to test BACKWARD coalesce
+% specifically.  Approach: allocate D below merged C+B+anchor pattern.
+% Actually simpler: allocate 3 longs above the anchor, free in middle,
+% then below-mid; this triggers forward coalesce.  Backward coalesce
+% requires a specific freeing order.
+%
+% Backward coalesce path: free X where X's LOWER-addr neighbour is free.
+% Set up: anchor (high), D (mid-high), E (mid-low), F (low).  Layout
+% (low->high): F, E, D, anchor.  m_vm_global = F.
+%
+% Free E first (mid).  Forward (D live), backward (F live) -- no coalesce.
+%   Free list: {E}.
+% Free F (at m_vm_global).  Forward neighbour is E (free) -> merge F+E.
+%   F is at m_vm_global -> top-edge advance.  m_vm_global += F+E.
+%   Free list: empty.
+%
+% Hmm, that's still forward.  For pure backward:
+% Free E first: solo in free list.
+% Free D (between anchor live and E free): forward neighbour anchor (live),
+%   backward neighbour E (free) -> backward coalesce!  Merge E+D.
+
+/anchor3 null def
+/d-slot null def
+/e-slot null def
+
+vm-global-info /pre3 exch def
+
+true set-global
+77l /anchor3 exch def
+1234l /d-slot exch def
+5678l /e-slot exch def
+false set-global
+
+% Free E (lower addr; E is mid-block since anchor3 is below... wait,
+% anchor3 was allocated first, so it's at HIGHER addr.  D second
+% (lower addr).  E third (lowest addr, at m_vm_global).
+%
+% Layout (low->high): E, D, anchor3.  m_vm_global = E_start.
+
+% Free D first: D is mid-block.  Forward (anchor3 live), backward (E
+% live) -- no coalesce.  Insert D into free list.
+/d-slot 0 def
+
+vm-global-info /free-d exch def
+free-d /free-blocks get 1 eq                        (s3: free D solo in list)  rt-ok
+
+% Now free E (at m_vm_global).  Forward neighbour is D (free) -> forward
+% coalesce.  But the BACKWARD path also needs verification: in the
+% other order, freeing D (after E is free) would trigger backward
+% coalesce.  Test the freeing-E-then-D order via overwrite.
+/e-slot 0 def
+
+vm-global-info /free-e exch def
+free-e /free-blocks get 0 eq                        (s3: forward coalesce + top-edge advance) rt-ok
+
+% Cleanup.
+/anchor3 0 def
+
+vm-global-info /cleanup3 exch def
+cleanup3 /total-bytes get pre3 /total-bytes get eq  (s3: cleanup back to baseline) rt-ok
+
+% ====================================================================
+% SECTION 4: dedicated backward-coalesce path
+% ====================================================================
+% Force the backward-coalesce branch in gvm_free by freeing in an order
+% where the LOWER-addr neighbour is already free.
+% Layout: anchor4 (high), G (mid-high), H (mid), I (low).
+%
+% Sequence:
+%   1. Free G (mid-high).  Forward (anchor4 live), backward (H live).
+%      No coalesce.  Free list: {G}.
+%   2. Free I (at m_vm_global).  Forward (H live), backward (none).
+%      Top-edge advance.  Free list: still {G}.
+%      (Wait, after I's top-edge advance, m_vm_global moves up to H_start.
+%       But H is live!  So m_vm_global = H_start, but H is not free.
+%       That means H is now AT m_vm_global but live.  This is fine --
+%       m_vm_global is the LOWEST allocated address, regardless of
+%       whether the block at that address is live or free.)
+%   3. Free H.  Forward (G free) -> forward coalesce H+G.  Merged block
+%      at H_start.  H_start == m_vm_global -> top-edge advance.
+%      m_vm_global += merged_size.
+%
+% Hmm, that's still forward coalesce.  To force PURE backward coalesce:
+%   1. Free I (at m_vm_global) -> top-edge advance -> m_vm_global = H_start.
+%   2. Free G (mid).  Forward (anchor4 live), backward (H live).  Insert.
+%   3. Free H (at m_vm_global -- H_start).  Forward (G free) -> merge H+G.
+%      H at m_vm_global -> top-edge advance.
+%
+% Argh -- in a bump-only allocator's natural address layout, every
+% top-of-free-list block is reached either via top-edge or via forward
+% coalesce, because lower-addr blocks tend to be at m_vm_global and
+% higher-addr live blocks are common.  Backward coalesce fires when
+% the LOWER neighbour of the just-freed block is already free; this
+% requires the lower block to NOT have been top-edge-advanced.
+%
+% Setup: 4-block anchor pattern.
+%   anchor4 (highest), G, H, I (lowest at m_vm_global).
+%
+% 1. Free I -> top-edge advance, m_vm_global = H_start.
+% 2. Free G -> mid (between H live and anchor4 live), insert.
+%    Free list: {G}.
+% 3. Free H -> at m_vm_global.  Forward (G free) -> merge H+G.  Top-edge.
+%    Free list: empty.
+%
+% Still forward coalesce, not backward.  Backward coalesce path is
+% really only reachable when there's BOTH a lower-addr free neighbour
+% AND a not-at-m_vm_global newly-freed block.  E.g.:
+%
+%   Layout: anchor (high), J, K, L, M (low).  J above K above L above M.
+%   1. Free M -> top-edge.  m_vm_global = L_start.
+%   2. Free K -> mid (between J live and L live).  Insert.  Free: {K}.
+%   3. Free L -> at m_vm_global.  Forward (K free) -> merge L+K.  Top-edge.
+%      m_vm_global = J_start.
+%   4. Free J -> at m_vm_global.  Forward (anchor live) no.  Backward
+%      (none below).  Top-edge.
+%   5. Free anchor -> at m_vm_global.  Top-edge.
+%
+% Hmm no backward.  Let me try one more pattern:
+%   Layout: anchor (high), J, K, L (low at m_vm_global).
+%   1. Free K -> mid.  Insert.  Free: {K}.
+%   2. Free J -> mid (between anchor live and K free).  Forward (anchor
+%      live) no.  BACKWARD (K free) -> backward coalesce J+K.  Merged
+%      block starts at K_offset, size J+K.  Insert (or top-edge if at
+%      m_vm_global -- K is NOT at m_vm_global because L is below).
+%      Free list: {K+J merged}.
+%
+% That's BACKWARD COALESCE.  Sequence: free K, then free J.  When
+% freeing J, J's lower neighbour is K (free) -> backward.
+
+/anchor4 null def
+/j-slot null def
+/k-slot null def
+/l-slot null def
+
+vm-global-info /pre4 exch def
+
+true set-global
+500l /anchor4 exch def
+600l /j-slot exch def
+700l /k-slot exch def
+800l /l-slot exch def
+false set-global
+
+% Layout (low->high): l-slot's Long, k-slot's, j-slot's, anchor4's.
+% m_vm_global = l-slot's Long.
+
+% Step 1: free K.  Mid-block.  Insert into free list.
+/k-slot 0 def
+vm-global-info /step4-1 exch def
+step4-1 /free-blocks get 1 eq                       (s4: step 1 -- K in free list)  rt-ok
+
+% Step 2: free J.  J's lower-addr neighbour is K (free) -> BACKWARD coalesce.
+/j-slot 0 def
+vm-global-info /step4-2 exch def
+% After backward coalesce, K+J is one merged block in the free list.
+step4-2 /free-blocks get 1 eq                       (s4: step 2 -- backward coalesce -> 1 block) rt-ok
+step4-2 /free-bytes  get 64 eq                      (s4: step 2 -- merged block is 64 bytes) rt-ok
+
+% Step 3: free L (at m_vm_global).  Forward neighbour is merged K+J
+% (free) -> forward coalesce -> L+K+J.  L was at m_vm_global -> top-edge
+% advance.
+/l-slot 0 def
+vm-global-info /step4-3 exch def
+step4-3 /free-blocks get 0 eq                       (s4: step 3 -- forward + top-edge advance) rt-ok
+
+% Step 4: free anchor4 -> top-edge.
+/anchor4 0 def
+vm-global-info /step4-4 exch def
+step4-4 /total-bytes get pre4 /total-bytes get eq   (s4: step 4 -- back to baseline) rt-ok
+
+% ====================================================================
+% SECTION 5: free-list reuse via first-fit
+% ====================================================================
+% Allocate N between TWO anchors, so freeing N puts it in the middle
+% of the heap (not at m_vm_global) and lands in the free list.  Then
+% allocate a new global Long of the same size; gvm_alloc's first-fit
+% should reuse N's slot instead of bumping m_vm_global.
+
+/anchor5-hi null def
+/n-slot null def
+/anchor5-lo null def
+
+vm-global-info /pre5 exch def
+
+true set-global
+55l /anchor5-hi exch def   % HIGHEST addr (allocated first)
+66l /n-slot exch def       % mid
+77l /anchor5-lo exch def   % LOWEST addr (= m_vm_global, anchored)
+false set-global
+
+vm-global-info /alloc5 exch def
+alloc5 /total-bytes get pre5 /total-bytes get sub 96 eq
+    (s5: 3 long allocs grew by 96)                  rt-ok
+
+/n-slot 0 def              % free N -> not at m_vm_global -> insert in free list
+
+vm-global-info /freed5 exch def
+freed5 /free-blocks get 1 eq                        (s5: N in free list)  rt-ok
+
+% Allocate another Long.  Same size as N (32 bytes).  First-fit should
+% reuse N's slot; vm-global-used should NOT grow.
+/m-slot null def
+true set-global
+88l /m-slot exch def
+false set-global
+
+vm-global-info /reused5 exch def
+reused5 /free-blocks get 0 eq                       (s5: first-fit reused N's slot) rt-ok
+reused5 /total-bytes get
+freed5  /total-bytes get eq                         (s5: m_vm_global unchanged on reuse) rt-ok
+
+% Cleanup.
+/m-slot 0 def
+/anchor5-hi 0 def
+/anchor5-lo 0 def
+
+vm-global-info /cleanup5 exch def
+cleanup5 /total-bytes get pre5 /total-bytes get eq  (s5: cleanup back to baseline) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_gvm_heap_free: ALL TESTS PASSED) =
+(__test_ok__) =

@@ -1,0 +1,131 @@
+% ====================================================================
+% test_gc_stress_record.trx -- deterministic GC-stress for the record ops
+% ====================================================================
+% Debug-only (needs the vm-gc-stress operator, TRIX_DEBUGGER).  Run via
+% tests/run_gc_stress_tests.sh; run_all.sh skips it.
+%
+% `vm-gc-stress` makes gvm_alloc fire a full vm_global_gc before EVERY
+% global user allocation.  Run inside ${...} (m_curr_alloc_global = true ->
+% the global alloc path) every record-instance / schema alloc and every
+% per-field make_clone is therefore preceded by a sweep, so a half-built
+% instance or schema held only in a C local / on the gc-root stack across
+% the next allocation is collected right before the alloc that needs it --
+% unless it is correctly rooted.  Long (`Nl`) field VALUES make the
+% per-field make_clone actually allocate (ExtValue), which is what arms the
+% window the gc-root-stack conversion (record_clone_replacing_field /
+% make_record_op / record_from_dict_op) must hold.
+%
+% Each case runs stressed-in-${} vs the same computation unstressed in
+% local VM (ground truth) and compares a scalar pulled from the result.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+true vm-gc-stress
+
+% --- record (make_record_op): half-built instance rooted across schema alloc ---
+${ 1l 2l 3l [ /a /b /c ] record /b get }
+1l 2l 3l [ /a /b /c ] record /b get
+eq (record: /b) rt-ok clear
+
+${ 1l 2l 3l [ /a /b /c ] record /a get }
+1l 2l 3l [ /a /b /c ] record /a get
+eq (record: /a survives schema alloc) rt-ok clear
+
+% --- record-update (record_clone_replacing_field) ---
+${ 1l 2l 3l [ /a /b /c ] record /b 99l record-update /b get }
+1l 2l 3l [ /a /b /c ] record /b 99l record-update /b get
+eq (record-update: /b replaced) rt-ok clear
+
+% the untouched fields must survive the per-field clone loop's GCs
+${ 1l 2l 3l [ /a /b /c ] record /b 99l record-update /a get }
+1l 2l 3l [ /a /b /c ] record /b 99l record-update /a get
+eq (record-update: /a survives) rt-ok clear
+
+${ 1l 2l 3l [ /a /b /c ] record /b 99l record-update /c get }
+1l 2l 3l [ /a /b /c ] record /b 99l record-update /c get
+eq (record-update: /c survives) rt-ok clear
+
+% --- record-map-field (record_clone_replacing_field via @complete) ---
+${ 1l 2l 3l [ /a /b /c ] record /b { 10l add } record-map-field /b get }
+1l 2l 3l [ /a /b /c ] record /b { 10l add } record-map-field /b get
+eq (record-map-field: /b) rt-ok clear
+
+${ 1l 2l 3l [ /a /b /c ] record /b { 10l add } record-map-field /a get }
+1l 2l 3l [ /a /b /c ] record /b { 10l add } record-map-field /a get
+eq (record-map-field: /a survives) rt-ok clear
+
+% --- record-from-dict (record_from_dict_op) ---
+${ << /a 1l /b 2l /c 3l >> [ /a /b /c ] record-from-dict /c get }
+<< /a 1l /b 2l /c 3l >> [ /a /b /c ] record-from-dict /c get
+eq (record-from-dict: /c) rt-ok clear
+
+${ << /a 1l /b 2l /c 3l >> [ /a /b /c ] record-from-dict /a get }
+<< /a 1l /b 2l /c 3l >> [ /a /b /c ] record-from-dict /a get
+eq (record-from-dict: /a survives) rt-ok clear
+
+% --- record-map (exec-stack rooted across the per-field user proc) ---
+${ 1l 2l 3l [ /a /b /c ] record { 10l add } record-map /a get }
+1l 2l 3l [ /a /b /c ] record { 10l add } record-map /a get
+eq (record-map: /a) rt-ok clear
+
+${ 1l 2l 3l [ /a /b /c ] record { 10l add } record-map /c get }
+1l 2l 3l [ /a /b /c ] record { 10l add } record-map /c get
+eq (record-map: /c) rt-ok clear
+
+% --- record-fields (operand-slot rooting across field clones) ---
+${ 1l 2l 3l [ /a /b /c ] record record-fields add add }
+1l 2l 3l [ /a /b /c ] record record-fields add add
+eq (record-fields: sum) rt-ok clear
+
+% --- record-values ---
+${ 1l 2l 3l [ /a /b /c ] record record-values 1 get }
+1l 2l 3l [ /a /b /c ] record record-values 1 get
+eq (record-values: [1]) rt-ok clear
+
+% --- record-schema ---
+${ 1l 2l 3l [ /a /b /c ] record record-schema 2 get }
+1l 2l 3l [ /a /b /c ] record record-schema 2 get
+eq (record-schema: [2]) rt-ok clear
+
+% --- record-merge ---
+${ 1l [ /a ] record 2l [ /b ] record record-merge /b get }
+1l [ /a ] record 2l [ /b ] record record-merge /b get
+eq (record-merge: /b) rt-ok clear
+
+${ 1l [ /a ] record 2l [ /b ] record record-merge /a get }
+1l [ /a ] record 2l [ /b ] record record-merge /a get
+eq (record-merge: /a) rt-ok clear
+
+% --- record-select ---
+${ 1l 2l 3l [ /a /b /c ] record [ /a /c ] record-select /c get }
+1l 2l 3l [ /a /b /c ] record [ /a /c ] record-select /c get
+eq (record-select: /c) rt-ok clear
+
+% --- record-to-dict ---
+${ 1l 2l [ /a /b ] record record-to-dict /a get }
+1l 2l [ /a /b ] record record-to-dict /a get
+eq (record-to-dict: /a) rt-ok clear
+
+% --- record-group-by (working dicts + cloned Long keys + per-group arrays) ---
+${ [ 1l 100l [ /k /v ] record 1l 200l [ /k /v ] record 2l 300l [ /k /v ] record ] /k record-group-by 1l get length }
+[ 1l 100l [ /k /v ] record 1l 200l [ /k /v ] record 2l 300l [ /k /v ] record ] /k record-group-by 1l get length
+eq (record-group-by: group 1l size) rt-ok clear
+
+% --- record-zip (columnar arrays -> array of records) ---
+${ [ [ 1l 2l ] [ 3l 4l ] ] [ /a /b ] record-zip 0 get /b get }
+[ [ 1l 2l ] [ 3l 4l ] ] [ /a /b ] record-zip 0 get /b get
+eq (record-zip: rec0 /b) rt-ok clear
+
+false vm-gc-stress
+
+(test_gc_stress_record.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

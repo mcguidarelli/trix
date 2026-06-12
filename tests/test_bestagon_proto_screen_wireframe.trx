@@ -1,0 +1,23 @@
+% ====================================================================
+% test_bestagon_proto_screen_wireframe.trx -- run examples/bestagon-
+% proto/proto-screen-wireframe.trx self-test via tests/ harness.
+% ====================================================================
+%
+% Thin wrapper: loads proto-screen-wireframe.trx (Phase 0.6C: screen
+% layout per GDD section 18.1 - floating top-bar/keybind + tall
+% minimap column), which auto-runs its self-test on load.
+%
+% Asserts:
+%   - 120x40 floating top-bar + keybind: no '|' at (0,0)/(w-1,0)/
+%     (0,h-1)/(w-1,h-1)
+%   - 120x40 panel dividers present at expected rows + columns
+%   - 120x40 panel labels present (Day 7 / Selected: / Combat: /
+%     minimap inline / WASD)
+%   - viewport hex-count reported at 120x40, 160x50, 200x60
+%   - per-size wireframe dumped to out/wireframe-{120x40,160x50,200x60}.txt
+%
+% Runs on default 1 MB VM.
+% ====================================================================
+
+(examples/bestagon-proto/proto-screen-wireframe.trx) run
+(__test_ok__) =

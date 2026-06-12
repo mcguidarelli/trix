@@ -1,0 +1,164 @@
+% ====================================================================
+% test_sysops.trx -- tests for system interface operators
+% ====================================================================
+% file-exists?, file-size, getcwd, getpid, mkdir, setenv, coroutine-sleep
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: file-exists?
+% ====================================================================
+
+(trix.h) file-exists?                     (file-exists?: trix.h exists) rt-ok  clear
+(trix.cpp) file-exists?                   (file-exists?: trix.cpp exists) rt-ok  clear
+(nonexistent_xyz_987.txt) file-exists? not  (file-exists?: missing file) rt-ok  clear
+(tests) file-exists?                    (file-exists?: directory) rt-ok  clear
+(.) file-exists?                        (file-exists?: dot) rt-ok  clear
+
+% type check
+{ 42 file-exists? } try /type-check eq  (file-exists?: type-check int) rt-ok  clear
+{ null file-exists? } try /type-check eq  (file-exists?: type-check null) rt-ok  clear
+
+% ====================================================================
+% SECTION 2: file-size
+% ====================================================================
+
+(trix.h) file-size 0l gt                (file-size: trix.h > 0) rt-ok  clear
+(trix.h) file-size type /long-type eq   (file-size: returns long) rt-ok  clear
+
+% create a known?-size file
+(/tmp/trix_fsize_test.txt) (w)#b stream
+dup (ABCDE) write-string
+close-stream
+(/tmp/trix_fsize_test.txt) file-size 5l eq  (file-size: 5 bytes) rt-ok  clear
+(/tmp/trix_fsize_test.txt) delete-file
+
+% error on missing file
+{ (nonexistent_xyz_987.txt) file-size } try
+/filename-not-found eq                 (file-size: missing file error) rt-ok  clear
+
+% type check
+{ 42 file-size } try /type-check eq   (file-size: type-check int) rt-ok  clear
+
+% ====================================================================
+% SECTION 3: getcwd
+% ====================================================================
+
+getcwd type /string-type eq           (getcwd: returns string) rt-ok  clear
+getcwd length 0 gt                    (getcwd: non-empty) rt-ok  clear
+getcwd 0 get 47b eq                   (getcwd: starts with /) rt-ok  clear
+
+% ====================================================================
+% SECTION 4: coroutine-sleep
+% ====================================================================
+
+% coroutine-sleep 0 is a no-op
+clock
+0 coroutine-sleep
+clock exch sub
+50000ul lt                             (sleep: 0ms is quick) rt-ok  clear
+
+% coroutine-sleep 20ms
+clock
+20 coroutine-sleep
+clock exch sub
+15000ul ge                             (sleep: 20ms elapsed >= 15ms) rt-ok  clear
+
+% error: negative
+{ -1 coroutine-sleep } try /range-check eq      (sleep: negative range-check) rt-ok  clear
+
+% error: type check
+{ (hello) coroutine-sleep } try /type-check eq  (sleep: string type-check) rt-ok  clear
+{ 1.5 coroutine-sleep } try /type-check eq      (sleep: real type-check) rt-ok  clear
+
+% ====================================================================
+% SECTION 5: getpid
+% ====================================================================
+
+getpid type /integer-type eq          (getpid: returns integer) rt-ok  clear
+getpid 0 gt                           (getpid: positive) rt-ok  clear
+getpid getpid eq                      (getpid: stable) rt-ok  clear
+
+% ====================================================================
+% SECTION 6: mkdir
+% ====================================================================
+
+% create a temp directory
+(/tmp/trix_mkdir_test) file-exists? { (/tmp/trix_mkdir_test) delete-file } if
+(/tmp/trix_mkdir_test) mkdir
+(/tmp/trix_mkdir_test) file-exists?     (mkdir: created) rt-ok  clear
+
+% error on duplicate
+{ (/tmp/trix_mkdir_test) mkdir } try
+/filename-not-found eq                 (mkdir: duplicate error) rt-ok  clear
+
+% type check
+{ 42 mkdir } try /type-check eq        (mkdir: type-check int) rt-ok  clear
+
+% cleanup (rmdir via writing an empty file trick — actually use delete-file which calls remove())
+% note: remove() works on empty directories on Linux
+(/tmp/trix_mkdir_test) delete-file
+
+% ====================================================================
+% SECTION 7: setenv
+% ====================================================================
+
+% set and retrieve
+(TRIX_TEST_SYSOPS) (test_value_42) setenv
+(TRIX_TEST_SYSOPS) getenv
+(setenv: getenv found) rt-ok
+(test_value_42) eq (setenv: round-trip value) rt-ok  clear
+
+% overwrite existing
+(TRIX_TEST_SYSOPS) (new_value) setenv
+(TRIX_TEST_SYSOPS) getenv
+(setenv: overwrite found) rt-ok
+(new_value) eq (setenv: overwrite value) rt-ok  clear
+
+% type checks
+{ 42 (val) setenv } try /type-check eq     (setenv: type-check name) rt-ok  clear
+{ (name) 42 setenv } try /type-check eq    (setenv: type-check value) rt-ok  clear
+{ setenv } try /opstack-underflow eq       (setenv: underflow) rt-ok  clear
+
+% ====================================================================
+% SECTION 8: getenv
+% ====================================================================
+
+% getenv found: set a known? var, then retrieve
+(TRIX_GETENV_TEST_42) (found_value) setenv
+(TRIX_GETENV_TEST_42) getenv
+true eq (getenv: found returns true) rt-ok
+(found_value) eq (getenv: found returns value) rt-ok
+clear
+
+% getenv missing: var that should not exist
+(TRIX_NONEXISTENT_VAR_XYZ_999) getenv
+false eq (getenv: missing returns false) rt-ok
+clear
+
+% getenv found: consumes string, pushes value + true (net +1)
+mark
+(TRIX_GETENV_TEST_42) getenv
+count-to-mark 2 eq (getenv: found pushes 2 items) rt-ok
+clear
+
+% getenv missing: consumes string, pushes false (net 0)
+mark
+(TRIX_NONEXISTENT_VAR_XYZ_999) getenv
+count-to-mark 1 eq (getenv: missing pushes 1 item) rt-ok
+clear
+
+% type check
+{ 42 getenv } try /type-check eq (getenv: type-check int) rt-ok clear
+
+(System ops tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

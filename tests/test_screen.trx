@@ -1,0 +1,298 @@
+% test_screen.trx -- Phase 2 commit 1 coverage for Screen non-render ops.
+% Renders are tested separately in commit 2 (test_screen_render.trx).
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+% --- make-screen + accessors ------------------------------------------------
+
+80 24 make-screen
+/s exch def
+
+s screen-cols 80 eq (make-screen: cols=80) rt-ok
+s screen-rows 24 eq (make-screen: rows=24) rt-ok
+
+% Different dims work.
+1 1 make-screen /tiny exch def
+tiny screen-cols 1 eq (1x1 cols=1) rt-ok
+tiny screen-rows 1 eq (1x1 rows=1) rt-ok
+
+200 80 make-screen /big exch def
+big screen-cols 200 eq (200x80 cols=200) rt-ok
+big screen-rows 80 eq  (200x80 rows=80)  rt-ok
+
+% --- range-check on dimensions -----------------------------------------------
+
+mark { 0 24 make-screen } try
+/range-check eq (zero cols rejected) rt-ok
+clear
+
+mark { 80 0 make-screen } try
+/range-check eq (zero rows rejected) rt-ok
+clear
+
+mark { -1 24 make-screen } try
+/range-check eq (negative cols rejected) rt-ok
+clear
+
+% --- screen-clear is a no-op visible only after render; just call it --------
+
+s screen-clear
+
+% --- screen-put-cell --------------------------------------------------------
+
+s 0 0 65 7 0 0 screen-put-cell    % 'A' top-left
+s 79 23 90 7 0 0 screen-put-cell  % 'Z' bottom-right
+s screen-cols 80 eq (post-put-cell cols=80) rt-ok
+
+mark { s 80 0 65 7 0 0 screen-put-cell } try   % col out of bounds
+/range-check eq (put-cell col oob rejected) rt-ok
+clear
+
+mark { s 0 24 65 7 0 0 screen-put-cell } try   % row out of bounds
+/range-check eq (put-cell row oob rejected) rt-ok
+clear
+
+mark { s 0 0 65 256 0 0 screen-put-cell } try  % fg out of palette
+/range-check eq (put-cell fg>255 rejected) rt-ok
+clear
+
+mark { s 0 0 65 7 256 0 screen-put-cell } try  % bg out of palette
+/range-check eq (put-cell bg>255 rejected) rt-ok
+clear
+
+mark { s 0 0 65 7 0 -1 screen-put-cell } try   % attrs negative
+/range-check eq (put-cell negative attrs rejected) rt-ok
+clear
+
+% --- screen-put-string ------------------------------------------------------
+
+s 0 0 (Hello) 7 0 0 screen-put-string
+s 0 23 (Bottom row text) 7 0 0 screen-put-string
+% off-screen truncation is silent (not an error)
+s 75 0 (truncatedlongstring) 7 0 0 screen-put-string
+
+mark { s 0 24 (X) 7 0 0 screen-put-string } try   % row oob
+/range-check eq (put-string row oob rejected) rt-ok
+clear
+
+% --- screen-fill-rect -------------------------------------------------------
+
+s 0 0 80 24 32 7 0 0 screen-fill-rect   % full clear via fill
+s 10 5 20 10 35 1 0 0 screen-fill-rect  % '#' rect
+% out-of-bounds rect is silently clipped (not an error)
+s 75 22 20 10 35 1 0 0 screen-fill-rect
+
+% Regression: a width whose x+w exceeds length_t must clip to m_cols, not wrap the
+% promoted sum down to a small value (which silently dropped/shortened the fill).
+200 5 make-screen /clip exch def
+clip 50 0 65535 1 35 7 0 0 screen-fill-rect pop
+clip 100 0 screen-get-cell pop pop pop 35 eq (fill-rect: col 100 filled despite wide width) rt-ok
+clip 199 0 screen-get-cell pop pop pop 35 eq (fill-rect: clips to m_cols edge col 199) rt-ok
+
+% O-form precision must NOT truncate the structured handle form (it only trims the bare
+% type-name in the 's' path); {:.4O} on an 80x24 screen stays "--screen:80x24--".
+=string ({:.4O}) mark s sprint-fmt pop (--screen:80x24--) eq (O-form not precision-truncated) rt-ok
+
+% --- screen-resize ----------------------------------------------------------
+
+100 30 make-screen /r exch def
+r 50 20 screen-resize
+r screen-cols 50 eq (resize-down cols=50) rt-ok
+r screen-rows 20 eq (resize-down rows=20) rt-ok
+
+% --- screen-resize rejects cross-save-level resize -------------------------
+% A resize after `save` would allocate buffers above the barrier; the screen
+% state (created earlier, at a lower save level) survives restore and would
+% then point at reclaimed memory.  Resizing a screen at the level it was
+% created at is fine -- restore rolls both back together.
+
+save /sv exch def
+mark { r 60 25 screen-resize } try
+/above-barrier eq (resize-after-save rejected with above-barrier) rt-ok
+clear
+sv restore
+
+r screen-cols 50 eq (resize-rejected: cols unchanged) rt-ok
+r screen-rows 20 eq (resize-rejected: rows unchanged) rt-ok
+
+% Same-save-level resize is fine: create + resize both inside the save block.
+save /sv2 exch def
+40 12 make-screen /rs exch def
+rs 30 9 screen-resize pop
+rs screen-cols 30 eq (same-level resize cols) rt-ok
+rs screen-rows  9 eq (same-level resize rows) rt-ok
+sv2 restore
+
+50 20 make-screen /r2 exch def
+r2 200 80 screen-resize
+r2 screen-cols 200 eq (resize-up cols=200) rt-ok
+r2 screen-rows 80 eq  (resize-up rows=80)  rt-ok
+
+mark { r 0 20 screen-resize } try
+/range-check eq (resize zero cols rejected) rt-ok
+clear
+
+% --- type-check on non-screen handle ----------------------------------------
+
+mark { 256 make-string-stream screen-cols } try
+/type-check eq (screen-cols on stream rejected) rt-ok
+clear
+
+mark { 100 200 200 7 0 0 0 0 0 screen-fill-rect } try
+/type-check eq (fill-rect on int rejected) rt-ok
+clear
+
+% --- equality + handle-Object identity --------------------------------------
+
+10 10 make-screen /a exch def
+10 10 make-screen /b exch def
+a a eq (screen handle eq self) rt-ok
+a b eq not (different screens not eq) rt-ok
+
+% --- screen?, handle-kind (B3) ----------------------------------------------
+
+a screen? (screen?: true on Screen) rt-ok
+42 screen? not (screen?: false on Integer) rt-ok
+(hello) screen? not (screen?: false on String) rt-ok
+null screen? not (screen?: false on Null) rt-ok
+256 make-string-stream screen? not (screen?: false on Stream) rt-ok
+
+a handle-kind /screen eq (handle-kind: /screen on Screen) rt-ok
+42 handle-kind null eq (handle-kind: null on Integer) rt-ok
+(hi) handle-kind null eq (handle-kind: null on String) rt-ok
+{ 1 } handle-kind null eq (handle-kind: null on Proc) rt-ok
+
+% (underflow is implicit -- `mark` itself sits on the stack so a bare
+% `screen?` consumes the mark; no clean way to write an empty-stack test
+% under the run-test wrapper.)
+
+% --- screen-get-cell (B1) ---------------------------------------------------
+
+10 10 make-screen /g exch def
+g 0 0 screen-get-cell                       % default cell at (0,0): space, fg=7, bg=0, attrs=0
+0 eq  (get-cell default attrs=0) rt-ok
+0 eq  (get-cell default bg=0)    rt-ok
+7 eq  (get-cell default fg=7)    rt-ok
+32 eq (get-cell default ch=0x20) rt-ok
+g 4 5 88 3 7 5 screen-put-cell pop          % put 'X' fg=3 bg=7 attrs=5 at (4,5)
+g 4 5 screen-get-cell                       % readback
+5 eq  (get-cell readback attrs=5) rt-ok
+7 eq  (get-cell readback bg=7)    rt-ok
+3 eq  (get-cell readback fg=3)    rt-ok
+88 eq (get-cell readback ch=88)   rt-ok
+
+mark { g 10 0 screen-get-cell } try /range-check eq (get-cell col oob) rt-ok clear
+mark { g 0 10 screen-get-cell } try /range-check eq (get-cell row oob) rt-ok clear
+mark { 42 0 0 screen-get-cell } try /type-check eq (get-cell on Integer) rt-ok clear
+
+% --- == output drift fix (C1/C2) -------------------------------------------
+
+=string ({0:O}) mark 10 5 make-screen sprint-fmt pop
+(--screen:10x5--) deep-eq (== output: --screen:COLSxROWS--) rt-ok
+
+% --- screen-resize no-op early-return (A1) ---------------------------------
+
+10 5 make-screen /sz exch def
+sz 10 5 screen-resize                       % same dims -- must not error
+sz screen-cols 10 eq (resize-noop cols preserved) rt-ok
+sz screen-rows  5 eq (resize-noop rows preserved) rt-ok
+
+% --- attrs reserved-bit rejection (A3) -------------------------------------
+
+10 5 make-screen /sa exch def
+mark { sa 0 0 65 7 0 128 screen-put-cell } try
+/range-check eq (put-cell rejects attrs bit 7) rt-ok clear
+mark { sa 0 0 (X) 7 0 200 screen-put-string } try
+/range-check eq (put-string rejects attrs bit 7) rt-ok clear
+mark { sa 0 0 4 4 65 7 0 255 screen-fill-rect } try
+/range-check eq (fill-rect rejects attrs bit 7) rt-ok clear
+% Boundary 127 must succeed.
+sa 0 0 65 7 0 127 screen-put-cell pop
+sa 0 0 screen-get-cell
+127 eq (attrs=127 accepted: attrs)  rt-ok pop pop pop
+
+% --- screen-put-utf8-string (A4) -------------------------------------------
+
+10 1 make-screen /sUtf exch def
+sUtf 0 0 (Héllo) 7 0 0 screen-put-utf8-string pop
+sUtf 0 0 screen-get-cell pop pop pop
+72 eq (utf8: H at col 0)            rt-ok
+sUtf 1 0 screen-get-cell pop pop pop
+233 eq (utf8: é at col 1, U+00E9)   rt-ok
+sUtf 2 0 screen-get-cell pop pop pop
+108 eq (utf8: l at col 2)           rt-ok
+sUtf 4 0 screen-get-cell pop pop pop
+111 eq (utf8: o at col 4)           rt-ok
+% 3-byte codepoint U+2603 SNOWMAN (E2 98 83) -- one cell at col 0.
+4 1 make-screen /sSnow exch def
+sSnow 0 0 (\xE2\x98\x83) 7 0 0 screen-put-utf8-string pop
+sSnow 0 0 screen-get-cell pop pop pop
+9731 eq (utf8: snowman one cell)    rt-ok
+% Truncation at right edge (3-cell screen, 5 codepoint string).
+3 1 make-screen /sTr exch def
+sTr 0 0 (Héllo) 7 0 0 screen-put-utf8-string pop
+sTr 2 0 screen-get-cell pop pop pop
+108 eq (utf8: truncates at edge -- l)    rt-ok
+% Ill-formed sequence becomes U+FFFD (the lone 0x80 continuation byte).
+4 1 make-screen /sBad exch def
+sBad 0 0 (\x80AB) 7 0 0 screen-put-utf8-string pop
+sBad 0 0 screen-get-cell pop pop pop
+65533 eq (utf8: lone 0x80 -> U+FFFD)     rt-ok
+sBad 1 0 screen-get-cell pop pop pop
+65 eq (utf8: A after bad-byte resync)    rt-ok
+
+% --- screen-blit (B2) ------------------------------------------------------
+
+% Cross-screen blit
+4 1 make-screen /bsrc exch def
+bsrc 0 0 65 1 0 0 screen-put-cell pop
+bsrc 1 0 66 2 0 0 screen-put-cell pop
+bsrc 2 0 67 3 0 0 screen-put-cell pop
+4 1 make-screen /bdst exch def
+bsrc 0 0 3 1 bdst 1 0 screen-blit pop
+bdst 0 0 screen-get-cell pop pop pop
+32 eq (blit: dst[0] untouched, default space) rt-ok
+bdst 1 0 screen-get-cell pop pop pop
+65 eq (blit: dst[1] is A from src[0])    rt-ok
+bdst 3 0 screen-get-cell pop pop pop
+67 eq (blit: dst[3] is C from src[2])    rt-ok
+% Out-of-bounds region clips silently (no error)
+bsrc 100 100 4 4 bdst 0 0 screen-blit pop  % src OOB, w/h trim to 0
+bsrc 0 0 2 1 bdst 100 100 screen-blit pop  % dst OOB, similar
+% Same-screen overlap: shift right by 1 within row
+4 1 make-screen /bself exch def
+bself 0 0 65 1 0 0 screen-put-cell pop
+bself 1 0 66 2 0 0 screen-put-cell pop
+bself 2 0 67 3 0 0 screen-put-cell pop
+bself 0 0 3 1 bself 1 0 screen-blit pop
+bself 0 0 screen-get-cell pop pop pop
+65 eq (blit: same-screen src col 0 unchanged) rt-ok
+bself 1 0 screen-get-cell pop pop pop
+65 eq (blit: same-screen overlap shift A->1) rt-ok
+bself 3 0 screen-get-cell pop pop pop
+67 eq (blit: same-screen overlap shift C->3) rt-ok
+mark { 42 0 0 1 1 4 1 make-screen 0 0 screen-blit } try
+/type-check eq (blit: src must be Screen)    rt-ok clear
+
+% --- Summary ---------------------------------------------------------------
+
+(\npassed: ) print passed = (failed: ) print failed = (total: ) print total =
+failed 0 eq { (test_screen OK) } { (test_screen FAILED) } if-else =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

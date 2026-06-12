@@ -1,0 +1,349 @@
+% ====================================================================
+% test_block_comment.trx -- nestable block comments %{...%}
+% ====================================================================
+% Validates that block comments are treated as whitespace, nest
+% correctly, track line numbers, and interact properly with other
+% scanner features.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Basic block comments
+% ====================================================================
+
+%{ simple block comment %} 42 42 eq
+    (bc: basic block comment skipped) rt-ok clear
+
+%{ multi
+   line
+   block
+   comment %} 99 99 eq
+    (bc: multi-line block comment skipped) rt-ok clear
+
+%{%} 7 7 eq
+    (bc: empty block comment) rt-ok clear
+
+%{  %} 8 8 eq
+    (bc: whitespace-only block comment) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Inline block comments
+% ====================================================================
+
+1 %{ skip this %} 2 add 3 eq
+    (bc: inline block comment) rt-ok clear
+
+(hello) %{ between tokens %} length 5 eq
+    (bc: inline between tokens) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Nesting
+% ====================================================================
+
+%{ outer %{ inner %} still outer %} 42 42 eq
+    (bc: one level nesting) rt-ok clear
+
+%{ L1 %{ L2 %{ L3 %} L2 %} L1 %} 10 10 eq
+    (bc: three level nesting) rt-ok clear
+
+%{ %{ %{ %{ deep %} %} %} %} 55 55 eq
+    (bc: four level nesting) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Block comment content -- special characters
+% ====================================================================
+
+%{ contains % without { or } %} 1 1 eq
+    (bc: lone percent inside) rt-ok clear
+
+%{ contains { and } without percent %} 2 2 eq
+    (bc: lone braces inside) rt-ok clear
+
+%{ /name (string) <FF> [1 2] << >> { proc } %} 3 3 eq
+    (bc: scanner syntax inside is ignored) rt-ok clear
+
+%{ line comment inside: % this is ignored
+   still in block comment %} 4 4 eq
+    (bc: line comment syntax inside) rt-ok clear
+
+%{ all special chars: / \ # @ ! ( ) [ ] << >> <( )> %} 5 5 eq
+    (bc: all special characters inside) rt-ok clear
+
+%{ exclamation, hash, equals: ! # = + - * %} 6 6 eq
+    (bc: operator-like characters inside) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Adjacent block comments
+% ====================================================================
+
+%{ first %} %{ second %} 42 42 eq
+    (bc: adjacent block comments) rt-ok clear
+
+%{ a %}%{ b %} 43 43 eq
+    (bc: immediately adjacent block comments) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Block comment at file boundaries
+% ====================================================================
+
+%{ block at start-ish of executable region %} 100 100 eq
+    (bc: block comment near start) rt-ok clear
+
+% ====================================================================
+% SECTION 7: %} at top level is a line comment
+% ====================================================================
+
+%} this is just a line comment because % starts it
+44 44 eq
+    (bc: top-level percent-brace is line comment) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Block comments in procedures
+% ====================================================================
+
+{ %{ comment inside proc %} 42 } exec 42 eq
+    (bc: block comment in procedure) rt-ok clear
+
+{ 1 %{ inline in proc %} 2 add } exec 3 eq
+    (bc: inline block comment in procedure) rt-ok clear
+
+{ %{ multi
+     line
+     in proc %} 99 } exec 99 eq
+    (bc: multi-line block comment in procedure) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Block comments with strings (strings are NOT comments)
+% ====================================================================
+
+(%{ not a comment %}) length 19 eq
+    (bc: block comment syntax in string is literal) rt-ok clear
+
+% hex-encode "%{ comment %}" = 25 7B 20 63 6F 6D 6D 65 6E 74 20 25 7D
+<257B20636F6D6D656E7420257D> length 13 eq
+    (bc: block comment delimiters in hex string are literal) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Block comments with other comment types
+% ====================================================================
+
+% line comment before
+%{ block %} 50 50 eq
+    (bc: line comment then block comment) rt-ok clear
+
+%{ block %} 51
+% line comment after
+51 eq
+    (bc: block comment then line comment) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Unterminated block comment error
+% ====================================================================
+
+% Use a string stream to test unterminated block comment
+{ (%{ no close) token pop pop } try /syntax-error eq
+    (bc: unterminated block comment raises syntax-error) rt-ok clear
+
+{ (%{ %{ inner %} ) token pop pop } try /syntax-error eq
+    (bc: unterminated nested block comment raises syntax-error) rt-ok clear
+
+% ====================================================================
+% SECTION 12: Block comments with run operator
+% ====================================================================
+
+% Write a temp file with block comments and execute it
+/bc-tmp-path (/tmp/test_block_comment_tmp.trx) def
+bc-tmp-path (w)#b { (%{ block comment in file %}\n42\n) write-string } with-stream
+
+bc-tmp-path run
+42 eq
+    (bc: block comment in run file) rt-ok clear
+
+bc-tmp-path delete-file
+
+% ====================================================================
+% SECTION 13: token operator skips block comments
+% ====================================================================
+
+(%{ skip %} 42) token
+    pop                  % drop true
+    exch pop             % drop remaining string
+    42 eq
+    (bc: token operator skips block comment) rt-ok clear
+
+(%{ multi
+line %} hello) token
+    pop
+    exch pop
+    /hello eq
+    (bc: token skips multi-line block comment) rt-ok clear
+
+% ====================================================================
+% SECTION 14: Interaction with shebang
+% ====================================================================
+
+% Shebang is only at file start for file streams, not string streams.
+% Just verify block comment after a comment line works.
+(% not shebang\n%{ block %} 99) token
+    pop
+    exch pop
+    99 eq
+    (bc: block comment after line comment via token) rt-ok clear
+
+% ====================================================================
+% SECTION 15: Nested with varied content
+% ====================================================================
+
+%{
+   This is a documentation block.
+   It contains:
+   - Multiple lines
+   - %{ A nested comment
+        with its own content %}
+   - More content after the nested part
+   - Special: / \ ( ) { } [ ] < > # % @ ! =
+%}
+200 200 eq
+    (bc: documentation-style block comment) rt-ok clear
+
+% ====================================================================
+% SECTION 16: Stress -- deeply nested
+% ====================================================================
+
+%{%{%{%{%{%{%{%{%{%{%{%{%{%{%{%{ 16 deep %}%}%}%}%}%}%}%}%}%}%}%}%}%}%}%}
+300 300 eq
+    (bc: 16-level deep nesting) rt-ok clear
+
+% ====================================================================
+% SECTION 17: Block comment does not affect string escapes
+% ====================================================================
+
+%{ comment %} (\n) length 1 eq
+    (bc: string after block comment has normal escapes) rt-ok clear
+
+%{ comment %} <(raw \n)> length 6 eq
+    (bc: raw string after block comment preserves backslash) rt-ok clear
+
+% ====================================================================
+% SECTION 18: Line number tracking after block comment
+% ====================================================================
+
+% We verify indirectly: an error after a multi-line block comment
+% should not crash or produce garbage. Verify the error is catchable.
+% Verify a multi-line block comment in a string stream parses correctly
+(%{
+multi
+line
+block
+%} 42) token
+    pop exch pop
+    42 eq
+    (bc: token after multi-line block comment in string) rt-ok clear
+
+% ====================================================================
+% SECTION 19: Multiple inline block comments per line
+% ====================================================================
+
+1 %{ a %} 2 %{ b %} add 3 eq
+    (bc: two inline block comments with code between) rt-ok clear
+
+10 %{ x %} 20 %{ y %} 30 %{ z %} add add 60 eq
+    (bc: three inline block comments on one line) rt-ok clear
+
+% ====================================================================
+% SECTION 20: Block comments inside array and dict literals
+% ====================================================================
+
+[ 1 %{ comment %} 2 3 ] length 3 eq
+    (bc: block comment inside array literal) rt-ok clear
+
+[ 1 %{ comment %} 2 3 ] 0 get 1 eq
+    (bc: array element after block comment correct) rt-ok clear
+
+<< /a %{ comment %} 1 /b 2 >> /a get 1 eq
+    (bc: block comment inside dict literal) rt-ok clear
+
+<< /a 1 %{ comment %} /b 2 >> /b get 2 eq
+    (bc: dict entry after block comment correct) rt-ok clear
+
+% ====================================================================
+% SECTION 21: Percent immediately before EOF inside block comment
+% ====================================================================
+
+% A '%' as the very last char before EOF inside a block comment:
+% the peek-after-% path must handle the case where fill() fails.
+{ (%{ text %) token pop pop } try /syntax-error eq
+    (bc: percent before EOF in block comment raises syntax-error) rt-ok clear
+
+{ (%{ %) token pop pop } try /syntax-error eq
+    (bc: lone percent before EOF in block comment) rt-ok clear
+
+% ====================================================================
+% SECTION 22: Block comment with %{ and %} on separate lines
+% ====================================================================
+
+%{
+%}
+42 42 eq
+    (bc: open and close on separate lines) rt-ok clear
+
+%{
+   content spanning
+   multiple lines
+%}
+77 77 eq
+    (bc: open alone on line, close alone on line) rt-ok clear
+
+% ====================================================================
+% SECTION 23: Block comment with percent-not-brace inside
+% ====================================================================
+
+%{ 100% done %} 9 9 eq
+    (bc: percent without brace inside block comment) rt-ok clear
+
+%{ 50% complete, 100% tested %} 11 11 eq
+    (bc: multiple lone percents inside) rt-ok clear
+
+% ====================================================================
+% SECTION 24: CR and CRLF line endings inside block comments
+% ====================================================================
+
+% Build a block comment with CR line endings via hex:
+% "%{ line1\r line2\r %} 42"
+% 25 7B 20 6C 69 6E 65 31 0D 20 6C 69 6E 65 32 0D 20 25 7D 20 34 32
+(%{ line1\r line2\r %} 42) token
+    pop exch pop
+    42 eq
+    (bc: CR line endings inside block comment) rt-ok clear
+
+% Block comment with CRLF line endings:
+% "%{ line1\r\n line2\r\n %} 99"
+(%{ line1\r\n line2\r\n %} 99) token
+    pop exch pop
+    99 eq
+    (bc: CRLF line endings inside block comment) rt-ok clear
+
+% Mixed line endings: LF, CR, CRLF
+(%{ a\n b\r c\r\n d %} 77) token
+    pop exch pop
+    77 eq
+    (bc: mixed line endings inside block comment) rt-ok clear
+
+% ====================================================================
+% SECTION 25: Multiple block comments in procedure
+% ====================================================================
+
+{ 1 2 %{ comment %} add %{ another %} 3 mul } exec 9 eq
+    (bc: multiple block comments in procedure) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_block_comment: ALL TESTS PASSED) =
+(__test_ok__) =

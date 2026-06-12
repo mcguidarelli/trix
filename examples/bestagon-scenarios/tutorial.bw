@@ -1,0 +1,77 @@
+% examples/bestagon-scenarios/tutorial.bw -- Bestagon Wars introductory scenario.
+%
+% Canonical first scenario per GDD section 16.7.  25x18 map; Bishop
+% (white, human, faction 0) vs Hammer (red, AI v1 easy, faction 1).
+% Fog off (section 11.3), luck off (section 7.3).  Three neutral cities
+% mid-map; a single bridge over a river splits the valley.
+%
+% Loaded by proto-loader.trx via `(path) run` -- top-level Names land
+% in userdict, where `validate-scenario` reads them by name.
+
+% NOTE on terrain-key keys: GDD section 16.7 shows `/. /plain` form
+% but Trix 2026-04 field-access sugar (`.field` -> `/field get`) makes
+% `/.` an invalid Name literal -- the scanner errors "expected digit
+% or field name after '.'".  This proto uses 1-char Strings as keys
+% instead: `(.) /plain`.  Phase 2's production loader inherits this
+% convention; GDD section 16.7 should be amended to match.
+/terrain-key <<
+    (.) /plain   (^) /mountain  (*) /forest  (~) /sea  (_) /beach
+    (B) /bridge  (R) /road      (|) /river   (;) /reef
+>> def
+
+/factions [
+    << /id 0 /color /white /co /bishop /starting-funds 7000 /controller /human                          >>
+    << /id 1 /color /red   /co /hammer /starting-funds 0    /controller /ai-v1  /ai-difficulty /easy >>
+] def
+
+/buildings [
+    << /pos [12  1] /type /hq   /owner 1  >>
+    << /pos [13  1] /type /city /owner 1  >>
+    << /pos [12  5] /type /city /owner -1 >>
+    << /pos [ 8 13] /type /city /owner -1 >>
+    << /pos [16 13] /type /city /owner -1 >>
+    << /pos [12 16] /type /hq   /owner 0  >>
+    << /pos [11 16] /type /city /owner 0  >>
+] def
+
+/starting-units [
+    << /pos [10  3] /type /infantry /owner 1 >>
+    << /pos [14  3] /type /infantry /owner 1 >>
+    << /pos [ 9 13] /type /infantry /owner 0 >>
+    << /pos [15 13] /type /infantry /owner 0 >>
+] def
+
+/scenario <<
+    /name        (Tutorial Beach)
+    /description (Capture neutral cities, build a tank, push to enemy HQ.)
+    /author      (Bestagon Wars Team)
+    /map-size    [25 18]
+    /map [
+        (.........................)
+        (.........................)
+        (.........................)
+        (.........................)
+        (.........................)
+        (.........................)
+        (......^^^.......^^^......)
+        (.....^^*^^.....^^*^^.....)
+        (......^^^.......^^^......)
+        (.........................)
+        (~~~~~~~~~~~~B~~~~~~~~~~~~)
+        (.........................)
+        (.........................)
+        (.........................)
+        (.....***.......***.......)
+        (....*****.....*****......)
+        (.........................)
+        (.........................)
+    ]
+    /terrain-key    terrain-key
+    /factions       factions
+    /buildings      buildings
+    /starting-units starting-units
+    /fog-of-war     false
+    /turn-limit     null
+    /win-conditions [/capture-hq /eliminate-all-enemies]
+    /briefing       (Welcome to Bestagon Wars.  You command Bishop's balanced army (white).  Capture the neutral cities for +1000 funds/turn each, then push to Hammer's HQ in the north.\n\nTwo things the game does NOT spell out on-screen:\n  * Captures take TWO turns at full HP -- city income flips in the day AFTER you arrive on the building, not the same day.  Don't panic if turn-2 funds look low; turn-3 is where the economy opens up.\n  * Moving next to an enemy unit halts the rest of your move that turn (zone-of-control).  When pushing across the central bridge, screen your tank with an infantry FIRST so the ZOC zone is yours, not theirs.)
+>>#r def

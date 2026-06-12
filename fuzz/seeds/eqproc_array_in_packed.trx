@@ -1,0 +1,1 @@
+{ 5 6 mul }#=a 1 packed 0 get exec

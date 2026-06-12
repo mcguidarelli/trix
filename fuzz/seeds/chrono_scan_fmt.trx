@@ -1,0 +1,4 @@
+{ (2026-04-30T12:34:56) ({0:I%Y-%m-%dT%H:%M:%S}) mark 0ul sscan-fmt } try clear
+{ (2026-04-30) ({0:D%Y-%m-%d}) mark 0u sscan-fmt } try clear
+{ (garbagestring) ({0:I%Y-%m-%d %H:%M:%S}) mark 0ul sscan-fmt } try clear
+{ (22:13) ({0:I%R}) mark 0ul sscan-fmt } try clear

@@ -1,0 +1,3 @@
+mark { coroutine-suspend 1 add } coroutine-launch /c exch def
+c coroutine-resume
+c coroutine-join pop pop

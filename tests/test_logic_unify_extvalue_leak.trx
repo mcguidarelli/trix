@@ -1,0 +1,157 @@
+% ====================================================================
+% test_logic_unify_extvalue_leak.trx -- regression for unify_op /
+% unify_match_op ExtValue leaks (Bugs 1 + 2 from the 2026-05-04 audit).
+% ====================================================================
+%
+% Pre-fix behavior: unify_op consumed both ExtValue operands without
+% freeing them; unify_match_op did the same with value_obj.  When no
+% binding consumed the operands (concrete-equal, concrete-unequal, or
+% all-patterns-fail), the heap cells orphaned and were reclaimed only
+% by save-level rollback.  At BASE save level with no rollback this is
+% a permanent leak.
+%
+% Post-fix: unify_impl returns {matched, did_bind}; the caller frees
+% both operands when did_bind is false (no shared-state with an lvar
+% binding) and skips freeing when did_bind is true (the shallow-share
+% in lvar_bind makes the lvar's storage the live owner).
+%
+% Each test brackets its scenario with //:status:extvalue-active (or
+% //:status:widevalue-active for Int128) snapshots and asserts the
+% count is unchanged across 50 repeated calls.  The test proc body
+% is pre-allocated so the scan-time literal ExtValues are baked into
+% the baseline -- otherwise the resident ExtValues in the packed
+% proc would mask the per-call leak signal.
+%
+% Verified to fail on every leak test when the fix is reverted via
+% `git stash push src/ops_logic.inl` -- see commit message.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- 1. unify_op: concrete-equal Longs (the canonical Bug 1 case) ---
+{ 100l 100l unify pop } /unify-eq exch def
+//:status:extvalue-active /b1 exch def
+50 /unify-eq load repeat
+//:status:extvalue-active b1 eq
+    (unify_op: 50x concrete-equal Longs no leak) rt-ok
+
+% --- 2. unify_op: concrete-unequal Longs (also leaked pre-fix) ---
+{ 42l 99l unify pop } /unify-ne exch def
+//:status:extvalue-active /b1 exch def
+50 /unify-ne load repeat
+//:status:extvalue-active b1 eq
+    (unify_op: 50x concrete-unequal Longs no leak) rt-ok
+
+% --- 3. unify_op: Doubles (ExtValue-backed; same leak class) ---
+{ 1.5d 1.5d unify pop } /unify-dbl exch def
+//:status:extvalue-active /b1 exch def
+50 /unify-dbl load repeat
+//:status:extvalue-active b1 eq
+    (unify_op: 50x concrete-equal Doubles no leak) rt-ok
+
+% --- 4. unify_op: ULongs ---
+{ 100ul 200ul unify pop } /unify-ulong exch def
+//:status:extvalue-active /b1 exch def
+50 /unify-ulong load repeat
+//:status:extvalue-active b1 eq
+    (unify_op: 50x concrete-unequal ULongs no leak) rt-ok
+
+% --- 5. unify_op: WideValue Int128 (the maybe_free_extvalue
+%        polymorphism path; widevalue-active counter rather than
+%        extvalue-active) ---
+{ 100q 200q unify pop } /unify-int128 exch def
+//:status:widevalue-active /b1 exch def
+50 /unify-int128 load repeat
+//:status:widevalue-active b1 eq
+    (unify_op: 50x concrete-unequal Int128 no widevalue leak) rt-ok
+
+% --- 6. unify_op: bind-from-concrete (Long flows into lvar storage,
+%        the operand stack slot is correctly NOT freed because the
+%        lvar's binding shares the m_offset; counter increases by
+%        exactly the lvar's retained ExtValue, then save/restore
+%        scope reclaims it) ---
+//:status:extvalue-active /b1 exch def
+save /S exch def
+logic-var /x exch def
+42l x unify pop
+//:status:extvalue-active b1 1 add eq
+    (unify_op: bind-from-concrete retains exactly 1 ExtValue) rt-ok
+S restore
+//:status:extvalue-active b1 eq
+    (unify_op: post-restore back to baseline) rt-ok
+
+% --- 7. unify_op: bind two unbound lvars (no ExtValues involved;
+%        binding pure-tagged objects shouldn't grow either counter) ---
+//:status:extvalue-active /b1 exch def
+save /S exch def
+logic-var /p exch def
+logic-var /q exch def
+p q unify pop
+//:status:extvalue-active b1 eq
+    (unify_op: bind two unbound lvars: 0 ExtValue allocations) rt-ok
+S restore
+
+% --- 8. unify_match_op: concrete-equal pattern match (the !did_bind
+%        free branch in my Bug 2 fix) ---
+{ 100l [[100l { } ]] unify-match } /umatch-eq exch def
+//:status:extvalue-active /b1 exch def
+50 /umatch-eq load repeat
+//:status:extvalue-active b1 eq
+    (unify_match: 50x concrete-equal match no leak) rt-ok
+
+% --- 9. unify_match_op: all-patterns-fail (the explicit
+%        maybe_free_extvalue + error path in my Bug 2 fix) ---
+{ { 42l [[1l { }] [2l { }] [3l { }]] unify-match } /Fail { } try } /umatch-fail exch def
+//:status:extvalue-active /b1 exch def
+50 /umatch-fail load repeat
+//:status:extvalue-active b1 eq
+    (unify_match: 50x all-fail no leak) rt-ok
+
+% --- 10. unify_match_op: success with binding (did_bind=true; my fix
+%         skips the free, lvar binding owns the m_offset).  We wrap
+%         in save/restore so each iteration's lvar + binding is
+%         rolled back, otherwise the lvar accumulates over iterations
+%         (a BASE-level effect, not a leak relevant to this fix) ---
+{ save /S exch def
+  logic-var /Y exch def
+  100l [[Y { }]] unify-match
+  S restore } /umatch-bind exch def
+//:status:extvalue-active /b1 exch def
+50 /umatch-bind load repeat
+//:status:extvalue-active b1 eq
+    (unify_match: 50x success-with-bind no leak) rt-ok
+
+% --- 11. End-to-end correctness: behaviors should still be intact
+%         (the leak fixes shouldn't have changed semantics) ---
+100l 100l unify
+    (unify: concrete-equal still returns true) rt-ok  clear
+42l 99l unify not
+    (unify: concrete-unequal still returns false) rt-ok  clear
+logic-var /x exch def
+42l x unify
+    (unify: bind-from-concrete still returns true) rt-ok
+x deref 42l eq
+    (unify: x correctly bound to 42l) rt-ok  clear
+
+% --- 12. unify-match transfers control to body intact. ---
+42l [[42l { true }]] unify-match
+    (unify-match: success-no-bind body ran) rt-ok  clear
+logic-var /Y exch def
+77l [[Y { Y deref }]] unify-match 77l eq
+    (unify-match: success-with-bind body sees binding) rt-ok  clear
+
+% --- 13. vm-validate confirms heap integrity after all the above. ---
+/vm-validate query-status true eq
+    (test_logic_unify_extvalue_leak: vm-validate passes) rt-ok  clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_logic_unify_extvalue_leak: ALL TESTS PASSED) =
+(__test_ok__) =

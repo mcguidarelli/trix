@@ -1,0 +1,145 @@
+% ====================================================================
+% test_userapi.trx -- tests for user operator API and related features
+% ====================================================================
+% my-square, my-clamp, rev-rot, fprint-fmt, dict paths
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: my-square (user operator)
+% ====================================================================
+
+0 my-square 0 eq                   (my-square: 0 -> 0) rt-ok clear
+5 my-square 25 eq                  (my-square: 5 -> 25) rt-ok clear
+-3 my-square 9 eq                  (my-square: -3 -> 9) rt-ok clear
+1 my-square 1 eq                   (my-square: 1 -> 1) rt-ok clear
+-1 my-square 1 eq                  (my-square: -1 -> 1) rt-ok clear
+100 my-square 10000 eq             (my-square: 100 -> 10000) rt-ok clear
+
+% overflow
+{ 100000 my-square } try /numerical-overflow eq   (my-square: overflow) rt-ok clear
+
+% type check
+{ 3.14 my-square } try /type-check eq             (my-square: real type-check) rt-ok clear
+{ (hello) my-square } try /type-check eq           (my-square: string type-check) rt-ok clear
+
+% underflow
+{ my-square } try /opstack-underflow eq            (my-square: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 2: my-clamp (user operator)
+% ====================================================================
+
+% in range
+5 1 10 my-clamp 5 eq               (my-clamp: 5 in 1..10 -> 5) rt-ok clear
+
+% below min
+0 1 10 my-clamp 1 eq               (my-clamp: 0 below 1..10 -> 1) rt-ok clear
+-5 1 10 my-clamp 1 eq              (my-clamp: -5 below 1..10 -> 1) rt-ok clear
+
+% above max
+15 1 10 my-clamp 10 eq             (my-clamp: 15 above 1..10 -> 10) rt-ok clear
+
+% at boundaries
+1 1 10 my-clamp 1 eq               (my-clamp: at min -> 1) rt-ok clear
+10 1 10 my-clamp 10 eq             (my-clamp: at max -> 10) rt-ok clear
+
+% same min and max
+5 5 5 my-clamp 5 eq                (my-clamp: 5 in 5..5 -> 5) rt-ok clear
+
+% range-check when min > max
+{ 5 10 1 my-clamp } try /range-check eq           (my-clamp: min>max range-check) rt-ok clear
+
+% type check
+{ 5 1 10.0 my-clamp } try /type-check eq          (my-clamp: real max type-check) rt-ok clear
+{ 5 (a) 10 my-clamp } try /type-check eq          (my-clamp: str min type-check) rt-ok clear
+
+% underflow
+{ 1 2 my-clamp } try /opstack-underflow eq        (my-clamp: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 3: rev-rot
+% ====================================================================
+
+% rev-rot: a b c -> c a b  (reverse rotation: top goes to bottom)
+1 2 3 rev-rot
+2 eq (rev-rot: top = 2) rt-ok
+1 eq (rev-rot: second = 1) rt-ok
+3 eq (rev-rot: third = 3) rt-ok
+clear
+
+% different types
+(a) 42 true rev-rot
+42 eq (rev-rot-mixed: top = 42) rt-ok
+(a) eq (rev-rot-mixed: second = a) rt-ok
+true eq (rev-rot-mixed: third = true) rt-ok
+clear
+
+% underflow
+{ 1 2 rev-rot } try /opstack-underflow eq            (rev-rot: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 4: fprint-fmt
+% ====================================================================
+
+% write formatted integer to temp file
+(/tmp/trix_fprintfmt_test.txt) (w)#b stream
+/sfp exch def
+
+sfp ({}) mark 42 fprint-fmt
+true eq (fprint-fmt: int returns true) rt-ok
+2 eq (fprint-fmt: int wrote 2 chars) rt-ok
+clear
+
+% write formatted string
+sfp ({}) mark (hello) fprint-fmt
+true eq (fprint-fmt: str returns true) rt-ok
+5 eq (fprint-fmt: str wrote 5 chars) rt-ok
+clear
+
+% multiple args
+sfp ({}-{}) mark 1 2 fprint-fmt
+true eq (fprint-fmt: multi returns true) rt-ok
+3 eq (fprint-fmt: multi wrote 3 chars) rt-ok
+clear
+
+sfp close-stream
+
+% read back and verify
+(/tmp/trix_fprintfmt_test.txt) (r)#b stream
+read-all (42hello1-2) eq (fprint-fmt: readback matches) rt-ok clear
+
+(/tmp/trix_fprintfmt_test.txt) delete-file
+
+% ====================================================================
+% SECTION 5: Dictionary paths
+% ====================================================================
+
+% systemdict path: pi constant
+//:systemdict:numbers:real-type:pi 3.14159 0.001
+3 1 roll sub abs ge                (dict-path: systemdict pi) rt-ok clear
+
+% userdict path: define and retrieve
+/test-dict-path-val 42 def
+//:userdict:test-dict-path-val 42 eq  (dict-path: userdict value) rt-ok clear
+
+% status path
+//:status:vm-used type /integer-type eq  (dict-path: status vm-used) rt-ok clear
+
+% missing leaf -> undefined error (use string+make-executable+exec to defer lookup)
+{ (//:systemdict:numbers:nonexistent-leaf-xyz) make-executable exec } try /undefined eq  (dict-path: missing leaf) rt-ok clear
+
+% missing intermediate -> undefined error
+{ (//:systemdict:nonexistent-dict-xyz:foo) make-executable exec } try /undefined eq  (dict-path: missing intermediate) rt-ok clear
+
+(User API tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

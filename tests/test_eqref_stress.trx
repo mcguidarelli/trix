@@ -1,0 +1,114 @@
+% test_eqref_stress.trx
+%
+% Stress tests for eq-storage #= mechanisms.  The whole reason for #= (as opposed
+% to plain `=string` / `[...]` / etc.) is to avoid VM-heap fragmentation when a
+% hot loop creates and discards short-lived temporaries.  These tests verify:
+%
+%   1. Generation counters bump once per runtime creation (no double-bump, no skip).
+%   2. VM usage does NOT grow with the loop count -- if it does, the mechanism
+%      has leaked its "one shared buffer" optimization.
+%
+% Hot-loop note: a literal `(x)#=` inside a proc body is scanned ONCE at scan
+% time; the loop just re-pushes the same already-created ref, which does not
+% exercise the hot-loop creation path.  To get true per-iteration creation we
+% use:
+%   - runtime ops where available: `=string`, `=array`, `=dict`
+%   - `(<source>) make-executable exec` to parse an eqref source per iteration
+%     for kinds with no runtime op: `}#=` (eqproc), `{{}}#=` (eqset)
+%
+% Each loop body is pre-defined as a named proc so that scanner-time VM
+% allocation for the loop body doesn't pollute the per-iteration VM-delta
+% measurement.  Before measurements start we also pre-warm `before-vm` and
+% `start-gen` in userdict so their first-def DictEntry allocations don't
+% appear in the first-block delta.
+
+(=== eqref stress tests ===) =
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% Pre-define loop bodies.
+/eqstring-body { pop =string pop } def
+/eqarray-body  { pop =array pop } def
+/eqdict-body   { pop =dict pop } def
+/eqproc-body   { pop ({ 1 2 add }#= pop) make-executable exec } def
+/eqset-body    { pop ({{ /a /b }}#= pop) make-executable exec } def
+
+% Pre-warm measurement slots in userdict so their first DictEntry alloc is
+% not charged to the first loop's delta.
+/before-vm 0 def
+/start-gen 0u def
+
+% Pre-warm each body once.  The first call into some eq-storage paths (notably
+% {{}}#=, which goes through Dict::create_set → Set entry pool init) allocates
+% a small one-time overhead that is not per-iteration.  Running once up front
+% keeps the first loop's delta measurement clean.
+0 //eqstring-body exec
+0 //eqarray-body exec
+0 //eqdict-body exec
+0 //eqproc-body exec
+0 //eqset-body exec
+
+% Pre-warm the per-coroutine binding cache for every name touched inside the
+% measurement region (the loop driver `for` and the delta-check ops `sub`/`eq`).
+% The cache allocates one 12-byte entry per never-before-looked-up Name; running
+% the exact pattern once before measurement ensures those entries exist so the
+% measured region observes a zero delta.
+1 1 1 //eqstring-body for
+//:status:vm-used //:status:vm-used sub 0 eq pop
+
+% --- eqstring ---
+/before-vm //:status:vm-used def
+/start-gen //:status:eqstring-generation def
+1 1 100 //eqstring-body for
+//:status:vm-used before-vm sub 0 eq
+    (stress: eqstring 100-iter hot loop leaves vm-used unchanged) rt-ok clear
+//:status:eqstring-generation start-gen sub 100u eq
+    (stress: eqstring 100 iterations bumped counter by 100) rt-ok clear
+
+% --- eqarray ---
+/before-vm //:status:vm-used def
+/start-gen //:status:eqarray-generation def
+1 1 100 //eqarray-body for
+//:status:vm-used before-vm sub 0 eq
+    (stress: eqarray 100-iter hot loop leaves vm-used unchanged) rt-ok clear
+//:status:eqarray-generation start-gen sub 100u eq
+    (stress: eqarray 100 iterations bumped counter by 100) rt-ok clear
+
+% --- eqdict ---
+/before-vm //:status:vm-used def
+/start-gen //:status:eqdict-generation def
+1 1 100 //eqdict-body for
+//:status:vm-used before-vm sub 0 eq
+    (stress: eqdict 100-iter hot loop leaves vm-used unchanged) rt-ok clear
+//:status:eqdict-generation start-gen sub 100u eq
+    (stress: eqdict 100 iterations bumped counter by 100) rt-ok clear
+
+% --- eqproc (no runtime op: parse per iteration) ---
+/before-vm //:status:vm-used def
+/start-gen //:status:eqproc-generation def
+1 1 100 //eqproc-body for
+//:status:vm-used before-vm sub 0 eq
+    (stress: eqproc 100-iter hot loop leaves vm-used unchanged) rt-ok clear
+//:status:eqproc-generation start-gen sub 100u eq
+    (stress: eqproc 100 iterations bumped counter by 100) rt-ok clear
+
+% --- eqset (no runtime op: parse per iteration) ---
+/before-vm //:status:vm-used def
+/start-gen //:status:eqset-generation def
+1 1 100 //eqset-body for
+//:status:vm-used before-vm sub 0 eq
+    (stress: eqset 100-iter hot loop leaves vm-used unchanged) rt-ok clear
+//:status:eqset-generation start-gen sub 100u eq
+    (stress: eqset 100 iterations bumped counter by 100) rt-ok clear
+
+(eqref stress tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

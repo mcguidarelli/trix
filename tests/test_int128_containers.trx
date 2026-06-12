@@ -1,0 +1,324 @@
+% ====================================================================
+% Phase 7: Int128 / UInt128 container integration tests.
+%
+% Verifies that the generic container plumbing correctly handles
+% Int128 and UInt128 Objects across every container type:
+%   - Dict   (keys and values via hash() + equal())
+%   - Set    (members via hash() + equal())
+%   - Record (fields via record-type/record/get/record-update)
+%   - Tagged (payload via tag / tag-value)
+%   - Curry  (captured argument)
+%   - Coroutine (return value delivered via join)
+%   - Logic-var (unify + deref)
+%   - Array  (get/put/length over 128-bit elements)
+%
+% Phase 8 unblocks 128-bit literals inside {...} bodies via PackedExt.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ---------- shared values ----------
+/i128a  42q def
+/i128b  -7q def
+/i128c  16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q def
+/u128a  100uq def
+/u128b  16#DEADBEEFCAFEBABE0123456789ABCDEF#uq def
+/u128c  16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFE#uq def
+
+% ====================================================================
+% SECTION 1: Dict with 128-bit keys
+% ====================================================================
+
+% put / get with Int128 key
+8 dict dup i128a (alpha) put
+dup i128a get (alpha) eq
+    (dict: Int128 key put/get) rt-ok clear
+
+% put / get with UInt128 key
+8 dict dup u128a (beta) put
+dup u128a get (beta) eq
+    (dict: UInt128 key put/get) rt-ok clear
+
+% known? with Int128 key
+8 dict dup i128a (x) put
+dup i128a known?
+    (dict: Int128 key known?) rt-ok clear
+
+% known? false for absent Int128 key
+8 dict dup i128a (x) put
+dup i128b known? not
+    (dict: Int128 key absent) rt-ok clear
+
+% overwrite existing Int128 key
+8 dict dup i128a (first) put
+dup i128a (second) put
+dup i128a get (second) eq
+    (dict: Int128 key overwrite) rt-ok clear
+
+% large/boundary UInt128 key round-trip
+8 dict dup u128b /found put
+dup u128b get /found eq
+    (dict: large UInt128 key) rt-ok clear
+
+% undef on Int128 key
+8 dict dup i128a 99 put
+dup i128a undef
+dup i128a known? not
+    (dict: Int128 key undef) rt-ok clear
+
+% Int128 and UInt128 are distinct key types (different type = different key)
+% Both use the same hash bucket math but equal() requires same type.
+8 dict dup 42q (signed) put
+dup 42uq (unsigned) put
+dup 42q get (signed) eq
+    (dict: Int128 / UInt128 disjoint keys -- signed side) rt-ok clear
+8 dict dup 42q (signed) put
+dup 42uq (unsigned) put
+dup 42uq get (unsigned) eq
+    (dict: Int128 / UInt128 disjoint keys -- unsigned side) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Dict with 128-bit values
+% ====================================================================
+
+8 dict dup /score i128c put
+dup /score get i128c deep-eq
+    (dict: Int128 value put/get) rt-ok clear
+
+8 dict dup /total u128b put
+dup /total get u128b deep-eq
+    (dict: UInt128 value put/get) rt-ok clear
+
+% dict literal with 128-bit value
+<< /big u128c >> /big get u128c deep-eq
+    (dict: UInt128 value via << >>) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Set with 128-bit members
+% ====================================================================
+
+4 set dup i128a set-add
+dup i128a set-member?
+    (set: Int128 add + member?) rt-ok clear
+
+4 set dup u128a set-add
+dup u128a set-member?
+    (set: UInt128 add + member?) rt-ok clear
+
+% set literal with 128-bit members
+{{ 1q 2q 3q }} length 3 eq
+    (set: literal with Int128 members) rt-ok clear
+
+{{ 1q 2q 3q }} 2q set-member?
+    (set: Int128 literal member present) rt-ok clear
+
+{{ 1q 2q 3q }} 9q set-member? not
+    (set: Int128 literal member absent) rt-ok clear
+
+% set-remove 128-bit member
+{{ 1q 2q 3q }} 2q set-remove 2q set-member? not
+    (set: Int128 remove) rt-ok clear
+
+% set-union / intersection / difference over 128-bit
+{{ 1q 2q 3q }} {{ 2q 3q 4q }} set-union length 4 eq
+    (set: union of Int128) rt-ok clear
+
+{{ 1q 2q 3q }} {{ 2q 3q 4q }} set-intersection length 2 eq
+    (set: intersection of Int128) rt-ok clear
+
+{{ 1q 2q 3q }} {{ 2q 3q 4q }} set-difference length 1 eq
+    (set: difference of Int128) rt-ok clear
+
+% Int128 and UInt128 are distinct set members
+{{ 42q 42uq }} length 2 eq
+    (set: Int128 / UInt128 are distinct members) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Record with 128-bit fields
+% ====================================================================
+
+/point128 [ /x /y ] record-type def
+
+% construct record with 128-bit field values
+i128a u128a point128 /r1 exch def
+r1 /x get i128a deep-eq
+    (record: Int128 field) rt-ok clear
+
+r1 /y get u128a deep-eq
+    (record: UInt128 field) rt-ok clear
+
+% length of 128-bit record
+r1 length 2 eq
+    (record: length with 128-bit fields) rt-ok clear
+
+% record-update on Int128 field
+r1 /x i128b record-update
+dup /x get i128b deep-eq
+    (record: update Int128 field) rt-ok
+/y get u128a deep-eq
+    (record: update preserves UInt128 field) rt-ok clear
+
+% record-fields destructure round-trip
+i128c u128c point128 record-fields
+u128c deep-eq
+    (record: fields destructure UInt128) rt-ok
+i128c deep-eq
+    (record: fields destructure Int128) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Tagged with 128-bit payload
+% ====================================================================
+
+i128a /big-i tag tag-value i128a deep-eq
+    (tag: Int128 payload tag-value) rt-ok clear
+
+u128a /big-u tag tag-value u128a deep-eq
+    (tag: UInt128 payload tag-value) rt-ok clear
+
+% tag-name preserved
+i128a /signed128 tag tag-name /signed128 eq
+    (tag: Int128 payload tag-name) rt-ok clear
+
+% untag returns name and payload
+u128a /unsigned128 tag untag
+/unsigned128 eq
+    (tag: UInt128 untag name) rt-ok
+u128a deep-eq
+    (tag: UInt128 untag payload) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Curry capture of 128-bit argument
+% ====================================================================
+
+% curry captures 128-bit Int128 value; exec applies it
+i128a //add curry 1q exch exec 43q deep-eq
+    (curry: Int128 capture + add) rt-ok clear
+
+% curry captures UInt128 value
+u128a //add curry 1uq exch exec 101uq deep-eq
+    (curry: UInt128 capture + add) rt-ok clear
+
+% uncurry returns captured 128-bit value and callable
+i128c //add curry uncurry
+pop i128c deep-eq
+    (curry: uncurry Int128 capture) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Coroutine yield / join with 128-bit values
+% ====================================================================
+
+% coroutine returns an Int128 value read from userdict (via def)
+[ { i128a } coroutine-launch coroutine-join
+pop i128a deep-eq
+    (coroutine: returns Int128) rt-ok clear
+
+% coroutine returns UInt128
+[ { u128b } coroutine-launch coroutine-join
+pop u128b deep-eq
+    (coroutine: returns UInt128) rt-ok clear
+
+% Phase 8: 128-bit literals work inside {...} bodies now.
+[ i128a { 1q add } coroutine-launch coroutine-join
+pop 43q deep-eq
+    (coroutine: Int128 parameter + literal add) rt-ok clear
+
+% coroutine returns an Int128 literal directly
+[ { 42q } coroutine-launch coroutine-join
+pop 42q deep-eq
+    (coroutine: Int128 literal in body) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Logic-var unify with 128-bit
+% ====================================================================
+
+logic-var /xv exch def
+xv i128c unify pop
+xv deref i128c deep-eq
+    (logic-var: unify Int128) rt-ok clear
+
+logic-var /yv exch def
+yv u128b unify pop
+yv deref u128b deep-eq
+    (logic-var: unify UInt128) rt-ok clear
+
+% unify same-value equal 128-bit values succeeds
+i128a i128a unify
+    (logic-var: unify identical Int128) rt-ok clear
+
+u128a u128a unify
+    (logic-var: unify identical UInt128) rt-ok clear
+
+% unify different Int128 values fails
+42q 99q unify not
+    (logic-var: unify distinct Int128 fails) rt-ok clear
+
+% unify inside array (pairwise)
+logic-var /zv exch def
+[ 1q zv 3q ] [ 1q 2q 3q ] unify pop
+zv deref 2q deep-eq
+    (logic-var: unify within Int128 array) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Array with 128-bit elements
+% ====================================================================
+
+% array literal with 128-bit values
+[ i128a i128b i128c ] length 3 eq
+    (array: length with Int128 elements) rt-ok clear
+
+[ i128a i128b i128c ] 0 get i128a deep-eq
+    (array: Int128 element 0) rt-ok clear
+
+[ i128a i128b i128c ] 2 get i128c deep-eq
+    (array: Int128 element 2) rt-ok clear
+
+% put on Int128 array element
+[ 0q 0q 0q ] dup 1 i128c put
+1 get i128c deep-eq
+    (array: put Int128 element) rt-ok clear
+
+% array of UInt128 values round-trip
+[ u128a u128b u128c ] 1 get u128b deep-eq
+    (array: UInt128 element get) rt-ok clear
+
+% for-all iteration sums Int128 array
+/sum 0q def
+[ 1q 2q 3q 4q ] { sum add /sum exch def } for-all
+sum 10q deep-eq
+    (array: for-all sum of Int128) rt-ok clear
+
+% ====================================================================
+% SECTION 10: deep-eq across containers holding 128-bit
+% ====================================================================
+
+% deep-eq arrays with 128-bit
+[ i128a u128a ] [ i128a u128a ] deep-eq
+    (deep-eq: arrays with 128-bit) rt-ok clear
+
+% deep-eq records with 128-bit
+i128a u128a point128 i128a u128a point128 deep-eq
+    (deep-eq: records with 128-bit) rt-ok clear
+
+% deep-eq dicts with 128-bit values
+<< /a i128c /b u128c >> << /a i128c /b u128c >> deep-eq
+    (deep-eq: dicts with 128-bit values) rt-ok clear
+
+% ====================================================================
+% SECTION 11: heap integrity
+% ====================================================================
+
+//:status:widevalue-validate  (widevalue free-list OK) rt-ok
+//:status:vm-validate         (vm heap OK)             rt-ok
+//:status:extvalue-validate   (extvalue free-list OK)  rt-ok
+
+(test_int128_containers.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

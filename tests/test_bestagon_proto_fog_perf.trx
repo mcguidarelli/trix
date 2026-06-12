@@ -1,0 +1,29 @@
+% ====================================================================
+% test_bestagon_proto_fog_perf.trx -- run examples/bestagon-proto/
+% proto-fog-perf.trx via the tests/ harness.
+% ====================================================================
+%
+% Thin wrapper: loads proto-fog-perf.trx (Phase 0.6E: fog-of-war perf-
+% budget validation per GDD section 11.1), which benches 1000
+% compute-fog invocations per variant (naive-bool / bbox-bool / bbox-set)
+% on Standard 50x36 and Epic 75x54 fixtures and writes the verdict to
+% examples/bestagon-proto/out/fog-perf.md.
+%
+% Correctness invariants asserted inside the proto (test fails on
+% mismatch):
+%   - naive-bool produces byte-identical Array<Byte> as bbox-bool
+%   - bbox-set length equals bbox-bool popcount
+%
+% Wall-clock budget verdict (PASS / FAIL on locked decision 32-D
+% no-cache stance) is logged to the verdict file but NOT asserted in
+% this test -- absolute wall-clock varies by build and host.  The
+% proto's stdout summary table is the primary artifact.
+%
+% Runs on default 1 MB VM via per-iteration save/restore brackets.
+% Iteration counts are 20 for naive (already shown hopeless at any N)
+% and 200 for bbox + set.  On debug build: ~5-7 minutes.  On prod build
+% (./trix.opt): ~20-30 s.
+% ====================================================================
+
+(examples/bestagon-proto/proto-fog-perf.trx) run
+(__test_ok__) =

@@ -1,0 +1,1208 @@
+% ====================================================================
+% test_lazy.trx -- Lazy Sequence Operators
+% ====================================================================
+% Validates lazy-seq construction, transformation, combining,
+% partitioning, and terminal operators.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Predicates and Accessors
+% ====================================================================
+
+null lazy-seq?                            (pred: null is lazy-seq) rt-ok clear
+null lazy-empty?                          (pred: null is lazy-empty) rt-ok clear
+
+1 lazy-from lazy-seq?                     (pred: lazy-from is lazy-seq) rt-ok clear
+1 lazy-from lazy-empty? not               (pred: lazy-from not empty) rt-ok clear
+
+1 lazy-from lazy-head 1 eq               (head: lazy-from 1) rt-ok clear
+1 lazy-from lazy-tail lazy-head 2 eq     (tail: lazy-from 1 tail head = 2) rt-ok clear
+
+% lazy-nil pushes null
+lazy-nil null eq                          (nil: pushes null) rt-ok clear
+lazy-nil lazy-seq?                        (nil: is lazy-seq) rt-ok clear
+lazy-nil lazy-empty?                      (nil: is empty) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Core Construction
+% ====================================================================
+
+% lazy-cons
+42 null lazy-cons lazy-head 42 eq         (cons: head = 42) rt-ok clear
+42 null lazy-cons lazy-tail null eq       (cons: tail of singleton = null) rt-ok clear
+
+% lazy-cons with lazy-seq tail
+1 2 null lazy-cons lazy-cons lazy-head 1 eq
+    (cons: nested head = 1) rt-ok clear
+1 2 null lazy-cons lazy-cons lazy-tail lazy-head 2 eq
+    (cons: nested tail head = 2) rt-ok clear
+
+% lazy-from: infinite sequence n, n+1, n+2, ...
+0 lazy-from lazy-head 0 eq               (from: head = 0) rt-ok clear
+0 lazy-from lazy-tail lazy-head 1 eq     (from: 1st tail = 1) rt-ok clear
+0 lazy-from lazy-tail lazy-tail lazy-head 2 eq
+    (from: 2nd tail = 2) rt-ok clear
+10 lazy-from lazy-head 10 eq             (from: start at 10) rt-ok clear
+
+% lazy-repeat: infinite repetition
+42 lazy-repeat lazy-head 42 eq           (repeat: head = 42) rt-ok clear
+42 lazy-repeat lazy-tail lazy-head 42 eq (repeat: tail head = 42) rt-ok clear
+
+% lazy-repeat-n: finite repetition
+7 3 lazy-repeat-n lazy-head 7 eq         (repeat-n: head = 7) rt-ok clear
+7 3 lazy-repeat-n lazy-tail lazy-head 7 eq
+    (repeat-n: 2nd = 7) rt-ok clear
+7 3 lazy-repeat-n lazy-tail lazy-tail lazy-head 7 eq
+    (repeat-n: 3rd = 7) rt-ok clear
+7 3 lazy-repeat-n lazy-tail lazy-tail lazy-tail null eq
+    (repeat-n: after 3 = null) rt-ok clear
+7 0 lazy-repeat-n null eq               (repeat-n: 0 = null) rt-ok clear
+7 1 lazy-repeat-n lazy-head 7 eq        (repeat-n: 1 = singleton) rt-ok clear
+7 1 lazy-repeat-n lazy-tail null eq     (repeat-n: 1 tail = null) rt-ok clear
+
+% ====================================================================
+% SECTION 3: lazy-take and lazy-to-array
+% ====================================================================
+
+1 lazy-from 5 lazy-take lazy-to-array
+    dup length 5 eq                      (take: length = 5) rt-ok
+    dup 0 get 1 eq                       (take: [0] = 1) rt-ok
+    dup 4 get 5 eq                       (take: [4] = 5) rt-ok
+    pop clear
+
+0 lazy-from 0 lazy-take null eq          (take 0: empty) rt-ok clear
+0 lazy-from 1 lazy-take lazy-to-array
+    dup length 1 eq                      (take 1: length = 1) rt-ok
+    0 get 0 eq                           (take 1: [0] = 0) rt-ok clear
+
+% lazy-take on finite seq that's shorter
+7 2 lazy-repeat-n 5 lazy-take lazy-to-array
+    length 2 eq                          (take > len: truncates) rt-ok clear
+
+% ====================================================================
+% SECTION 4: lazy-seq (array to lazy)
+% ====================================================================
+
+[1 2 3 4 5] lazy-seq lazy-to-array
+    dup length 5 eq                      (seq: round-trip length) rt-ok
+    dup 0 get 1 eq                       (seq: [0] = 1) rt-ok
+    dup 2 get 3 eq                       (seq: [2] = 3) rt-ok
+    dup 4 get 5 eq                       (seq: [4] = 5) rt-ok
+    pop clear
+
+[] lazy-seq null eq                      (seq: empty array = null) rt-ok clear
+
+[42] lazy-seq lazy-head 42 eq            (seq: singleton) rt-ok clear
+[42] lazy-seq lazy-tail null eq          (seq: singleton tail) rt-ok clear
+
+% ====================================================================
+% SECTION 5: lazy-map
+% ====================================================================
+
+1 lazy-from { 2 mul } lazy-map 5 lazy-take lazy-to-array
+    dup 0 get 2 eq                       (map: [0] = 2) rt-ok
+    dup 1 get 4 eq                       (map: [1] = 4) rt-ok
+    dup 4 get 10 eq                      (map: [4] = 10) rt-ok
+    pop clear
+
+% map over finite
+[10 20 30] lazy-seq { 1 add } lazy-map lazy-to-array
+    dup 0 get 11 eq                      (map-fin: [0] = 11) rt-ok
+    dup 1 get 21 eq                      (map-fin: [1] = 21) rt-ok
+    dup 2 get 31 eq                      (map-fin: [2] = 31) rt-ok
+    pop clear
+
+% map on empty
+null { 1 add } lazy-map null eq          (map: empty = null) rt-ok clear
+
+% ====================================================================
+% SECTION 6: lazy-filter
+% ====================================================================
+
+1 lazy-from { 2 mod 0 eq } lazy-filter 5 lazy-take lazy-to-array
+    dup 0 get 2 eq                       (filter: [0] = 2) rt-ok
+    dup 1 get 4 eq                       (filter: [1] = 4) rt-ok
+    dup 4 get 10 eq                      (filter: [4] = 10) rt-ok
+    pop clear
+
+% filter all out
+[1 3 5] lazy-seq { 2 mod 0 eq } lazy-filter null eq
+    (filter: all out = null) rt-ok clear
+
+% filter none out
+[2 4 6] lazy-seq { 2 mod 0 eq } lazy-filter lazy-to-array
+    length 3 eq                          (filter: none out) rt-ok clear
+
+% filter on empty
+null { true } lazy-filter null eq        (filter: empty = null) rt-ok clear
+
+% ====================================================================
+% SECTION 7: lazy-drop
+% ====================================================================
+
+1 lazy-from 3 lazy-drop lazy-head 4 eq   (drop: skip 3 → head = 4) rt-ok clear
+[1 2 3 4 5] lazy-seq 2 lazy-drop lazy-to-array
+    dup length 3 eq                      (drop: length after drop 2) rt-ok
+    dup 0 get 3 eq                       (drop: [0] = 3) rt-ok
+    pop clear
+
+[1 2] lazy-seq 5 lazy-drop null eq      (drop: over-drop = null) rt-ok clear
+[1 2 3] lazy-seq 0 lazy-drop lazy-to-array
+    length 3 eq                          (drop 0: no change) rt-ok clear
+
+% ====================================================================
+% SECTION 8: lazy-take-while and lazy-drop-while
+% ====================================================================
+
+1 lazy-from { 10 lt } lazy-take-while lazy-to-array
+    dup length 9 eq                      (take-while: length = 9) rt-ok
+    dup 0 get 1 eq                       (take-while: [0] = 1) rt-ok
+    dup 8 get 9 eq                       (take-while: [8] = 9) rt-ok
+    pop clear
+
+[1 2 3 4 5] lazy-seq { 3 lt } lazy-drop-while lazy-to-array
+    dup length 3 eq                      (drop-while: length = 3) rt-ok
+    dup 0 get 3 eq                       (drop-while: [0] = 3) rt-ok
+    pop clear
+
+% drop-while all
+[1 2 3] lazy-seq { 10 lt } lazy-drop-while null eq
+    (drop-while: all dropped = null) rt-ok clear
+
+% ====================================================================
+% SECTION 9: lazy-range
+% ====================================================================
+
+0 5 1 lazy-range lazy-to-array
+    dup length 5 eq                      (range: 0..5 length) rt-ok
+    dup 0 get 0 eq                       (range: [0] = 0) rt-ok
+    dup 4 get 4 eq                       (range: [4] = 4) rt-ok
+    pop clear
+
+0 10 2 lazy-range lazy-to-array
+    dup length 5 eq                      (range: step 2 length) rt-ok
+    dup 0 get 0 eq                       (range: step 2 [0] = 0) rt-ok
+    dup 4 get 8 eq                       (range: step 2 [4] = 8) rt-ok
+    pop clear
+
+10 0 -2 lazy-range lazy-to-array
+    dup length 5 eq                      (range: neg step length) rt-ok
+    dup 0 get 10 eq                      (range: neg [0] = 10) rt-ok
+    dup 4 get 2 eq                       (range: neg [4] = 2) rt-ok
+    pop clear
+
+5 5 1 lazy-range null eq                 (range: empty range) rt-ok clear
+0 5 -1 lazy-range null eq               (range: wrong direction) rt-ok clear
+
+% ====================================================================
+% SECTION 10: lazy-iterate
+% ====================================================================
+
+1 { 2 mul } lazy-iterate 5 lazy-take lazy-to-array
+    dup 0 get 1 eq                       (iterate: [0] = 1) rt-ok
+    dup 1 get 2 eq                       (iterate: [1] = 2) rt-ok
+    dup 2 get 4 eq                       (iterate: [2] = 4) rt-ok
+    dup 3 get 8 eq                       (iterate: [3] = 8) rt-ok
+    dup 4 get 16 eq                      (iterate: [4] = 16) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 11: lazy-unfold
+% ====================================================================
+
+1 { dup 10 gt { pop null } { dup 1 add mark 3 1 roll array-from-mark } if-else } lazy-unfold lazy-to-array
+    dup length 10 eq                     (unfold: 1..10 length) rt-ok
+    dup 0 get 1 eq                       (unfold: [0] = 1) rt-ok
+    dup 9 get 10 eq                      (unfold: [9] = 10) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 12: lazy-cycle
+% ====================================================================
+
+[1 2 3] lazy-cycle 7 lazy-take lazy-to-array
+    dup 0 get 1 eq                       (cycle: [0] = 1) rt-ok
+    dup 2 get 3 eq                       (cycle: [2] = 3) rt-ok
+    dup 3 get 1 eq                       (cycle: [3] = 1 wrap) rt-ok
+    dup 6 get 1 eq                       (cycle: [6] = 1 wrap2) rt-ok
+    pop clear
+
+[42] lazy-cycle 3 lazy-take lazy-to-array
+    dup 0 get 42 eq                      (cycle1: [0] = 42) rt-ok
+    dup 2 get 42 eq                      (cycle1: [2] = 42) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 13: lazy-chain
+% ====================================================================
+
+[1 2 3] lazy-seq [4 5 6] lazy-seq lazy-chain lazy-to-array
+    dup length 6 eq                      (chain: length = 6) rt-ok
+    dup 0 get 1 eq                       (chain: [0] = 1) rt-ok
+    dup 3 get 4 eq                       (chain: [3] = 4) rt-ok
+    dup 5 get 6 eq                       (chain: [5] = 6) rt-ok
+    pop clear
+
+null [1 2 3] lazy-seq lazy-chain lazy-to-array
+    length 3 eq                          (chain: null+seq = seq) rt-ok clear
+[1 2 3] lazy-seq null lazy-chain lazy-to-array
+    length 3 eq                          (chain: seq+null = seq) rt-ok clear
+null null lazy-chain null eq             (chain: null+null = null) rt-ok clear
+
+% ====================================================================
+% SECTION 14: lazy-zip
+% ====================================================================
+
+[1 2 3] lazy-seq [10 20 30] lazy-seq lazy-zip lazy-to-array
+    dup length 3 eq                      (zip: length = 3) rt-ok
+    dup 0 get dup 0 get 1 eq exch 1 get 10 eq and
+                                         (zip: [0] = [1,10]) rt-ok
+    dup 2 get dup 0 get 3 eq exch 1 get 30 eq and
+                                         (zip: [2] = [3,30]) rt-ok
+    pop clear
+
+% zip stops at shorter
+[1 2] lazy-seq 1 lazy-from lazy-zip lazy-to-array
+    length 2 eq                          (zip: stops at shorter) rt-ok clear
+
+% ====================================================================
+% SECTION 15: lazy-fold and lazy-sum
+% ====================================================================
+
+[1 2 3 4 5] lazy-seq 0 { add } lazy-fold 15 eq
+    (fold: sum 1..5 = 15) rt-ok clear
+
+null 42 { add } lazy-fold 42 eq
+    (fold: empty = init) rt-ok clear
+
+1 lazy-from 10 lazy-take lazy-sum 55 eq
+    (sum: 1..10 = 55) rt-ok clear
+
+null lazy-sum 0 eq
+    (sum: empty = 0) rt-ok clear
+
+% ====================================================================
+% SECTION 16: lazy-count
+% ====================================================================
+
+[1 2 3 4 5] lazy-seq lazy-count 5 eq    (count: 5 elems) rt-ok clear
+null lazy-count 0 eq                     (count: empty = 0) rt-ok clear
+1 lazy-from 100 lazy-take lazy-count 100 eq
+    (count: take 100) rt-ok clear
+
+% ====================================================================
+% SECTION 17: lazy-any, lazy-all
+% ====================================================================
+
+[1 2 3 4 5] lazy-seq { 3 eq } lazy-any  (any: found 3) rt-ok clear
+[1 2 3 4 5] lazy-seq { 9 eq } lazy-any not
+    (any: 9 not found) rt-ok clear
+null { true } lazy-any not               (any: empty = false) rt-ok clear
+
+[2 4 6 8] lazy-seq { 2 mod 0 eq } lazy-all
+    (all: all even) rt-ok clear
+[2 4 5 8] lazy-seq { 2 mod 0 eq } lazy-all not
+    (all: not all even) rt-ok clear
+null { false } lazy-all                  (all: empty = true) rt-ok clear
+
+% short-circuit: any on infinite seq
+1 lazy-from { 100 eq } lazy-any         (any-inf: finds 100) rt-ok clear
+
+% ====================================================================
+% SECTION 18: lazy-find, lazy-find-index
+% ====================================================================
+
+1 lazy-from { 7 eq } lazy-find 7 eq     (find: find 7) rt-ok clear
+[10 20 30 40] lazy-seq { 30 eq } lazy-find 30 eq
+    (find: find 30) rt-ok clear
+
+[10 20 30 40] lazy-seq { 30 eq } lazy-find-index 2 eq
+    (find-idx: index of 30 = 2) rt-ok clear
+1 lazy-from { 50 eq } lazy-find-index 49 eq
+    (find-idx: index of 50 = 49) rt-ok clear
+
+% ====================================================================
+% SECTION 19: lazy-nth
+% ====================================================================
+
+1 lazy-from 0 lazy-nth 1 eq             (nth: [0] = 1) rt-ok clear
+1 lazy-from 4 lazy-nth 5 eq             (nth: [4] = 5) rt-ok clear
+[10 20 30] lazy-seq 2 lazy-nth 30 eq    (nth: array [2] = 30) rt-ok clear
+
+% ====================================================================
+% SECTION 20: lazy-for-each (side effects)
+% ====================================================================
+
+0 [1 2 3] lazy-seq { add } lazy-for-each 6 eq
+    (for-each: sum via side effects) rt-ok clear
+
+% ====================================================================
+% SECTION 21: lazy-intersperse
+% ====================================================================
+
+[1 2 3] lazy-seq 0 lazy-intersperse lazy-to-array
+    dup length 5 eq                      (intersperse: length = 5) rt-ok
+    dup 0 get 1 eq                       (intersperse: [0] = 1) rt-ok
+    dup 1 get 0 eq                       (intersperse: [1] = 0) rt-ok
+    dup 2 get 2 eq                       (intersperse: [2] = 2) rt-ok
+    dup 3 get 0 eq                       (intersperse: [3] = 0) rt-ok
+    dup 4 get 3 eq                       (intersperse: [4] = 3) rt-ok
+    pop clear
+
+[42] lazy-seq 0 lazy-intersperse lazy-to-array
+    length 1 eq                          (intersperse: singleton) rt-ok clear
+
+% ====================================================================
+% SECTION 22: lazy-enumerate
+% ====================================================================
+
+[10 20 30] lazy-seq lazy-enumerate lazy-to-array
+    dup 0 get dup 0 get 0 eq exch 1 get 10 eq and
+                                         (enum: [0] = [0,10]) rt-ok
+    dup 2 get dup 0 get 2 eq exch 1 get 30 eq and
+                                         (enum: [2] = [2,30]) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 23: lazy-interleave
+% ====================================================================
+
+[1 3 5] lazy-seq [2 4 6] lazy-seq lazy-interleave lazy-to-array
+    dup length 6 eq                      (interleave: length = 6) rt-ok
+    dup 0 get 1 eq                       (interleave: [0] = 1) rt-ok
+    dup 1 get 2 eq                       (interleave: [1] = 2) rt-ok
+    dup 2 get 3 eq                       (interleave: [2] = 3) rt-ok
+    dup 5 get 6 eq                       (interleave: [5] = 6) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 24: lazy-dedupe
+% ====================================================================
+
+[1 1 2 2 2 3 3 1] lazy-seq lazy-dedupe lazy-to-array
+    dup length 4 eq                      (dedupe: length = 4) rt-ok
+    dup 0 get 1 eq                       (dedupe: [0] = 1) rt-ok
+    dup 1 get 2 eq                       (dedupe: [1] = 2) rt-ok
+    dup 2 get 3 eq                       (dedupe: [2] = 3) rt-ok
+    dup 3 get 1 eq                       (dedupe: [3] = 1) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 25: lazy-step-by
+% ====================================================================
+
+1 lazy-from 3 lazy-step-by 4 lazy-take lazy-to-array
+    dup 0 get 1 eq                       (step-by: [0] = 1) rt-ok
+    dup 1 get 4 eq                       (step-by: [1] = 4) rt-ok
+    dup 2 get 7 eq                       (step-by: [2] = 7) rt-ok
+    dup 3 get 10 eq                      (step-by: [3] = 10) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 26: lazy-scan
+% ====================================================================
+
+[1 2 3 4 5] lazy-seq 0 { add } lazy-scan lazy-to-array
+    dup 0 get 0 eq                       (scan: [0] = init = 0) rt-ok
+    dup 1 get 1 eq                       (scan: [1] = 0+1 = 1) rt-ok
+    dup 2 get 3 eq                       (scan: [2] = 1+2 = 3) rt-ok
+    dup 5 get 15 eq                      (scan: [5] = 15) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 27: lazy-filter-not
+% ====================================================================
+
+[1 2 3 4 5] lazy-seq { 2 mod 0 eq } lazy-filter-not lazy-to-array
+    dup length 3 eq                      (filter-not: length = 3) rt-ok
+    dup 0 get 1 eq                       (filter-not: [0] = 1) rt-ok
+    dup 1 get 3 eq                       (filter-not: [1] = 3) rt-ok
+    dup 2 get 5 eq                       (filter-not: [2] = 5) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 28: lazy-filter-map
+% ====================================================================
+
+[1 2 3 4 5] lazy-seq { dup 2 mod 0 eq { 2 mul } { pop null } if-else } lazy-filter-map lazy-to-array
+    dup length 2 eq                      (filter-map: length = 2) rt-ok
+    dup 0 get 4 eq                       (filter-map: [0] = 4) rt-ok
+    dup 1 get 8 eq                       (filter-map: [1] = 8) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 29: lazy-zip-with
+% ====================================================================
+
+[1 2 3] lazy-seq [10 20 30] lazy-seq { add } lazy-zip-with lazy-to-array
+    dup 0 get 11 eq                      (zip-with: [0] = 11) rt-ok
+    dup 1 get 22 eq                      (zip-with: [1] = 22) rt-ok
+    dup 2 get 33 eq                      (zip-with: [2] = 33) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 30: Composition / Pipeline
+% ====================================================================
+
+% Square numbers < 100
+1 lazy-from { dup mul } lazy-map { 100 lt } lazy-take-while lazy-sum 285 eq
+    (pipeline: sum of squares < 100) rt-ok clear
+
+% Round-trip: array → lazy → array
+[1 2 3 4 5] lazy-seq lazy-to-array
+    dup 0 get 1 eq exch dup 4 get 5 eq exch length 5 eq and and
+    (round-trip: array → lazy → array) rt-ok clear
+
+% Chained transformations
+1 lazy-from { 2 mul } lazy-map { 3 mod 0 eq } lazy-filter 3 lazy-take lazy-to-array
+    dup 0 get 6 eq                       (chain-xform: [0] = 6) rt-ok
+    dup 1 get 12 eq                      (chain-xform: [1] = 12) rt-ok
+    dup 2 get 18 eq                      (chain-xform: [2] = 18) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 31: lazy-flat-map and lazy-flatten
+% ====================================================================
+
+% flat-map: each element → [elem, elem]
+[1 2 3] lazy-seq { dup mark 3 1 roll array-from-mark lazy-seq } lazy-flat-map
+    lazy-to-array
+    dup length 6 eq                      (flat-map: length = 6) rt-ok
+    dup 0 get 1 eq                       (flat-map: [0] = 1) rt-ok
+    dup 1 get 1 eq                       (flat-map: [1] = 1) rt-ok
+    dup 2 get 2 eq                       (flat-map: [2] = 2) rt-ok
+    dup 3 get 2 eq                       (flat-map: [3] = 2) rt-ok
+    dup 4 get 3 eq                       (flat-map: [4] = 3) rt-ok
+    dup 5 get 3 eq                       (flat-map: [5] = 3) rt-ok
+    pop clear
+
+% flat-map: empty outer → null
+null { dup mark 3 1 roll array-from-mark lazy-seq } lazy-flat-map
+    null eq                              (flat-map: empty = null) rt-ok clear
+
+% flat-map: some inner seqs empty
+[1 2 3] lazy-seq { dup 2 eq { pop null } { 1 lazy-repeat-n } if-else } lazy-flat-map
+    lazy-to-array
+    dup length 2 eq                      (flat-map: skip-inner len = 2) rt-ok
+    dup 0 get 1 eq                       (flat-map: skip-inner [0] = 1) rt-ok
+    dup 1 get 3 eq                       (flat-map: skip-inner [1] = 3) rt-ok
+    pop clear
+
+% flat-map: all inner seqs empty
+[1 2 3] lazy-seq { pop null } lazy-flat-map
+    null eq                              (flat-map: all-empty = null) rt-ok clear
+
+% flat-map on infinite source with take
+1 lazy-from { 3 lazy-repeat-n } lazy-flat-map 9 lazy-take lazy-to-array
+    dup length 9 eq                      (flat-map-inf: len = 9) rt-ok
+    dup 0 get 1 eq                       (flat-map-inf: [0] = 1) rt-ok
+    dup 2 get 1 eq                       (flat-map-inf: [2] = 1) rt-ok
+    dup 3 get 2 eq                       (flat-map-inf: [3] = 2) rt-ok
+    pop clear
+
+% lazy-flatten: seq of seqs
+[1 2] lazy-seq [3 4] lazy-seq mark 3 1 roll array-from-mark lazy-seq
+    lazy-flatten lazy-to-array
+    dup length 4 eq                      (flatten: len = 4) rt-ok
+    dup 0 get 1 eq                       (flatten: [0] = 1) rt-ok
+    dup 3 get 4 eq                       (flatten: [3] = 4) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 32: lazy-chunked
+% ====================================================================
+
+1 lazy-from 9 lazy-take 3 lazy-chunked lazy-to-array
+    dup length 3 eq                      (chunked: 3 chunks) rt-ok
+    dup 0 get dup length 3 eq exch 0 get 1 eq and
+                                         (chunked: chunk0 = [1,2,3]) rt-ok
+    dup 2 get 0 get 7 eq                 (chunked: chunk2[0] = 7) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 33: lazy-map-indexed
+% ====================================================================
+
+[10 20 30] lazy-seq { add } lazy-map-indexed lazy-to-array
+    dup 0 get 10 eq                      (map-idx: [0] = 10+0) rt-ok
+    dup 1 get 21 eq                      (map-idx: [1] = 20+1) rt-ok
+    dup 2 get 32 eq                      (map-idx: [2] = 30+2) rt-ok
+    pop clear
+
+% map-indexed: empty → null
+null { add } lazy-map-indexed
+    null eq                              (map-idx: empty = null) rt-ok clear
+
+% map-indexed: singleton
+[100] lazy-seq { add } lazy-map-indexed lazy-to-array
+    dup length 1 eq                      (map-idx: single len = 1) rt-ok
+    dup 0 get 100 eq                     (map-idx: single [0] = 100+0) rt-ok
+    pop clear
+
+% map-indexed on infinite source
+1 lazy-from { mul } lazy-map-indexed 6 lazy-take lazy-to-array
+    dup 0 get 0 eq                       (map-idx-inf: [0] = 1*0 = 0) rt-ok
+    dup 1 get 2 eq                       (map-idx-inf: [1] = 2*1 = 2) rt-ok
+    dup 2 get 6 eq                       (map-idx-inf: [2] = 3*2 = 6) rt-ok
+    dup 3 get 12 eq                      (map-idx-inf: [3] = 4*3 = 12) rt-ok
+    dup 4 get 20 eq                      (map-idx-inf: [4] = 5*4 = 20) rt-ok
+    dup 5 get 30 eq                      (map-idx-inf: [5] = 6*5 = 30) rt-ok
+    pop clear
+
+% map-indexed: index used for filtering pattern (proc ignores element, returns index)
+[100 200 300 400 500] lazy-seq { exch pop } lazy-map-indexed lazy-to-array
+    dup 0 get 0 eq                       (map-idx-only: [0] = 0) rt-ok
+    dup 4 get 4 eq                       (map-idx-only: [4] = 4) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 34: Showcase - Fibonacci
+% ====================================================================
+
+% Fibonacci via lazy-iterate on pairs
+% Fibonacci via lazy-iterate (pairs: [a, b] → [b, a+b])
+[0 1] { dup 0 get exch 1 get dup rot add mark 3 1 roll array-from-mark } lazy-iterate
+    5 lazy-take lazy-to-array
+    dup 0 get 0 get 0 eq                 (fib: pair[0][0] = 0) rt-ok
+    dup 1 get 0 get 1 eq                 (fib: pair[1][0] = 1) rt-ok
+    dup 4 get 0 get 3 eq                 (fib: pair[4][0] = 3) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 35: Showcase - Sum of squares pipeline
+% ====================================================================
+
+1 lazy-from { dup mul } lazy-map { 1000 lt } lazy-take-while lazy-sum 10416 eq
+    (showcase: sum squares < 1000) rt-ok clear
+
+% ====================================================================
+% SECTION 36: lazy-pairwise
+% ====================================================================
+
+% pairwise includes trailing partial windows (partialWindows=true)
+[1 2 3 4] lazy-seq lazy-pairwise lazy-to-array
+    dup length 4 eq                      (pairwise: length = 4) rt-ok
+    dup 0 get dup 0 get 1 eq exch 1 get 2 eq and
+                                         (pairwise: [0] = [1,2]) rt-ok
+    dup 1 get dup 0 get 2 eq exch 1 get 3 eq and
+                                         (pairwise: [1] = [2,3]) rt-ok
+    dup 2 get dup 0 get 3 eq exch 1 get 4 eq and
+                                         (pairwise: [2] = [3,4]) rt-ok
+    dup 3 get length 1 eq               (pairwise: [3] partial len=1) rt-ok
+    pop clear
+
+% pairwise on singleton → partial window [42] (partialWindows=true behavior)
+[42] lazy-seq lazy-pairwise lazy-to-array
+    dup length 1 eq                      (pairwise: singleton len = 1) rt-ok
+    dup 0 get 0 get 42 eq               (pairwise: singleton [0] = [42]) rt-ok
+    pop clear
+
+% pairwise on empty → null
+null lazy-pairwise null eq
+    (pairwise: empty = null) rt-ok clear
+
+% pairwise on exactly 2 elements: full pair + trailing partial
+[10 20] lazy-seq lazy-pairwise lazy-to-array
+    dup length 2 eq                      (pairwise: 2 elems → 2 windows) rt-ok
+    dup 0 get dup 0 get 10 eq exch 1 get 20 eq and
+                                         (pairwise: [0] = [10,20]) rt-ok
+    dup 1 get 0 get 20 eq               (pairwise: [1] = [20] partial) rt-ok
+    pop clear
+
+% pairwise: filter workaround for full-size-only windows
+[1 2 3 4] lazy-seq lazy-pairwise { length 2 eq } lazy-filter lazy-to-array
+    dup length 3 eq                      (pairwise-full: length = 3) rt-ok
+    dup 0 get dup 0 get 1 eq exch 1 get 2 eq and
+                                         (pairwise-full: [0] = [1,2]) rt-ok
+    dup 2 get dup 0 get 3 eq exch 1 get 4 eq and
+                                         (pairwise-full: [2] = [3,4]) rt-ok
+    pop clear
+
+% pairwise from infinite source with take
+1 lazy-from lazy-pairwise 3 lazy-take lazy-to-array
+    dup 0 get dup 0 get 1 eq exch 1 get 2 eq and
+                                         (pairwise-inf: [0] = [1,2]) rt-ok
+    dup 2 get dup 0 get 3 eq exch 1 get 4 eq and
+                                         (pairwise-inf: [2] = [3,4]) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 37: lazy-windowed
+% ====================================================================
+
+% windowed includes trailing partial windows (partialWindows=true)
+[1 2 3 4 5] lazy-seq 3 lazy-windowed lazy-to-array
+    dup 0 get dup 0 get 1 eq exch 2 get 3 eq and
+                                         (windowed: [0] = [1,2,3]) rt-ok
+    dup 1 get dup 0 get 2 eq exch 2 get 4 eq and
+                                         (windowed: [1] = [2,3,4]) rt-ok
+    dup 2 get dup 0 get 3 eq exch 2 get 5 eq and
+                                         (windowed: [2] = [3,4,5]) rt-ok
+    dup 3 get length 2 eq               (windowed: [3] partial len=2) rt-ok
+    dup 4 get length 1 eq               (windowed: [4] partial len=1) rt-ok
+    pop clear
+
+% windowed: filter workaround for full-size-only windows
+[1 2 3 4 5] lazy-seq 3 lazy-windowed { length 3 eq } lazy-filter lazy-to-array
+    dup length 3 eq                      (windowed-full: length = 3) rt-ok
+    dup 0 get dup 0 get 1 eq exch 2 get 3 eq and
+                                         (windowed-full: [0] = [1,2,3]) rt-ok
+    dup 2 get dup 0 get 3 eq exch 2 get 5 eq and
+                                         (windowed-full: [2] = [3,4,5]) rt-ok
+    pop clear
+
+% windowed: n=1 is just wrapping each element in an array
+[10 20 30] lazy-seq 1 lazy-windowed lazy-to-array
+    dup length 3 eq                      (windowed-1: length = 3) rt-ok
+    dup 0 get 0 get 10 eq               (windowed-1: [0] = [10]) rt-ok
+    dup 2 get 0 get 30 eq               (windowed-1: [2] = [30]) rt-ok
+    pop clear
+
+% windowed on empty → null
+null 3 lazy-windowed null eq
+    (windowed: empty = null) rt-ok clear
+
+% windowed from infinite source with take
+1 lazy-from 3 lazy-windowed 2 lazy-take lazy-to-array
+    dup 0 get dup 0 get 1 eq exch 2 get 3 eq and
+                                         (windowed-inf: [0] = [1,2,3]) rt-ok
+    dup 1 get dup 0 get 2 eq exch 2 get 4 eq and
+                                         (windowed-inf: [1] = [2,3,4]) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 38: ExtValue elements (Long/Double in lazy sequences)
+% ====================================================================
+
+% --- Long elements through core operators ---
+
+% lazy-seq with Long values, round-trip
+[100l 200l 300l] lazy-seq lazy-to-array
+    dup 0 get 100l eq                    (ext: long round-trip [0]) rt-ok
+    dup 1 get 200l eq                    (ext: long round-trip [1]) rt-ok
+    dup 2 get 300l eq                    (ext: long round-trip [2]) rt-ok
+    pop clear
+
+% lazy-from produces integers (not Long), test Long via lazy-map
+[1l 2l 3l 4l 5l] lazy-seq { 10l mul } lazy-map lazy-to-array
+    dup 0 get 10l eq                     (ext: long map [0] = 10) rt-ok
+    dup 4 get 50l eq                     (ext: long map [4] = 50) rt-ok
+    pop clear
+
+% lazy-filter with Long predicate
+[10l 20l 30l 40l 50l] lazy-seq { 25l gt } lazy-filter lazy-to-array
+    dup length 3 eq                      (ext: long filter length) rt-ok
+    dup 0 get 30l eq                     (ext: long filter [0] = 30) rt-ok
+    dup 2 get 50l eq                     (ext: long filter [2] = 50) rt-ok
+    pop clear
+
+% lazy-fold with Long accumulator
+[1l 2l 3l 4l 5l] lazy-seq 0l { add } lazy-fold 15l eq
+    (ext: long fold sum = 15) rt-ok clear
+
+% lazy-fold sum with Long elements (lazy-sum uses int 0 init, needs Long 0l)
+[100l 200l 300l] lazy-seq 0l { add } lazy-fold 600l eq
+    (ext: long fold-sum = 600) rt-ok clear
+
+% lazy-scan with Long accumulator
+[1l 2l 3l] lazy-seq 0l { add } lazy-scan lazy-to-array
+    dup 0 get 0l eq                      (ext: long scan [0] = 0) rt-ok
+    dup 1 get 1l eq                      (ext: long scan [1] = 1) rt-ok
+    dup 3 get 6l eq                      (ext: long scan [3] = 6) rt-ok
+    pop clear
+
+% lazy-find with Long elements
+[10l 20l 30l 40l] lazy-seq { 30l eq } lazy-find 30l eq
+    (ext: long find = 30) rt-ok clear
+
+% lazy-any/lazy-all with Long
+[10l 20l 30l] lazy-seq { 20l eq } lazy-any
+    (ext: long any finds 20) rt-ok clear
+[10l 20l 30l] lazy-seq { 5l gt } lazy-all
+    (ext: long all > 5) rt-ok clear
+
+% lazy-zip with Long elements
+[1l 2l 3l] lazy-seq [10l 20l 30l] lazy-seq lazy-zip lazy-to-array
+    dup 0 get dup 0 get 1l eq exch 1 get 10l eq and
+                                         (ext: long zip [0] = [1,10]) rt-ok
+    dup 2 get dup 0 get 3l eq exch 1 get 30l eq and
+                                         (ext: long zip [2] = [3,30]) rt-ok
+    pop clear
+
+% lazy-chain with Long elements
+[1l 2l] lazy-seq [3l 4l] lazy-seq lazy-chain lazy-to-array
+    dup length 4 eq                      (ext: long chain length) rt-ok
+    dup 0 get 1l eq                      (ext: long chain [0]) rt-ok
+    dup 3 get 4l eq                      (ext: long chain [3]) rt-ok
+    pop clear
+
+% lazy-flat-map with Long elements
+[1l 2l] lazy-seq { dup mark 3 1 roll array-from-mark lazy-seq } lazy-flat-map lazy-to-array
+    dup length 4 eq                      (ext: long flat-map len) rt-ok
+    dup 0 get 1l eq                      (ext: long flat-map [0]) rt-ok
+    dup 2 get 2l eq                      (ext: long flat-map [2]) rt-ok
+    pop clear
+
+% lazy-map-indexed with Long elements (index is integer, cast to long)
+[100l 200l 300l] lazy-seq { /long-type cast add } lazy-map-indexed lazy-to-array
+    dup 0 get 100l eq                    (ext: long map-idx [0] = 100+0) rt-ok
+    dup 1 get 201l eq                    (ext: long map-idx [1] = 200+1) rt-ok
+    dup 2 get 302l eq                    (ext: long map-idx [2] = 300+2) rt-ok
+    pop clear
+
+% lazy-nth with Long
+[10l 20l 30l] lazy-seq 2 lazy-nth 30l eq
+    (ext: long nth) rt-ok clear
+
+% lazy-dedupe with Long
+[1l 1l 2l 2l 3l] lazy-seq lazy-dedupe lazy-to-array
+    dup length 3 eq                      (ext: long dedupe length) rt-ok
+    dup 0 get 1l eq                      (ext: long dedupe [0]) rt-ok
+    dup 2 get 3l eq                      (ext: long dedupe [2]) rt-ok
+    pop clear
+
+% lazy-intersperse with Long separator
+[1l 2l 3l] lazy-seq 0l lazy-intersperse lazy-to-array
+    dup length 5 eq                      (ext: long intersperse len) rt-ok
+    dup 1 get 0l eq                      (ext: long intersperse [1] = 0) rt-ok
+    dup 2 get 2l eq                      (ext: long intersperse [2] = 2) rt-ok
+    pop clear
+
+% --- Double elements through core operators ---
+
+[1.5d 2.5d 3.5d] lazy-seq lazy-to-array
+    dup 0 get 1.5d eq                    (ext: double round-trip [0]) rt-ok
+    dup 2 get 3.5d eq                    (ext: double round-trip [2]) rt-ok
+    pop clear
+
+[1.0d 2.0d 3.0d] lazy-seq { 10.0d mul } lazy-map lazy-to-array
+    dup 0 get 10.0d eq                   (ext: double map [0]) rt-ok
+    dup 2 get 30.0d eq                   (ext: double map [2]) rt-ok
+    pop clear
+
+[1.0d 2.0d 3.0d 4.0d 5.0d] lazy-seq 0.0d { add } lazy-fold 15.0d eq
+    (ext: double fold sum) rt-ok clear
+
+% lazy-iterate with Double (powers of 2.0d)
+1.0d { 2.0d mul } lazy-iterate 5 lazy-take lazy-to-array
+    dup 0 get 1.0d eq                    (ext: double iterate [0]) rt-ok
+    dup 1 get 2.0d eq                    (ext: double iterate [1]) rt-ok
+    dup 4 get 16.0d eq                   (ext: double iterate [4]) rt-ok
+    pop clear
+
+% --- Mixed types in same lazy sequence ---
+
+% Integer + Long + Double in one array
+[42 100l 3.14d] lazy-seq lazy-to-array
+    dup 0 get 42 eq                      (ext: mixed [0] = int) rt-ok
+    dup 1 get 100l eq                    (ext: mixed [1] = long) rt-ok
+    dup 2 get 3.14d eq                   (ext: mixed [2] = double) rt-ok
+    pop clear
+
+% Mixed types through lazy-map
+[1 2l 3.0d] lazy-seq { type } lazy-map lazy-to-array
+    dup 0 get /integer-type eq           (ext: mixed type [0] = integer) rt-ok
+    dup 1 get /long-type eq              (ext: mixed type [1] = long) rt-ok
+    dup 2 get /double-type eq            (ext: mixed type [2] = double) rt-ok
+    pop clear
+
+% String elements through lazy
+[(hello) (world)] lazy-seq lazy-to-array
+    dup 0 get (hello) eq                 (ext: string [0]) rt-ok
+    dup 1 get (world) eq                 (ext: string [1]) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 39: Save/Restore with lazy sequences
+% ====================================================================
+
+% lazy-seq created before save survives restore
+[1 2 3] lazy-seq /sr-lazy exch def
+save
+    /sr-lazy [99] lazy-seq def
+restore
+sr-lazy lazy-to-array
+    dup length 3 eq                      (save: lazy restored length) rt-ok
+    dup 0 get 1 eq                       (save: lazy restored [0]) rt-ok
+    pop clear
+
+% lazy-seq created after save is rolled back
+save
+    /tmp-lazy [1 2 3] lazy-seq def
+restore
+{ /tmp-lazy load } try /undefined eq
+    (save: lazy after save rolled back) rt-ok clear
+
+% Force thunk before save, verify still forced after save/restore
+[10 20 30] lazy-seq /sr2-lazy exch def
+sr2-lazy lazy-head 10 eq pop            % force to materialize head access
+save restore
+sr2-lazy lazy-head 10 eq
+    (save: forced lazy survives save/restore) rt-ok clear
+
+% Thunk state rolls back: force after save, restore reverts to unevaluated
+[1 2 3] lazy-seq /sr3-lazy exch def
+save
+    sr3-lazy lazy-to-array pop          % force all thunks
+restore
+sr3-lazy lazy-to-array
+    dup 0 get 1 eq                       (save: thunk state reverted [0]) rt-ok
+    dup 2 get 3 eq                       (save: thunk state reverted [2]) rt-ok
+    pop clear
+
+% Nested save/restore with lazy sequences
+/outer-sv save def
+    [1 2 3] lazy-seq /outer-lazy exch def
+    /inner-sv save def
+        [99 98 97] lazy-seq /inner-lazy exch def
+    inner-sv restore
+    { /inner-lazy load } try /undefined eq
+    (save: inner lazy rolled back) rt-ok clear
+    outer-lazy lazy-to-array length 3 eq
+    (save: outer lazy survives inner restore) rt-ok clear
+outer-sv restore
+clear
+
+% Save/restore with Long elements in lazy sequences
+[100l 200l 300l] lazy-seq /sr-long exch def
+save
+    /sr-long [999l] lazy-seq def
+restore
+sr-long lazy-to-array
+    dup 0 get 100l eq                    (save: long lazy [0] restored) rt-ok
+    dup 2 get 300l eq                    (save: long lazy [2] restored) rt-ok
+    pop clear
+
+% Many lazy allocations after save, restore reclaims VM
+/sv-many save def
+    100 { 1 lazy-from 3 lazy-take lazy-to-array pop } repeat
+sv-many restore
+% Verify subsequent allocations succeed (VM reclaimed)
+[1 2 3] lazy-seq lazy-to-array length 3 eq
+    (save: VM reclaimed after restore of many lazy allocs) rt-ok clear
+
+% ====================================================================
+% SECTION 40: Error paths
+% ====================================================================
+
+% lazy-head on null → range-check error
+{ null lazy-head } try /range-check eq
+    (err: lazy-head on null) rt-ok clear
+
+% lazy-tail on null → range-check error
+{ null lazy-tail } try /range-check eq
+    (err: lazy-tail on null) rt-ok clear
+
+% lazy-head on non-lazy → type-check error
+{ 42 lazy-head } try /type-check eq
+    (err: lazy-head on integer) rt-ok clear
+
+% lazy-tail on non-lazy → type-check error
+{ (hello) lazy-tail } try /type-check eq
+    (err: lazy-tail on string) rt-ok clear
+
+% lazy-map on non-lazy → type-check error
+{ 42 { } lazy-map } try /type-check eq
+    (err: lazy-map on integer) rt-ok clear
+
+% lazy-find not found on finite → range-check error
+{ [1 2 3] lazy-seq { 99 eq } lazy-find } try /range-check eq
+    (err: lazy-find not found) rt-ok clear
+
+% lazy-find-index not found on finite → range-check error
+{ [1 2 3] lazy-seq { 99 eq } lazy-find-index } try /range-check eq
+    (err: lazy-find-index not found) rt-ok clear
+
+% lazy-nth out of range → range-check error
+{ [1 2 3] lazy-seq 10 lazy-nth } try /range-check eq
+    (err: lazy-nth out of range) rt-ok clear
+
+% lazy-nth on empty → range-check error
+{ null 0 lazy-nth } try /range-check eq
+    (err: lazy-nth on empty) rt-ok clear
+
+% lazy-windowed with n=0 → range-check error
+{ [1 2 3] lazy-seq 0 lazy-windowed } try /range-check eq
+    (err: lazy-windowed n=0) rt-ok clear
+
+% lazy-windowed with n<0 → range-check error
+{ [1 2 3] lazy-seq -1 lazy-windowed } try /range-check eq
+    (err: lazy-windowed n<0) rt-ok clear
+
+% lazy-take with underflow → error
+{ lazy-take } try /opstack-underflow eq
+    (err: lazy-take underflow) rt-ok clear
+
+% lazy-step-by with n=0 → range-check error
+{ [1 2 3] lazy-seq 0 lazy-step-by } try /range-check eq
+    (err: lazy-step-by n=0) rt-ok clear
+
+% lazy-chunked with n=0 → range-check error
+{ [1 2 3] lazy-seq 0 lazy-chunked } try /range-check eq
+    (err: lazy-chunked n=0) rt-ok clear
+
+% ====================================================================
+% SECTION 41: Introspection — :status variables
+% ====================================================================
+
+% Exec stack depth stays bounded during lazy processing on infinite source
+% Record baseline, process 500 elements, verify exec depth didn't grow
+/exec-before //:status:exec-depth def
+1 lazy-from 500 lazy-take lazy-to-array length 500 eq
+    (status: 500-elem take length) rt-ok clear
+/exec-after //:status:exec-depth def
+exec-after exec-before eq
+    (status: exec-depth bounded after 500-take) rt-ok clear
+
+% Op stack depth is clean after lazy pipeline
+/op-before //:status:op-depth def
+1 lazy-from { 2 mul } lazy-map { 100 lt } lazy-filter 10 lazy-take lazy-sum pop
+/op-after //:status:op-depth def
+op-after op-before eq
+    (status: op-depth clean after pipeline) rt-ok clear
+
+% High-water marks do not explode during lazy processing
+/hw-before //:status:exec-high-water def
+1 lazy-from { dup mul } lazy-map { 10000 lt } lazy-take-while lazy-count pop
+/hw-after //:status:exec-high-water def
+% Exec high-water should not grow by more than ~30 (async force + continuations)
+hw-after hw-before sub 50 lt
+    (status: exec-hw growth < 50 during lazy pipeline) rt-ok clear
+
+% VM usage increases during lazy materialization, tracked by :status
+/vm-before //:status:vm-used def
+1 lazy-from 100 lazy-take lazy-to-array pop
+/vm-after //:status:vm-used def
+vm-after vm-before gt
+    (status: vm-used increases during materialization) rt-ok clear
+
+% Verify lazy-any short-circuits: exec-depth does not grow
+% even though source is infinite
+/exec-before //:status:exec-depth def
+1 lazy-from { 1000 eq } lazy-any pop
+/exec-after //:status:exec-depth def
+exec-after exec-before eq
+    (status: exec-depth clean after short-circuit any) rt-ok clear
+
+% ====================================================================
+% SECTION 42: Thunk memoization — verify no recomputation
+% ====================================================================
+
+% Side-effect counter proves thunk is forced only once per node
+<< /n 0 >> /memo-ctr exch def
+/memo-seq [1 2 3] lazy-seq
+    { memo-ctr /n memo-ctr /n get 1 add put 10 mul } lazy-map def
+
+% First traversal forces all 3 thunks
+memo-seq lazy-to-array
+    dup 0 get 10 eq                      (memo: first [0] = 10) rt-ok
+    dup 2 get 30 eq                      (memo: first [2] = 30) rt-ok
+    pop
+memo-ctr /n get 3 eq                     (memo: proc ran 3 times) rt-ok clear
+
+% Second traversal of same lazy-seq uses cached results
+memo-ctr /n 0 put
+memo-seq lazy-to-array
+    dup 0 get 10 eq                      (memo: cached [0] = 10) rt-ok
+    dup 2 get 30 eq                      (memo: cached [2] = 30) rt-ok
+    pop
+memo-ctr /n get 0 eq                     (memo: proc ran 0 times on 2nd pass) rt-ok clear
+
+% Verify lazy-tail returns same object on repeated access (thunk caching)
+1 lazy-from /memo-inf exch def
+memo-inf lazy-tail lazy-head 2 eq        (memo: tail head = 2) rt-ok clear
+memo-inf lazy-tail lazy-head 2 eq        (memo: tail head cached = 2) rt-ok clear
+
+% ====================================================================
+% SECTION 43: Stress tests — large materialization and deep chains
+% ====================================================================
+
+% Materialize 500 elements from lazy-from
+1 lazy-from 500 lazy-take lazy-to-array
+    dup length 500 eq                    (stress: 500 elems length) rt-ok
+    dup 0 get 1 eq                       (stress: 500 elems [0]) rt-ok
+    dup 499 get 500 eq                   (stress: 500 elems [499]) rt-ok
+    pop clear
+
+% Deep transformation chain: map+filter+map+take
+1 lazy-from
+    { 3 mul } lazy-map
+    { 2 mod 0 eq } lazy-filter
+    { 1 add } lazy-map
+    20 lazy-take lazy-to-array
+    dup length 20 eq                     (stress: deep chain length) rt-ok
+    dup 0 get 7 eq                       (stress: deep chain [0] = 6+1) rt-ok
+    pop clear
+
+% Sum of first 1000 integers via lazy pipeline
+1 lazy-from 1000 lazy-take lazy-sum 500500 eq
+    (stress: sum 1..1000 = 500500) rt-ok clear
+
+% Large lazy-range
+/sv-stress save def
+0 1000 1 lazy-range lazy-count 1000 eq
+    (stress: range 0..1000 count) rt-ok clear
+sv-stress restore
+
+% lazy-filter on large range (primes-like pattern: not divisible by 2,3,5)
+/sv-stress save def
+1 lazy-from
+    { dup 2 mod 0 ne exch dup 3 mod 0 ne exch 5 mod 0 ne and and } lazy-filter
+    50 lazy-take lazy-to-array
+    dup 0 get 1 eq                       (stress: coprime [0] = 1) rt-ok
+    dup length 50 eq                     (stress: coprime length = 50) rt-ok
+    pop clear
+sv-stress restore
+
+% Chained flat-map: each n → [n, n+100], then flat-map again → [x, x*10]
+/sv-stress save def
+[1 2 3] lazy-seq
+    { dup 100 add mark 3 1 roll array-from-mark lazy-seq } lazy-flat-map
+    { dup 10 mul mark 3 1 roll array-from-mark lazy-seq } lazy-flat-map
+    lazy-to-array
+    dup length 12 eq                     (stress: nested flat-map length) rt-ok
+    dup 0 get 1 eq                       (stress: nested flat-map [0] = 1) rt-ok
+    dup 1 get 10 eq                      (stress: nested flat-map [1] = 10) rt-ok
+    dup 2 get 101 eq                     (stress: nested flat-map [2] = 101) rt-ok
+    dup 3 get 1010 eq                    (stress: nested flat-map [3] = 1010) rt-ok
+    pop clear
+sv-stress restore
+
+% Stress: lazy-zip-with on large range
+/sv-stress save def
+1 lazy-from 1 lazy-from { add } lazy-zip-with 200 lazy-take lazy-to-array
+    dup 0 get 2 eq                       (stress: zip-with 200 [0] = 2) rt-ok
+    dup 199 get 400 eq                   (stress: zip-with 200 [199] = 400) rt-ok
+    pop clear
+sv-stress restore
+
+% Stress: lazy-scan running sum on 200 elements
+/sv-stress save def
+1 lazy-from 200 lazy-take 0 { add } lazy-scan lazy-to-array
+    dup 0 get 0 eq                       (stress: scan 200 [0] = 0) rt-ok
+    dup 200 get 20100 eq                 (stress: scan 200 [200] = 20100) rt-ok
+    pop clear
+sv-stress restore
+
+% Stress: Long values through deep pipeline
+/sv-stress save def
+[1l 2l 3l 4l 5l 6l 7l 8l 9l 10l] lazy-seq
+    { 100l mul } lazy-map
+    { 500l gt } lazy-filter
+    0l { add } lazy-fold
+    4000l eq
+    (stress: long deep pipeline = 4000) rt-ok clear
+sv-stress restore
+
+% Stress: VM pressure — allocate many lazy nodes, reclaim via save/restore
+/sv-outer save def
+    200 {
+        /sv-inner save def
+            1 lazy-from 50 lazy-take lazy-to-array pop
+        sv-inner restore
+    } repeat
+sv-outer restore
+% Verify VM is healthy after pressure test
+[1 2 3] lazy-seq lazy-to-array length 3 eq
+    (stress: VM healthy after 200 save/restore cycles) rt-ok clear
+
+% Stress: lazy-map-indexed on 100 elements
+/sv-stress save def
+0 lazy-from 100 lazy-take { add } lazy-map-indexed lazy-to-array
+    dup 0 get 0 eq                       (stress: map-idx-100 [0] = 0+0) rt-ok
+    dup 99 get 198 eq                    (stress: map-idx-100 [99] = 99+99) rt-ok
+    pop clear
+sv-stress restore
+
+% ====================================================================
+% SECTION 44: Edge cases — empty and singleton sequences
+% ====================================================================
+
+% All transformations on empty return null
+null { } lazy-map null eq               (edge: map empty) rt-ok clear
+null { true } lazy-filter null eq       (edge: filter empty) rt-ok clear
+null 0 lazy-take null eq                (edge: take 0) rt-ok clear
+null 5 lazy-drop null eq                (edge: drop empty) rt-ok clear
+null { true } lazy-take-while null eq   (edge: take-while empty) rt-ok clear
+null { false } lazy-drop-while null eq  (edge: drop-while empty) rt-ok clear
+null { true } lazy-filter-not null eq   (edge: filter-not empty) rt-ok clear
+null lazy-dedupe null eq                (edge: dedupe empty) rt-ok clear
+null 0 lazy-intersperse null eq         (edge: intersperse empty) rt-ok clear
+null 3 lazy-step-by null eq             (edge: step-by empty) rt-ok clear
+null 0 { add } lazy-scan lazy-to-array length 1 eq
+                                         (edge: scan empty = [init]) rt-ok clear
+null lazy-enumerate null eq             (edge: enumerate empty) rt-ok clear
+null null lazy-interleave null eq       (edge: interleave both empty) rt-ok clear
+
+% Singleton through various ops
+[42] lazy-seq { 2 mul } lazy-map lazy-to-array
+    dup length 1 eq exch 0 get 84 eq and
+                                         (edge: map singleton) rt-ok clear
+[42] lazy-seq { true } lazy-filter lazy-to-array
+    length 1 eq                          (edge: filter singleton pass) rt-ok clear
+[42] lazy-seq { false } lazy-filter null eq
+                                         (edge: filter singleton fail) rt-ok clear
+[42] lazy-seq 1 lazy-take lazy-to-array
+    length 1 eq                          (edge: take 1 singleton) rt-ok clear
+[42] lazy-seq 1 lazy-drop null eq
+                                         (edge: drop 1 singleton = empty) rt-ok clear
+[42] lazy-seq lazy-dedupe lazy-to-array
+    length 1 eq                          (edge: dedupe singleton) rt-ok clear
+[42] lazy-seq 0 lazy-intersperse lazy-to-array
+    length 1 eq                          (edge: intersperse singleton) rt-ok clear
+[42] lazy-seq lazy-enumerate lazy-to-array
+    dup 0 get dup 0 get 0 eq exch 1 get 42 eq and
+                                         (edge: enumerate singleton = [0,42]) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 45: Null-input coverage for lazy_null_pop2_push_null helper
+% ====================================================================
+
+% Operators that take (lazy proc/pred) and return null on null input
+null { dup mul } lazy-filter-map null eq
+                                         (null: filter-map on null) rt-ok clear
+null { } lazy-flat-map null eq           (null: flat-map on null) rt-ok clear
+null lazy-flatten null eq                (null: flatten on null) rt-ok clear
+null 3 lazy-chunked null eq              (null: chunked on null) rt-ok clear
+null null { add } lazy-zip-with null eq  (null: zip-with both null) rt-ok clear
+null 1 lazy-from { add } lazy-zip-with null eq
+                                         (null: zip-with lazy1=null) rt-ok clear
+1 lazy-from null { add } lazy-zip-with null eq
+                                         (null: zip-with lazy2=null) rt-ok clear
+
+% lazy-for-each on null should be a no-op (no side effects)
+/fe-count 0 def
+null { /fe-count fe-count 1 add def } lazy-for-each
+fe-count 0 eq                            (null: for-each on null is noop) rt-ok clear
+
+% lazy-zip on two null inputs
+null null lazy-zip null eq               (null: zip both null) rt-ok clear
+
+% lazy-unfold with immediate termination (proc returns null at step 0)
+0 { pop null } lazy-unfold null eq
+                                         (null: unfold immediate terminate) rt-ok clear
+
+% lazy-zip on one null input
+1 lazy-from null lazy-zip null eq        (null: zip one null) rt-ok clear
+null 1 lazy-from lazy-zip null eq        (null: zip other null) rt-ok clear
+
+% ====================================================================
+% SECTION 46: VM integrity after null-input tests
+% ====================================================================
+
+//:status:vm-validate                    (lazy-null: vm-validate) rt-ok clear
+//:status:extvalue-validate              (lazy-null: extvalue-validate) rt-ok clear
+
+(test_lazy: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

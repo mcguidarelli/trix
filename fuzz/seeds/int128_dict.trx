@@ -1,0 +1,2 @@
+<< /a 42q /b 99uq >> dup /a get
+<< 42q /v 99uq /w >> length

@@ -1,0 +1,1 @@
+<< /init {0} /handle-cast {pop pop} >> gen-server

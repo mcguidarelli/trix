@@ -1,0 +1,309 @@
+% =====================================================================
+% damage-matrix.trx -- Bestagon Wars damage-matrix explorer (Phase 0.5B)
+% =====================================================================
+%
+% Tier 1.1 of plan_bestagon_balance_prototyping.md.  Enumerates every
+% meaningful combat cell, dumps damage values + outliers to CSV, plus a
+% base-damage heatmap and a markdown summary.
+%
+% Domain (~1M cells):
+%   - 17 attacker types x sparse legal defenders (~170 legal cells)
+%   - x 9 terrains
+%   - x 6 attacker COs x 6 defender COs
+%   - x 4 attacker vet tiers (0..3)
+%   - x 5 defender HP levels (10, 8, 5, 3, 1)
+%
+% Outputs (written to examples/bestagon-sim/out/, gitignored):
+%   damage-matrix.csv          every cell: 8 columns (7 dims + damage_hp)
+%   damage-matrix-outliers.csv subset: one-shots (>= 10 HP) AND useless
+%                              (== 0 HP)
+%   damage-matrix-heatmap.csv  17x17 base damage table grid
+%                              (no CO, no vet, no terrain, no Power)
+%   damage-matrix-summary.md   counts, max-damage, per-CO matchup stats
+%
+% Run with the prod build (debug is 10-30x slower):
+%   ./trix.opt examples/bestagon-sim/damage-matrix.trx
+%
+% Memory: predict-damage is zero-VM-heap-alloc in the inner loop (no
+% counter-spec build, just frame-local mutation).  No --vm-size override
+% needed at default 1 MB.
+% =====================================================================
+
+(examples/bestagon-sim/combat-core.trx) run
+
+
+% ====================================================================
+% Section 1: enumeration dimensions
+% ====================================================================
+
+/all-terrains  [ /plain /road /forest /mountain /river /bridge /sea /reef /beach ] def
+/all-cos       [ /bishop /hammer /hawk /boots /veil /talon ] def
+/all-vets      [ 0 1 2 3 ] def
+/all-def-hps   [ 10 8 5 3 1 ] def
+/all-units     [
+    /infantry   /mech     /recon    /apc      /tank     /heavy-tank  /anti-air
+    /artillery  /rocket   /fighter  /bomber   /battle-copter         /lander
+    /destroyer  /submarine          /battleship                      /carrier
+] def
+
+
+% ====================================================================
+% Section 2: mutable spec dicts -- reused per iteration, no inner-loop
+%            heap allocation (combat-core's `predict-damage` is zero-
+%            alloc once specs exist)
+% ====================================================================
+
+/atk-spec << /type /tank  /hp 10  /vet-tier 0  /co /bishop
+             /power-active false  /super-active false  /terrain /plain >> def
+/def-spec << /type /tank  /hp 10  /vet-tier 0  /co /bishop
+             /power-active false  /super-active false  /terrain /plain >> def
+/ctx-off  << /luck-mode /off  /weather-current /clear
+             /attacker-can-see-defender true >>#r def
+
+
+% ====================================================================
+% Section 3: running counters + max tracker
+% ====================================================================
+
+/total-cells     0 def
+/one-shot-cells  0 def
+/useless-cells   0 def
+/max-damage      0 def
+/max-atk         /none def
+/max-def         /none def
+/max-terrain     /none def
+/max-atk-co      /none def
+/max-def-co      /none def
+/max-vet         0    def
+/max-def-hp      0    def
+
+
+% ====================================================================
+% Section 4: output paths
+% ====================================================================
+
+/out-main      (examples/bestagon-sim/out/damage-matrix.csv) def
+/out-outliers  (examples/bestagon-sim/out/damage-matrix-outliers.csv) def
+/out-heatmap   (examples/bestagon-sim/out/damage-matrix-heatmap.csv) def
+/out-summary   (examples/bestagon-sim/out/damage-matrix-summary.md) def
+
+
+% ====================================================================
+% Section 5: heatmap dump
+% ====================================================================
+%
+% Pure dump of damage-table -- no resolver call.  Provides the
+% "no modifiers" baseline view.  17x17 grid with "-" for illegal cells.
+
+/dump-heatmap {||#+1
+    /h  out-heatmap (w)#b stream  local-def
+
+    % Header row.
+    h (atk\\def) write-string
+    all-units { |def-u|
+        h (,{0:s}) mark def-u fprint-fmt pop pop
+    } for-all
+    h (\n) write-string
+
+    % Data rows.
+    all-units { |atk-u|
+        h ({0:s}) mark atk-u fprint-fmt pop pop
+        all-units { |def-u|
+            atk-u def-u lookup-base-damage
+            { |base|
+                h (,{0}) mark base fprint-fmt pop pop
+            } {
+                h (,-) write-string
+            } if-else
+        } for-all
+        h (\n) write-string
+    } for-all
+
+    h close-stream
+} def
+
+
+% ====================================================================
+% Section 6: per-cell writer
+% ====================================================================
+%
+% Stack at call:
+%   m o atk-u def-u terrain atk-co def-co vet def-hp damage
+% Returns: nothing (preserves m, o via reads, NOT pass-through).
+
+/write-cell {|m o atk-u def-u terrain atk-co def-co vet def-hp damage|#+1
+    /reason /none local-def
+
+    % main CSV row: every cell.
+    m ({0:s},{1:s},{2:s},{3:s},{4:s},{5},{6},{7}\n)
+        mark atk-u def-u terrain atk-co def-co vet def-hp damage
+        fprint-fmt pop pop
+
+    % Outlier classification.
+    damage 10 ge {
+        /reason /one-shot store
+        o ({0:s},{1:s},{2:s},{3:s},{4:s},{5},{6},{7},{8:s}\n)
+            mark atk-u def-u terrain atk-co def-co vet def-hp damage reason
+            fprint-fmt pop pop
+        /one-shot-cells  one-shot-cells 1 add  store
+    } if
+    damage 0 le {
+        /reason /useless store
+        o ({0:s},{1:s},{2:s},{3:s},{4:s},{5},{6},{7},{8:s}\n)
+            mark atk-u def-u terrain atk-co def-co vet def-hp damage reason
+            fprint-fmt pop pop
+        /useless-cells  useless-cells 1 add  store
+    } if
+
+    % Max tracker.  Capture full context so the summary can reproduce
+    % the row.
+    damage max-damage gt {
+        /max-damage  damage   store
+        /max-atk     atk-u    store
+        /max-def     def-u    store
+        /max-terrain terrain  store
+        /max-atk-co  atk-co   store
+        /max-def-co  def-co   store
+        /max-vet     vet      store
+        /max-def-hp  def-hp   store
+    } if
+} def
+
+
+% ====================================================================
+% Section 7: main enumeration
+% ====================================================================
+%
+% Outer: damage-table for-all over (atk-unit, atk-row).  Inside: nested
+% array loops for the other dimensions.  Inner-most: atk-row for-all
+% over (def-unit, base) -- the sparse-Dict iteration is what makes the
+% enumeration ~170 legal cells per terrain/CO/vet/def-hp combo, not
+% 17x17 = 289.
+
+/run-matrix-sim {||#+2
+    /m  out-main     (w)#b stream  local-def
+    /o  out-outliers (w)#b stream  local-def
+
+    % Headers.
+    m (atk_unit,def_unit,terrain,atk_co,def_co,atk_vet,def_hp,damage_hp\n)
+        write-string
+    o (atk_unit,def_unit,terrain,atk_co,def_co,atk_vet,def_hp,damage_hp,reason\n)
+        write-string
+
+    damage-table { |atk-u atk-row|
+        all-terrains { |terrain|
+            all-cos { |atk-co|
+                all-cos { |def-co|
+                    all-vets { |vet|
+                        all-def-hps { |def-hp|
+
+                            atk-spec /type     atk-u    put
+                            atk-spec /vet-tier vet      put
+                            atk-spec /co       atk-co   put
+                            atk-spec /terrain  terrain  put
+
+                            def-spec /co       def-co   put
+                            def-spec /hp       def-hp   put
+                            def-spec /terrain  terrain  put
+
+                            atk-row { |def-u base|#+1
+                                def-spec /type def-u put
+
+                                atk-spec def-spec ctx-off predict-damage
+                                pop                            % drop max-d
+                                /damage exch local-def         % keep min-d
+
+                                m o
+                                  atk-u def-u terrain atk-co def-co
+                                  vet def-hp damage
+                                  write-cell
+
+                                /total-cells  total-cells 1 add  store
+                            } for-all
+
+                        } for-all
+                    } for-all
+                } for-all
+            } for-all
+        } for-all
+    } for-all
+
+    m close-stream
+    o close-stream
+} def
+
+
+% ====================================================================
+% Section 8: markdown summary
+% ====================================================================
+
+/dump-summary {||#+1
+    /s  out-summary (w)#b stream  local-def
+
+    s (# Bestagon damage-matrix sim summary\n\n) write-string
+
+    s (## Counts\n\n) write-string
+    s (- total cells evaluated: {0}\n)
+        mark total-cells fprint-fmt pop pop
+    s (- one-shot outliers (damage >= 10 HP at full HP): {0}\n)
+        mark one-shot-cells fprint-fmt pop pop
+    s (- useless outliers (damage == 0): {0}\n)
+        mark useless-cells fprint-fmt pop pop
+    s (\n) write-string
+
+    s (## Max damage seen\n\n) write-string
+    s (- value: {0} HP\n)
+        mark max-damage fprint-fmt pop pop
+    s (- attacker: {0:s}  (CO: {1:s}, vet {2})\n)
+        mark max-atk max-atk-co max-vet fprint-fmt pop pop
+    s (- defender: {0:s}  (CO: {1:s}, HP {2})\n)
+        mark max-def max-def-co max-def-hp fprint-fmt pop pop
+    s (- terrain:  {0:s}\n\n)
+        mark max-terrain fprint-fmt pop pop
+
+    s (## How to read this\n\n) write-string
+    s (- `damage-matrix.csv`: one row per cell. Columns: atk_unit,\n)
+        write-string
+    s (  def_unit, terrain, atk_co, def_co, atk_vet, def_hp,\n)
+        write-string
+    s (  damage_hp. Damage is in HP post-floor; atk HP fixed at 10\n)
+        write-string
+    s (  per GDD §7.1 attacker-HP scaling. Wounded-attacker is\n)
+        write-string
+    s (  symmetric and not enumerated.\n) write-string
+    s (- `damage-matrix-outliers.csv`: subset where damage_hp >= 10\n)
+        write-string
+    s (  [one-shot at full HP] OR damage_hp == 0 [useless attack].\n)
+        write-string
+    s (- `damage-matrix-heatmap.csv`: bare §7.5 damage-table base\n)
+        write-string
+    s (  values, no modifiers applied. 17x17 sparse grid with `-` for\n)
+        write-string
+    s (  illegal cells.\n) write-string
+
+    s close-stream
+} def
+
+
+% ====================================================================
+% Section 9: orchestration
+% ====================================================================
+
+(=== damage-matrix sim starting ===\n) print
+dump-heatmap
+(  heatmap written: {0:s}\n) mark out-heatmap print-fmt pop pop
+
+run-matrix-sim
+(  main written: {0:s}\n)     mark out-main     print-fmt pop pop
+(  outliers written: {0:s}\n) mark out-outliers print-fmt pop pop
+
+dump-summary
+(  summary written: {0:s}\n)  mark out-summary  print-fmt pop pop
+
+(\n=== summary ===\n) print
+(  total cells:   {0}\n) mark total-cells print-fmt pop pop
+(  one-shots:     {0}\n) mark one-shot-cells print-fmt pop pop
+(  useless:       {0}\n) mark useless-cells print-fmt pop pop
+(  max damage:    {0} HP -- {1:s}@{2:s} vs {3:s}@{4:s} vet={5} def_hp={6} terrain={7:s}\n)
+    mark max-damage max-atk max-atk-co max-def max-def-co max-vet max-def-hp max-terrain
+    print-fmt pop pop

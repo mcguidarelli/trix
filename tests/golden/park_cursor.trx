@@ -1,0 +1,13 @@
+% ====================================================================
+% golden/park_cursor.trx -- screen-park-cursor emits CSI row;col H
+% (1-based on the wire, 0-indexed col row operands) directly to fd 1,
+% flushing buffered stdout first so ordering is deterministic.  No tty
+% required: the op writes to whatever stdout is, so the escape bytes
+% land in the golden capture verbatim.
+% ====================================================================
+
+(before-park) =
+5 7 screen-park-cursor
+(park 0 0:) =
+0 0 screen-park-cursor
+(after-park) =

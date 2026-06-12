@@ -1,0 +1,682 @@
+% ====================================================================
+% test_global_composite.trx -- composite types migrate to global VM
+% ====================================================================
+% Migration 3 of the global-VM allocator plan: Curry, Thunk, Tagged, Record, and
+% Packed factories consult m_curr_alloc_global.  When set, the backing
+% storage lands in global VM, tagged with the matching ChunkKind, and
+% survives every save/restore cycle -- closing the dangling-ref hazard
+% for these composites stored in global Dicts and Arrays.
+%
+% Stream is intentionally NOT covered: its backing struct is allocated
+% from a fixed-capacity init-time pool (stream.inl:237) and recycled
+% via alloc_stream/free_stream.  Pool entries are BASE-stamped, never
+% move, and Stream objects already survive save/restore via the pool
+% architecture; ChunkKind::Stream stays count=0 by design.
+%
+% Coroutine, PipeBuffer, Cell, Continuation, and Screen are queued as
+% Migration 4-6 -- not part of this file.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Curry survives restore when allocated globally
+% ====================================================================
+% A curried proc {value callable} stored in a global Dict must keep
+% its [value, callable] pair pointing at live VM after restore.
+
+${ 8 dict } /g1 exch def
+
+vm-global-info /by-kind get /curry get /count get /pre1 exch def
+
+save /sv1 exch def
+true set-global
+${
+    g1 /add5  5  {add} curry put         % 5 + (top of stack)
+    g1 /mul10 10 {mul} curry put
+}
+false set-global
+
+vm-global-info /by-kind get /curry get /count get /post1 exch def
+post1 pre1 sub 2 eq        (s1: curry count +2 globally)              rt-ok
+
+% Verify pre-restore that currying still works.
+3 g1 /add5 get exec 8 eq   (s1: pre-restore add5 returns 5+3=8)       rt-ok
+4 g1 /mul10 get exec 40 eq (s1: pre-restore mul10 returns 10*4=40)    rt-ok
+
+sv1 restore
+
+% Post-restore: the curried procs are still there because the [value,
+% callable] pair survived.  Without global allocation, the curry's
+% storage would be reclaimed and the pair would dangle.
+3 g1 /add5 get exec 8 eq   (s1: post-restore add5 still works)        rt-ok
+7 g1 /mul10 get exec 70 eq (s1: post-restore mul10 still works)       rt-ok
+
+% ====================================================================
+% SECTION 2: Thunk survives restore
+% ====================================================================
+% A thunk wrapping {42} stored in a global Dict must remain forceable
+% after restore.  The thunk's [state, proc, result] tuple lives in
+% global VM.
+
+${ 8 dict } /g2 exch def
+
+vm-global-info /by-kind get /thunk get /count get /pre2 exch def
+
+save /sv2 exch def
+true set-global
+${
+    g2 /lazy42  { 42 } thunk put
+    g2 /lazyfun { 7 7 mul } thunk put       % 49 when forced
+}
+false set-global
+
+vm-global-info /by-kind get /thunk get /count get /post2 exch def
+post2 pre2 sub 2 eq        (s2: thunk count +2 globally)              rt-ok
+
+% Force pre-restore -- this caches the result in the result slot, in global VM.
+g2 /lazy42 get force 42 eq  (s2: pre-restore lazy42 forces to 42)     rt-ok
+
+sv2 restore
+
+% Post-restore: the unforced thunk is still callable, and the cached
+% result of lazy42 must also still be readable.
+g2 /lazy42  get force 42 eq  (s2: post-restore lazy42 still 42)       rt-ok
+g2 /lazyfun get force 49 eq  (s2: post-restore lazyfun forces to 49)  rt-ok
+
+% ====================================================================
+% SECTION 3: Tagged survives restore
+% ====================================================================
+% A tagged value {/tag payload} stored in a global Dict must keep its
+% [name, payload] pair live after restore.  Pre-intern the tag names
+% locally first -- otherwise scan-time interleaving would intern them
+% globally inside the set-global window (see reference_global_name_keys.md).
+
+/ok null def
+/err null def
+
+${ 8 dict } /g3 exch def
+
+vm-global-info /by-kind get /tagged get /count get /pre3 exch def
+
+save /sv3 exch def
+true set-global
+${
+    g3 /good 100 /ok  tag put
+    g3 /bad  (oops) /err tag put
+}
+false set-global
+
+vm-global-info /by-kind get /tagged get /count get /post3 exch def
+post3 pre3 sub 2 eq        (s3: tagged count +2 globally)             rt-ok
+
+g3 /good get tag-name /ok eq      (s3: pre-restore good tag is /ok)   rt-ok
+g3 /good get tag-value 100 eq     (s3: pre-restore good payload 100)  rt-ok
+
+sv3 restore
+
+g3 /good get tag-name /ok eq      (s3: post-restore good tag is /ok)  rt-ok
+g3 /good get tag-value 100 eq     (s3: post-restore good payload 100) rt-ok
+g3 /bad  get tag-name /err eq     (s3: post-restore bad tag is /err)  rt-ok
+g3 /bad  get tag-value (oops) eq  (s3: post-restore bad payload)      rt-ok
+
+% ====================================================================
+% SECTION 4: Record survives restore
+% ====================================================================
+% A record whose schema and instance are both allocated in global VM
+% must remain readable after restore.  Both /record kinds will grow
+% (one for schema, one for instance, plus the constructor proc body
+% which goes to /array).
+
+% Pre-intern the schema field names locally first.
+/x null def
+/y null def
+/z null def
+
+${ 8 dict } /g4 exch def
+
+vm-global-info /by-kind get /record get /count get /pre4-r exch def
+
+save /sv4 exch def
+true set-global
+${
+    [/x /y /z] record-type /point3d exch def
+    g4 /origin 0 0 0 point3d put
+    g4 /unit-x 1 0 0 point3d put
+}
+false set-global
+
+vm-global-info /by-kind get /record get /count get /post4-r exch def
+
+% Expect exactly 4 new Record blocks: 1 schema + 1 schema-holder (a 0-field
+% RecordInstance the ctor proc holds so the GC keeps the schema reachable, task
+% #37) + 2 instances.  The constructor proc body is a 2-Object Array (not a Record).
+post4-r pre4-r sub 4 eq   (s4: record count +4 globally)             rt-ok
+
+% Pre-restore: read fields back.
+g4 /unit-x get /x get 1 eq  (s4: pre-restore unit-x.x = 1)     rt-ok
+g4 /unit-x get /y get 0 eq  (s4: pre-restore unit-x.y = 0)     rt-ok
+
+sv4 restore
+
+% Post-restore: schema and instance still live.
+g4 /origin get /x get 0 eq  (s4: post-restore origin.x = 0)    rt-ok
+g4 /unit-x get /x get 1 eq  (s4: post-restore unit-x.x = 1)    rt-ok
+g4 /unit-x get /z get 0 eq  (s4: post-restore unit-x.z = 0)    rt-ok
+
+% ====================================================================
+% SECTION 5: Packed survives restore
+% ====================================================================
+% The `packed` op compresses N stack values into a Packed Object.  When
+% allocated globally, the packed bytes live in global VM and survive
+% restore.
+
+${ 8 dict } /g5 exch def
+
+vm-global-info /by-kind get /packed get /count get /pre5 exch def
+
+save /sv5 exch def
+true set-global
+${
+    g5 /trio 11 22 33 3 packed put
+}
+false set-global
+
+vm-global-info /by-kind get /packed get /count get /post5 exch def
+% Count grows by >=1 for the trio packed Object; ${...} body wrappers
+% can also pack themselves into global VM, so the delta is not exactly 1.
+post5 pre5 sub 1 ge         (s5: packed count +>=1 globally)         rt-ok
+
+g5 /trio get 0 get 11 eq    (s5: pre-restore trio[0] = 11)           rt-ok
+g5 /trio get 2 get 33 eq    (s5: pre-restore trio[2] = 33)           rt-ok
+
+sv5 restore
+
+g5 /trio get 0 get 11 eq    (s5: post-restore trio[0] = 11)          rt-ok
+g5 /trio get 1 get 22 eq    (s5: post-restore trio[1] = 22)          rt-ok
+g5 /trio get 2 get 33 eq    (s5: post-restore trio[2] = 33)          rt-ok
+
+% ====================================================================
+% SECTION 6: by-kind histogram tracks each composite separately
+% ====================================================================
+% Sanity-check that the four migrated kinds report nonzero counts and
+% nonzero total-bytes -- their introspection slots are wired up.
+
+vm-global-info /info6 exch def
+
+info6 /by-kind get /curry  get /count get 1 ge   (s6: /curry  count >=1)  rt-ok
+info6 /by-kind get /thunk  get /count get 1 ge   (s6: /thunk  count >=1)  rt-ok
+info6 /by-kind get /tagged get /count get 1 ge   (s6: /tagged count >=1)  rt-ok
+info6 /by-kind get /record get /count get 1 ge   (s6: /record count >=1)  rt-ok
+info6 /by-kind get /packed get /count get 1 ge   (s6: /packed count >=1)  rt-ok
+
+info6 /by-kind get /curry  get /total-bytes get 0 gt  (s6: /curry  bytes >0) rt-ok
+info6 /by-kind get /thunk  get /total-bytes get 0 gt  (s6: /thunk  bytes >0) rt-ok
+info6 /by-kind get /tagged get /total-bytes get 0 gt  (s6: /tagged bytes >0) rt-ok
+info6 /by-kind get /record get /total-bytes get 0 gt  (s6: /record bytes >0) rt-ok
+info6 /by-kind get /packed get /total-bytes get 0 gt  (s6: /packed bytes >0) rt-ok
+
+% Stream stays at count=0 -- confirms the design decision (init-time
+% pool, no runtime gvm_alloc<Stream> path).
+info6 /by-kind get /stream get /count get 0 eq
+    (s6: /stream count == 0 -- pool-allocated, not via gvm_alloc) rt-ok
+
+% Subsystem-managed slots that stay count=0 at this point in the test.
+info6 /by-kind get /pipebuffer get /count get 0 eq
+    (s6: /pipebuffer count == 0 -- RESERVED, VM Redux symmetry will revive) rt-ok
+% /mailbox is now Active (VM Redux Phase 3 wired actor_alloc_mailbox to
+% gvm_alloc).  test_global_composite.trx doesn't spawn actors, so its
+% count stays 0 here -- but the slot is no longer RESERVED.
+info6 /by-kind get /mailbox    get /count get 0 eq
+    (s6: /mailbox count == 0 in this test -- Active, exercised in test_phase3_mailbox_global) rt-ok
+info6 /by-kind get /cell       get /count get 0 eq
+    (s6: /cell count == 0 -- non-persistent by design, RETIRED)   rt-ok
+info6 /by-kind get /continuation get /count get 0 eq
+    (s6: /continuation count == 0 -- handle dangle-check correct, RETIRED) rt-ok
+% Post main-context-local (2026-05-09): main coroutine is in LOCAL VM,
+% so /coroutinecontext stays at 0 in single-coroutine no-spawn programs.
+% /coroutinestacks is 0 too because main reuses Trix member vars.
+% Binding cache is lazy-allocated on first spawn; single-coroutine mode
+% keeps /bindingbucket and /bindingentry at 0 here.
+info6 /by-kind get /coroutinecontext get /count get 0 eq
+    (s6: /coroutinecontext count = 0 -- main is local-VM) rt-ok
+info6 /by-kind get /coroutinestacks  get /count get 0 eq
+    (s6: /coroutinestacks  count = 0 -- main reuses member vars) rt-ok
+info6 /by-kind get /bindingbucket    get /count get 0 eq
+    (s6: /bindingbucket count = 0 -- single-coroutine mode) rt-ok
+
+% ====================================================================
+% SECTION 7: set-algebra ops with ExtValue elements under ${...}
+% ====================================================================
+% intersect/difference/union build temp-region membership dicts (lookup/
+% seen) that stay live across the whole scan.  The temp region sits just
+% below m_vm_global, so any GLOBAL allocation grows the global region down
+% over it.  Under ${...} with Long/Double elements, the per-element clones
+% were global -> they clobbered the live temp dicts -> abort (misaligned
+% DictEntry / invalid-restore) on a PLAIN ${...} program, no gc-stress
+% needed.  Fix: every clone in these ops stays LOCAL (make_clone_local),
+% as the (working) top-level path allocates.  Long payloads (`Nl`) make
+% the clones real ExtValue allocations.  (verified: pre-fix these abort.)
+${ [ 5000000001l 5000000002l 5000000003l ] [ 5000000002l 5000000003l 5000000004l ] intersect } /s7i exch def
+s7i length 2 eq          (s7: intersect length == 2)          rt-ok
+s7i 0 get 5000000002l eq (s7: intersect[0] == 5000000002l)    rt-ok
+s7i 1 get 5000000003l eq (s7: intersect[1] == 5000000003l)    rt-ok
+
+${ [ 5000000001l 5000000002l 5000000003l ] [ 5000000002l ] difference } /s7d exch def
+s7d length 2 eq          (s7: difference length == 2)         rt-ok
+s7d 0 get 5000000001l eq (s7: difference[0] == 5000000001l)   rt-ok
+s7d 1 get 5000000003l eq (s7: difference[1] == 5000000003l)   rt-ok
+
+${ [ 5000000001l 5000000002l ] [ 5000000002l 5000000003l ] union } /s7u exch def
+s7u length 3 eq          (s7: union length == 3)              rt-ok
+s7u 0 get 5000000001l eq (s7: union[0] == 5000000001l)        rt-ok
+s7u 2 get 5000000003l eq (s7: union[2] == 5000000003l)        rt-ok
+
+% Double payloads through the same path.
+${ [ 1.5d 2.5d ] [ 2.5d 3.5d ] intersect } dup length 1 eq (s7: intersect Double length == 1) rt-ok
+0 get 2.5d eq            (s7: intersect Double[0] == 2.5d)     rt-ok
+
+% ====================================================================
+% SECTION 8: PACKED sources under ${...} (shared expand_packed_to_temp)
+% ====================================================================
+% expand_packed_to_temp decodes a packed source into a temp-region buffer.
+% Under ${...} the decode (materialising a Long ExtValue) and clone allocated
+% GLOBALLY, growing the global region down over that very buffer -> abort on a
+% plain ${...} program with Long elements.  The ops that USE the expansion
+% (zip/zip-longest/interpose/enumerate/chunk/sliding-window + intersect/union/
+% difference) compounded it with their own global element clones.  Fix: the
+% expansion and every element clone stay LOCAL (expand_packed_to_temp suppresses
+% the global flag; the ops use make_clone_local).  `N packed` builds packed Long
+% arrays.  (verified: pre-fix these abort with gvm/DictEntry assertions.)
+${ 5000000001l 5000000002l 5000000003l 3 packed 6000000001l 6000000002l 6000000003l 3 packed zip } /s8z exch def
+s8z 0 get 1 get 6000000001l eq  (s8: zip packed pair[0][1])        rt-ok
+s8z 2 get 0 get 5000000003l eq  (s8: zip packed pair[2][0])        rt-ok
+
+${ 5000000001l 5000000002l 5000000003l 3 packed 9000000009l interpose } /s8i exch def
+s8i 0 get 5000000001l eq        (s8: interpose packed[0])          rt-ok
+s8i 1 get 9000000009l eq        (s8: interpose packed[1] sep)      rt-ok
+s8i 2 get 5000000002l eq        (s8: interpose packed[2])          rt-ok
+
+${ 5000000001l 5000000002l 5000000003l 5000000004l 4 packed 2 chunk } /s8c exch def
+s8c 0 get 0 get 5000000001l eq  (s8: chunk packed[0][0])           rt-ok
+s8c 1 get 1 get 5000000004l eq  (s8: chunk packed[1][1])           rt-ok
+
+${ 5000000001l 5000000002l 5000000003l 3 packed 2 sliding-window } /s8w exch def
+s8w 0 get 0 get 5000000001l eq  (s8: sliding-window packed[0][0])  rt-ok
+s8w 1 get 1 get 5000000003l eq  (s8: sliding-window packed[1][1])  rt-ok
+
+${ 5000000001l 5000000002l 5000000003l 3 packed enumerate } /s8e exch def
+s8e 2 get 1 get 5000000003l eq  (s8: enumerate packed[2][1])       rt-ok
+
+${ 5000000001l 5000000002l 5000000003l 3 packed 5000000002l 5000000003l 5000000004l 3 packed intersect } /s8x exch def
+s8x length 2 eq                 (s8: intersect packed length == 2) rt-ok
+s8x 1 get 5000000003l eq        (s8: intersect packed[1])          rt-ok
+
+${ 5000000001l 5000000002l 2 packed 5000000002l 5000000003l 2 packed union } /s8u exch def
+s8u length 3 eq                 (s8: union packed length == 3)     rt-ok
+s8u 2 get 5000000003l eq        (s8: union packed[2])              rt-ok
+
+% ====================================================================
+% SECTION 9: sort-by / group-by collect-phase under ${...}
+% ====================================================================
+% These two-phase ops collect proc keys + popped elements into temp-region
+% arrays held live across EVERY proc invocation.  Under ${...} the user proc's
+% global allocations (and the popped-element/result clones) grew the global
+% region down over those temp arrays, clobbering them -> abort on a plain ${...}
+% program with Long elements (gvm misaligned-size / "key missing from count_dict").
+% Fix: the whole op runs with global allocation suppressed (the saved flag rides
+% the bottom of the exec frame, restored at finalization), so the proc + all
+% clones stay LOCAL and nothing clobbers the temp scratch -- as the top-level
+% path runs.  (verified: pre-fix these abort.)
+${ [ 5000000005l 5000000001l 5000000003l ] { } sort-by } /s9s exch def
+s9s 0 get 5000000001l eq        (s9: sort-by[0] (min))             rt-ok
+s9s 2 get 5000000005l eq        (s9: sort-by[2] (max))             rt-ok
+
+% allocating key proc -> proc runs LOCAL under the suppression
+${ [ 5000000005l 5000000001l 5000000003l ] { dup add } sort-by } /s9k exch def
+s9k 0 get 5000000001l eq        (s9: sort-by allocating-key[0])    rt-ok
+s9k 2 get 5000000005l eq        (s9: sort-by allocating-key[2])    rt-ok
+
+% packed source through the same collect path
+${ 5000000005l 5000000001l 5000000003l 3 packed { } sort-by } /s9p exch def
+s9p 0 get 5000000001l eq        (s9: sort-by packed[0])            rt-ok
+
+${ [ 5000000001l 5000000002l 5000000003l 5000000004l ] { 2l mod } group-by } /s9g exch def
+s9g keys length 2 eq            (s9: group-by 2 keys)              rt-ok
+s9g 1l get length 2 eq          (s9: group-by odd group size 2)    rt-ok
+s9g 1l get 0 get 5000000001l eq (s9: group-by odd[0])             rt-ok
+s9g 0l get 1 get 5000000004l eq (s9: group-by even[1])            rt-ok
+
+% ====================================================================
+% SECTION 10: partition (two-phase temp) + frequencies (packed temp) under ${...}
+% ====================================================================
+% partition holds pass/fail temp arrays live across every proc invocation (same
+% collect-phase clobber as sort-by/group-by -> suppress global for the op).
+% frequencies clones dict keys while a packed source's expansion buffer is live
+% (-> make_clone_local).  Both aborted/corrupted on a plain ${...} Long program
+% pre-fix; the auditor mis-classified partition as defended.
+${ [ 5000000001l 5000000002l 5000000003l 5000000004l ] { 5000000002l le } partition } /s10pf exch def /s10pp exch def
+s10pp length 2 eq               (s10: partition pass length 2)     rt-ok
+s10pf length 2 eq               (s10: partition fail length 2)     rt-ok
+s10pp 0 get 5000000001l eq      (s10: partition pass[0])           rt-ok
+s10pf 1 get 5000000004l eq      (s10: partition fail[1])           rt-ok
+
+${ 5000000001l 5000000002l 5000000003l 5000000004l 4 packed { 5000000002l le } partition } /s10qf exch def /s10qp exch def
+s10qp 0 get 5000000001l eq      (s10: partition packed pass[0])    rt-ok
+s10qf 0 get 5000000003l eq      (s10: partition packed fail[0])    rt-ok
+
+${ [ 5000000001l 5000000001l 5000000002l ] frequencies } /s10fa exch def
+s10fa 5000000001l get 2 eq      (s10: frequencies array count)     rt-ok
+${ 5000000001l 5000000001l 5000000002l 3 packed frequencies } /s10fp exch def
+s10fp 5000000001l get 2 eq      (s10: frequencies packed count==2) rt-ok
+s10fp 5000000002l get 1 eq      (s10: frequencies packed other 1)  rt-ok
+
+% ====================================================================
+% SECTION 11: deref of a bound lvar returns an independent value, not a
+% borrowed alias of the binding's ExtValue (under ${...})
+% ====================================================================
+% deref_op returned the value stored in the binding slot AS-IS -- a borrowed
+% alias of the ExtValue/WideValue the binding owns (the same ownership rule
+% unify_impl enforces internally by flipping a_consumable=false for a deref'd
+% bound lvar).  Handing that borrow to the op stack let a later pop / consuming
+% op maybe_free_extvalue it, freeing the binding's ExtValue out from under the
+% lvar -- the binding then dangled.  With a Long payload and enough global churn
+% to reuse the freed slot, re-reading the binding silently returned garbage
+% (production-facing, no debug op); under vm-gc-stress the global GC tripped on
+% it as "references a freed block".  Fix: deref_op clones the result when the
+% input is a bound lvar.  (verified: reverting the clone -> s11 reads != bound.)
+${ /s11a logic-var def s11a 70000000001l unify pop s11a deref pop  90000000001l pop 90000000002l pop 90000000003l pop 90000000004l pop  s11a deref } /s11v exch def
+s11v 70000000001l eq            (s11: bound lvar value survives deref-pop+churn) rt-ok
+% the array-build-after-deref crash shape (>=2 bound lvars + deref-pop, then a global composite)
+${ /s11p logic-var def /s11q logic-var def s11p 71000000001l unify pop s11q 72000000002l unify pop s11p deref pop [ s11p s11q 73000000003l ] } /s11arr exch def
+s11arr length 3 eq              (s11: global array built after lvar deref-pop) rt-ok
+s11arr 2 get 73000000003l eq    (s11: array literal[2] intact)              rt-ok
+s11q deref 72000000002l eq      (s11: other bound lvar still intact)         rt-ok
+
+% ====================================================================
+% SECTION 12: Cat-1 string ops produce a GLOBAL result under ${...}
+% ====================================================================
+% uppercase / lowercase / capitalize / reverse(string) / replace / join /
+% repeat-string / pad-left / pad-right / regex-replace each allocated their
+% result via vm_alloc (always LOCAL) regardless of m_curr_alloc_global, so
+% under ${...} they returned a LOCAL string.  Stored into a GLOBAL dict at
+% save level >= 1 that local result is restore-fragile: Dict::put R6-REJECTS
+% it (the put errors out) -- or, before the R6 guard existed, it dangled after
+% restore.  Fix (#46 Cat 1): vm_alloc<vm_t> -> vm_alloc_dispatch<vm_t>(...,
+% ChunkKind::String) so the result lands in the global region and survives
+% restore.  NON-VACUOUS: reverting any one op -> its put R6-rejects right here.
+%
+% Each op READS a local input (a string literal -- local by design; the global
+% literal form is `(...)#$`) and PRODUCES a fresh result; only the RESULT is
+% stored, so the local input never trips R6.  join's input is an ARRAY of
+% string literals, and building that array literal globally under ${...} WOULD
+% R6-reject its local elements before join runs -- so the join inputs are built
+% before `save` (base-level local, not restore-fragile) and only join's result
+% is stored.
+${ 16 dict } /g12 exch def
+[ (a) (b) (c) ] /arr12  exch def
+[ ]             /arr12e exch def
+save /sv12 exch def
+true set-global
+${ g12 /upper  (hello)              uppercase         put }
+${ g12 /lower  (WORLD)              lowercase         put }
+${ g12 /cap    (trix)              capitalize        put }
+${ g12 /rev    (abc)               reverse           put }
+${ g12 /repl   (a.b.a) (a) (X)     replace           put }
+${ g12 /join   arr12  (,)          join              put }
+${ g12 /joinE  arr12e (,)          join              put }
+${ g12 /rep    (ab) 3l             repeat-string     put }
+${ g12 /padl   (hi) 5l 32b         pad-left          put }
+${ g12 /padr   (hi) 5l 32b         pad-right         put }
+${ g12 /rxrep  (a1b2c3) ([0-9]) (#) regex-replace    put }
+false set-global
+
+% pre-restore: results are readable inside the set-global window
+g12 /upper get (HELLO)  eq  (s12: pre-restore uppercase)     rt-ok
+g12 /join  get (a,b,c)  eq  (s12: pre-restore join)          rt-ok
+g12 /rxrep get (a#b#c#) eq  (s12: pre-restore regex-replace) rt-ok
+
+sv12 restore
+
+% post-restore: every string survives because it lives in the global region
+g12 /upper get (HELLO)   eq (s12: post-restore uppercase)     rt-ok
+g12 /lower get (world)   eq (s12: post-restore lowercase)     rt-ok
+g12 /cap   get (Trix)    eq (s12: post-restore capitalize)    rt-ok
+g12 /rev   get (cba)     eq (s12: post-restore reverse)       rt-ok
+g12 /repl  get (X.b.X)   eq (s12: post-restore replace)       rt-ok
+g12 /join  get (a,b,c)   eq (s12: post-restore join)          rt-ok
+g12 /joinE get ()        eq (s12: post-restore join empty)    rt-ok
+g12 /rep   get (ababab)  eq (s12: post-restore repeat-string) rt-ok
+g12 /padl  get (   hi)   eq (s12: post-restore pad-left)      rt-ok
+g12 /padr  get (hi   )   eq (s12: post-restore pad-right)     rt-ok
+g12 /rxrep get (a#b#c#)  eq (s12: post-restore regex-replace) rt-ok
+
+% ====================================================================
+% SECTION 13: Cat-2 string/regex array results are region-aware under ${...}
+% ====================================================================
+% split / chars / flatten / reverse(array) / regex-find-all / regex-split /
+% regex-search built their result ARRAY with vm_alloc_n<Object> (always LOCAL),
+% and their element strings were LOCAL too (split = zero-copy views into the
+% source; regex = make_string local copies).  Under ${...} the whole result was
+% therefore local and R6-rejected when stored into a global dict at save level
+% >= 1.  Fix (#46 Cat 2): the array uses vm_alloc_dispatch_n(..., ChunkKind::Array)
+% (rooted across the fill since element clones/copies can fire vm_global_gc), and
+% element strings use make_string_region (split copies under ${...} instead of
+% viewing; regex copies into the global region).  NON-VACUOUS: reverting any one
+% op back to vm_alloc_n makes its put R6-reject the local array here.
+%
+% Array inputs are built before `save` (base-level local, not restore-fragile);
+% the ops READ them and PRODUCE global results -- only the results are stored.
+${ 16 dict } /g13 exch def
+[ 1l 2l 3l ]            /arr13rev  exch def
+[ [ 1l 2l ] [ 3l 4l ] ] /arr13flat exch def
+save /sv13 exch def
+true set-global
+${ g13 /split   (a,b,c)  (,) split                        put }
+${ g13 /splited (xyz)    ()  split                        put }
+${ g13 /chars   (abc)    chars                            put }
+${ g13 /flat    arr13flat    flatten                      put }
+${ g13 /rev     arr13rev     reverse                      put }
+${ g13 /rfa     (a1b2c3) ([0-9]) regex-find-all           put }
+${ g13 /rsplit  (a:b:c)  (:) regex-split                  put }
+${ g13 /rsearch (abc123) (([a-z]+)([0-9]+)) regex-search pop put }
+false set-global
+
+% pre-restore (readable inside the set-global window)
+g13 /split get 1 get (b) eq  (s13: pre-restore split[1])         rt-ok
+g13 /rfa   get 0 get (1) eq  (s13: pre-restore regex-find-all[0]) rt-ok
+
+sv13 restore
+
+% post-restore: arrays and their element strings survive in the global region
+g13 /split   get length 3 eq (s13: post split length 3)       rt-ok
+g13 /split   get 0 get (a) eq (s13: post split[0])            rt-ok
+g13 /split   get 2 get (c) eq (s13: post split[2])            rt-ok
+g13 /splited get 1 get (y) eq (s13: post split empty-delim[1]) rt-ok
+g13 /chars   get 0 get 97b eq (s13: post chars[0])            rt-ok
+g13 /flat    get length 4 eq (s13: post flatten length 4)     rt-ok
+g13 /flat    get 3 get 4l eq (s13: post flatten[3])          rt-ok
+g13 /rev     get 0 get 3l eq (s13: post reverse[0])          rt-ok
+g13 /rfa     get length 3 eq (s13: post regex-find-all len 3) rt-ok
+g13 /rfa     get 2 get (3) eq (s13: post regex-find-all[2])   rt-ok
+g13 /rsplit  get 2 get (c) eq (s13: post regex-split[2])      rt-ok
+g13 /rsearch get 1 get (abc) eq (s13: post regex-search group1) rt-ok
+g13 /rsearch get 2 get (123) eq (s13: post regex-search group2) rt-ok
+
+% ====================================================================
+% SECTION 14: Cat-2b core array ops region-aware under ${...}
+% ====================================================================
+% range / range-from / step-range (immediate Integer elements -> no rooting),
+% append / sort / unique / dedupe (cloned elements, already rooted by the
+% Class-A fix) and values/keys (dict-extract, cloned elements -- root added)
+% allocated their result with vm_alloc_n (LOCAL).  #46 Cat 2b flips them to
+% vm_alloc_dispatch_n so the ${...} result lands in the global region and
+% survives restore.  NON-VACUOUS: reverting any one -> its put R6-rejects.
+% Array/dict inputs are built before `save` (base-level local, not restore-fragile).
+${ 16 dict } /g14 exch def
+[ 30l 10l 20l ]    /arr14s exch def
+[ 1l 1l 2l 2l 3l ] /arr14d exch def
+4 dict dup /a 1l put dup /b 2l put dup /c 3l put /dic14 exch def
+save /sv14 exch def
+true set-global
+${ g14 /range   5l range            put }
+${ g14 /rangef  2l 6l range-from     put }
+${ g14 /steprng 0l 10l 2l step-range put }
+${ g14 /append  arr14s 99l append    put }
+${ g14 /sort    arr14s sort           put }
+${ g14 /unique  arr14d unique         put }
+${ g14 /dedupe  arr14d dedupe         put }
+${ g14 /vals    dic14 values          put }
+false set-global
+
+g14 /range get length 5 eq (s14: pre-restore range len) rt-ok
+
+sv14 restore
+
+g14 /range   get 4 get 4 eq   (s14: post range[4])        rt-ok
+g14 /rangef  get length 4 eq  (s14: post range-from len)  rt-ok
+g14 /rangef  get 0 get 2 eq   (s14: post range-from[0])   rt-ok
+g14 /steprng get 2 get 4 eq   (s14: post step-range[2])   rt-ok
+g14 /append  get length 4 eq  (s14: post append len)      rt-ok
+g14 /append  get 3 get 99l eq (s14: post append[3])       rt-ok
+g14 /sort    get 0 get 10l eq (s14: post sort[0])         rt-ok
+g14 /sort    get 2 get 30l eq (s14: post sort[2])         rt-ok
+g14 /unique  get length 3 eq  (s14: post unique len)      rt-ok
+g14 /dedupe  get length 3 eq  (s14: post dedupe len)      rt-ok
+g14 /dedupe  get 2 get 3l eq  (s14: post dedupe[2])       rt-ok
+g14 /vals    get length 3 eq  (s14: post values len)      rt-ok
+g14 /vals    get 0 get 1l ge  (s14: post values[0] >= 1)  rt-ok
+
+% ====================================================================
+% SECTION 15: Cat-2c proc-invoking array ops region-aware under ${...}
+% ====================================================================
+% map / map-indexed / filter / scan / take-while / drop-while allocated their
+% result array with vm_alloc_n (LOCAL) and parked it on the exec stack across
+% the per-element proc callbacks.  #46 Cat 2c flips them to vm_alloc_dispatch_n
+% so the ${...} result lands in the global region; the exec-stack park keeps it
+% marked across the proc callbacks (no extra gc-root needed, except scan's empty
+% path and the already-rooted scan main / drop-while collect).  filter/take-while
+% over-allocate then vm_trim_alloc the tail -- a no-op for a global result (not at
+% the local heap top), which just leaves the global block over-allocated; the GC
+% marks by the handle's arrays_length and walks the null tail safely.
+% NON-VACUOUS: reverting an op's alloc -> its put R6-rejects the local result.
+% Array inputs are built before `save` (base-level local, not restore-fragile).
+${ 16 dict } /g15 exch def
+[ 1l 2l 3l ]       /arr15  exch def
+[ 1l 2l 5l 1l ]    /arr15w exch def
+save /sv15 exch def
+true set-global
+${ g15 /map     arr15  { 10l add } map            put }
+${ g15 /mapidx  arr15  { exch pop } map-indexed    put }
+${ g15 /filter  arr15w { 3l lt } filter            put }
+${ g15 /scan    arr15  0l { add } scan             put }
+${ g15 /takew   arr15w { 3l lt } take-while        put }
+${ g15 /dropw   arr15w { 3l lt } drop-while        put }
+false set-global
+
+g15 /map get 0 get 11l eq (s15: pre-restore map[0]) rt-ok
+
+sv15 restore
+
+g15 /map    get length 3 eq (s15: post map len)        rt-ok
+g15 /map    get 2 get 13l eq (s15: post map[2])        rt-ok
+g15 /mapidx get 2 get 2 eq   (s15: post map-indexed[2]) rt-ok
+g15 /filter get length 3 eq  (s15: post filter len)    rt-ok
+g15 /filter get 0 get 1l eq  (s15: post filter[0])     rt-ok
+g15 /filter get 2 get 1l eq  (s15: post filter[2])     rt-ok
+g15 /scan   get length 4 eq  (s15: post scan len)      rt-ok
+g15 /scan   get 3 get 6l eq  (s15: post scan[3])       rt-ok
+g15 /takew  get length 2 eq  (s15: post take-while len) rt-ok
+g15 /takew  get 1 get 2l eq  (s15: post take-while[1]) rt-ok
+g15 /dropw  get 0 get 5l eq  (s15: post drop-while[0]) rt-ok
+
+% ====================================================================
+% SECTION 16: promote / coerce array results region-aware under ${...}
+% ====================================================================
+% promote and coerce allocated their result with vm_alloc_n (LOCAL), so under
+% ${...} the result was local and R6-rejected when stored into a global dict at
+% save level >= 1.  #46 Cat 2d flips the result to vm_alloc_dispatch_n + null-init
+% + gc-root across the fill.  Their packed path also gained a suppress-global guard
+% around the scratch-buffer expansion (the buffer is local-heap and must hold LOCAL
+% clones; a global expansion left it holding global clones that a later GC swept --
+% a pre-existing latent bug, see test_gc_stress_b7).  NON-VACUOUS: reverting the
+% result flip -> the put R6-rejects.  Inputs built before `save` (not restore-fragile).
+${ 16 dict } /g16 exch def
+[ 1l 2 3l ]  /arr16p exch def
+[ 1l 2l 3l ] /arr16c exch def
+save /sv16 exch def
+true set-global
+${ g16 /promote arr16p promote            put }
+${ g16 /coerce  arr16c /long-type coerce  put }
+false set-global
+
+g16 /promote get 1 get 2l eq (s16: pre-restore promote[1]) rt-ok
+
+sv16 restore
+
+g16 /promote get length 3 eq (s16: post promote len) rt-ok
+g16 /promote get 1 get 2l eq (s16: post promote[1])  rt-ok
+g16 /promote get 2 get 3l eq (s16: post promote[2])  rt-ok
+g16 /coerce  get length 3 eq (s16: post coerce len)  rt-ok
+g16 /coerce  get 0 get 1l eq (s16: post coerce[0])   rt-ok
+g16 /coerce  get 2 get 3l eq (s16: post coerce[2])   rt-ok
+
+% ====================================================================
+% SECTION 17: Cat-4 dict/set/array results region-aware under ${...}
+% ====================================================================
+% merge / coerce-dict / set-from-array / set-members / set-filter /
+% protocol-methods / xf-compose allocated their result LOCAL regardless of
+% m_curr_alloc_global, so under ${...} the result was local and R6-rejected when
+% stored into a global dict at save level >= 1.  #46 Cat 4 routes each through a
+% region-aware allocator (create_result_dict / create_result_set / dispatch_n).
+% NON-VACUOUS: reverting any one -> its `put` R6-rejects (restore-fragile local
+% into global container).  Inputs built before `save` (base-local, not fragile).
+${ 24 dict } /g17 exch def
+
+4 dict /d17a exch def  d17a 100l 1000l put  d17a 200l 2000l put
+4 dict /d17b exch def  d17b 300l 3000l put  d17b 400l 4000l put
+4 dict /d17c exch def  d17c 10l 11 put      d17c 20l 22 put
+[ 100l 200l 300l 400l ] /arr17 exch def
+[ /p17a /p17b /p17c ] /proto17 def-protocol
+{ dup 1l add } xf-map    /xf17a exch def
+{ 5l gt }      xf-filter /xf17b exch def
+
+save /sv17 exch def
+true set-global
+${ g17 /merge   d17a d17b merge                          put }
+${ g17 /coerce  d17c /long-type coerce                   put }
+${ g17 /setfa   arr17 set-from-array                     put }
+${ g17 /members arr17 set-from-array members             put }
+${ g17 /setflt  arr17 set-from-array { 250l gt } set-filter put }
+${ g17 /protom  /proto17 protocol-methods                put }
+${ g17 /xfc     xf17a xf17b xf-compose                   put }
+false set-global
+
+g17 /merge get length 4 eq (s17: pre-restore merge len) rt-ok
+
+sv17 restore
+
+g17 /merge   get length 4 eq        (s17: post merge len)          rt-ok
+g17 /merge   get 100l get 1000l eq  (s17: post merge[100])         rt-ok
+g17 /merge   get 400l get 4000l eq  (s17: post merge[400])         rt-ok
+g17 /coerce  get length 2 eq        (s17: post coerce len)         rt-ok
+g17 /coerce  get 10l get 11l eq     (s17: post coerce[10]==11l)    rt-ok
+g17 /setfa   get length 4 eq        (s17: post set-from-array len) rt-ok
+g17 /setfa   get 300l set-member?   (s17: post set has 300l)       rt-ok
+g17 /members get length 4 eq        (s17: post members len)        rt-ok
+g17 /setflt  get length 2 eq        (s17: post set-filter len)     rt-ok
+g17 /setflt  get 400l set-member?   (s17: post set-filter has 400l) rt-ok
+g17 /protom  get length 3 eq        (s17: post protocol-methods len) rt-ok
+g17 /xfc     get length 2 eq        (s17: post xf-compose len)     rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_global_composite: ALL TESTS PASSED) =
+(__test_ok__) =

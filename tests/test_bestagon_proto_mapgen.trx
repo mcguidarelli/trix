@@ -1,0 +1,19 @@
+% ====================================================================
+% test_bestagon_proto_mapgen.trx -- run examples/bestagon-proto/
+% proto-mapgen.trx via the tests/ harness.
+% ====================================================================
+%
+% Thin wrapper: loads proto-mapgen.trx (Phase 0.7: procedural map
+% generator).  Algorithm: noise + cellular-automata + cluster-spawn
+% + flood-fill connectedness with mirror-h / rotational-180 symmetry.
+%
+% 6 assertions: connectedness + seed-determinism for each of 3 sizes
+% (Tutorial 25x18, Standard 50x36, Epic 75x54) over 10 random seeds.
+%
+% Throws on any assertion mismatch.  Runs on default 1 MB VM.  On
+% debug build: ~3-4 min (the bench dominates).  On prod: ~10-15 s
+% (mean 41/175/402 ms per generation across the 3 sizes).
+% ====================================================================
+
+(examples/bestagon-proto/proto-mapgen.trx) run
+(__test_ok__) =

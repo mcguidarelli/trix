@@ -1,0 +1,44 @@
+Test: backtrace_operands
+Feature: operand-stack snapshot in format_backtrace()
+
+Run
+---
+  cd /home/parallels/cps
+  ./ps tests/backtrace_operands.ps
+
+Input
+-----
+None (script is self-contained).
+
+Expected stdout
+---------------
+(empty)
+
+Expected stderr
+---------------
+  #0: --div--
+  #1: boom at tests/backtrace_operands.ps:15:5
+      at tests/backtrace_operands.ps:15:4
+  operands: --integer-- 0 --integer-- 1 --array--[3] --name-- /aname --string--(5 bytes) --real-- 3.14 --integer-- 42 --boolean-- true
+Trix div-by-zero --div--: division by zero
+Trix exiting --interpreter--
+
+Notes
+-----
+- The operand snapshot (Phase 1) prints up to 8 top-of-stack values,
+  ordered top-first, with type annotations from object_name() and
+  compact inline values:
+
+    --integer-- 0     top (div operand 0)
+    --integer-- 1     div operand 1
+    --array--[3]      [ 1 2 3 ] — shows element count
+    --name-- /aname   literal name with / prefix (executable names use \)
+    --string--(5 bytes) (hello) — shows byte length, not content
+    --real-- 3.14     real value
+    --integer-- 42    integer value
+    --boolean-- true  boolean with value
+
+- Type names are derived from object_name(), which strips "-type" from
+  type_sv() and wraps with "--": "integer-type" -> "--integer--".
+
+- If more than 8 operands are present, a "(+N more)" suffix is appended.

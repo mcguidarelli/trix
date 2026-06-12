@@ -1,0 +1,1 @@
+{ 1 add } { 2 mul } compose 5 exec

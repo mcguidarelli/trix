@@ -1,0 +1,3 @@
+current-stream /c exch def
+c status
+c bytes-available

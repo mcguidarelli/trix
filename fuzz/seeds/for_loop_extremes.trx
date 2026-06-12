@@ -1,0 +1,6 @@
+% for-loop overflow clamps at integer extremes (all widths).
+2147483647 1 2147483647 { pop } for
+-2147483648 -1 -2147483648 { pop } for
+9223372036854775807l 1l 9223372036854775807l { pop } for
+0ul 1ul 3ul { pop } for
+255b 1b 255b { pop } for

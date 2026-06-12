@@ -1,0 +1,195 @@
+% ====================================================================
+% test_global_extvalue.trx -- ExtValue/WideValue migrate to global VM
+% ====================================================================
+% Phase 3a's global-VM allocator plan, Migration 1+2: ExtValue::alloc and
+% WideValue::alloc consult m_curr_alloc_global.  When set, the
+% backing cell goes to global VM (tagged with the matching ChunkKind)
+% and survives every save/restore cycle -- closing the dangling-ref
+% hazard for numeric values stored in global Dicts and Arrays.
+%
+% Verifies all 6 numeric types: Long, ULong, Address, Double, Int128,
+% UInt128.  Each must:
+%   - report count >= 1 in /by-kind/<kind> after a global alloc;
+%   - survive save/restore intact when stored in a global container;
+%   - have its ExtValue/WideValue offset land in the global region
+%     (verified via vm-global-info totals).
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Long survives restore when allocated globally
+% ====================================================================
+
+${ 8 dict } /g1 exch def
+
+save /sv1 exch def
+
+true set-global
+${
+    g1 /big-long 9223372036854775807l put       % LONG_MAX
+}
+false set-global
+
+g1 /big-long get 9223372036854775807l eq
+    (s1: pre-restore Long value preserved)  rt-ok
+sv1 restore
+
+g1 /big-long known? true eq
+    (s1: post-restore /big-long key survives) rt-ok
+g1 /big-long get 9223372036854775807l eq
+    (s1: post-restore Long value survives -- ExtValue is global)  rt-ok
+
+% ====================================================================
+% SECTION 2: ULong survives restore
+% ====================================================================
+
+${ 8 dict } /g2 exch def
+
+save /sv2 exch def
+true set-global
+${
+    g2 /big-ulong 18446744073709551615ul put    % ULONG_MAX
+}
+false set-global
+sv2 restore
+
+g2 /big-ulong get 18446744073709551615ul eq
+    (s2: post-restore ULong survives)  rt-ok
+
+% ====================================================================
+% SECTION 3: Address survives restore
+% ====================================================================
+
+${ 8 dict } /g3 exch def
+
+save /sv3 exch def
+true set-global
+${
+    g3 /addr 16777216a put                      % 16 MB address
+}
+false set-global
+sv3 restore
+
+g3 /addr get 16777216a eq
+    (s3: post-restore Address survives)  rt-ok
+
+% ====================================================================
+% SECTION 4: Double survives restore
+% ====================================================================
+
+${ 8 dict } /g4 exch def
+
+save /sv4 exch def
+true set-global
+${
+    g4 /pi 3.141592653589793d put
+}
+false set-global
+sv4 restore
+
+g4 /pi get 3.141592653589793d eq
+    (s4: post-restore Double survives)  rt-ok
+
+% ====================================================================
+% SECTION 5: Int128 survives restore (WideValue)
+% ====================================================================
+
+${ 8 dict } /g5 exch def
+
+save /sv5 exch def
+true set-global
+${
+    g5 /big-i 12345678901234567890q put         % > LONG_MAX
+}
+false set-global
+sv5 restore
+
+g5 /big-i get 12345678901234567890q eq
+    (s5: post-restore Int128 survives)  rt-ok
+
+% ====================================================================
+% SECTION 6: UInt128 survives restore (WideValue)
+% ====================================================================
+
+${ 8 dict } /g6 exch def
+
+save /sv6 exch def
+true set-global
+${
+    g6 /big-u 99999999999999999999uq put
+}
+false set-global
+sv6 restore
+
+g6 /big-u get 99999999999999999999uq eq
+    (s6: post-restore UInt128 survives)  rt-ok
+
+% ====================================================================
+% SECTION 7: vm-global-info reports per-kind populations
+% ====================================================================
+% By now sections 1-6 have allocated one of each numeric kind in
+% global VM.  Verify /by-kind/<kind>/count is >= 1 for each.
+
+vm-global-info /info exch def
+
+info /by-kind get /long    get /count get 1 ge   (s7: long    >= 1)  rt-ok
+info /by-kind get /ulong   get /count get 1 ge   (s7: ulong   >= 1)  rt-ok
+info /by-kind get /address get /count get 1 ge   (s7: address >= 1)  rt-ok
+info /by-kind get /double  get /count get 1 ge   (s7: double  >= 1)  rt-ok
+info /by-kind get /int128  get /count get 1 ge   (s7: int128  >= 1)  rt-ok
+info /by-kind get /uint128 get /count get 1 ge   (s7: uint128 >= 1)  rt-ok
+
+% Each ExtValue is 8 bytes payload + 8 byte header = 16 byte block.
+% Each WideValue is 16 bytes payload + 8 byte header = 24 byte block.
+info /by-kind get /long  get /total-bytes get 16 ge  (s7: long  total-bytes >= 16) rt-ok
+info /by-kind get /int128 get /total-bytes get 24 ge (s7: int128 total-bytes >= 24) rt-ok
+
+% ====================================================================
+% SECTION 8: local Long inside a save scope still works
+% (regression: make sure the global-aware alloc didn't break the
+% normal local path)
+% ====================================================================
+
+save /sv8 exch def
+1234567890123l /local-long-val exch def
+local-long-val 1234567890123l eq
+    (s8: in-save local Long value)    rt-ok
+sv8 restore
+
+% After restore, /local-long-val is undefined again (was defined
+% inside the save scope).  Just verify we don't crash.
+
+% ====================================================================
+% SECTION 9: extvalue-active count is unchanged by global allocs
+% (globals don't participate in the local active count -- they are
+% tracked via vm-global-info instead)
+% ====================================================================
+
+//:status:extvalue-active /pre9 exch def
+
+true set-global
+${
+    42l pop                     % global Long allocation, then pop (no-op free)
+    3.14d pop                   % global Double allocation, then pop (no-op free)
+}
+false set-global
+
+//:status:extvalue-active /post9 exch def
+
+% Number of active LOCAL extvalues should be unchanged (the two
+% globals don't count).  Equality, not inequality.
+post9 pre9 eq
+    (s9: extvalue-active unchanged by global allocs)  rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_global_extvalue: ALL TESTS PASSED) =
+(__test_ok__) =

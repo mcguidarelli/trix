@@ -1,0 +1,6 @@
+% |locals|#+N relative-capacity scanner suffix: K named args + N extras.
+{ |a b|#+3 /x 1 local-def /y 2 local-def /z 3 local-def a b x y z add add add add } 10 20 rot exec
+{ |a b|#+0 a b add } 10 20 rot exec                       % #+0 == default capacity
+{ ||#+5 /x 10 local-def /y 32 local-def x y add } exec    % empty header relative
+{ |a|#+999 /z 42 local-def a z add } 5 exch exec          % large relative N
+{ ({ |a|#+ body }) token } try                            % missing digits after #+

@@ -1,0 +1,7 @@
+% require_helper_a.trx -- test helper for require operator
+% Increments /require-a-count each time this file is loaded.
+/require-a-count where { pop
+    /require-a-count require-a-count 1 add def
+} {
+    /require-a-count 1 def
+} if-else

@@ -1,0 +1,126 @@
+% ====================================================================
+% test_chrono_local.trx -- Chrono Tier 1 Phase C: local-zone accessors
+% ====================================================================
+% Runs under TZ=America/New_York pinned by the test runner.  Assertions
+% encode the offsets of New York City for fixed dates: EST (UTC-5) in
+% winter, EDT (UTC-4) in summer.  The DST transition rules of NYC are
+% stable since 2007.
+%
+% Vector decoder:
+%   1700000000000  =  2023-11-14 22:13:20 UTC  =  17:13:20 EST  (Nov, EST)
+%   1689422400000  =  2023-07-15 12:00:00 UTC  =  08:00:00 EDT  (Jul, EDT)
+%   1700017200000  =  2023-11-15 03:00:00 UTC  =  22:00:00 EST  (still Nov 14 local)
+%
+% These vectors specifically span: a winter day (EST), a summer day
+% (EDT), and a midnight crossing where the local day is a calendar day
+% earlier than the UTC day.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Winter (EST, UTC-5) -- 2023-11-14
+% ====================================================================
+
+1700000000000ul instant-year-local         2023 eq      (s1: EST year 2023)            rt-ok
+1700000000000ul instant-month-local          11 eq      (s1: EST month November)       rt-ok
+1700000000000ul instant-day-local            14 eq      (s1: EST day 14)               rt-ok
+1700000000000ul instant-hour-local           17 eq      (s1: EST hour shifted -5)      rt-ok
+1700000000000ul instant-minute-local         13 eq      (s1: EST minute preserved)     rt-ok
+1700000000000ul instant-second-local         20 eq      (s1: EST second preserved)     rt-ok
+1700000000000ul instant-weekday-local /tuesday eq       (s1: EST Tuesday 2023-11-14)   rt-ok
+
+% ====================================================================
+% SECTION 2: Summer (EDT, UTC-4) -- 2023-07-15
+% ====================================================================
+
+1689422400000ul instant-year-local           2023 eq    (s2: EDT year 2023)            rt-ok
+1689422400000ul instant-month-local             7 eq    (s2: EDT month July)           rt-ok
+1689422400000ul instant-day-local              15 eq    (s2: EDT day 15)               rt-ok
+1689422400000ul instant-hour-local              8 eq    (s2: EDT hour shifted -4)      rt-ok
+1689422400000ul instant-weekday-local /saturday eq      (s2: EDT Saturday 2023-07-15)  rt-ok
+
+% ====================================================================
+% SECTION 3: Cross-midnight boundary (UTC date != local date)
+% ====================================================================
+% 2023-11-15 03:00:00 UTC = 2023-11-14 22:00:00 EST.  Confirm:
+%   - UTC variants see Nov 15 / Wednesday
+%   - local variants see Nov 14 / Tuesday
+
+1700017200000ul instant-day                   15 eq    (s3: UTC sees Nov 15)          rt-ok
+1700017200000ul instant-day-local             14 eq    (s3: local sees Nov 14)        rt-ok
+1700017200000ul instant-weekday      /wednesday eq     (s3: UTC Wednesday)            rt-ok
+1700017200000ul instant-weekday-local  /tuesday eq     (s3: local Tuesday)            rt-ok
+1700017200000ul instant-hour                   3 eq    (s3: UTC hour 3)               rt-ok
+1700017200000ul instant-hour-local            22 eq    (s3: local hour 22 (-5))       rt-ok
+
+% ====================================================================
+% SECTION 4: Millisecond is zone-independent
+% ====================================================================
+% Zone offsets are whole-second; ms component matches UTC always.
+
+1700000000123ul instant-millisecond 123 eq              (s4: ms 123 zone-independent)  rt-ok
+
+% ====================================================================
+% SECTION 5: PrintFmt :Il -- known local divergence
+% ====================================================================
+
+=string ({0:Il%Y-%m-%d %H:%M:%S}) mark 1700000000000ul sprint-fmt pop
+(2023-11-14 17:13:20) deep-eq                           (s5: :Il EST format)           rt-ok
+
+=string ({0:Il%H}) mark 1689422400000ul sprint-fmt pop
+(08) deep-eq                                            (s5: :Il EDT hour 08)          rt-ok
+
+% UTC vs local divergence visible via different format outputs.
+=string ({0:I%H}) mark 1700000000000ul sprint-fmt pop
+=string ({0:Il%H}) mark 1700000000000ul sprint-fmt pop
+deep-eq not                                             (s5: :I != :Il for NYC)        rt-ok
+
+% ====================================================================
+% SECTION 6: ScanFmt :Il -- parse local-zone input
+% ====================================================================
+
+=string ({0:Il%Y-%m-%d %H:%M:%S}) mark 1700000000000ul sprint-fmt pop
+({0:Il%Y-%m-%d %H:%M:%S}) mark 0ul sscan-fmt pop
+1700000000000ul eq                                      (s6: :Il round-trip preserves) rt-ok
+
+% Format with :I (UTC), parse with :Il (local) -- expect divergence
+=string ({0:I%Y-%m-%d %H:%M:%S}) mark 1700000000000ul sprint-fmt pop
+({0:Il%Y-%m-%d %H:%M:%S}) mark 0ul sscan-fmt pop
+% UTC-printed string parsed as local: shifts result forward by zone offset (EST = +5h)
+% 1700000000000 + 5*3600*1000 = 1700018000000
+1700018000000ul eq                                      (s6: :I->:Il shifts +5h in EST) rt-ok
+
+% ====================================================================
+% SECTION 7: instant <-> date local-zone conversions (Phase G)
+% ====================================================================
+
+% Cross-midnight: 2023-11-15 03:00:00 UTC = 2023-11-14 22:00:00 EST
+1700017200000ul instant-to-date       2023 11 15 make-date eq    (s7: UTC sees Nov 15)        rt-ok
+1700017200000ul instant-to-date-local 2023 11 14 make-date eq    (s7: local sees Nov 14)      rt-ok
+
+% make-instant-local round-trip: 2023-11-14 17:13:20 EST = 1700000000000 UTC
+2023 11 14 make-date 17 13 20 0 make-instant-local
+1700000000000ul eq                                                (s7: NY 17:13 EST -> 22:13 UTC) rt-ok
+
+% Regression (ops_chrono-1): a DST spring-forward gap wall-clock time (2024-03-10 02:30
+% does not exist in America/New_York) must resolve to a ULong via choose::earliest, NOT
+% throw nonexistent_local_time -- the throwing 1-arg to_sys was caught as an uncatchable
+% std::exception and tore down the entire VM.
+2024 3 10 make-date 2 30 0 0 make-instant-local type /ulong-type eq (s7: DST-gap local time resolves, no VM crash) rt-ok
+
+% UTC vs local divergence: same call inputs produce different ULongs
+2023 11 14 make-date 17 13 20 0 make-instant
+2023 11 14 make-date 17 13 20 0 make-instant-local
+ne                                                                (s7: make-instant UTC != local) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_chrono_local: ALL TESTS PASSED) =
+(__test_ok__) =

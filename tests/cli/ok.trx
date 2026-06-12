@@ -1,0 +1,3 @@
+% ok.trx -- minimal "the interpreter booted and ran" payload for
+% run_cli_tests.sh flag-acceptance cases.
+(cli-ok) =

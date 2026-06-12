@@ -1,0 +1,136 @@
+% test_require.trx -- tests for the require operator
+% Tests: idempotent loading, transitive require, circular require,
+%        error handling, save/restore interaction, ExtValue leak check.
+
+/test_name (test_require) def
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ============================================================
+% Section 1: Basic require + idempotent loading
+% ============================================================
+
+save /sv exch def
+
+(tests/require_helper_a.trx) require
+require-a-count 1 eq (require: first load sets count to 1) rt-ok
+
+(tests/require_helper_a.trx) require
+require-a-count 1 eq (require: second load is noop, count still 1) rt-ok
+
+(tests/require_helper_a.trx) require
+(tests/require_helper_a.trx) require
+(tests/require_helper_a.trx) require
+require-a-count 1 eq (require: five total requires, count still 1) rt-ok
+
+sv restore clear
+
+% ============================================================
+% Section 2: Transitive require (B requires A)
+% ============================================================
+
+save /sv exch def
+
+(tests/require_helper_b.trx) require
+require-a-count 1 eq (require: transitive - A loaded once via B) rt-ok
+require-b-count 1 eq (require: transitive - B loaded once) rt-ok
+
+% Requiring A again after B already loaded it should be noop
+(tests/require_helper_a.trx) require
+require-a-count 1 eq (require: A still 1 after explicit re-require) rt-ok
+
+% Requiring B again should be noop
+(tests/require_helper_b.trx) require
+require-b-count 1 eq (require: B still 1 after re-require) rt-ok
+
+sv restore clear
+
+% ============================================================
+% Section 3: Circular require (file requires itself)
+% ============================================================
+
+save /sv exch def
+
+(tests/require_circular.trx) require
+circular-loaded (require: circular file loaded successfully) rt-ok
+
+% Second require of circular file should be noop
+(tests/require_circular.trx) require
+circular-loaded (require: circular re-require is noop) rt-ok
+
+sv restore clear
+
+% ============================================================
+% Section 4: Error handling -- nonexistent file
+% ============================================================
+
+{ (tests/nonexistent_file_that_does_not_exist.trx) require } try
+/filename-not-found eq (require: nonexistent file raises filename-not-found) rt-ok
+clear
+
+% ============================================================
+% Section 5: Save/restore rolls back require state
+% ============================================================
+
+save /sv-outer exch def
+
+save /sv-inner exch def
+(tests/require_helper_a.trx) require
+require-a-count 1 eq (require: loaded inside inner save) rt-ok
+sv-inner restore clear
+
+% After restore, the require dict entry should be rolled back.
+% So requiring again should load the file again.
+(tests/require_helper_a.trx) require
+require-a-count 1 eq (require: re-loaded after restore, count is 1) rt-ok
+
+sv-outer restore clear
+
+% ============================================================
+% Section 6: Type check -- require expects a string
+% ============================================================
+
+{ 42 require } try
+/type-check eq (require: integer arg raises type-check) rt-ok
+clear
+
+{ /foo require } try
+/type-check eq (require: name arg raises type-check) rt-ok
+clear
+
+% ============================================================
+% Section 7: ExtValue leak check
+% ============================================================
+
+save /sv exch def
+
+/ev-before //:status:extvalue-active def
+
+(tests/require_helper_a.trx) require
+(tests/require_helper_a.trx) require
+(tests/require_helper_a.trx) require
+
+//:status:extvalue-active ev-before eq
+(require: no ExtValue leak from repeated require) rt-ok
+
+sv restore clear
+
+% ============================================================
+% Section 8: VM validation after all tests
+% ============================================================
+
+//:status:vm-validate (require: vm-validate after all tests) rt-ok
+//:status:extvalue-validate (require: extvalue-validate after all tests) rt-ok
+clear
+
+(test_require: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

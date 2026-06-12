@@ -1,0 +1,10 @@
+before error
+  state: sl=0 coro=main dict-depth=3 err-depth=0
+  #0: 'div'
+      at tests/golden/global_handler.trx:27:7
+  operands: --integer-- 0 --integer-- 1
+  high-water: op 3/1024 exec 4/2048 dict 3/64 error 0/64
+handler errname: div-by-zero
+handler operator: div
+handler msg: div: division by zero
+handler returning normally

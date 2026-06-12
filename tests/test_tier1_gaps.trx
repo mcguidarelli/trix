@@ -1,0 +1,1366 @@
+% ====================================================================
+% Test Tier 1 Gaps: nip, tuck, dip, bi, exec-n, dup-n, pop-n,
+%   swap-at, do-while, put-interval, homogeneous?, bind, rint
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: nip — happy path
+% ====================================================================
+
+1 2 nip 2 eq                               (nip: keeps top) rt-ok clear
+10 20 nip 20 eq                             (nip: basic) rt-ok clear
+(a) (b) nip (b) eq                          (nip: strings) rt-ok clear
+true false nip false eq                     (nip: booleans) rt-ok clear
+1 2 3 nip 3 eq                              (nip: 3-deep keeps top) rt-ok
+  1 eq                                      (nip: 3-deep preserves bottom) rt-ok clear
+
+% nip with ExtValue types
+save
+  100l 200l nip 200l eq                     (nip: Long keeps top) rt-ok
+  3.14d 2.72d nip 2.72d eq                  (nip: Double keeps top) rt-ok
+restore clear
+
+% nip frees ExtValue of second element
+save
+  /ev-before //:status:extvalue-active def
+  100l 200l nip pop
+  //:status:extvalue-active ev-before eq    (nip: ExtValue freed) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 2: nip — sad path
+% ====================================================================
+
+{ nip } try /opstack-underflow eq           (nip: empty stack) rt-ok clear
+{ 1 nip } try /opstack-underflow eq         (nip: 1-deep stack) rt-ok clear
+
+% ====================================================================
+% SECTION 3: tuck — happy path
+% ====================================================================
+
+1 2 tuck
+  2 eq                                      (tuck: top stays) rt-ok
+  1 eq                                      (tuck: second preserved) rt-ok
+  2 eq                                      (tuck: copy under second) rt-ok clear
+
+(a) (b) tuck
+  (b) eq                                    (tuck: string top) rt-ok
+  (a) eq                                    (tuck: string second) rt-ok
+  (b) eq                                    (tuck: string copy) rt-ok clear
+
+% tuck with ExtValue — clones properly
+save
+  100l 200l tuck
+  200l eq                                   (tuck: Long top) rt-ok
+  100l eq                                   (tuck: Long middle) rt-ok
+  200l eq                                   (tuck: Long copy) rt-ok
+restore clear
+
+% Verify tuck produces independent clone (not alias)
+save
+  % tuck clones the top value (shallow for composites)
+  42 99 tuck
+  % stack: save 99 42 99
+  pop pop pop
+restore clear
+
+% ====================================================================
+% SECTION 4: tuck — sad path
+% ====================================================================
+
+{ tuck } try /opstack-underflow eq          (tuck: empty stack) rt-ok clear
+{ 1 tuck } try /opstack-underflow eq        (tuck: 1-deep stack) rt-ok clear
+
+% ====================================================================
+% SECTION 5: dip — happy path
+% ====================================================================
+
+1 2 { 10 add } dip
+  2 eq                                      (dip: top restored) rt-ok
+  11 eq                                     (dip: proc applied to second) rt-ok clear
+
+5 (top) { dup mul } dip
+  (top) eq                                  (dip: string top restored) rt-ok
+  25 eq                                     (dip: 5 squared below) rt-ok clear
+
+% dip with multiple values below
+1 2 3 { add } dip
+  3 eq                                      (dip: top-3 restored) rt-ok
+  3 eq                                      (dip: 1+2 underneath) rt-ok clear
+
+% dip with ExtValue hidden value
+save
+  100l 200l { 1l add } dip
+  200l eq                                   (dip: Long restored) rt-ok
+  101l eq                                   (dip: Long add below) rt-ok
+restore clear
+
+% dip with empty proc
+42 99 { } dip
+  99 eq                                     (dip: empty proc top) rt-ok
+  42 eq                                     (dip: empty proc bottom) rt-ok clear
+
+% ====================================================================
+% SECTION 6: dip — sad path
+% ====================================================================
+
+{ { } dip } try /opstack-underflow eq       (dip: needs 2 items) rt-ok clear
+{ 1 2 dip } try /type-check eq             (dip: non-proc) rt-ok clear
+
+% ====================================================================
+% SECTION 7: bi — happy path
+% ====================================================================
+
+5 { 2 add } { 3 mul } bi
+  15 eq                                     (bi: second proc) rt-ok
+  7 eq                                      (bi: first proc) rt-ok clear
+
+10 { 1 sub } { 1 add } bi
+  11 eq                                     (bi: inc) rt-ok
+  9 eq                                      (bi: dec) rt-ok clear
+
+% bi with ExtValue cloning
+save
+  100l { 1l add } { 2l mul } bi
+  200l eq                                   (bi: Long mul) rt-ok
+  101l eq                                   (bi: Long add) rt-ok
+restore clear
+
+% bi with array — independent clones
+save
+  [1 2 3] { length } { 0 get } bi
+  1 eq                                      (bi: array get) rt-ok
+  3 eq                                      (bi: array length) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 8: bi — sad path
+% ====================================================================
+
+{ { } { } bi } try /opstack-underflow eq    (bi: needs 3 items) rt-ok clear
+{ 1 2 { } bi } try /type-check eq          (bi: second must be proc) rt-ok clear
+{ 1 { } 2 bi } try /type-check eq          (bi: first must be proc) rt-ok clear
+
+% ====================================================================
+% SECTION 9: exec-n — happy path
+% ====================================================================
+
+0 exec-n count 0 eq                         (exec-n: 0 items) rt-ok clear
+
+1 1 exec-n
+  1 eq                                      (exec-n: 1 literal) rt-ok clear
+
+10 20 30 3 exec-n
+  30 eq                                     (exec-n: 3 items third) rt-ok
+  20 eq                                     (exec-n: 3 items second) rt-ok
+  10 eq                                     (exec-n: 3 items first) rt-ok clear
+
+% exec-n with executable proc
+5 { 2 mul } 2 exec-n
+  10 eq                                     (exec-n: executes proc) rt-ok clear
+
+% exec-n with multiple procs — executed in order
+0 { 1 add } { 10 mul } 2 exec-n
+  10 eq                                     (exec-n: procs in order) rt-ok clear
+
+% exec-n preserves values below
+99 1 2 3 3 exec-n pop pop pop
+  99 eq                                     (exec-n: preserves below) rt-ok clear
+
+% Verify execution order via status
+save
+  /a 0 def /b 0 def
+  { /a 1 def } { /b 2 def } 2 exec-n
+  a 1 eq                                    (exec-n: first proc ran) rt-ok
+  b 2 eq                                    (exec-n: second proc ran) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 10: exec-n — sad path
+% ====================================================================
+
+{ -1 exec-n } try /range-check eq            (exec-n: negative) rt-ok clear
+{ 1 5 exec-n } try /opstack-underflow eq     (exec-n: N > stack) rt-ok clear
+
+% ====================================================================
+% SECTION 11: dup-n — happy path
+% ====================================================================
+
+1 2 3 0 dup-n count 3 eq                    (dup-n: 0 = no change) rt-ok clear
+
+10 1 dup-n
+  10 eq                                     (dup-n: 1 = dup) rt-ok
+  10 eq                                     (dup-n: 1 original) rt-ok clear
+
+10 20 2 dup-n
+  20 eq                                     (dup-n: 2 top copy) rt-ok
+  10 eq                                     (dup-n: 2 second copy) rt-ok
+  20 eq                                     (dup-n: 2 original top) rt-ok
+  10 eq                                     (dup-n: 2 original second) rt-ok clear
+
+1 2 3 3 dup-n
+  3 eq                                      (dup-n: 3-a) rt-ok
+  2 eq                                      (dup-n: 3-b) rt-ok
+  1 eq                                      (dup-n: 3-c) rt-ok
+  3 eq                                      (dup-n: 3-d) rt-ok
+  2 eq                                      (dup-n: 3-e) rt-ok
+  1 eq                                      (dup-n: 3-f) rt-ok clear
+
+% dup-n with ExtValue types
+save
+  100l 200l 2 dup-n
+  200l eq                                   (dup-n: Long top copy) rt-ok
+  100l eq                                   (dup-n: Long second copy) rt-ok
+  200l eq                                   (dup-n: Long original top) rt-ok
+  100l eq                                   (dup-n: Long original second) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 12: dup-n — sad path
+% ====================================================================
+
+{ -1 dup-n } try /range-check eq             (dup-n: negative) rt-ok clear
+{ 1 5 dup-n } try /range-check eq           (dup-n: N > stack) rt-ok clear
+
+% ====================================================================
+% SECTION 13: pop-n — happy path
+% ====================================================================
+
+1 2 3 0 pop-n
+  count 3 eq                                (pop-n: 0 = no change) rt-ok clear
+
+1 2 3 1 pop-n
+  count 2 eq                                (pop-n: 1 removes top) rt-ok
+  2 eq                                      (pop-n: 1 second stays) rt-ok
+  1 eq                                      (pop-n: 1 first stays) rt-ok clear
+
+1 2 3 3 pop-n
+  count 0 eq                                (pop-n: 3 removes all) rt-ok clear
+
+10 20 30 40 50 3 pop-n
+  20 eq                                     (pop-n: 3-of-5 second remains) rt-ok
+  10 eq                                     (pop-n: 3-of-5 first remains) rt-ok clear
+
+% pop-n frees ExtValues
+save
+  /ev-before //:status:extvalue-active def
+  100l 200l 300l 3 pop-n
+  //:status:extvalue-active ev-before eq    (pop-n: ExtValues freed) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 14: pop-n — sad path
+% ====================================================================
+
+{ -1 pop-n } try /range-check eq             (pop-n: negative) rt-ok clear
+{ 1 5 pop-n } try /range-check eq           (pop-n: N > stack) rt-ok clear
+
+% ====================================================================
+% SECTION 15: swap-at — happy path
+% ====================================================================
+
+save
+  [10 20 30 40 50] dup 0 4 swap-at
+  dup 0 get 50 eq                           (swap-at: first=50) rt-ok
+  dup 4 get 10 eq                           (swap-at: last=10) rt-ok
+  dup 2 get 30 eq                           (swap-at: middle unchanged) rt-ok
+  pop pop
+
+  [1 2 3] dup 1 1 swap-at
+  dup 1 get 2 eq                            (swap-at: same index no-op) rt-ok
+  pop pop
+
+  % swap-at with ExtValue elements
+  [100l 200l 300l] dup 0 2 swap-at
+  dup 0 get 300l eq                         (swap-at: Long first) rt-ok
+  dup 2 get 100l eq                         (swap-at: Long last) rt-ok
+  pop pop
+restore clear
+
+% ====================================================================
+% SECTION 16: swap-at — sad path
+% ====================================================================
+
+{ [1 2 3] -1 0 swap-at } try /range-check eq     (swap-at: neg i) rt-ok clear
+{ [1 2 3] 0 -1 swap-at } try /range-check eq    (swap-at: neg j) rt-ok clear
+{ [1 2 3] 3 0 swap-at } try /index-check eq     (swap-at: i=length) rt-ok clear
+{ [1 2 3] 0 3 swap-at } try /index-check eq     (swap-at: j=length) rt-ok clear
+{ [1 2 3] 99 0 swap-at } try /index-check eq    (swap-at: i way out) rt-ok clear
+
+% ====================================================================
+% SECTION 17: do-while — happy path
+% ====================================================================
+
+save
+  % Count to 5
+  0 { 1 add dup 5 lt } do-while
+  5 eq                                      (do-while: count to 5) rt-ok
+
+  % Sum 1 to 10
+  /sum 0 def
+  /n 0 def
+  { /n n 1 add def
+    /sum sum n add def
+    n 10 lt
+  } do-while
+  sum 55 eq                                 (do-while: sum 1-10) rt-ok
+
+  % do-while always executes at least once
+  /ran false def
+  { /ran true def false } do-while
+  ran                                       (do-while: runs at least once) rt-ok
+
+  % do-while with exit
+  /count 0 def
+  { /count count 1 add def
+    count 3 eq { exit } if
+    true
+  } do-while
+  count 3 eq                                (do-while: exit at 3) rt-ok
+
+  % Factorial via do-while
+  /n 5 def
+  /result 1 def
+  { /result result n mul def
+    /n n 1 sub def
+    n 0 gt
+  } do-while
+  result 120 eq                             (do-while: factorial 5) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 18: do-while — sad path
+% ====================================================================
+
+{ 42 do-while } try /type-check eq          (do-while: non-proc) rt-ok clear
+
+% ====================================================================
+% SECTION 19: put-interval — happy path (arrays)
+% ====================================================================
+
+save
+  % Basic array put-interval
+  [0 0 0 0 0] dup 1 [10 20 30] put-interval
+  dup 0 get 0 eq                            (put-int: arr[0] unchanged) rt-ok
+  dup 1 get 10 eq                           (put-int: arr[1] = 10) rt-ok
+  dup 2 get 20 eq                           (put-int: arr[2] = 20) rt-ok
+  dup 3 get 30 eq                           (put-int: arr[3] = 30) rt-ok
+  dup 4 get 0 eq                            (put-int: arr[4] unchanged) rt-ok
+  pop
+
+  % put-interval at start
+  [0 0 0] dup 0 [1 2] put-interval
+  dup 0 get 1 eq                            (put-int: start[0]) rt-ok
+  dup 1 get 2 eq                            (put-int: start[1]) rt-ok
+  dup 2 get 0 eq                            (put-int: start[2] unchanged) rt-ok
+  pop
+
+  % put-interval at end
+  [0 0 0] dup 1 [8 9] put-interval
+  dup 1 get 8 eq                            (put-int: end[1]) rt-ok
+  dup 2 get 9 eq                            (put-int: end[2]) rt-ok
+  pop
+
+  % put-interval with empty source
+  [1 2 3] dup 0 [] put-interval
+  dup 0 get 1 eq                            (put-int: empty src no change) rt-ok
+  pop
+
+  % put-interval full overwrite
+  [0 0 0] dup 0 [7 8 9] put-interval
+  [7 8 9] deep-eq                           (put-int: full overwrite) rt-ok
+
+  % put-interval with ExtValue elements
+  [0l 0l 0l] dup 0 [100l 200l] put-interval
+  dup 0 get 100l eq                         (put-int: Long[0]) rt-ok
+  dup 1 get 200l eq                         (put-int: Long[1]) rt-ok
+  dup 2 get 0l eq                           (put-int: Long[2] unchanged) rt-ok
+  pop
+
+  % put-interval with packed source
+  [0 0 0 0 0] dup 1 { 10 20 30 } put-interval
+  dup 1 get 10 eq                           (put-int: packed src [1]) rt-ok
+  dup 2 get 20 eq                           (put-int: packed src [2]) rt-ok
+  dup 3 get 30 eq                           (put-int: packed src [3]) rt-ok
+  pop
+restore clear
+
+% ====================================================================
+% SECTION 20: put-interval — happy path (strings)
+% ====================================================================
+
+save
+  (AAAAA) dup 1 (xyz) put-interval
+  (AxyzA) eq                                (put-int: string middle) rt-ok
+
+  (hello) dup 0 (HE) put-interval
+  (HEllo) eq                                (put-int: string start) rt-ok
+
+  (abc) dup 0 (ABC) put-interval
+  (ABC) eq                                  (put-int: string full) rt-ok
+
+  (test) dup 2 () put-interval
+  (test) eq                                 (put-int: empty string noop) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 21: put-interval — sad path
+% ====================================================================
+
+{ [1 2 3] -1 [4] put-interval } try /index-check eq        (put-int: neg index) rt-ok clear
+{ [1 2 3] 3 [4] put-interval } try /index-check eq         (put-int: index=length) rt-ok clear
+{ [1 2 3] 2 [4 5] put-interval } try /index-check eq       (put-int: overflow) rt-ok clear
+{ (abc) 0 [1] put-interval } try /type-check eq             (put-int: type mismatch) rt-ok clear
+{ [1 2] 0 (ab) put-interval } try /type-check eq            (put-int: array/string mismatch) rt-ok clear
+
+% ====================================================================
+% SECTION 22: homogeneous? — happy path
+% ====================================================================
+
+[1 2 3] homogeneous?
+  true eq                                   (homo: int array is true) rt-ok
+  /integer-type eq                          (homo: int array type name) rt-ok clear
+
+[1.0 2.0 3.0] homogeneous?
+  true eq                                   (homo: real array is true) rt-ok
+  /real-type eq                             (homo: real type name) rt-ok clear
+
+[(a) (b) (c)] homogeneous?
+  true eq                                   (homo: string array is true) rt-ok
+  /string-type eq                           (homo: string type name) rt-ok clear
+
+[true false true] homogeneous?
+  true eq                                   (homo: bool array is true) rt-ok
+  /boolean-type eq                          (homo: bool type name) rt-ok clear
+
+save
+  [100l 200l] homogeneous?
+  true eq                                   (homo: Long is true) rt-ok
+  /long-type eq                             (homo: Long type name) rt-ok
+
+  [3.14d 2.72d] homogeneous?
+  true eq                                   (homo: Double is true) rt-ok
+  /double-type eq                           (homo: Double type name) rt-ok
+restore clear
+
+% Single element — always homogeneous
+[42] homogeneous?
+  true eq                                   (homo: single element is true) rt-ok
+  /integer-type eq                          (homo: single element type) rt-ok clear
+
+% Heterogeneous
+[1 (hello)] homogeneous? false eq           (homo: int+string = false) rt-ok clear
+[1 true] homogeneous? false eq              (homo: int+bool = false) rt-ok clear
+[1 1.0] homogeneous? false eq               (homo: int+real = false) rt-ok clear
+
+% Empty array
+[] homogeneous? false eq                    (homo: empty = false) rt-ok clear
+
+% Packed array input
+{ 1 2 3 } homogeneous?
+  true eq                                   (homo: packed int true) rt-ok
+  /integer-type eq                          (homo: packed int type) rt-ok clear
+
+{ 1 (a) } homogeneous? false eq             (homo: packed mixed false) rt-ok clear
+
+% ====================================================================
+% SECTION 23: homogeneous? — sad path
+% ====================================================================
+
+{ 42 homogeneous? } try /type-check eq      (homo: non-array) rt-ok clear
+{ (hello) homogeneous? } try /type-check eq (homo: string not array) rt-ok clear
+
+% ====================================================================
+% SECTION 24: bind — happy path
+% ====================================================================
+
+save
+  % bind resolves names to operators
+  /add-one { 1 add } bind def
+  5 add-one 6 eq                            (bind: basic name resolution) rt-ok
+
+  % bind with multiple names
+  /add-mul { add mul } bind def
+  2 3 4 add-mul 14 eq                       (bind: multi-name) rt-ok
+
+  % bind resolves user-defined names too
+  /my-inc { 1 add } def
+  /use-inc { my-inc } bind def
+  10 use-inc 11 eq                          (bind: user-defined name) rt-ok
+
+  % bind with already-bound proc (idempotent)
+  { 1 add } bind bind bind
+  5 exch exec 6 eq                          (bind: idempotent) rt-ok
+
+  % bind doesn't affect literals
+  /lit-proc { /myname 42 } bind def
+  lit-proc 42 eq                            (bind: literal int preserved) rt-ok
+  /myname eq                                (bind: literal name preserved) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 25: bind — sad path
+% ====================================================================
+
+{ 42 bind } try /type-check eq              (bind: non-proc) rt-ok clear
+{ (hello) bind } try /type-check eq         (bind: string not proc) rt-ok clear
+
+% ====================================================================
+% SECTION 26: rint — happy path
+% ====================================================================
+
+2.5 rint 2.0 eq                             (rint: 2.5 -> 2.0 banker) rt-ok clear
+3.5 rint 4.0 eq                             (rint: 3.5 -> 4.0 banker) rt-ok clear
+2.3 rint 2.0 eq                             (rint: 2.3 -> 2.0) rt-ok clear
+2.7 rint 3.0 eq                             (rint: 2.7 -> 3.0) rt-ok clear
+-2.5 rint -2.0 eq                           (rint: -2.5 -> -2.0) rt-ok clear
+-3.5 rint -4.0 eq                           (rint: -3.5 -> -4.0) rt-ok clear
+0.0 rint 0.0 eq                             (rint: 0.0 -> 0.0) rt-ok clear
+1.0 rint 1.0 eq                             (rint: 1.0 -> 1.0) rt-ok clear
+-0.0 rint -0.0 eq                           (rint: -0.0 -> -0.0) rt-ok clear
+
+% rint Double inputs
+save
+  2.5d rint 2.0d eq                         (rint: Double 2.5d) rt-ok
+  3.5d rint 4.0d eq                         (rint: Double 3.5d) rt-ok
+  2.3d rint 2.0d eq                         (rint: Double 2.3d) rt-ok
+  100.7d rint 101.0d eq                     (rint: Double 100.7d) rt-ok
+restore clear
+
+% rint preserves type
+2.3 rint type /real-type eq                 (rint: Real preserves type) rt-ok clear
+save
+  2.3d rint type /double-type eq            (rint: Double preserves type) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 27: rint — sad path
+% ====================================================================
+
+{ nan rint } try /numerical-nan eq           (rint: NaN error) rt-ok clear
+{ nan#d rint } try /numerical-nan eq          (rint: NaN double error) rt-ok clear
+{ 42 rint } try /type-check eq              (rint: integer type error) rt-ok clear
+{ (hello) rint } try /type-check eq         (rint: string type error) rt-ok clear
+
+% ====================================================================
+% SECTION 28: Stress — stack ops
+% ====================================================================
+
+save
+  % stress nip: remove 100 items one at a time
+  0 1 99 { } for   % push 100 items (0..99) + save obj below
+  99 { nip } repeat
+  % 99 nips on 100 items leaves top (99)
+  99 eq                                     (stress: nip 99 items) rt-ok
+restore clear
+
+% stress tuck: build up stack
+1 2
+10 { tuck } repeat
+count 12 eq                                 (stress: tuck 10x depth) rt-ok clear
+
+% stress pop-n: large removal
+1 1 100 { } for   % push 100 items
+100 pop-n
+count 0 eq                                  (stress: pop-n 100) rt-ok clear
+
+% stress dup-n: large duplication
+1 2 3 4 5  5 dup-n
+count 10 eq                                 (stress: dup-n 5 doubles) rt-ok clear
+
+% ====================================================================
+% SECTION 29: Stress — do-while
+% ====================================================================
+
+save
+  % do-while iterating 1000 times
+  /count 0 def
+  { /count count 1 add def
+    count 1000 lt
+  } do-while
+  count 1000 eq                             (stress: do-while 1000) rt-ok
+
+  % Nested do-while
+  /outer 0 def
+  /inner-total 0 def
+  { /outer outer 1 add def
+    /inner 0 def
+    { /inner inner 1 add def
+      /inner-total inner-total 1 add def
+      inner 5 lt
+    } do-while
+    outer 3 lt
+  } do-while
+  outer 3 eq                                (stress: nested do-while outer) rt-ok
+  inner-total 15 eq                         (stress: nested do-while total) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 30: Stress — put-interval large arrays
+% ====================================================================
+
+save
+  % put-interval with 100-element source
+  100 array dup
+  0 [0 1 99 { } for] put-interval
+  dup 0 get 0 eq                            (stress: put-int large[0]) rt-ok
+  dup 50 get 50 eq                          (stress: put-int large[50]) rt-ok
+  dup 99 get 99 eq                          (stress: put-int large[99]) rt-ok
+  pop
+restore clear
+
+% ====================================================================
+% SECTION 31: Stress — exec-n with many items
+% ====================================================================
+
+% exec-n with 20 literals
+1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20  20 exec-n
+count 20 eq                                 (stress: exec-n 20 items) rt-ok
+20 eq                                       (stress: exec-n last is 20) rt-ok clear
+
+% ====================================================================
+% SECTION 32: Fuzz — type variety in stack ops
+% ====================================================================
+
+% nip across all types
+null true nip true eq                       (fuzz: nip null+bool) rt-ok clear
+42b (x) nip (x) eq                          (fuzz: nip byte+string) rt-ok clear
+save
+  42u 42l nip 42l eq                        (fuzz: nip uint+long) rt-ok
+restore clear
+mark null nip null eq                       (fuzz: nip mark+null) rt-ok clear
+
+% tuck across types
+42 3.14 tuck
+  3.14 eq                                   (fuzz: tuck int/real top) rt-ok
+  42 eq                                     (fuzz: tuck int/real mid) rt-ok
+  3.14 eq                                   (fuzz: tuck int/real bot) rt-ok clear
+
+% dip with various hidden types
+save
+  3.14d { } dip 3.14d eq                    (fuzz: dip Double hidden) rt-ok
+restore clear
+null { } dip null eq                        (fuzz: dip null hidden) rt-ok clear
+true { } dip true eq                        (fuzz: dip bool hidden) rt-ok clear
+42b { } dip 42b eq                          (fuzz: dip byte hidden) rt-ok clear
+
+% ====================================================================
+% SECTION 33: Fuzz — homogeneous? type matrix
+% ====================================================================
+
+[42u 43u 44u] homogeneous?
+  true eq                                   (fuzz-homo: uint) rt-ok
+  /uinteger-type eq                         (fuzz-homo: uint name) rt-ok clear
+
+[42b 43b 44b] homogeneous?
+  true eq                                   (fuzz-homo: byte) rt-ok
+  /byte-type eq                             (fuzz-homo: byte name) rt-ok clear
+
+[null null null] homogeneous?
+  true eq                                   (fuzz-homo: null) rt-ok
+  /null-type eq                             (fuzz-homo: null name) rt-ok clear
+
+save
+  [0a 1a 2a] homogeneous?
+  true eq                                   (fuzz-homo: address) rt-ok
+  /address-type eq                          (fuzz-homo: address name) rt-ok
+
+  [42ul 43ul] homogeneous?
+  true eq                                   (fuzz-homo: ulong) rt-ok
+  /ulong-type eq                            (fuzz-homo: ulong name) rt-ok
+restore clear
+
+% Mixed ExtValue types
+save
+  [100l 3.14d] homogeneous? false eq        (fuzz-homo: Long+Double false) rt-ok
+  [0a 42ul] homogeneous? false eq           (fuzz-homo: Addr+ULong false) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 34: Fuzz — rint boundary values
+% ====================================================================
+
+0.5 rint 0.0 eq                             (fuzz-rint: 0.5 banker) rt-ok clear
+1.5 rint 2.0 eq                             (fuzz-rint: 1.5 banker) rt-ok clear
+4.5 rint 4.0 eq                             (fuzz-rint: 4.5 banker) rt-ok clear
+5.5 rint 6.0 eq                             (fuzz-rint: 5.5 banker) rt-ok clear
+-0.5 rint -0.0 eq                           (fuzz-rint: -0.5 banker) rt-ok clear
+-1.5 rint -2.0 eq                           (fuzz-rint: -1.5 banker) rt-ok clear
+inf rint inf eq                             (fuzz-rint: +inf passthrough) rt-ok clear
+1.0e10 rint 1.0e10 eq                       (fuzz-rint: large value) rt-ok clear
+save
+  1.0e10d rint 1.0e10d eq                   (fuzz-rint: large Double) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 35: Fuzz — put-interval boundary cases
+% ====================================================================
+
+save
+  % put-interval at exact end boundary
+  [1 2 3] dup 2 [99] put-interval
+  dup 2 get 99 eq                           (fuzz-put: exact end) rt-ok
+  pop
+
+  % put-interval single element array
+  [0] dup 0 [42] put-interval
+  0 get 42 eq                               (fuzz-put: single element) rt-ok
+
+  % put-interval string single char
+  (x) dup 0 (Y) put-interval
+  (Y) eq                                    (fuzz-put: single char string) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 36: Integration — combining operators
+% ====================================================================
+
+save
+  % dip + nip: hide 3, add 1+2=3, restore 3, nip=3
+  1 2 3 { add } dip nip
+  3 eq                                      (combo: dip+nip result) rt-ok
+
+  % bi + nip for max of two transforms
+  10 { 3 add } { 2 mul } bi max
+  20 eq                                     (combo: bi+max) rt-ok
+
+  % exec-n with dup-n
+  1 2 3 3 dup-n 3 pop-n
+  3 eq                                      (combo: dup-n+pop-n restore) rt-ok
+  2 eq                                      (combo: dup-n+pop-n second) rt-ok
+  1 eq                                      (combo: dup-n+pop-n first) rt-ok
+
+  % do-while + put-interval: fill array
+  [0 0 0 0 0] /arr exch def
+  /i 0 def
+  { arr i [99] put-interval
+    /i i 1 add def
+    i 5 lt
+  } do-while
+  arr [99 99 99 99 99] deep-eq              (combo: do-while+put-interval fill) rt-ok
+
+  % bind + exec
+  /bound-add { 1 add } bind def
+  5 bound-add 6 eq                          (combo: bind+exec) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 37: op-stack-N verification for dup-n and pop-n
+% ====================================================================
+
+save
+  % Verify dup-n result via stack-probe
+  10 20 30 2 dup-n
+  % stack: save 10 20 30 20 30
+  /op-stack 0 stack-probe 30 eq             (probe: dup-n op-stack 0) rt-ok
+  /op-stack 1 stack-probe 20 eq             (probe: dup-n op-stack 1) rt-ok
+  /op-stack 2 stack-probe 30 eq             (probe: dup-n op-stack 2) rt-ok
+  /op-stack 3 stack-probe 20 eq             (probe: dup-n op-stack 3) rt-ok
+  /op-stack 4 stack-probe 10 eq             (probe: dup-n op-stack 4) rt-ok
+  5 pop-n
+
+  % Verify pop-n result via stack-probe
+  10 20 30 40 50 2 pop-n
+  % stack: save 10 20 30
+  /op-stack 0 stack-probe 30 eq             (probe: pop-n op-stack 0) rt-ok
+  /op-stack 1 stack-probe 20 eq             (probe: pop-n op-stack 1) rt-ok
+  /op-stack 2 stack-probe 10 eq             (probe: pop-n op-stack 2) rt-ok
+  3 pop-n
+restore clear
+
+% ====================================================================
+% SECTION 38: Fuzz — exec-n with various types
+% ====================================================================
+
+save
+  % exec-n with name lookup + proc
+  /x 99 def
+  \x { 1 add } 2 exec-n
+  100 eq                                    (fuzz-execn: name+proc) rt-ok
+restore clear
+
+% exec-n with 0 (no-op)
+42 0 exec-n 42 eq                           (fuzz-execn: 0 items) rt-ok clear
+
+% exec-n with single proc
+{ 42 } 1 exec-n 42 eq                      (fuzz-execn: single proc) rt-ok clear
+
+% ====================================================================
+% SECTION 39: Fuzz — swap-at various types
+% ====================================================================
+
+save
+  % swap-at with mixed types
+  [1 (hello) true 3.14 null] dup 0 4 swap-at
+  dup 0 get null eq                         (fuzz-swap: mixed[0]=null) rt-ok
+  dup 4 get 1 eq                            (fuzz-swap: mixed[4]=1) rt-ok
+  pop pop
+
+  % swap-at with ExtValue elements
+  [100l 200l 300l] dup 0 2 swap-at
+  dup 0 get 300l eq                         (fuzz-swap: Long[0]=300) rt-ok
+  dup 2 get 100l eq                         (fuzz-swap: Long[2]=100) rt-ok
+  pop pop
+
+  % swap-at adjacent elements
+  [1 2 3] dup 1 2 swap-at
+  [1 3 2] deep-eq                           (fuzz-swap: adjacent) rt-ok pop
+
+  % swap-at first two elements
+  [10 20 30] dup 0 1 swap-at
+  [20 10 30] deep-eq                        (fuzz-swap: first two) rt-ok pop
+restore clear
+
+% ====================================================================
+% SECTION 40: Fuzz — bind with various proc contents
+% ====================================================================
+
+save
+  % bind with empty proc
+  { } bind
+  {} deep-eq                                (fuzz-bind: empty proc) rt-ok
+
+  % bind with nested proc (inner not bound)
+  { { 1 add } } bind
+  exec 5 exch exec 6 eq                    (fuzz-bind: nested inner works) rt-ok
+
+  % bind with only literals (no names to resolve)
+  { 1 2 3 } bind
+  exec count 1 sub 3 eq                    (fuzz-bind: literals only) rt-ok
+  3 pop-n
+restore clear
+
+% ====================================================================
+% SECTION: between? — val lo hi -- bool
+% ====================================================================
+
+% --- integers ---
+5 1 10 between? (between: int in range) rt-ok clear
+1 1 10 between? (between: int at lo) rt-ok clear
+10 1 10 between? (between: int at hi) rt-ok clear
+0 1 10 between? not (between: int below) rt-ok clear
+11 1 10 between? not (between: int above) rt-ok clear
+
+% --- negative range ---
+-5 -10 -1 between? (between: negative in range) rt-ok clear
+-11 -10 -1 between? not (between: negative below) rt-ok clear
+
+% --- reals ---
+3.14 1.0 5.0 between? (between: real in range) rt-ok clear
+0.5 1.0 5.0 between? not (between: real below) rt-ok clear
+
+% --- doubles ---
+3.14d 1.0d 5.0d between? (between: double in range) rt-ok clear
+6.0d 1.0d 5.0d between? not (between: double above) rt-ok clear
+
+% --- longs ---
+50l 10l 100l between? (between: long in range) rt-ok clear
+5l 10l 100l between? not (between: long below) rt-ok clear
+
+% --- bytes ---
+128b 0b 255b between? (between: byte in range) rt-ok clear
+0b 0b 255b between? (between: byte at lo) rt-ok clear
+
+% --- unsigned integers ---
+5u 1u 10u between? (between: uint in range) rt-ok clear
+0u 1u 10u between? not (between: uint below) rt-ok clear
+
+% --- strings ---
+(m) (a) (z) between? (between: string in range) rt-ok clear
+(a) (a) (z) between? (between: string at lo) rt-ok clear
+(z) (a) (z) between? (between: string at hi) rt-ok clear
+(A) (a) (z) between? not (between: string below) rt-ok clear
+
+% --- addresses ---
+50a 10a 100a between? (between: address in range) rt-ok clear
+5a 10a 100a between? not (between: address below) rt-ok clear
+
+% --- equal bounds ---
+5 5 5 between? (between: val == lo == hi) rt-ok clear
+4 5 5 between? not (between: val < lo == hi) rt-ok clear
+
+% --- sad: type mismatch ---
+<< /type-check { clear true } >> { (hello) 1 10 between? } try-catch
+(between: type mismatch string/int) rt-ok clear
+
+% --- unsigned long ---
+100ul 10ul 200ul between? (between: ulong in range) rt-ok clear
+10ul 10ul 200ul between? (between: ulong at lo) rt-ok clear
+200ul 10ul 200ul between? (between: ulong at hi) rt-ok clear
+5ul 10ul 200ul between? not (between: ulong below) rt-ok clear
+
+% --- address bounds ---
+10a 10a 10a between? (between: address val == lo == hi) rt-ok clear
+50a 0a 100a between? (between: address in range) rt-ok clear
+
+% --- byte 0b and 255b boundaries ---
+0b 0b 0b between? (between: byte 0b single) rt-ok clear
+255b 0b 255b between? (between: byte at hi 255b) rt-ok clear
+255b 255b 255b between? (between: byte 255b single) rt-ok clear
+
+% --- reversed bounds (lo > hi means empty range → false) ---
+5 10 1 between? not (between: reversed bounds) rt-ok clear
+5.0 10.0 1.0 between? not (between: reversed real bounds) rt-ok clear
+
+% ====================================================================
+% SECTION: factorial — int -- int
+% ====================================================================
+
+% --- integer ---
+0 factorial 1 eq (factorial: 0! = 1) rt-ok clear
+1 factorial 1 eq (factorial: 1! = 1) rt-ok clear
+5 factorial 120 eq (factorial: 5! = 120) rt-ok clear
+10 factorial 3628800 eq (factorial: 10! = 3628800) rt-ok clear
+12 factorial 479001600 eq (factorial: 12! = 479001600) rt-ok clear
+
+% --- long ---
+0l factorial 1l eq (factorial: 0l! = 1l) rt-ok clear
+20l factorial 2432902008176640000l eq (factorial: 20l!) rt-ok clear
+
+% --- unsigned integer ---
+5u factorial 120u eq (factorial: 5u! = 120u) rt-ok clear
+12u factorial 479001600u eq (factorial: 12u!) rt-ok clear
+
+% --- unsigned long ---
+20ul factorial 2432902008176640000ul eq (factorial: 20ul!) rt-ok clear
+
+% --- byte ---
+0b factorial 1b eq (factorial: 0b! = 1b) rt-ok clear
+5b factorial 120b eq (factorial: 5b! = 120b) rt-ok clear
+
+% --- sad: overflow ---
+<< /numerical-overflow { clear true } >> { 13 factorial } try-catch
+(factorial: 13! overflows int) rt-ok clear
+<< /numerical-overflow { clear true } >> { 21l factorial } try-catch
+(factorial: 21l! overflows long) rt-ok clear
+<< /numerical-overflow { clear true } >> { 6b factorial } try-catch
+(factorial: 6b! overflows byte) rt-ok clear
+
+% --- sad: negative ---
+<< /range-check { clear true } >> { -1 factorial } try-catch
+(factorial: negative error) rt-ok clear
+<< /range-check { clear true } >> { -1l factorial } try-catch
+(factorial: negative long error) rt-ok clear
+
+% --- sad: type mismatch ---
+<< /type-check { clear true } >> { 5.0 factorial } try-catch
+(factorial: real type error) rt-ok clear
+
+% --- type preservation ---
+5 factorial type /integer-type eq (factorial: int type preserved) rt-ok clear
+5u factorial type /uinteger-type eq (factorial: uint type preserved) rt-ok clear
+5l factorial type /long-type eq (factorial: long type preserved) rt-ok clear
+5ul factorial type /ulong-type eq (factorial: ulong type preserved) rt-ok clear
+5b factorial type /byte-type eq (factorial: byte type preserved) rt-ok clear
+
+% --- boundary values ---
+1b factorial 1b eq (factorial: 1b! = 1b) rt-ok clear
+12u factorial 479001600u eq (factorial: 12u!) rt-ok clear
+0u factorial 1u eq (factorial: 0u! = 1u) rt-ok clear
+0ul factorial 1ul eq (factorial: 0ul! = 1ul) rt-ok clear
+
+% --- sad: overflow boundaries ---
+<< /numerical-overflow { clear true } >> { 13u factorial } try-catch
+(factorial: 13u! overflows uint) rt-ok clear
+<< /numerical-overflow { clear true } >> { 21ul factorial } try-catch
+(factorial: 21ul! overflows ulong) rt-ok clear
+
+% --- sad: non-integer types ---
+<< /type-check { clear true } >> { true factorial } try-catch
+(factorial: boolean type error) rt-ok clear
+
+% ====================================================================
+% SECTION: nCr — n r -- int  (binomial coefficient)
+% ====================================================================
+
+% --- basic ---
+5 0 nCr 1 eq (nCr: 5C0 = 1) rt-ok clear
+5 1 nCr 5 eq (nCr: 5C1 = 5) rt-ok clear
+5 2 nCr 10 eq (nCr: 5C2 = 10) rt-ok clear
+5 5 nCr 1 eq (nCr: 5C5 = 1) rt-ok clear
+10 3 nCr 120 eq (nCr: 10C3 = 120) rt-ok clear
+10 5 nCr 252 eq (nCr: 10C5 = 252) rt-ok clear
+20 10 nCr 184756 eq (nCr: 20C10 = 184756) rt-ok clear
+
+% --- symmetry: nCr(n, r) == nCr(n, n-r) ---
+10 3 nCr 10 7 nCr eq (nCr: symmetry 10C3 == 10C7) rt-ok clear
+20 4 nCr 20 16 nCr eq (nCr: symmetry 20C4 == 20C16) rt-ok clear
+
+% --- long ---
+30l 15l nCr 155117520l eq (nCr: 30C15 long) rt-ok clear
+60l 30l nCr 118264581564861424l eq (nCr: 60C30 long) rt-ok clear
+
+% --- unsigned ---
+10u 3u nCr 120u eq (nCr: 10C3 uint) rt-ok clear
+10ul 5ul nCr 252ul eq (nCr: 10C5 ulong) rt-ok clear
+
+% --- edge: r == 0 and r == n ---
+0 0 nCr 1 eq (nCr: 0C0 = 1) rt-ok clear
+1 0 nCr 1 eq (nCr: 1C0 = 1) rt-ok clear
+1 1 nCr 1 eq (nCr: 1C1 = 1) rt-ok clear
+
+% --- sad: r > n ---
+<< /range-check { clear true } >> { 3 5 nCr } try-catch
+(nCr: r > n error) rt-ok clear
+
+% --- sad: negative ---
+<< /range-check { clear true } >> { -1 5 nCr } try-catch
+(nCr: negative n error) rt-ok clear
+<< /range-check { clear true } >> { 5 -1 nCr } try-catch
+(nCr: negative r error) rt-ok clear
+
+% --- sad: overflow ---
+<< /numerical-overflow { clear true } >> { 34 17 nCr } try-catch
+(nCr: 34C17 overflows int) rt-ok clear
+
+% --- sad: type mismatch ---
+<< /type-check { clear true } >> { 5.0 3.0 nCr } try-catch
+(nCr: real type error) rt-ok clear
+
+% --- byte input ---
+5b 2b nCr 10b eq (nCr: 5C2 byte) rt-ok clear
+5b 2b nCr type /byte-type eq (nCr: byte type preserved) rt-ok clear
+
+% --- type preservation ---
+10u 3u nCr type /uinteger-type eq (nCr: uint type preserved) rt-ok clear
+30l 15l nCr type /long-type eq (nCr: long type preserved) rt-ok clear
+10ul 5ul nCr type /ulong-type eq (nCr: ulong type preserved) rt-ok clear
+
+% --- 0C0 for all types ---
+0 0 nCr 1 eq (nCr: 0C0 int) rt-ok clear
+0u 0u nCr 1u eq (nCr: 0C0 uint) rt-ok clear
+0l 0l nCr 1l eq (nCr: 0C0 long) rt-ok clear
+0b 0b nCr 1b eq (nCr: 0C0 byte) rt-ok clear
+
+% --- nCr(n, n) explicitly ---
+20 20 nCr 1 eq (nCr: 20C20 = 1) rt-ok clear
+100l 100l nCr 1l eq (nCr: 100C100 long = 1) rt-ok clear
+
+% --- large safe long values ---
+40l 20l nCr 137846528820l eq (nCr: 40C20 long) rt-ok clear
+
+% --- byte overflow ---
+<< /numerical-overflow { clear true } >> { 11b 6b nCr } try-catch
+(nCr: 11C6 overflows byte) rt-ok clear
+
+% ====================================================================
+% SECTION: prime? — int -- bool
+% ====================================================================
+
+% --- small primes ---
+2 prime? (prime: 2) rt-ok clear
+3 prime? (prime: 3) rt-ok clear
+5 prime? (prime: 5) rt-ok clear
+7 prime? (prime: 7) rt-ok clear
+11 prime? (prime: 11) rt-ok clear
+13 prime? (prime: 13) rt-ok clear
+97 prime? (prime: 97) rt-ok clear
+
+% --- small non-primes ---
+0 prime? not (prime: 0 not prime) rt-ok clear
+1 prime? not (prime: 1 not prime) rt-ok clear
+4 prime? not (prime: 4 not prime) rt-ok clear
+9 prime? not (prime: 9 not prime) rt-ok clear
+100 prime? not (prime: 100 not prime) rt-ok clear
+
+% --- larger primes ---
+7919 prime? (prime: 7919) rt-ok clear
+104729 prime? (prime: 104729) rt-ok clear
+
+% --- larger composites ---
+7917 prime? not (prime: 7917 = 3*2639) rt-ok clear
+104727 prime? not (prime: 104727 = 3*34909) rt-ok clear
+
+% --- Carmichael numbers (fool naive Fermat test) ---
+561 prime? not (prime: 561 Carmichael) rt-ok clear
+1105 prime? not (prime: 1105 Carmichael) rt-ok clear
+1729 prime? not (prime: 1729 Carmichael) rt-ok clear
+
+% --- Long type ---
+2l prime? (prime: 2l) rt-ok clear
+999999999989l prime? (prime: 999999999989l) rt-ok clear
+999999999990l prime? not (prime: 999999999990l) rt-ok clear
+
+% --- ULong type ---
+2ul prime? (prime: 2ul) rt-ok clear
+7ul prime? (prime: 7ul) rt-ok clear
+
+% --- UInteger type ---
+97u prime? (prime: 97u) rt-ok clear
+100u prime? not (prime: 100u) rt-ok clear
+
+% --- Byte type ---
+2b prime? (prime: 2b) rt-ok clear
+251b prime? (prime: 251b) rt-ok clear
+255b prime? not (prime: 255b = 3*5*17) rt-ok clear
+0b prime? not (prime: 0b) rt-ok clear
+1b prime? not (prime: 1b) rt-ok clear
+
+% --- sad: negative ---
+<< /range-check { clear true } >> { -1 prime? } try-catch
+(prime: negative error) rt-ok clear
+<< /range-check { clear true } >> { -5l prime? } try-catch
+(prime: negative long error) rt-ok clear
+
+% --- sad: type mismatch ---
+<< /type-check { clear true } >> { 5.0 prime? } try-catch
+(prime: real type error) rt-ok clear
+
+% ====================================================================
+% SECTION: pow-mod — base exp mod -- int
+% ====================================================================
+
+% --- basic ---
+2 10 1000 pow-mod 24 eq (pow-mod: 2^10 mod 1000 = 24) rt-ok clear
+3 4 5 pow-mod 1 eq (pow-mod: 3^4 mod 5 = 1) rt-ok clear
+7 3 13 pow-mod 5 eq (pow-mod: 7^3 mod 13 = 5) rt-ok clear
+
+% --- edge: exp = 0 ---
+5 0 7 pow-mod 1 eq (pow-mod: any^0 mod m = 1) rt-ok clear
+
+% --- edge: exp = 1 ---
+5 1 7 pow-mod 5 eq (pow-mod: 5^1 mod 7 = 5) rt-ok clear
+
+% --- edge: base = 0 ---
+0 10 7 pow-mod 0 eq (pow-mod: 0^10 mod 7 = 0) rt-ok clear
+
+% --- edge: base = 1 ---
+1 1000000 7 pow-mod 1 eq (pow-mod: 1^N mod m = 1) rt-ok clear
+
+% --- edge: mod = 1 ---
+5 3 1 pow-mod 0 eq (pow-mod: any mod 1 = 0) rt-ok clear
+
+% --- Long type ---
+2l 32l 1000000007l pow-mod 294967268l eq (pow-mod: 2^32 mod 1e9+7 long) rt-ok clear
+
+% --- ULong type ---
+2ul 64ul 1000000007ul pow-mod 582344008ul eq (pow-mod: 2^64 mod 1e9+7 ulong) rt-ok clear
+
+% --- Byte type ---
+2b 7b 100b pow-mod 28b eq (pow-mod: 2^7 mod 100 = 28 byte) rt-ok clear
+
+% --- UInteger type ---
+3u 10u 1000u pow-mod 49u eq (pow-mod: 3^10 mod 1000 uint) rt-ok clear
+
+% --- Fermat's little theorem: a^(p-1) mod p = 1 for prime p ---
+2 12 13 pow-mod 1 eq (pow-mod: Fermat 2^12 mod 13) rt-ok clear
+3 96 97 pow-mod 1 eq (pow-mod: Fermat 3^96 mod 97) rt-ok clear
+
+% --- sad: mod = 0 ---
+<< /range-check { clear true } >> { 2 3 0 pow-mod } try-catch
+(pow-mod: mod=0 error) rt-ok clear
+
+% --- sad: negative ---
+<< /range-check { clear true } >> { -2 3 5 pow-mod } try-catch
+(pow-mod: negative base error) rt-ok clear
+<< /range-check { clear true } >> { 2 -3 5 pow-mod } try-catch
+(pow-mod: negative exp error) rt-ok clear
+
+% --- sad: type mismatch ---
+<< /type-check { clear true } >> { 2.0 3 5 pow-mod } try-catch
+(pow-mod: real type error) rt-ok clear
+
+% ====================================================================
+% SECTION: isqrt — int -- int
+% ====================================================================
+
+% --- basic ---
+0 isqrt 0 eq (isqrt: 0) rt-ok clear
+1 isqrt 1 eq (isqrt: 1) rt-ok clear
+4 isqrt 2 eq (isqrt: 4) rt-ok clear
+9 isqrt 3 eq (isqrt: 9) rt-ok clear
+16 isqrt 4 eq (isqrt: 16) rt-ok clear
+100 isqrt 10 eq (isqrt: 100) rt-ok clear
+
+% --- non-perfect squares (floor) ---
+2 isqrt 1 eq (isqrt: 2 -> 1) rt-ok clear
+3 isqrt 1 eq (isqrt: 3 -> 1) rt-ok clear
+5 isqrt 2 eq (isqrt: 5 -> 2) rt-ok clear
+10 isqrt 3 eq (isqrt: 10 -> 3) rt-ok clear
+99 isqrt 9 eq (isqrt: 99 -> 9) rt-ok clear
+101 isqrt 10 eq (isqrt: 101 -> 10) rt-ok clear
+
+% --- type preservation ---
+9 isqrt type /integer-type eq (isqrt: int type) rt-ok clear
+9u isqrt type /uinteger-type eq (isqrt: uint type) rt-ok clear
+9l isqrt type /long-type eq (isqrt: long type) rt-ok clear
+9ul isqrt type /ulong-type eq (isqrt: ulong type) rt-ok clear
+9b isqrt type /byte-type eq (isqrt: byte type) rt-ok clear
+
+% --- Byte type ---
+0b isqrt 0b eq (isqrt: 0b) rt-ok clear
+255b isqrt 15b eq (isqrt: 255b -> 15b) rt-ok clear
+225b isqrt 15b eq (isqrt: 225b perfect) rt-ok clear
+
+% --- Long type: large values beyond double precision ---
+2000000000000000000l isqrt 1414213562l eq (isqrt: 2e18 long) rt-ok clear
+9223372036854775807l isqrt 3037000499l eq (isqrt: max-long) rt-ok clear
+
+% --- ULong type ---
+2000000000000000000ul isqrt 1414213562ul eq (isqrt: 2e18 ulong) rt-ok clear
+
+% --- UInteger type ---
+4294967295u isqrt 65535u eq (isqrt: max-uint) rt-ok clear
+
+% --- sad: negative ---
+<< /range-check { clear true } >> { -1 isqrt } try-catch
+(isqrt: negative error) rt-ok clear
+<< /range-check { clear true } >> { -1l isqrt } try-catch
+(isqrt: negative long error) rt-ok clear
+
+% --- sad: type mismatch ---
+<< /type-check { clear true } >> { 9.0 isqrt } try-catch
+(isqrt: real type error) rt-ok clear
+
+% ====================================================================
+% SECTION: capitalize — str -- str
+% ====================================================================
+
+% --- basic ---
+(hello) capitalize (Hello) eq (capitalize: hello -> Hello) rt-ok clear
+(HELLO) capitalize (HELLO) eq (capitalize: already upper) rt-ok clear
+(world) capitalize (World) eq (capitalize: world -> World) rt-ok clear
+
+% --- single char ---
+(a) capitalize (A) eq (capitalize: single a -> A) rt-ok clear
+(A) capitalize (A) eq (capitalize: single A unchanged) rt-ok clear
+(1) capitalize (1) eq (capitalize: digit unchanged) rt-ok clear
+
+% --- empty string ---
+() capitalize () eq (capitalize: empty -> empty) rt-ok clear
+
+% --- only first byte changed ---
+(hELLO wORLD) capitalize (HELLO wORLD) eq (capitalize: only first byte) rt-ok clear
+
+% --- non-alpha first byte ---
+(123abc) capitalize (123abc) eq (capitalize: digit first) rt-ok clear
+( hello) capitalize ( hello) eq (capitalize: space first) rt-ok clear
+
+% --- sad: type mismatch ---
+<< /type-check { clear true } >> { 42 capitalize } try-catch
+(capitalize: type error) rt-ok clear
+
+% ====================================================================
+% SECTION: count-substring — str sub -- int
+% ====================================================================
+
+% --- basic ---
+(hello world hello) (hello) count-substring 2 eq (count-sub: 2 hellos) rt-ok clear
+(aaa) (a) count-substring 3 eq (count-sub: 3 a's) rt-ok clear
+(abcabc) (abc) count-substring 2 eq (count-sub: 2 abc's) rt-ok clear
+
+% --- no match ---
+(hello) (xyz) count-substring 0 eq (count-sub: no match) rt-ok clear
+(hello) (helloo) count-substring 0 eq (count-sub: sub longer) rt-ok clear
+
+% --- single occurrence ---
+(hello) (hello) count-substring 1 eq (count-sub: exact match) rt-ok clear
+(hello world) (world) count-substring 1 eq (count-sub: at end) rt-ok clear
+(hello world) (hello) count-substring 1 eq (count-sub: at start) rt-ok clear
+
+% --- non-overlapping ---
+(aaaa) (aa) count-substring 2 eq (count-sub: non-overlapping aa) rt-ok clear
+(ababab) (ab) count-substring 3 eq (count-sub: 3 ab's) rt-ok clear
+
+% --- empty sub returns 0 ---
+(hello) () count-substring 0 eq (count-sub: empty sub) rt-ok clear
+
+% --- empty haystack ---
+() (a) count-substring 0 eq (count-sub: empty str) rt-ok clear
+() () count-substring 0 eq (count-sub: both empty) rt-ok clear
+
+% --- single char sub ---
+(mississippi) (s) count-substring 4 eq (count-sub: 4 s's) rt-ok clear
+(mississippi) (i) count-substring 4 eq (count-sub: 4 i's) rt-ok clear
+(mississippi) (p) count-substring 2 eq (count-sub: 2 p's) rt-ok clear
+
+% --- long string ---
+(aababaababaab) (aab) count-substring 3 eq (count-sub: 3 aab's) rt-ok clear
+
+% --- sad: type mismatch ---
+<< /type-check { clear true } >> { 42 (hello) count-substring } try-catch
+(count-sub: type error) rt-ok clear
+
+% ====================================================================
+% SECTION: Additional coverage — type preservation and fuzz
+% ====================================================================
+
+% --- prime? output type ---
+97 prime? type /boolean-type eq (prime: output is bool) rt-ok clear
+4 prime? type /boolean-type eq (prime: false output is bool) rt-ok clear
+
+% --- pow-mod type preservation ---
+5 3 7 pow-mod type /integer-type eq (pow-mod: int type preserved) rt-ok clear
+5l 3l 7l pow-mod type /long-type eq (pow-mod: long type preserved) rt-ok clear
+5u 3u 7u pow-mod type /uinteger-type eq (pow-mod: uint type preserved) rt-ok clear
+5ul 3ul 7ul pow-mod type /ulong-type eq (pow-mod: ulong type preserved) rt-ok clear
+5b 3b 7b pow-mod type /byte-type eq (pow-mod: byte type preserved) rt-ok clear
+
+% --- pow-mod large exponent stress ---
+2 1000000 1000000007 pow-mod type /integer-type eq (pow-mod: large exp completes) rt-ok clear
+
+% --- pow-mod mod=2 and mod=3 edge cases ---
+7 10 2 pow-mod 1 eq (pow-mod: 7^10 mod 2 = 1) rt-ok clear
+5 100 3 pow-mod 1 eq (pow-mod: 5^100 mod 3 = 1) rt-ok clear
+
+% --- isqrt fuzz near perfect squares ---
+8 isqrt 2 eq (isqrt: 8 -> 2) rt-ok clear
+10 isqrt 3 eq (isqrt: 10 -> 3) rt-ok clear
+15 isqrt 3 eq (isqrt: 15 -> 3) rt-ok clear
+24 isqrt 4 eq (isqrt: 24 -> 4) rt-ok clear
+25 isqrt 5 eq (isqrt: 25 -> 5) rt-ok clear
+26 isqrt 5 eq (isqrt: 26 -> 5) rt-ok clear
+
+% --- isqrt math property: N^2 -> N ---
+/isqrt-ok true def
+1 1 50 { dup dup mul isqrt eq isqrt-ok and /isqrt-ok exch def } for
+isqrt-ok (isqrt: N^2 -> N for 1..50) rt-ok clear
+
+% --- isqrt math property: N^2-1 -> N-1 ---
+/isqrt-ok2 true def
+2 1 50 { dup dup mul 1 sub isqrt exch 1 sub eq isqrt-ok2 and /isqrt-ok2 exch def } for
+isqrt-ok2 (isqrt: N^2-1 -> N-1 for 2..50) rt-ok clear
+
+% --- isqrt long near-boundary (values above 2^53 where double loses precision) ---
+9007199254740992l isqrt 94906265l eq (isqrt: 2^53 long) rt-ok clear
+9007199254740993l isqrt 94906265l eq (isqrt: 2^53+1 long) rt-ok clear
+
+% --- capitalize output type ---
+(hello) capitalize type /string-type eq (capitalize: output is string) rt-ok clear
+() capitalize type /string-type eq (capitalize: empty output is string) rt-ok clear
+
+% --- capitalize extended ASCII ---
+(~test) capitalize (~test) eq (capitalize: tilde unchanged) rt-ok clear
+
+% --- count-substring non-overlapping guarantee ---
+(aaaaaa) (aaa) count-substring 2 eq (count-sub: 6 a's / 3-char = 2 non-overlap) rt-ok clear
+(aaaaa) (aa) count-substring 2 eq (count-sub: 5 a's / 2-char = 2 non-overlap) rt-ok clear
+
+% --- count-substring case sensitivity ---
+(Hello hello HELLO) (hello) count-substring 1 eq (count-sub: case sensitive) rt-ok clear
+
+% --- count-substring sub = entire haystack ---
+(abc) (abc) count-substring 1 eq (count-sub: sub = haystack) rt-ok clear
+
+% --- nCr sequential stress ---
+/ncr-ok true def
+0 1 10 { 10 exch nCr 0 ge ncr-ok and /ncr-ok exch def } for
+ncr-ok (nCr: 10C0 through 10C10 all valid) rt-ok clear
+
+% --- nCr large n small r ---
+1000 2 nCr 499500 eq (nCr: 1000C2 = 499500) rt-ok clear
+1000l 3l nCr 166167000l eq (nCr: 1000C3 long) rt-ok clear
+
+(tests/test_tier1_gaps.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

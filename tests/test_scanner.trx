@@ -1,0 +1,1695 @@
+% ====================================================================
+% Scanner / Tokenizer / String / Numeric / Name comprehensive tests
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Integer literal parsing
+% ====================================================================
+
+% --- positive integers ---
+42 42 eq  (int: 42) rt-ok  clear
+0 0 eq  (int: 0) rt-ok  clear
+1 1 eq  (int: 1) rt-ok  clear
+100 100 eq  (int: 100) rt-ok  clear
+
+% --- negative integers ---
+-42 -42 eq  (int: -42) rt-ok  clear
+-1 -1 eq  (int: -1) rt-ok  clear
+
+% --- verify default integer type ---
+42 type /integer-type eq  (int-type: 42 is integer) rt-ok  clear
+0 type /integer-type eq  (int-type: 0 is integer) rt-ok  clear
+-42 type /integer-type eq  (int-type: -42 is integer) rt-ok  clear
+
+% --- suffix i (integer) ---
+42i 42 eq  (int-suffix-i: 42i value) rt-ok  clear
+42i type /integer-type eq  (int-suffix-i: 42i type) rt-ok  clear
+
+% --- suffix u (unsigned integer) ---
+42u 42u eq  (int-suffix-u: 42u value) rt-ok  clear
+42u type /uinteger-type eq  (int-suffix-u: 42u type) rt-ok  clear
+
+% --- suffix l (long) ---
+42l 42l eq  (int-suffix-l: 42l value) rt-ok  clear
+42l type /long-type eq  (int-suffix-l: 42l type) rt-ok  clear
+
+% --- suffix ul (unsigned long) ---
+42ul 42ul eq  (int-suffix-ul: 42ul value) rt-ok  clear
+42ul type /ulong-type eq  (int-suffix-ul: 42ul type) rt-ok  clear
+
+% --- suffix b (byte) ---
+42b 42b eq  (int-suffix-b: 42b value) rt-ok  clear
+42b type /byte-type eq  (int-suffix-b: 42b type) rt-ok  clear
+
+% --- suffix a (address) ---
+16#FF#a type /address-type eq  (int-suffix-a: 16#FF#a type) rt-ok  clear
+
+% --- max integer values ---
+2147483647 2147483647 eq  (int-max: INT_MAX) rt-ok  clear
+2147483647 type /integer-type eq  (int-max: INT_MAX type) rt-ok  clear
+-2147483648 -2147483648 eq  (int-min: INT_MIN) rt-ok  clear
+-2147483648 type /integer-type eq  (int-min: INT_MIN type) rt-ok  clear
+
+% --- unsigned max ---
+4294967295u 4294967295u eq  (uint-max: UINT_MAX) rt-ok  clear
+4294967295u type /uinteger-type eq  (uint-max: UINT_MAX type) rt-ok  clear
+
+% --- byte max ---
+255b 255b eq  (byte-max: 255b) rt-ok  clear
+0b 0b eq  (byte-zero: 0b) rt-ok  clear
+
+% --- integer overflow produces error ---
+<< /numerical-overflow { clear true } >> { (2147483648) token pop pop } try-catch
+(int-overflow: INT_MAX+1 overflows) rt-ok  clear
+
+<< /numerical-overflow { clear true } >> { (-2147483649) token pop pop } try-catch
+(int-overflow: INT_MIN-1 overflows) rt-ok  clear
+
+<< /numerical-overflow { clear true } >> { (256b) token pop pop } try-catch
+(byte-overflow: 256b overflows) rt-ok  clear
+
+% --- integer overflow: values that skip bit 31 entirely ---
+<< /numerical-overflow { clear true } >> { (4294967296) token pop pop } try-catch
+(int-overflow: 2^32 skip-bit31) rt-ok  clear
+
+<< /numerical-overflow { clear true } >> { (8589934592) token pop pop } try-catch
+(int-overflow: 2^33 skip-bit31) rt-ok  clear
+
+% ====================================================================
+% SECTION 2: Radix literal parsing
+% ====================================================================
+
+% --- binary ---
+2#1010# 10 eq  (radix-bin: 2#1010# = 10) rt-ok  clear
+2#11111111# 255 eq  (radix-bin: 2#11111111# = 255) rt-ok  clear
+2#0# 0 eq  (radix-bin: 2#0# = 0) rt-ok  clear
+2#1# 1 eq  (radix-bin: 2#1# = 1) rt-ok  clear
+
+% --- octal ---
+8#77# 63 eq  (radix-oct: 8#77# = 63) rt-ok  clear
+8#0# 0 eq  (radix-oct: 8#0# = 0) rt-ok  clear
+8#377# 255 eq  (radix-oct: 8#377# = 255) rt-ok  clear
+
+% --- hex ---
+16#FF# 255 eq  (radix-hex: 16#FF# = 255) rt-ok  clear
+16#ff# 255 eq  (radix-hex: 16#ff# case insensitive) rt-ok  clear
+16#0# 0 eq  (radix-hex: 16#0# = 0) rt-ok  clear
+16#A# 10 eq  (radix-hex: 16#A# = 10) rt-ok  clear
+16#a# 10 eq  (radix-hex: 16#a# = 10) rt-ok  clear
+16#FFFF# 65535 eq  (radix-hex: 16#FFFF# = 65535) rt-ok  clear
+
+% --- base 36 ---
+36#Z# 35 eq  (radix-b36: 36#Z# = 35) rt-ok  clear
+36#z# 35 eq  (radix-b36: 36#z# case insensitive) rt-ok  clear
+36#10# 36 eq  (radix-b36: 36#10# = 36) rt-ok  clear
+
+% --- radix default type is integer ---
+16#FF# type /integer-type eq  (radix-type: 16#FF# is integer) rt-ok  clear
+2#1010# type /integer-type eq  (radix-type: 2#1010# is integer) rt-ok  clear
+
+% --- radix with suffix b ---
+16#FF#b 255b eq  (radix-suffix-b: 16#FF#b value) rt-ok  clear
+16#FF#b type /byte-type eq  (radix-suffix-b: 16#FF#b type) rt-ok  clear
+
+% --- radix with suffix u ---
+16#FFFF#u 65535u eq  (radix-suffix-u: 16#FFFF#u value) rt-ok  clear
+16#FFFF#u type /uinteger-type eq  (radix-suffix-u: 16#FFFF#u type) rt-ok  clear
+
+% --- radix with suffix l ---
+16#FF#l type /long-type eq  (radix-suffix-l: 16#FF#l type) rt-ok  clear
+
+% --- radix with suffix ul ---
+16#FF#ul type /ulong-type eq  (radix-suffix-ul: 16#FF#ul type) rt-ok  clear
+
+% --- radix with suffix a ---
+16#FF#a type /address-type eq  (radix-suffix-a: 16#FF#a type) rt-ok  clear
+
+% --- radix overflow: values that skip bit 31 entirely ---
+<< /numerical-overflow { clear true } >> { (16#100000000#) token pop pop } try-catch
+(radix-overflow: 16#100000000# skip-bit31) rt-ok  clear
+
+<< /numerical-overflow { clear true } >> { (16#200000000#) token pop pop } try-catch
+(radix-overflow: 16#200000000# skip-bit31) rt-ok  clear
+
+<< /numerical-overflow { clear true } >> { (16#110000000#) token pop pop } try-catch
+(radix-overflow: 16#110000000# skip-bit31) rt-ok  clear
+
+% ====================================================================
+% SECTION 2b: Int128 / UInt128 literal parsing (q / uq suffixes)
+% ====================================================================
+
+% --- decimal forms and types ---
+42q 42q eq  (q: 42q value) rt-ok  clear
+42q type /int128-type eq  (q: 42q is int128) rt-ok  clear
+42uq 42uq eq  (uq: 42uq value) rt-ok  clear
+42uq type /uint128-type eq  (uq: 42uq is uint128) rt-ok  clear
+-42q -42q eq  (q: -42q value) rt-ok  clear
+0q type /int128-type eq  (q: 0q is int128) rt-ok  clear
+
+% --- eq is type-strict across widths ---
+42q 42 eq not  (q: 42q ne Integer 42) rt-ok  clear
+42q 42uq eq not  (q: 42q ne 42uq) rt-ok  clear
+
+% --- boundaries: INT128_MIN/MAX, UINT128_MAX (decimal and hex agree) ---
+170141183460469231731687303715884105727q
+0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q eq  (q: INT128_MAX decimal = hex) rt-ok  clear
+-170141183460469231731687303715884105728q type /int128-type eq
+(q: INT128_MIN accepted) rt-ok  clear
+340282366920938463463374607431768211455uq
+0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq eq  (uq: UINT128_MAX decimal = hex) rt-ok  clear
+
+% --- overflow: one past each bound ---
+<< /numerical-overflow { clear true } >> { (170141183460469231731687303715884105728q) token pop pop } try-catch
+(q-overflow: INT128_MAX+1) rt-ok  clear
+<< /numerical-overflow { clear true } >> { (-170141183460469231731687303715884105729q) token pop pop } try-catch
+(q-overflow: INT128_MIN-1) rt-ok  clear
+<< /numerical-overflow { clear true } >> { (340282366920938463463374607431768211456uq) token pop pop } try-catch
+(uq-overflow: UINT128_MAX+1) rt-ok  clear
+<< /numerical-overflow { clear true } >> { (0x80000000000000000000000000000000#q) token pop pop } try-catch
+(q-overflow: hex sign bit as positive q) rt-ok  clear
+
+% --- radix forms ---
+16#FF#q type /int128-type eq  (radix-q: 16#FF#q is int128) rt-ok  clear
+16#FF#uq type /uint128-type eq  (radix-uq: 16#FF#uq is uint128) rt-ok  clear
+0xFF#q 255q eq  (hex-q: 0xFF#q = 255q) rt-ok  clear
+2#1111#uq 15uq eq  (bin-uq: 2#1111#uq = 15uq) rt-ok  clear
+
+% --- silent-truncation regressions (exact accumulator overflow fix):
+% the masked prior>=current wrap heuristic missed radix>=16 steps whose
+% masked value still increased, so these all truncated silently before
+% ====================================================================
+<< /numerical-overflow { clear true } >> { (0x1FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq) token pop pop } try-catch
+(trunc-regression: 33-hex-digit uq overflows) rt-ok  clear
+<< /numerical-overflow { clear true } >> { (0x1FF#b) token pop pop } try-catch
+(trunc-regression: 0x1FF#b overflows) rt-ok  clear
+<< /numerical-overflow { clear true } >> { (0x1FFFFFFFF#u) token pop pop } try-catch
+(trunc-regression: 0x1FFFFFFFF#u overflows) rt-ok  clear
+<< /numerical-overflow { clear true } >> { (0x1FFFFFFFFFFFFFFFF#ul) token pop pop } try-catch
+(trunc-regression: 0x1FFFFFFFFFFFFFFFF#ul overflows) rt-ok  clear
+<< /numerical-overflow { clear true } >> { (16#1FF#b) token pop pop } try-catch
+(trunc-regression: 16#1FF#b overflows) rt-ok  clear
+<< /numerical-overflow { clear true } >> { (36#ZZZZZZZZZZZZZZZZZZZZZZZZZ#uq) token pop pop } try-catch
+(trunc-regression: base-36 past 128 bits overflows) rt-ok  clear
+
+% --- name fallbacks (mirror SECTION 21's narrow-width rules) ---
+(-42uq) token pop type /name-type eq  (q-name: -42uq is name) rt-ok  clear
+(42q3) token pop type /name-type eq  (q-name: 42q3 is name) rt-ok  clear
+(1.5q) token pop type /name-type eq  (q-name: 1.5q is name) rt-ok  clear
+
+% ====================================================================
+% SECTION 3: Real / Double literal parsing
+% ====================================================================
+
+% --- simple reals ---
+3.14 type /real-type eq  (real-type: 3.14) rt-ok  clear
+-2.5 type /real-type eq  (real-type: -2.5) rt-ok  clear
+0.0 type /real-type eq  (real-type: 0.0) rt-ok  clear
+0.0 0.0 eq  (real-val: 0.0) rt-ok  clear
+
+% --- real value checks ---
+3.14 3.14 eq  (real-val: 3.14) rt-ok  clear
+-2.5 -2.5 eq  (real-val: -2.5) rt-ok  clear
+
+% --- scientific notation ---
+1e3 1000.0 eq  (real-sci: 1e3 = 1000.0) rt-ok  clear
+1e3 type /real-type eq  (real-sci-type: 1e3 is real) rt-ok  clear
+1.5e2 150.0 eq  (real-sci: 1.5e2 = 150.0) rt-ok  clear
+-2E4 -20000.0 eq  (real-sci: -2E4 = -20000.0) rt-ok  clear
+
+% --- leading dot ---
+.5 0.5 eq  (real-dot: .5 = 0.5) rt-ok  clear
+.5 type /real-type eq  (real-dot-type: .5 is real) rt-ok  clear
+
+% --- trailing dot ---
+5. 5.0 eq  (real-trail: 5. = 5.0) rt-ok  clear
+5. type /real-type eq  (real-trail-type: 5. is real) rt-ok  clear
+
+% --- double suffix ---
+3.14d type /double-type eq  (double-type: 3.14d) rt-ok  clear
+3.14d 3.14d eq  (double-val: 3.14d) rt-ok  clear
+1e3d type /double-type eq  (double-sci-type: 1e3d) rt-ok  clear
+1e3d 1000.0d eq  (double-sci-val: 1e3d = 1000.0d) rt-ok  clear
+
+% --- real suffix r (explicit) ---
+3.14r type /real-type eq  (real-suffix-r: 3.14r is real) rt-ok  clear
+3.14r 3.14 eq  (real-suffix-r-val: 3.14r = 3.14) rt-ok  clear
+
+% --- negative values ---
+-3.14 -3.14 eq  (real-neg: -3.14 value) rt-ok  clear
+-3.14d -3.14d eq  (double-neg: -3.14d value) rt-ok  clear
+-3.14d type /double-type eq  (double-neg-type: -3.14d type) rt-ok  clear
+
+% --- signed exponent ---
+1e+3 1000.0 eq  (real-sci-plus: 1e+3 = 1000.0) rt-ok  clear
+1e-3 0.001 eq  (real-sci-minus: 1e-3 = 0.001) rt-ok  clear
+1.5E-2 0.015 eq  (real-sci-negexp: 1.5E-2 = 0.015) rt-ok  clear
+-1.5e-2 -0.015 eq  (real-sci-negneg: -1.5e-2 = -0.015) rt-ok  clear
+1e+3d 1000.0d eq  (double-sci-plus: 1e+3d) rt-ok  clear
+1.5e-2d 0.015d eq  (double-sci-negexp: 1.5e-2d) rt-ok  clear
+
+% --- leading dot variants ---
+.5d type /double-type eq  (double-dot: .5d type) rt-ok  clear
+.5d 0.5d eq  (double-dot-val: .5d = 0.5d) rt-ok  clear
+-.5 -0.5 eq  (real-negdot: -.5 = -0.5) rt-ok  clear
++.5 0.5 eq  (real-plusdot: +.5 = 0.5) rt-ok  clear
+.5e2 50.0 eq  (real-dot-sci: .5e2 = 50.0) rt-ok  clear
+
+% --- trailing dot variants ---
+5.d type /double-type eq  (double-trail: 5.d type) rt-ok  clear
+5.d 5.0d eq  (double-trail-val: 5.d = 5.0d) rt-ok  clear
+-5. -5.0 eq  (real-negtrail: -5. = -5.0) rt-ok  clear
+5.e2 500.0 eq  (real-trail-sci: 5.e2 = 500.0) rt-ok  clear
+
+% --- explicit r with scientific ---
+1e3r type /real-type eq  (real-r-sci: 1e3r type) rt-ok  clear
+1e3r 1000.0 eq  (real-r-sci-val: 1e3r = 1000.0) rt-ok  clear
+
+% --- sad: invalid suffix on float ---
+(3.14x) token pop type /name-type eq  (real-sad: 3.14x is name) rt-ok  clear
+(3.14b) token pop type /name-type eq  (real-sad: 3.14b is name) rt-ok  clear
+(3.14u) token pop type /name-type eq  (real-sad: 3.14u is name) rt-ok  clear
+(3.14l) token pop type /name-type eq  (real-sad: 3.14l is name) rt-ok  clear
+(3.14dr) token pop type /name-type eq  (real-sad: 3.14dr is name) rt-ok  clear
+(3.14rd) token pop type /name-type eq  (real-sad: 3.14rd is name) rt-ok  clear
+
+% --- sad: 42d is a name (no dot or e) ---
+(42d) token pop type /name-type eq  (real-sad: 42d is name) rt-ok  clear
+
+% --- stress: real overflow ---
+<< /numerical-overflow { clear true } >> { (3.5e38) token pop pop } try-catch
+(real-stress: 3.5e38 overflows real) rt-ok  clear
+
+% --- stress: double overflow ---
+<< /numerical-overflow { clear true } >> { (1e309d) token pop pop } try-catch
+(double-stress: 1e309d overflows double) rt-ok  clear
+
+<< /numerical-overflow { clear true } >> { (1e309) token pop pop } try-catch
+(real-stress: 1e309 overflows real) rt-ok  clear
+
+<< /numerical-overflow { clear true } >> { (1e999) token pop pop } try-catch
+(real-stress: 1e999 overflows real) rt-ok  clear
+
+% --- stress: real overflow but double fits ---
+3.5e38d type /double-type eq  (real-stress: 3.5e38d fits double) rt-ok  clear
+
+% --- stress: underflow is an error ---
+<< /numerical-overflow { clear true } >> { (1e-400) token pop pop } try-catch
+(real-stress: 1e-400 underflow is error) rt-ok  clear
+
+<< /numerical-overflow { clear true } >> { (1e-400d) token pop pop } try-catch
+(double-stress: 1e-400d underflow is error) rt-ok  clear
+
+% --- stress: real underflow (fits double but not float) ---
+<< /numerical-overflow { clear true } >> { (1e-46) token pop pop } try-catch
+(real-stress: 1e-46 underflows real) rt-ok  clear
+
+% value fits in double
+1e-46d type /double-type eq  (double-stress: 1e-46d fits double) rt-ok  clear
+
+% --- fuzz: negative zero ---
+-0.0 0.0 eq  (real-fuzz: -0.0 = 0.0) rt-ok  clear
+-0.0d 0.0d eq  (double-fuzz: -0.0d = 0.0d) rt-ok  clear
+-0.0d type /double-type eq  (double-fuzz: -0.0d type) rt-ok  clear
+
+% --- fuzz: uppercase E ---
+1E3 1000.0 eq  (real-fuzz: 1E3 uppercase E) rt-ok  clear
+1E3d 1000.0d eq  (double-fuzz: 1E3d uppercase E) rt-ok  clear
+
+% --- fuzz: uppercase D suffix ---
+3.14D type /double-type eq  (double-fuzz: 3.14D uppercase D) rt-ok  clear
+
+% --- fuzz: uppercase R suffix ---
+3.14R type /real-type eq  (real-fuzz: 3.14R uppercase R) rt-ok  clear
+
+% --- boundary: inf and nan literals ---
+inf type /real-type eq  (real-boundary: inf is real) rt-ok  clear
+nan type /real-type eq  (real-boundary: nan is real) rt-ok  clear
+inf#d type /double-type eq  (double-boundary: inf#d is double) rt-ok  clear
+nan#d type /double-type eq  (double-boundary: nan#d is double) rt-ok  clear
+
+% ====================================================================
+% SECTION 4: String literal syntax
+% ====================================================================
+
+% --- basic string ---
+(hello) (hello) eq  (str: basic hello) rt-ok  clear
+(hello) length 5 eq  (str-len: hello is 5) rt-ok  clear
+
+% --- empty string ---
+() () eq  (str: empty string) rt-ok  clear
+() length 0 eq  (str-len: empty is 0) rt-ok  clear
+
+% --- string type ---
+(hello) type /string-type eq  (str-type: string) rt-ok  clear
+
+% --- escape sequences ---
+(\n) length 1 eq  (str-esc: newline is 1 char) rt-ok  clear
+(\n) 0 get 10b eq  (str-esc: newline = 10) rt-ok  clear
+(\t) 0 get 9b eq  (str-esc: tab = 9) rt-ok  clear
+(\r) 0 get 13b eq  (str-esc: CR = 13) rt-ok  clear
+(\f) 0 get 12b eq  (str-esc: FF = 12) rt-ok  clear
+(\b) 0 get 8b eq  (str-esc: BS = 8) rt-ok  clear
+(\a) 0 get 7b eq  (str-esc: BEL = 7) rt-ok  clear
+
+% --- backslash escape ---
+(\\) length 1 eq  (str-esc: backslash is 1 char) rt-ok  clear
+(\\) 0 get 92b eq  (str-esc: backslash = 92) rt-ok  clear
+
+% --- paren escape ---
+(\() length 1 eq  (str-esc: open paren is 1 char) rt-ok  clear
+(\() 0 get 40b eq  (str-esc: open paren = 40) rt-ok  clear
+(\)) length 1 eq  (str-esc: close paren is 1 char) rt-ok  clear
+(\)) 0 get 41b eq  (str-esc: close paren = 41) rt-ok  clear
+
+% --- octal escape ---
+(\101) length 1 eq  (str-oct: \\101 is 1 char) rt-ok  clear
+(\101) 0 get 65b eq  (str-oct: \\101 = 65 = A) rt-ok  clear
+(\377) 0 get 255b eq  (str-oct: \\377 = 255) rt-ok  clear
+(\000) 0 get 0b eq  (str-oct: \\000 = 0 = null) rt-ok  clear
+(\060) 0 get 48b eq  (str-oct: \\060 = 48 = zero char) rt-ok  clear
+
+% --- hex escape ---
+(\x41) length 1 eq  (str-hex: \\x41 is 1 char) rt-ok  clear
+(\x41) 0 get 65b eq  (str-hex: \\x41 = 65 = A) rt-ok  clear
+(\xFF) 0 get 255b eq  (str-hex: \\xFF = 255) rt-ok  clear
+(\x00) 0 get 0b eq  (str-hex: \\x00 = 0 = null) rt-ok  clear
+(\x61) 0 get 97b eq  (str-hex: \\x61 = 97 = a) rt-ok  clear
+
+% --- nested balanced parens ---
+(a(b)c) length 5 eq  (str-nest: a(b)c is 5 chars) rt-ok  clear
+(a(b)c) (a(b)c) eq  (str-nest: a(b)c value) rt-ok  clear
+((nested)) length 8 eq  (str-nest: (nested) is 8 chars) rt-ok  clear
+
+% --- deeply nested parens ---
+(a(b(c)d)e) length 9 eq  (str-deep-nest: a(b(c)d)e is 9 chars) rt-ok  clear
+
+% --- string suffixes ---
+% #r makes readonly
+(hello)#r type /string-type eq  (str-suffix-r: type is string) rt-ok  clear
+
+% #x makes executable - extract from proc to avoid execution
+{ (hello)#x } 0 get executable?  (str-suffix-x: is executable) rt-ok  clear
+
+% #b makes byte from single-char string
+(A)#b type /byte-type eq  (str-suffix-b: type is byte) rt-ok  clear
+(A)#b 65b eq  (str-suffix-b: A = 65b) rt-ok  clear
+
+% #= uses temporary storage
+(hello)#= (hello) eq  (str-suffix-eq: value matches) rt-ok  clear
+
+% stale )#= reference detection: second )#= overwrites the first
+% Outer proc is }#a so the scanner does not reject the inner eqstrings at pack time.
+% exch brings the (now-stale) first eqstring back to top; = reads it and errors.
+{ (a)#= (b)#= exch = }#a try /unsupported eq  (str-suffix-eq: stale eqstring errors cleanly) rt-ok clear
+% lone eqstring, consumed before any subsequent )#=: no staleness issue.
+% (Can't test "two sequential consumed eqstrings" in one evaluation because both )#= are
+% resolved at scan time, so the first is already stale by the time the proc runs.  That
+% is the intended behavior -- )#= is one-shot per evaluation.)
+{ (a)#= pop }#a try /no-error eq  (str-suffix-eq: single eqstring use is clean) rt-ok clear
+% eqrefs ride inside packed arrays via PackedExt subcodes; fresh ref round-trips cleanly.
+{ (eq)#= 1 packed 0 get (eq) eq }#a exec true eq  (str-suffix-eq: eqstring packs and round-trips) rt-ok clear
+
+% --- long string ---
+(abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ) length 114 eq  (str-long: 114 char string) rt-ok  clear
+
+% --- multiple escape sequences in one string ---
+(\t\n\r) length 3 eq  (str-multi-esc: tab+lf+cr is 3 chars) rt-ok  clear
+(\t\n\r) 0 get 9b eq  (str-multi-esc: first is tab) rt-ok  clear
+(\t\n\r) 1 get 10b eq  (str-multi-esc: second is lf) rt-ok  clear
+(\t\n\r) 2 get 13b eq  (str-multi-esc: third is cr) rt-ok  clear
+
+% ====================================================================
+% SECTION 5: Hex string syntax
+% ====================================================================
+
+% --- basic hex string ---
+<48656C6C6F> (Hello) eq  (hexstr: 48656C6C6F = Hello) rt-ok  clear
+
+% --- hex string with whitespace ---
+<48 65 6C 6C 6F> (Hello) eq  (hexstr-ws: whitespace ignored) rt-ok  clear
+
+% --- hex string mixed case ---
+<48656c6c6f> (Hello) eq  (hexstr-case: mixed case) rt-ok  clear
+
+% --- empty hex string ---
+<> length 0 eq  (hexstr-empty: empty hex string) rt-ok  clear
+<> () eq  (hexstr-empty: equals empty string) rt-ok  clear
+
+% --- hex string type ---
+<48> type /string-type eq  (hexstr-type: string type) rt-ok  clear
+
+% --- hex string single byte ---
+<41> (A) eq  (hexstr-single: 41 = A) rt-ok  clear
+<00> 0 get 0b eq  (hexstr-null: 00 = null byte) rt-ok  clear
+<FF> 0 get 255b eq  (hexstr-ff: FF = 255) rt-ok  clear
+
+% --- odd number of hex digits: token returns false (scanner syntax error) ---
+(<486>) token not  (hexstr-odd: odd digits -> token returns false) rt-ok  clear
+
+% ====================================================================
+% SECTION 6: Name syntax
+% ====================================================================
+
+% --- literal name ---
+/foo type /name-type eq  (name-lit: /foo is name type) rt-ok  clear
+/foo executable? not  (name-lit: /foo is literal) rt-ok  clear
+
+% --- executable name via backslash ---
+% \foo should be executable
+% We wrap in a proc and check the proc element
+{ \foo } 0 get executable?  (name-exe: backslash-foo is executable) rt-ok  clear
+
+% --- immediate literal lookup ---
+% //add should immediately resolve to the operator
+//add type /operator-type eq  (name-imm-lit: //add is operator) rt-ok  clear
+
+% --- name with hyphens ---
+/my-name type /name-type eq  (name-hyphen: /my-name is name) rt-ok  clear
+
+% --- name with digits ---
+/x1 type /name-type eq  (name-digit: /x1 is name) rt-ok  clear
+/abc123 type /name-type eq  (name-digit: /abc123 is name) rt-ok  clear
+
+% --- single char name ---
+/a type /name-type eq  (name-single: /a is name) rt-ok  clear
+
+% --- name with special chars ---
+/a-b_c type /name-type eq  (name-special: a-b_c is name) rt-ok  clear
+
+% --- name lookup via load ---
+/myvar 42 def
+/myvar load 42 eq  (name-load: defined name loads) rt-ok  clear
+
+% ====================================================================
+% SECTION 7: Array / procedure syntax
+% ====================================================================
+
+% --- literal array ---
+[1 2 3] type /array-type eq  (array-type: [1 2 3] is array) rt-ok  clear
+[1 2 3] length 3 eq  (array-len: [1 2 3] length 3) rt-ok  clear
+[1 2 3] 0 get 1 eq  (array-get: first = 1) rt-ok  clear
+[1 2 3] 1 get 2 eq  (array-get: second = 2) rt-ok  clear
+[1 2 3] 2 get 3 eq  (array-get: third = 3) rt-ok  clear
+
+% --- empty array ---
+[] type /array-type eq  (array-empty-type: [] is array) rt-ok  clear
+[] length 0 eq  (array-empty-len: [] length 0) rt-ok  clear
+
+% --- nested array ---
+[[1 2] [3 4]] length 2 eq  (array-nested-len: 2 sub-arrays) rt-ok  clear
+[[1 2] [3 4]] 0 get 0 get 1 eq  (array-nested-val: first first = 1) rt-ok  clear
+[[1 2] [3 4]] 1 get 1 get 4 eq  (array-nested-val: second second = 4) rt-ok  clear
+
+% --- procedure (executable array/packed) ---
+{ 1 2 add } type /packed-type eq  (proc-type: curly-brace is packed) rt-ok  clear
+{ 1 2 add } executable?  (proc-exec: curly-brace is executable) rt-ok  clear
+
+% --- procedure execution ---
+{ 1 2 add } exec 3 eq  (proc-exec-val: 1+2=3) rt-ok  clear
+
+% --- empty procedure ---
+{ } executable?  (proc-empty-exec: empty proc is executable) rt-ok  clear
+
+% --- nested procedures ---
+{ { 1 } { 2 } } executable?  (proc-nested: nested is executable) rt-ok  clear
+{ { 1 } exec } exec 1 eq  (proc-nested-exec: nested executes) rt-ok  clear
+
+% --- array with mixed types ---
+[1 3.14 (hello) true] length 4 eq  (array-mixed: 4 elements) rt-ok  clear
+[1 3.14 (hello) true] 0 get type /integer-type eq  (array-mixed: first is int) rt-ok  clear
+[1 3.14 (hello) true] 2 get type /string-type eq  (array-mixed: third is string) rt-ok  clear
+[1 3.14 (hello) true] 3 get type /boolean-type eq  (array-mixed: fourth is bool) rt-ok  clear
+
+% --- array is literal ---
+[1 2 3] executable? not  (array-literal: brackets is literal) rt-ok  clear
+
+% ====================================================================
+% SECTION 8: Dict syntax
+% ====================================================================
+
+% --- basic dict ---
+<< /a 1 /b 2 >> type /dict-type eq  (dict-type: angle-bracket is dict) rt-ok  clear
+<< /a 1 /b 2 >> length 2 eq  (dict-len: 2 entries) rt-ok  clear
+<< /a 1 /b 2 >> /a get 1 eq  (dict-get: /a = 1) rt-ok  clear
+<< /a 1 /b 2 >> /b get 2 eq  (dict-get: /b = 2) rt-ok  clear
+
+% --- empty dict ---
+<< >> type /dict-type eq  (dict-empty-type: empty dict is dict) rt-ok  clear
+<< >> length 0 eq  (dict-empty-len: 0 entries) rt-ok  clear
+
+% --- dict with nested array value ---
+<< /a [1 2 3] >> /a get length 3 eq  (dict-nested-array: array val length) rt-ok  clear
+
+% --- dict with nested dict value ---
+<< /a << /c 4 >> >> /a get /c get 4 eq  (dict-nested-dict: nested value) rt-ok  clear
+
+% --- dict with string value ---
+<< /name (hello) >> /name get (hello) eq  (dict-str-val: string value) rt-ok  clear
+
+% ====================================================================
+% SECTION 9: Token operator
+% ====================================================================
+
+% --- token on integer string ---
+(42) token  true eq  (token-int: returns true) rt-ok
+42 eq  (token-int: value is 42) rt-ok
+() eq  (token-int: remainder is empty) rt-ok  clear
+
+% --- token on real string ---
+(3.14) token  true eq  (token-real: returns true) rt-ok
+3.14 eq  (token-real: value is 3.14) rt-ok
+() eq  (token-real: remainder is empty) rt-ok  clear
+
+% --- token on name string ---
+(hello) token  true eq  (token-name: returns true) rt-ok
+type /name-type eq  (token-name: type is name) rt-ok
+pop  clear
+
+% --- token on empty string ---
+() token  false eq  (token-empty: returns false) rt-ok  clear
+
+% --- token with leading whitespace ---
+(  42) token  true eq  (token-ws: returns true) rt-ok
+42 eq  (token-ws: value is 42) rt-ok
+pop  clear
+
+% --- token with trailing content ---
+(42 99) token  true eq  (token-trail: returns true) rt-ok
+42 eq  (token-trail: first value is 42) rt-ok
+( 99) eq  (token-trail: remainder has 99) rt-ok  clear
+
+% --- token on string with literal name ---
+(/foo) token  true eq  (token-litname: returns true) rt-ok
+type /name-type eq  (token-litname: is name type) rt-ok
+pop  clear
+
+% --- token on boolean string ---
+% token scans "true" as an executable name, not as a boolean value
+(true) token  true eq  (token-bool-str: returns true) rt-ok
+type /name-type eq  (token-bool-str: true scanned as name) rt-ok
+pop  clear
+
+% --- token on radix string ---
+(16#FF#) token  true eq  (token-radix: returns true) rt-ok
+255 eq  (token-radix: value is 255) rt-ok
+pop  clear
+
+% ====================================================================
+% SECTION 10: Comment syntax
+% ====================================================================
+
+% this comment should be completely ignored
+42  % another comment
+42 eq  (comment: percent skips to EOL) rt-ok  clear
+
+% verify comments do not eat next line
+1
+% comment line
+2
+2 eq  (comment: next line unaffected-a) rt-ok
+1 eq  (comment: next line unaffected-b) rt-ok  clear
+
+% ====================================================================
+% SECTION 11: Scanner edge cases
+% ====================================================================
+
+% --- multiple consecutive whitespace ---
+1    2    3 count 3 eq  (ws: multiple spaces between tokens) rt-ok  clear
+
+% --- boolean literals ---
+true type /boolean-type eq  (bool-type: true is boolean) rt-ok  clear
+false type /boolean-type eq  (bool-type: false is boolean) rt-ok  clear
+true true eq  (bool-val: true) rt-ok  clear
+false false eq  (bool-val: false) rt-ok  clear
+
+% --- plus sign on integers ---
++42 42 eq  (int-plus: +42 = 42) rt-ok  clear
+
+% --- plus sign on reals ---
++3.14 3.14 eq  (real-plus: +3.14 = 3.14) rt-ok  clear
+
+% --- negative zero ---
+-0 0 eq  (int-neg-zero: -0 = 0) rt-ok  clear
+-0.0 0.0 eq  (real-neg-zero: -0.0 = 0.0) rt-ok  clear
+
+% --- multiple tokens on one line ---
+1 2 3 4 5 count 5 eq  (multi-tok: 5 items on one line) rt-ok  clear
+
+% --- string with all printable ASCII (except unescaped parens/backslash) ---
+( !"#$%&') length 8 eq  (str-print-a: first 8 printable) rt-ok  clear
+(*+,-./0123456789:;) length 18 eq  (str-print-b: symbols and digits) rt-ok  clear
+(ABCDEFGHIJKLMNOPQRSTUVWXYZ) length 26 eq  (str-print-c: uppercase) rt-ok  clear
+(abcdefghijklmnopqrstuvwxyz) length 26 eq  (str-print-d: lowercase) rt-ok  clear
+
+% --- mixed numeric types in expressions ---
+1.0 1.0 add 2.0 eq  (mixed: real + real = real) rt-ok  clear
+
+% --- radix edge cases ---
+2#1# 1 eq  (radix-edge: single digit binary) rt-ok  clear
+16#0# 0 eq  (radix-edge: zero hex) rt-ok  clear
+
+% --- consecutive string literals ---
+(abc) (def)
+(def) eq  (str-consec: second is def) rt-ok
+(abc) eq  (str-consec: first is abc) rt-ok  clear
+
+% --- integer arithmetic preserves type ---
+42i 1i add type /integer-type eq  (type-arith: int+int is int) rt-ok  clear
+42u 1u add type /uinteger-type eq  (type-arith: uint+uint is uint) rt-ok  clear
+
+% --- very long name ---
+/abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ type /name-type eq  (name-long: long name works) rt-ok  clear
+
+% --- error path: undefined name ---
+{ /undefined-scanner-test-name load } try /undefined eq  (err: undefined name) rt-ok  clear
+
+% --- error path: unclosed hex string via token ---
+% token returns false for a malformed <hex without closing >
+(<48) token not  (err: unclosed hex via token returns false) rt-ok  clear
+
+% --- null-type ---
+null type /null-type eq  (null-type: null is null-type) rt-ok  clear
+
+% --- mark-type ---
+mark type /mark-type eq  (mark-type: mark is mark-type) rt-ok  clear
+
+% --- string vertical tab escape ---
+(\v) 0 get 11b eq  (str-esc: VT = 11) rt-ok  clear
+
+% --- string escape-e (ESC) ---
+(\e) 0 get 27b eq  (str-esc: ESC = 27) rt-ok  clear
+
+% --- hex string with tabs and newlines as whitespace ---
+<48
+65
+6C	6C
+6F> (Hello) eq  (hexstr-ws-mixed: tabs and newlines) rt-ok  clear
+
+% --- single-element array ---
+[42] length 1 eq  (array-single: length 1) rt-ok  clear
+[42] 0 get 42 eq  (array-single: value is 42) rt-ok  clear
+
+% --- dict with boolean value ---
+<< /flag true >> /flag get true eq  (dict-bool-val: boolean value) rt-ok  clear
+
+% --- dict with real value ---
+<< /pi 3.14 >> /pi get 3.14 eq  (dict-real-val: real value) rt-ok  clear
+
+% --- token on double string ---
+(3.14d) token  true eq  (token-double: returns true) rt-ok
+type /double-type eq  (token-double: parsed as double) rt-ok
+pop  clear
+
+% --- token on string with suffix ---
+(42u) token  true eq  (token-suffix-u: returns true) rt-ok
+type /uinteger-type eq  (token-suffix-u: parsed as uint) rt-ok
+pop  clear
+
+% --- scanning multiple tokens from one string ---
+(1 2 3) token  true eq  (token-multi-1: first returns true) rt-ok
+1 eq  (token-multi-1: first value is 1) rt-ok
+token  true eq  (token-multi-2: second returns true) rt-ok
+2 eq  (token-multi-2: second value is 2) rt-ok
+token  true eq  (token-multi-3: third returns true) rt-ok
+3 eq  (token-multi-3: third value is 3) rt-ok
+token  false eq  (token-multi-end: end returns false) rt-ok  clear
+
+% --- procedure containing array literal ---
+{ [1 2 3] } exec length 3 eq  (proc-array: proc with array literal) rt-ok  clear
+
+% --- procedure containing dict literal ---
+{ << /a 1 >> } exec type /dict-type eq  (proc-dict: proc with dict literal) rt-ok  clear
+
+% --- procedure containing string ---
+{ (hello) } exec (hello) eq  (proc-string: proc with string literal) rt-ok  clear
+
+% ====================================================================
+% SECTION 11b: Runtime fallback for [...] / <<...>> with executable names
+% ====================================================================
+% When [...] or <<...>> inside a proc body contains executable names
+% (no / prefix), the scanner emits mark + elements + *-from-mark instead
+% of building a literal at scan time.  This allows runtime variable
+% references to work transparently.
+
+% --- literal-only: scan-time (regression) ---
+{ [1 2 3] } exec dup length 3 eq           (rt-fb: literal array ok) rt-ok
+0 get 1 eq                                 (rt-fb: literal array val) rt-ok clear
+{ << /a 1 /b 2 >> } exec /a get 1 eq       (rt-fb: literal dict ok) rt-ok clear
+
+% --- executable name in array: runtime fallback ---
+/myval 42 def
+{ [1 myval 3] } exec
+dup length 3 eq                             (rt-fb: array runtime len) rt-ok
+dup 0 get 1 eq                              (rt-fb: array runtime [0]) rt-ok
+dup 1 get 42 eq                             (rt-fb: array runtime [1]) rt-ok
+2 get 3 eq                                  (rt-fb: array runtime [2]) rt-ok
+
+% --- executable name in dict: runtime fallback ---
+/mykey /color def
+/mycolor (red) def
+{ << mykey mycolor >> } exec
+dup /color get (red) eq                     (rt-fb: dict runtime val) rt-ok
+type /dict-type eq                          (rt-fb: dict runtime type) rt-ok clear
+
+% --- mixed literal + executable in dict ---
+/x 99 def
+{ << /fixed 1 /dynamic x >> } exec
+dup /fixed get 1 eq                         (rt-fb: dict mixed fixed) rt-ok
+/dynamic get 99 eq                          (rt-fb: dict mixed dynamic) rt-ok clear
+
+% --- suffix #r with runtime fallback (read-only array) ---
+/v 7 def
+{ [v]#r } exec
+dup 0 get 7 eq                              (rt-fb: array #r value) rt-ok
+{ dup 0 42 put } try /read-only eq          (rt-fb: array #r readonly) rt-ok clear
+
+% --- suffix #r with runtime fallback (read-only dict) ---
+{ << /k v >>#r } exec
+dup /k get 7 eq                             (rt-fb: dict #r value) rt-ok
+type /dict-type eq                          (rt-fb: dict #r type) rt-ok clear
+
+% --- runtime fallback re-evaluates each call ---
+/counter 0 def
+/bump { /counter counter 1 add def counter } def
+{ [bump bump bump] } exec
+dup 0 get 1 eq                              (rt-fb: re-eval first) rt-ok
+dup 1 get 2 eq                              (rt-fb: re-eval second) rt-ok
+2 get 3 eq                                  (rt-fb: re-eval third) rt-ok
+
+% --- nested: array with exec names inside proc ---
+/a 10 def /b 20 def
+{ [a [1 2] b] } exec
+dup length 3 eq                             (rt-fb: nested len) rt-ok
+dup 0 get 10 eq                             (rt-fb: nested [0]) rt-ok
+dup 1 get [1 2] deep-eq                     (rt-fb: nested [1] literal) rt-ok
+2 get 20 eq                                 (rt-fb: nested [2]) rt-ok
+
+% ====================================================================
+% SECTION 12: Caret escape sequences \^X
+% ====================================================================
+
+(\^@) 0 get  0b eq  (caret-esc: ^@ = NUL) rt-ok  clear
+(\^A) 0 get  1b eq  (caret-esc: ^A = SOH) rt-ok  clear
+(\^G) 0 get  7b eq  (caret-esc: ^G = BEL) rt-ok  clear
+(\^M) 0 get  13b eq  (caret-esc: ^M = CR) rt-ok  clear
+(\^Z) 0 get  26b eq  (caret-esc: ^Z = SUB) rt-ok  clear
+(\^[) 0 get  27b eq  (caret-esc: ^[ = ESC) rt-ok  clear
+(\^?) 0 get  127b eq  (caret-esc: ^? = DEL) rt-ok  clear
+
+% ====================================================================
+% SECTION 13: Short octal and hex escapes
+% ====================================================================
+
+% 1-digit octal
+(\0) 0 get  0b eq  (oct-short: \\0 = 0) rt-ok  clear
+(\7) 0 get  7b eq  (oct-short: \\7 = 7) rt-ok  clear
+
+% 2-digit octal
+(\77) 0 get  63b eq  (oct-short: \\77 = 63) rt-ok  clear
+(\12) 0 get  10b eq  (oct-short: \\12 = 10 LF) rt-ok  clear
+
+% 1-digit hex
+(\xA) 0 get  10b eq  (hex-short: \\xA = 10) rt-ok  clear
+(\xF) 0 get  15b eq  (hex-short: \\xF = 15) rt-ok  clear
+
+% ====================================================================
+% SECTION 14: String suffix combinations
+% ====================================================================
+
+% #l explicit literal (redundant but valid)
+(hello)#l executable? not  (str-suffix-l: is literal) rt-ok  clear
+
+% #w explicit read-write (redundant but valid)
+(hello)#w length 5 eq  (str-suffix-w: is writable string) rt-ok  clear
+
+% combined: #=r (eq-string + readonly)
+(hello)#=r writable? not  (str-suffix-=r: eq readonly) rt-ok  clear
+
+% combined: #xr (executable + readonly) - extract from proc
+{ (hello)#xr } 0 get dup executable? exch writable? not and  (str-suffix-xr: exec+readonly) rt-ok  clear
+
+% combined: #lr (literal + readonly)
+(hello)#lr writable? not  (str-suffix-lr: literal readonly) rt-ok  clear
+
+% combined: #lw (literal + read-write, both default)
+(hello)#lw length 5 eq  (str-suffix-lw: literal writable) rt-ok  clear
+
+% ====================================================================
+% SECTION 15: Hex string suffixes
+% ====================================================================
+
+<41>#b type /byte-type eq  (hexstr-suffix-b: byte from hex) rt-ok  clear
+<41>#b 65b eq  (hexstr-suffix-b: value = 65) rt-ok  clear
+<4142>#r writable? not  (hexstr-suffix-r: readonly hex) rt-ok  clear
+{ <4142>#x } 0 get executable?  (hexstr-suffix-x: executable hex) rt-ok  clear
+
+% ====================================================================
+% SECTION 16: Array suffixes
+% ====================================================================
+
+[1 2 3]#r writable? not  (array-suffix-r: readonly array) rt-ok  clear
+[1 2 3]#r length 3 eq  (array-suffix-r: length 3) rt-ok  clear
+{ [1 2 3]#r 0 99 put } try  /read-only eq  (array-suffix-r: put errors) rt-ok  clear
+
+% #= eq-array (temporary storage)
+[1 2 3]#= length 3 eq  (array-suffix-=: eq-array length) rt-ok  clear
+
+% stale ]#= reference detection: second ]#= overwrites the first
+% Outer proc is }#a so the scanner does not reject the inner eqarrays at pack time.
+% exch brings the now-stale first eqarray back to top; `0 get` reads body[0] and errors.
+{ [1 2]#= [3 4]#= exch 0 get }#a try /unsupported eq  (array-suffix-=: stale eqarray errors cleanly) rt-ok clear
+% eqrefs ride inside packed arrays via PackedExt subcodes; fresh ref round-trips cleanly.
+{ [1 2]#= 1 packed 0 get length 2 eq }#a exec true eq  (array-suffix-=: eqarray packs and round-trips) rt-ok clear
+% single eqarray, consumed cleanly: no error
+{ [1 2 3]#= pop }#a try /no-error eq  (array-suffix-=: single eqarray use is clean) rt-ok clear
+
+% ====================================================================
+% SECTION 18: Dict suffixes
+% ====================================================================
+
+<< /a 1 >>#r writable? not  (dict-suffix-r: readonly dict) rt-ok  clear
+{ << /a 1 >>#r /b 2 put } try  /read-only eq  (dict-suffix-r: put errors) rt-ok  clear
+
+% #= eq-dict (temporary storage)
+<< /a 1 >>#= /a get 1 eq  (dict-suffix-=: eq-dict get) rt-ok  clear
+
+% stale <<>>#= reference detection: second <<>>#= overwrites the first
+% Outer proc is }#a so the scanner doesn't reject the inner eqdicts at pack time.
+% exch brings the now-stale first eqdict back to top; `/a get` reads it and errors.
+{ << /a 1 >>#= << /a 2 >>#= exch /a get }#a try /unsupported eq  (dict-suffix-=: stale eqdict errors cleanly) rt-ok clear
+% eqrefs ride inside packed arrays via PackedExt subcodes; fresh ref round-trips cleanly.
+{ << /a 1 >>#= 1 packed 0 get /a get 1 eq }#a exec true eq  (dict-suffix-=: eqdict packs and round-trips) rt-ok clear
+% single eqdict, consumed cleanly: no error
+{ << /a 1 >>#= pop }#a try /no-error eq  (dict-suffix-=: single eqdict use is clean) rt-ok clear
+
+% stale {{}}#= (eqset): second {{}}#= overwrites the first
+{ {{ /a }}#= {{ /b }}#= exch length }#a try /unsupported eq  (set-suffix-=: stale eqset errors cleanly) rt-ok clear
+% eqrefs ride inside packed arrays via PackedExt subcodes; fresh ref round-trips cleanly.
+{ {{ /a }}#= 1 packed 0 get length 1 eq }#a exec true eq  (set-suffix-=: eqset packs and round-trips) rt-ok clear
+
+% ====================================================================
+% SECTION 19: Immediate executable name lookup \\name
+% ====================================================================
+
+% \\add inside a proc resolves to the operator at scan time
+{ \\add } 0 get type /operator-type eq  (imm-exe: \\add resolves to operator) rt-ok  clear
+
+% ====================================================================
+% SECTION 20: Scanner error paths
+% ====================================================================
+
+% multi-char string with #b suffix -> syntax error via token
+((ab)#b) token not  (scan-err: multi-char #b fails) rt-ok  clear
+
+% invalid string suffix letter -> syntax error via token
+((hello)#z) token not  (scan-err: invalid suffix #z fails) rt-ok  clear
+
+% <!...> is now a syntax error (base-64 strings removed)
+(<!000!>) token not  (scan-err: <! is syntax error) rt-ok  clear
+
+% invalid hex char in hex string -> syntax error via token
+(<4G>) token not  (scan-err: hex invalid char fails) rt-ok  clear
+
+% unbalanced ) at top level -> syntax error via token
+(\)) token not  (scan-err: unbalanced paren fails) rt-ok  clear
+
+% unbalanced } at top level -> syntax error via token
+(}) token not  (scan-err: unbalanced brace fails) rt-ok  clear
+
+% ====================================================================
+% SECTION 21: Negative with unsigned suffix -> name
+% ====================================================================
+
+(-42u) token pop type /name-type eq  (neg-suffix: -42u is name) rt-ok  clear
+(-1b) token pop type /name-type eq  (neg-suffix: -1b is name) rt-ok  clear
+
+% digit after suffix -> name
+(42u3) token pop type /name-type eq  (suffix-digit: 42u3 is name) rt-ok  clear
+
+% ====================================================================
+% SECTION 22: Radix with i suffix
+% ====================================================================
+
+16#FF#i type /integer-type eq  (radix-suffix-i: type is integer) rt-ok  clear
+16#FF#i 255 eq  (radix-suffix-i: value = 255) rt-ok  clear
+
+% ====================================================================
+% SECTION 23: Binary token basics via string scanning
+% ====================================================================
+
+% Header-only binary tokens (no payload bytes):
+% 0xAB = True, 0xAA = False, 0xAC = Mark, 0xAD = Null
+% 0xCF = Integer_0, 0xD0 = Integer_1
+
+% Binary token 0xAB = Boolean true
+1 string dup 0 16#AB#b put
+token pop true eq                  (btok: 0xAB = true) rt-ok clear
+
+% Binary token 0xAA = Boolean false
+1 string dup 0 16#AA#b put
+token pop false eq                 (btok: 0xAA = false) rt-ok clear
+
+% Binary token 0xAD = Null
+1 string dup 0 16#AD#b put
+token pop null eq                  (btok: 0xAD = null) rt-ok clear
+
+% Binary token 0xAC = Mark
+1 string dup 0 16#AC#b put
+token pop type /mark-type eq       (btok: 0xAC = mark) rt-ok clear
+
+% Binary token 0xCF = Integer_0
+1 string dup 0 16#CF#b put
+token pop 0 eq                     (btok: 0xCF = integer 0) rt-ok clear
+
+% Binary token 0xD0 = Integer_1
+1 string dup 0 16#D0#b put
+token pop 1 eq                     (btok: 0xD0 = integer 1) rt-ok clear
+
+% ====================================================================
+% SECTION 24: Procedure suffixes (scan_proc_suffix)
+% ====================================================================
+
+% --- #p packed (default) ---
+{ 1 2 add }#p type /packed-type eq  (proc-suffix-p: packed type) rt-ok clear
+{ 1 2 add }#p exec 3 eq  (proc-suffix-p: executes correctly) rt-ok clear
+
+% --- #a array ---
+{ 1 2 add }#a type /array-type eq  (proc-suffix-a: array type) rt-ok clear
+{ 1 2 add }#a exec 3 eq  (proc-suffix-a: executes correctly) rt-ok clear
+
+% --- #e early binding ---
+{ 1 2 add }#e exec 3 eq  (proc-suffix-e: early binding executes) rt-ok clear
+
+% --- #l late binding (default) ---
+{ 1 2 add }#l exec 3 eq  (proc-suffix-l: late binding executes) rt-ok clear
+
+% --- #r readonly array ---
+{ 1 2 add }#ar writable? not  (proc-suffix-ar: array readonly) rt-ok clear
+{ 1 2 add }#ar exec 3 eq  (proc-suffix-ar: readonly executes) rt-ok clear
+
+% --- #w explicit writable array ---
+{ 1 2 add }#aw writable?  (proc-suffix-aw: array writable) rt-ok clear
+
+% --- combined: #=p eq-proc packed ---
+{ 42 }#=p exec 42 eq  (proc-suffix-=p: eq packed exec) rt-ok clear
+
+% --- combined: #=a eq-proc array ---
+{ 42 }#=a exec 42 eq  (proc-suffix-=a: eq array exec) rt-ok clear
+
+% --- combined: #aer early-binding readonly array ---
+{ 1 2 add }#aer exec 3 eq  (proc-suffix-aer: combined executes) rt-ok clear
+{ 1 2 add }#aer writable? not  (proc-suffix-aer: is readonly) rt-ok clear
+
+% --- combined: #pel packed early late (last wins) ---
+{ 42 }#pe exec 42 eq  (proc-suffix-pe: packed early binding) rt-ok clear
+
+% --- error: #pw packed + writable is unsupported ---
+{ ({ 1 }#pw) token pop pop } try /unsupported eq  (proc-suffix-pw: packed writable errors) rt-ok clear
+
+% --- error: invalid suffix letter ---
+({ 1 }#z) token not  (proc-suffix-err: invalid suffix #z) rt-ok clear
+
+% --- error: suffix not followed by terminator ---
+({ 1 }#pfoo) token not  (proc-suffix-err: suffix not terminated) rt-ok clear
+
+% --- stale }#= reference: two live eqprocs, first becomes stale when second is created ---
+% Mixed layouts (}#=a then }#=) were the original fuzz-UB case; both-packed and both-array
+% cases also become stale (silent corruption becomes a clean error).  The outer proc is
+% }#a (array form) so the inner eqrefs are not rejected at pack time (reject-at-pack on a
+% normal packed body would fire at scan time and mask this test).
+{ { 42 }#=a { 7 }#= print-stack }#a try /unsupported eq  (proc-eqref: mixed array then packed stale) rt-ok clear
+{ { 42 }#= { 7 }#= print-stack }#a try /unsupported eq  (proc-eqref: two packed }#= stale) rt-ok clear
+{ { 42 }#=a { 7 }#=a print-stack }#a try /unsupported eq  (proc-eqref: two array }#=a stale) rt-ok clear
+
+% --- fresh }#= reference: exec the proc before creating the next one, no staleness ---
+{ 1 2 add }#= exec 3 eq  (proc-eqref: exec then discard cleanly) rt-ok clear
+{ 4 5 add }#= exec 9 eq  (proc-eqref: second }#= after first consumed) rt-ok clear
+
+% --- eqproc rides inside packed arrays via PackedExt subcodes ---
+% PackedExt carries m_generation + flavor subcode; length is recovered from Trix state
+% on decode.  Fresh refs round-trip cleanly; stale refs raise on access as usual.
+{ { 1 }#= 1 packed 0 get exec 1 eq }#a exec true eq  (proc-eqref: eqproc packs and round-trips) rt-ok clear
+
+% --- no suffix (default packed) ---
+{ 99 } type /packed-type eq  (proc-no-suffix: default is packed) rt-ok clear
+
+% ====================================================================
+% SECTION 25: Local variable bindings (scan_local_bindings)
+% ====================================================================
+
+% --- basic local binding ---
+{ |x| x } 42 exch exec 42 eq  (locals: single variable) rt-ok clear
+
+% --- multiple locals ---
+{ |a b| a b add } 10 20 rot exec 30 eq  (locals: two variables) rt-ok clear
+
+% --- locals with body computation ---
+{ |x y| x y mul x y add add } 3 4 rot exec 19 eq  (locals: mul+add body) rt-ok clear
+
+% --- empty body with locals ---
+{ |x| } 42 exch exec count 0 eq  (locals: empty body) rt-ok clear
+
+% --- locals don't leak to outer scope ---
+/scan-local-test-var 99 def
+{ |scan-local-test-var| scan-local-test-var } 42 exch exec 42 eq  (locals: shadows outer) rt-ok
+scan-local-test-var 99 eq  (locals: outer preserved) rt-ok clear
+
+% --- error: unterminated locals ---
+({ |a b ) token not  (locals-err: unterminated binding) rt-ok clear
+
+% --- error: empty binding ---
+({ || body ) token not  (locals-err: empty binding) rt-ok clear
+
+% --- |locals|#N capacity suffix: allows working vars in frame dict ---
+{ |a b|#8 /x 1 local-def /y 2 local-def a b x y add add add } 10 20 rot exec 33 eq
+  (locals #N: capacity allows working vars) rt-ok clear
+
+% --- |locals|#N: N==K is equivalent to plain |locals| (regression) ---
+{ |a b|#2 a b add } 10 20 rot exec 30 eq  (locals #N: N==K regression) rt-ok clear
+
+% --- |locals|#N: large-but-legal N works ---
+{ |a|#1000 /z 42 local-def a z add } 5 exch exec 47 eq
+  (locals #N: large N works) rt-ok clear
+
+% --- |locals|#N: boundary N=65535 parses ---
+% The scanner+opcode accept the maximum 65535-slot capacity; what
+% happens at runtime depends on VM size: small VMs (<= 1 MB) hit
+% /vm-full while allocating the dict, larger VMs (e.g. multi-test
+% runners with --vm-size=4M) succeed.  Either outcome proves the
+% parse accepted the suffix, which is what this test exists to
+% verify; reject only /undefined / /type-check / etc.
+{ { |a|#65535 a } 7 exch exec } try
+dup /vm-full eq exch /no-error eq or
+  (locals #N: N=65535 accepted by scanner+opcode) rt-ok clear
+
+% --- |locals|#N: N<K rejected at scan time ---
+({ |a b|#1 body }) token not  (locals-err #N: N<K rejected) rt-ok clear
+
+% --- |locals|#N: N>65535 raises limit-check at scan time ---
+{ ({ |a|#65536 body }) token } try /limit-check eq
+  (locals-err #N: N>65535 limit-check) rt-ok clear
+
+% --- |locals|#N: '#' not followed by digit rejected ---
+({ |a|# body }) token not  (locals-err #N: # without digits rejected) rt-ok clear
+
+% --- |locals|#N: whitespace between | and # disables suffix (body-relative) ---
+% {|a| #8 body} should NOT parse the #8 as capacity suffix; it's body content.
+% With K=1 and no working-var defs, running the body treats 8 as a literal value.
+{ |a|  42 } 7 exch exec 42 eq  (locals #N: whitespace between | and # body) rt-ok clear
+
+% --- |locals|#N: nested procs each have independent capacity ---
+{ |a|#4
+  /t1 1 local-def
+  { |b|#6 /u1 10 local-def /u2 20 local-def b u1 u2 add add } 5 exch exec
+  a t1 add add
+} 3 exch exec 39 eq  (locals #N: nested independent capacity) rt-ok clear
+
+% --- |locals|#N: recursion, capacity applies per-call ---
+% Each recursive call gets its own /inner-val working var in its frame dict.
+% 3 test-recur = 30 + 20 + 10 + 0 = 60 (n scaled to avoid ambiguity with arg).
+save
+/locals-test-recur { |n|#4
+  /inner-val n 10 mul local-def
+  n 0 le
+  { 0 }
+  { n 1 sub locals-test-recur inner-val add }
+  if-else
+} def
+3 locals-test-recur 60 eq  (locals #N: recursion per-call capacity) rt-ok
+restore clear
+
+% --- |locals|: line comment between `{` and pipe-header is transparent ---
+{
+    % stack effect: a b -- a+b
+    |a b| a b add
+} 10 20 rot exec 30 eq  (locals: line comment before pipe-header) rt-ok clear
+
+% --- |locals|#N: line comment before pipe-header with capacity suffix ---
+{
+    % stack effect: a b -- a+b+working
+    |a b|#6 /w 100 local-def a b add w add
+} 10 20 rot exec 130 eq  (locals #N: line comment before pipe-header) rt-ok clear
+
+% --- |locals|: block comment between `{` and pipe-header is transparent ---
+{ %{ this is a block comment %} |a| a 1 add } 7 exch exec 8 eq
+  (locals: block comment before pipe-header) rt-ok clear
+
+% --- |locals|: multiple comments and whitespace interleaved ---
+{
+    % first comment
+    %{ block %}
+    % second comment
+    |x|#4 /y 2 local-def x y mul
+} 21 exch exec 42 eq  (locals: multi-comment before pipe-header) rt-ok clear
+
+% --- |locals|: line comment BETWEEN names in pipe-header ---
+{ |a  % split across names
+  b| a b add } 10 20 rot exec 30 eq
+  (locals: line comment between pipe-header names) rt-ok clear
+
+% --- |locals|: block comment between names in pipe-header ---
+{ |a %{ inline %} b| a b add } 10 20 rot exec 30 eq
+  (locals: block comment between pipe-header names) rt-ok clear
+
+% --- |locals|: multi-line comments interleaved with names ---
+3 4 5 { |a
+  % comment 1
+  b
+  %{ block %}
+  c| a b mul c add } exec 17 eq
+  (locals: multi-comment between pipe-header names) rt-ok clear
+
+% --- by-design: whitespace/comment between closing `|` and `#N` disables suffix ---
+% The #N capacity suffix must be contiguous with the closing `|`, matching the
+% numeric-suffix rule (42d, {...}#p, [...]#r).  A comment or whitespace between
+% them makes `#N` body content, not a suffix (same rule as line 1032 above).
+{ |a| % disables suffix
+  42 } 7 exch exec 42 eq
+  (locals #N: comment disables suffix -- body sees literal) rt-ok clear
+
+% --- ||#N: empty-header scratch frame dict, happy path ---
+% No stack args consumed; body uses /foo def to populate the frame dict of
+% capacity N.  Bindings are torn down at end-locals like a named |locals| form.
+{ ||#4 /x 10 local-def /y 32 local-def x y add } exec 42 eq
+  (locals ||#N: empty header with /def scratch) rt-ok clear
+
+% --- ||#N: nested scopes are independent ---
+{ ||#3 /a 1 local-def { ||#3 /a 2 local-def a } exec a add } exec 3 eq
+  (locals ||#N: nested empty headers have separate frame dicts) rt-ok clear
+
+% --- ||#N: bindings don't leak to caller ---
+{ ||#2 /scan-empty-locals-probe 99 local-def } exec
+{ scan-empty-locals-probe } try /undefined eq
+  (locals ||#N: def inside empty-header scope does not leak) rt-ok clear
+
+% --- ||#N error: || without #N still rejected (no useless empty-dict form) ---
+({ || body }) token not  (locals-err ||#N: bare || without #N rejected) rt-ok clear
+
+% --- ||#N error: ||#0 rejected (zero-capacity frame dict is useless) ---
+({ ||#0 body }) token not  (locals-err ||#N: ||#0 zero capacity rejected) rt-ok clear
+
+% --- ||#N error: dict-full when def exceeds capacity ---
+{ { ||#2 /x 1 local-def /y 2 local-def /z 3 local-def } exec } try /dict-full eq
+  (locals-err ||#N: def past capacity raises dict-full) rt-ok clear
+
+% --- |locals|#+N: relative-form, K=2 + N=3 yields capacity 5 ---
+{ |a b|#+3 /x 1 local-def /y 2 local-def /z 3 local-def a b x y z add add add add } 10 20 rot exec 36 eq
+  (locals #+N: K + N capacity) rt-ok clear
+
+% --- |locals|#+0: relative form with zero extras matches plain |locals| ---
+{ |a b|#+0 a b add } 10 20 rot exec 30 eq
+  (locals #+N: #+0 same as no suffix) rt-ok clear
+
+% --- ||#+N: relative empty-header form ---
+{ ||#+5 /x 10 local-def /y 32 local-def x y add } exec 42 eq
+  (locals ||#+N: empty header relative) rt-ok clear
+
+% --- mixed #N (absolute) and #+N (relative) in adjacent procs both compile and run ---
+{ |a|#3 /x 100 local-def a x add } 7 exch exec
+{ |a|#+2 /x 100 local-def a x add } 7 exch exec
+add 214 eq
+  (locals: mixed #N and #+N forms in one file) rt-ok clear
+
+% --- |locals|#+N: large relative N works ---
+{ |a|#+999 /z 42 local-def a z add } 5 exch exec 47 eq
+  (locals #+N: large N works) rt-ok clear
+
+% --- |locals|#+N: dict-full when local-defs exceed K + N ---
+{ { |a|#+1 /x 1 local-def /y 2 local-def } 7 exch exec } try /dict-full eq
+  (locals-err #+N: def past K+N raises dict-full) rt-ok clear
+
+% --- |locals|#+N: '#+' not followed by digit rejected ---
+({ |a|#+ body }) token not  (locals-err #+N: #+ without digits rejected) rt-ok clear
+
+% --- ||#+N error: ||#+0 rejected (zero-capacity frame dict is useless) ---
+({ ||#+0 body }) token not  (locals-err ||#+N: ||#+0 zero capacity rejected) rt-ok clear
+
+% --- |locals|#+N: nested procs each get their own K + N capacity ---
+{ |a|#+3
+  /t1 1 local-def
+  { |b|#+4 /u1 10 local-def /u2 20 local-def b u1 u2 add add } 5 exch exec
+  a t1 add add
+} 3 exch exec 39 eq  (locals #+N: nested independent capacity) rt-ok clear
+
+% --- |locals|#+N: by-design whitespace between `|` and `#+` disables suffix ---
+% Same contiguity rule as #N: a comment or whitespace after `|` makes `#+8` body content.
+{ |a| % disables suffix
+  42 } 7 exch exec 42 eq
+  (locals #+N: comment disables suffix -- body sees literal) rt-ok clear
+
+% ====================================================================
+% SECTION 26: Whitespace variety
+% ====================================================================
+
+% --- tab separates tokens ---
+(1\t2) token pop 1 eq  (ws-tab: tab before token) rt-ok clear
+
+% --- form feed is whitespace ---
+(1\f2) token pop 1 eq  (ws-ff: form feed before token) rt-ok clear
+
+% --- CR is whitespace (via string with CR byte) ---
+(1\r2) token pop 1 eq  (ws-cr: CR before token) rt-ok clear
+
+% --- CRLF is whitespace ---
+(1\r\n2) token pop 1 eq  (ws-crlf: CRLF before token) rt-ok clear
+
+% --- multiple whitespace types mixed ---
+(1 \t \n 2) token pop pop token pop 2 eq  (ws-mixed: mixed whitespace) rt-ok clear
+
+% ====================================================================
+% SECTION 27: Line comment edge cases
+% ====================================================================
+
+% --- comment-only string: token returns false ---
+(% just a comment\n) token not  (comment: comment-only returns false) rt-ok clear
+
+% --- comment followed by token ---
+(% comment\n42) token pop 42 eq  (comment: token after comment) rt-ok clear
+
+% --- multiple consecutive comment lines ---
+(% first\n% second\n42) token pop 42 eq  (comment: after two comment lines) rt-ok clear
+
+% --- comment at very end of string (no terminator) ---
+(42 % trailing) token pop 42 eq  (comment: trailing comment) rt-ok clear
+
+% --- comment with CR terminator ---
+(% comment\r42) token pop 42 eq  (comment: CR terminated) rt-ok clear
+
+% --- comment with CRLF terminator ---
+(% comment\r\n42) token pop 42 eq  (comment: CRLF terminated) rt-ok clear
+
+% ====================================================================
+% SECTION 28: Name edge cases
+% ====================================================================
+
+% --- bare / is the literal name '/' ---
+(/) token pop /slash-name exch def
+slash-name type /name-type eq  (name-bare: / is name type) rt-ok clear
+
+% --- bare \ is the executable name '\' ---
+% can't easily test in isolation, but token should succeed
+(\\) token  true eq  (name-bare-bs: backslash token succeeds) rt-ok
+    pop pop clear
+
+% --- very long name near limit ---
+% 127 chars should be fine
+/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa type /name-type eq  (name-max: 127-char name) rt-ok clear
+
+% --- name with all regular characters ---
+/abc-def_ghi~mnop type /name-type eq  (name-chars: hyphens underscores tildes) rt-ok clear
+
+% ====================================================================
+% SECTION 29: scan_regular_chars via number/name boundary
+% ====================================================================
+
+% --- token immediately at buffer boundary (stress scan_regular_chars) ---
+% a regular-char token followed immediately by delimiter
+(42(str)) token pop 42 eq  (scan-reg: number then paren) rt-ok clear
+(foo(str)) token pop type /name-type eq  (scan-reg: name then paren) rt-ok clear
+(42[1 2]) token pop 42 eq  (scan-reg: number then bracket) rt-ok clear
+(name{proc}) token pop type /name-type eq  (scan-reg: name then brace) rt-ok clear
+
+% --- regular chars stopped by whitespace ---
+(abc def) token pop pop (abc) token pop type /name-type eq  (scan-reg: ws stops name) rt-ok clear
+
+% ====================================================================
+% SECTION 30: fixup_cr via line-number tracking
+% ====================================================================
+
+% --- Verify CR in various contexts doesn't corrupt scanning ---
+% String with CR between tokens: both tokens parse correctly
+(1\r2) token pop exch token pop exch pop
+2 eq  (fixup-cr: second token after CR) rt-ok
+1 eq  (fixup-cr: first token before CR) rt-ok clear
+
+% --- CRLF between tokens ---
+(1\r\n2) token pop exch token pop exch pop
+2 eq  (fixup-cr: second token after CRLF) rt-ok
+1 eq  (fixup-cr: first token before CRLF) rt-ok clear
+
+% --- Multiple CRs ---
+(1\r\r2) token pop exch token pop exch pop
+2 eq  (fixup-cr: token after double CR) rt-ok
+1 eq  (fixup-cr: token before double CR) rt-ok clear
+
+% ====================================================================
+% SECTION 31: Proc suffix error paths
+% ====================================================================
+
+% --- unmatched } at nesting 0 ---
+(}) token not  (proc-err: unbalanced close brace) rt-ok clear
+
+% --- unmatched ) at top level ---
+(\)) token not  (proc-err: unbalanced close paren) rt-ok clear
+
+% --- unmatched > at top level ---
+(>) token not  (proc-err: unbalanced close angle) rt-ok clear
+
+% --- nested proc execution ---
+{ { { 42 } exec } exec } exec 42 eq  (proc-nest: three-level nesting) rt-ok clear
+
+% --- EOF inside unclosed '{' : token returns false rather than hanging ---
+({ body) token not  (proc-err: EOF inside unclosed brace) rt-ok clear
+
+% --- EOF inside nested unclosed braces : same ---
+({ { 42 } def) token not  (proc-err: EOF inside nested unclosed brace) rt-ok clear
+
+% --- EOF inside triple-nested unclosed : same ---
+({ /a { /b { /c ) token not  (proc-err: EOF inside triple-nested unclosed) rt-ok clear
+
+% --- proc with all element types ---
+{ 1 3.14 (hello) true /name [1] << /a 2 >> } type /packed-type eq
+    (proc-mixed: mixed element proc) rt-ok clear
+
+% ====================================================================
+% SECTION 32: Raw string in scanner context
+% ====================================================================
+
+% --- raw string preserves backslash ---
+<(hello\nworld)> length 12 eq  (raw-str: backslash preserved) rt-ok clear
+<(hello\nworld)> 5 get 92b eq  (raw-str: byte 5 is backslash) rt-ok clear
+
+% --- raw string with nested parens ---
+<(a(b)c)> (a(b)c) eq  (raw-str: nested parens) rt-ok clear
+
+% --- empty raw string ---
+<()> length 0 eq  (raw-str: empty) rt-ok clear
+
+% --- raw string suffix ---
+<(A)>#b type /byte-type eq  (raw-str-suffix: #b byte type) rt-ok clear
+<(AB)>#r writable? not  (raw-str-suffix: #r readonly) rt-ok clear
+
+% ====================================================================
+% SECTION: Prefix literal parsing (0x, 0o, 0b)
+% ====================================================================
+
+% --- hex prefix: happy path ---
+0xFF 255 eq  (prefix-hex: 0xFF = 255) rt-ok  clear
+0xff 255 eq  (prefix-hex: 0xff lowercase) rt-ok  clear
+0x0 0 eq  (prefix-hex: 0x0 = 0) rt-ok  clear
+0x1 1 eq  (prefix-hex: 0x1 = 1) rt-ok  clear
+0xA 10 eq  (prefix-hex: 0xA = 10) rt-ok  clear
+0xa 10 eq  (prefix-hex: 0xa lowercase) rt-ok  clear
+0xFFFF 65535 eq  (prefix-hex: 0xFFFF = 65535) rt-ok  clear
+0x10 16 eq  (prefix-hex: 0x10 = 16) rt-ok  clear
+0x7FFFFFFF 2147483647 eq  (prefix-hex: 0x7FFFFFFF = INT_MAX) rt-ok  clear
+
+% --- hex prefix: default type is integer ---
+0xFF type /integer-type eq  (prefix-hex-type: 0xFF is integer) rt-ok  clear
+0x0 type /integer-type eq  (prefix-hex-type: 0x0 is integer) rt-ok  clear
+
+% --- hex prefix: case insensitive prefix ---
+0XFF 255 eq  (prefix-hex: 0XFF uppercase X) rt-ok  clear
+0Xff 255 eq  (prefix-hex: 0Xff mixed case) rt-ok  clear
+
+% --- hex prefix with # suffix ---
+0xFF#b 255b eq  (prefix-hex-suffix: 0xFF#b value) rt-ok  clear
+0xFF#b type /byte-type eq  (prefix-hex-suffix: 0xFF#b type) rt-ok  clear
+0xFFFF#u 65535u eq  (prefix-hex-suffix: 0xFFFF#u value) rt-ok  clear
+0xFFFF#u type /uinteger-type eq  (prefix-hex-suffix: 0xFFFF#u type) rt-ok  clear
+0xFF#l type /long-type eq  (prefix-hex-suffix: 0xFF#l type) rt-ok  clear
+0xFF#ul type /ulong-type eq  (prefix-hex-suffix: 0xFF#ul type) rt-ok  clear
+0xFF#a type /address-type eq  (prefix-hex-suffix: 0xFF#a type) rt-ok  clear
+0xFF#i type /integer-type eq  (prefix-hex-suffix: 0xFF#i type) rt-ok  clear
+
+% --- hex prefix: suffix letters WITHOUT # are digits ---
+0xFFb 16#FFB# eq  (prefix-hex-nosep: 0xFFb = hex FFB) rt-ok  clear
+0xFFa 16#FFA# eq  (prefix-hex-nosep: 0xFFa = hex FFA) rt-ok  clear
+0xABd 16#ABD# eq  (prefix-hex-nosep: 0xABd = hex ABD) rt-ok  clear
+
+% --- octal prefix: happy path ---
+0o77 63 eq  (prefix-oct: 0o77 = 63) rt-ok  clear
+0o0 0 eq  (prefix-oct: 0o0 = 0) rt-ok  clear
+0o1 1 eq  (prefix-oct: 0o1 = 1) rt-ok  clear
+0o377 255 eq  (prefix-oct: 0o377 = 255) rt-ok  clear
+0o10 8 eq  (prefix-oct: 0o10 = 8) rt-ok  clear
+0o7777 4095 eq  (prefix-oct: 0o7777 = 4095) rt-ok  clear
+
+% --- octal prefix: default type is integer ---
+0o77 type /integer-type eq  (prefix-oct-type: 0o77 is integer) rt-ok  clear
+
+% --- octal prefix: case insensitive prefix ---
+0O77 63 eq  (prefix-oct: 0O77 uppercase O) rt-ok  clear
+
+% --- octal prefix with # suffix ---
+0o377#b 255b eq  (prefix-oct-suffix: 0o377#b value) rt-ok  clear
+0o377#b type /byte-type eq  (prefix-oct-suffix: 0o377#b type) rt-ok  clear
+0o77#u type /uinteger-type eq  (prefix-oct-suffix: 0o77#u type) rt-ok  clear
+0o77#l type /long-type eq  (prefix-oct-suffix: 0o77#l type) rt-ok  clear
+0o77#ul type /ulong-type eq  (prefix-oct-suffix: 0o77#ul type) rt-ok  clear
+0o77#a type /address-type eq  (prefix-oct-suffix: 0o77#a type) rt-ok  clear
+
+% --- binary prefix: happy path ---
+0b1010 10 eq  (prefix-bin: 0b1010 = 10) rt-ok  clear
+0b0 0 eq  (prefix-bin: 0b0 = 0) rt-ok  clear
+0b1 1 eq  (prefix-bin: 0b1 = 1) rt-ok  clear
+0b11111111 255 eq  (prefix-bin: 0b11111111 = 255) rt-ok  clear
+0b100 4 eq  (prefix-bin: 0b100 = 4) rt-ok  clear
+0b0000 0 eq  (prefix-bin: 0b0000 leading zeros) rt-ok  clear
+
+% --- binary prefix: default type is integer ---
+0b1010 type /integer-type eq  (prefix-bin-type: 0b1010 is integer) rt-ok  clear
+
+% --- binary prefix: case insensitive prefix ---
+0B1010 10 eq  (prefix-bin: 0B1010 uppercase B) rt-ok  clear
+
+% --- binary prefix with # suffix ---
+0b11111111#b 255b eq  (prefix-bin-suffix: 0b11111111#b value) rt-ok  clear
+0b11111111#b type /byte-type eq  (prefix-bin-suffix: 0b11111111#b type) rt-ok  clear
+0b1010#u type /uinteger-type eq  (prefix-bin-suffix: 0b1010#u type) rt-ok  clear
+0b1010#l type /long-type eq  (prefix-bin-suffix: 0b1010#l type) rt-ok  clear
+0b1010#ul type /ulong-type eq  (prefix-bin-suffix: 0b1010#ul type) rt-ok  clear
+0b1010#a type /address-type eq  (prefix-bin-suffix: 0b1010#a type) rt-ok  clear
+
+% --- 0b disambiguation: bare 0b is byte zero, not binary prefix ---
+0b 0b eq  (prefix-0b-disambig: 0b = byte zero) rt-ok  clear
+0b type /byte-type eq  (prefix-0b-disambig: 0b is byte type) rt-ok  clear
+
+% --- sad: prefix without digits is a name ---
+(0x) token pop type /name-type eq  (prefix-sad: 0x alone is name) rt-ok  clear
+(0o) token pop type /name-type eq  (prefix-sad: 0o alone is name) rt-ok  clear
+
+% --- sad: invalid digits for base ---
+(0o8) token pop type /name-type eq  (prefix-sad: 0o8 invalid octal) rt-ok  clear
+(0o9) token pop type /name-type eq  (prefix-sad: 0o9 invalid octal) rt-ok  clear
+(0b2) token pop type /name-type eq  (prefix-sad: 0b2 invalid binary) rt-ok  clear
+(0b9) token pop type /name-type eq  (prefix-sad: 0b9 invalid binary) rt-ok  clear
+(0xGG) token pop type /name-type eq  (prefix-sad: 0xGG invalid hex) rt-ok  clear
+
+% --- sad: sign not supported with prefix ---
+(-0xFF) token pop type /name-type eq  (prefix-sad: -0xFF is name) rt-ok  clear
+(+0xFF) token pop type /name-type eq  (prefix-sad: +0xFF is name) rt-ok  clear
+
+% --- stress: large values ---
+0x7FFFFFFF 2147483647 eq  (prefix-stress: hex INT_MAX) rt-ok  clear
+0xFFFFFFFF#u 4294967295u eq  (prefix-stress: hex UINT_MAX) rt-ok  clear
+0xFFFFFFFF#u type /uinteger-type eq  (prefix-stress: hex UINT_MAX type) rt-ok  clear
+0b01111111111111111111111111111111 2147483647 eq  (prefix-stress: bin INT_MAX) rt-ok  clear
+0o17777777777 2147483647 eq  (prefix-stress: oct INT_MAX) rt-ok  clear
+
+% --- stress: long values with suffix ---
+0xFFFFFFFFFFFFFFFF#ul type /ulong-type eq  (prefix-stress: hex ULONG_MAX type) rt-ok  clear
+0x7FFFFFFFFFFFFFFF#l type /long-type eq  (prefix-stress: hex LONG_MAX type) rt-ok  clear
+
+% --- stress: overflow with suffix ---
+<< /numerical-overflow { clear true } >> { (0x100#b) token pop pop } try-catch
+(prefix-stress: 0x100#b overflows byte) rt-ok  clear
+
+<< /numerical-overflow { clear true } >> { (0b100000000#b) token pop pop } try-catch
+(prefix-stress: 0b100000000#b overflows byte) rt-ok  clear
+
+% --- stress: overflow at sign-bit boundary ---
+<< /numerical-overflow { clear true } >> { (0x80000000) token pop pop } try-catch
+(prefix-stress: 0x80000000 overflows signed int) rt-ok  clear
+
+<< /numerical-overflow { clear true } >> { (0o20000000000) token pop pop } try-catch
+(prefix-stress: 0o20000000000 overflows signed int) rt-ok  clear
+
+% --- stress: overflow that skips bit 31 entirely ---
+<< /numerical-overflow { clear true } >> { (0x100000000) token pop pop } try-catch
+(prefix-stress: 0x100000000 skip-bit31 overflow) rt-ok  clear
+
+<< /numerical-overflow { clear true } >> { (0x200000000) token pop pop } try-catch
+(prefix-stress: 0x200000000 skip-bit31 overflow) rt-ok  clear
+
+<< /numerical-overflow { clear true } >> { (0x110000000) token pop pop } try-catch
+(prefix-stress: 0x110000000 skip-bit31 overflow) rt-ok  clear
+
+% --- fuzz: mixed case hex digits ---
+0xAbCdEf 16#ABCDEF# eq  (prefix-fuzz: 0xAbCdEf mixed case) rt-ok  clear
+0xaBcDeF 16#ABCDEF# eq  (prefix-fuzz: 0xaBcDeF mixed case) rt-ok  clear
+
+% --- fuzz: leading zeros ---
+0x00FF 255 eq  (prefix-fuzz: 0x00FF leading zeros) rt-ok  clear
+0o007 7 eq  (prefix-fuzz: 0o007 leading zeros) rt-ok  clear
+0b0001 1 eq  (prefix-fuzz: 0b0001 leading zeros) rt-ok  clear
+
+% --- fuzz: single digit ---
+0x0 0 eq  (prefix-fuzz: 0x0 single digit) rt-ok  clear
+0xF 15 eq  (prefix-fuzz: 0xF single digit) rt-ok  clear
+0o7 7 eq  (prefix-fuzz: 0o7 single digit) rt-ok  clear
+0b0 0 eq  (prefix-fuzz: 0b0 single digit) rt-ok  clear
+0b1 1 eq  (prefix-fuzz: 0b1 single digit) rt-ok  clear
+
+% --- boundary: 0b followed by non-binary should not be prefix ---
+(0b2) token pop type /name-type eq  (prefix-boundary: 0b2 is name) rt-ok  clear
+(0ba) token pop type /name-type eq  (prefix-boundary: 0ba is name) rt-ok  clear
+
+% --- boundary: equivalence with radix forms ---
+0xFF 16#FF# eq  (prefix-equiv: 0xFF = 16#FF#) rt-ok  clear
+0o77 8#77# eq  (prefix-equiv: 0o77 = 8#77#) rt-ok  clear
+0b1010 2#1010# eq  (prefix-equiv: 0b1010 = 2#1010#) rt-ok  clear
+0xFF#b 16#FF#b eq  (prefix-equiv: 0xFF#b = 16#FF#b) rt-ok  clear
+0o77#u 8#77#u eq  (prefix-equiv: 0o77#u = 8#77#u) rt-ok  clear
+0b1010#l 2#1010#l eq  (prefix-equiv: 0b1010#l = 2#1010#l) rt-ok  clear
+
+% ====================================================================
+% SECTION: Hex float literal parsing (0x...p...)
+% ====================================================================
+
+% --- happy path: basic values ---
+0x1.0p0 1.0 eq  (hexfloat: 0x1.0p0 = 1.0) rt-ok  clear
+0x1.0p8 256.0 eq  (hexfloat: 0x1.0p8 = 256.0) rt-ok  clear
+0x1.Fp4 31.0 eq  (hexfloat: 0x1.Fp4 = 31.0) rt-ok  clear
+0xA.BCp0 10.734375 eq  (hexfloat: 0xA.BCp0 = 10.734375) rt-ok  clear
+0x1.0p-1 0.5 eq  (hexfloat: 0x1.0p-1 = 0.5) rt-ok  clear
+0x1.0p+10 1024.0 eq  (hexfloat: 0x1.0p+10 = 1024.0) rt-ok  clear
+0x0.0p0 0.0 eq  (hexfloat: 0x0.0p0 = 0.0) rt-ok  clear
+0x0p0 0.0 eq  (hexfloat: 0x0p0 = 0.0) rt-ok  clear
+
+% --- happy path: no fractional part ---
+0xFFp0 255.0 eq  (hexfloat: 0xFFp0 = 255.0) rt-ok  clear
+0x1p0 1.0 eq  (hexfloat: 0x1p0 = 1.0) rt-ok  clear
+0x1p8 256.0 eq  (hexfloat: 0x1p8 = 256.0) rt-ok  clear
+0x1p-1 0.5 eq  (hexfloat: 0x1p-1 = 0.5) rt-ok  clear
+
+% --- happy path: fractional-only ---
+0x0.1p0 0.0625 eq  (hexfloat: 0x0.1p0 = 0.0625) rt-ok  clear
+0x0.8p0 0.5 eq  (hexfloat: 0x0.8p0 = 0.5) rt-ok  clear
+0x0.Cp0 0.75 eq  (hexfloat: 0x0.Cp0 = 0.75) rt-ok  clear
+
+% --- default type is real ---
+0x1.0p0 type /real-type eq  (hexfloat-type: default is real) rt-ok  clear
+0xFFp0 type /real-type eq  (hexfloat-type: no-dot is real) rt-ok  clear
+
+% --- suffix #d selects double ---
+0x1.0p0#d type /double-type eq  (hexfloat-suffix: #d is double) rt-ok  clear
+0x1.0p0#d 1.0d eq  (hexfloat-suffix: #d value) rt-ok  clear
+0xFFp0#d type /double-type eq  (hexfloat-suffix: #d no-dot double) rt-ok  clear
+
+% --- suffix #r is explicit real ---
+0x1.0p0#r type /real-type eq  (hexfloat-suffix: #r is real) rt-ok  clear
+0x1.0p0#r 1.0 eq  (hexfloat-suffix: #r value) rt-ok  clear
+
+% --- case insensitive prefix and exponent ---
+0X1.0p0 1.0 eq  (hexfloat: 0X uppercase prefix) rt-ok  clear
+0x1.0P0 1.0 eq  (hexfloat: 0x1.0P0 uppercase P) rt-ok  clear
+0X1.FP4 31.0 eq  (hexfloat: 0X1.FP4 both uppercase) rt-ok  clear
+
+% --- case insensitive hex digits ---
+0xa.bcp0 10.734375 eq  (hexfloat: lowercase hex digits) rt-ok  clear
+0xA.bCp0 10.734375 eq  (hexfloat: mixed case hex digits) rt-ok  clear
+
+% --- pi as exact double ---
+0x1.921FB54442D18p1#d 3.141592653589793d eq  (hexfloat: pi as double) rt-ok  clear
+0x1.921FB54442D18p1#d type /double-type eq  (hexfloat: pi type) rt-ok  clear
+
+% --- Double type hint via strict ScanFmt acts as an implicit #d (no explicit suffix) ---
+% Regression: scan_hex_float previously dropped the type_hint that scan_real honors, so a
+% strict :f scan of an unsuffixed hex float into a Double receiver wrongly parsed as Real
+% and failed the strict type check (scan-type-fail).
+(0x1.0p0) ({:f}) mark 0.0d sscan-fmt pop type /double-type eq  (hexfloat-hint: strict :f Double receiver) rt-ok  clear
+(0x1.0p0) ({:f}) mark 0.0d sscan-fmt pop 1.0d eq                (hexfloat-hint: strict :f Double value) rt-ok  clear
+(0x1.0p0) ({:f}) mark 0.0  sscan-fmt pop type /real-type eq     (hexfloat-hint: strict :f Real receiver unchanged) rt-ok  clear
+(1.5)     ({:f}) mark 0.0d sscan-fmt pop type /double-type eq   (hexfloat-hint: decimal control still Double) rt-ok  clear
+
+% --- sad: no p exponent (stays as integer) ---
+0xFF 255 eq  (hexfloat-sad: 0xFF without p is integer) rt-ok  clear
+0xFF type /integer-type eq  (hexfloat-sad: 0xFF type is integer) rt-ok  clear
+
+% --- sad: suffix without # separator ---
+(0x1.0p0d) token pop type /name-type eq  (hexfloat-sad: 0x1.0p0d no # is name) rt-ok  clear
+
+% --- sad: invalid suffix ---
+(0x1.0p0#b) token pop type /name-type eq  (hexfloat-sad: #b invalid for float) rt-ok  clear
+(0x1.0p0#u) token pop type /name-type eq  (hexfloat-sad: #u invalid for float) rt-ok  clear
+(0x1.0p0#l) token pop type /name-type eq  (hexfloat-sad: #l invalid for float) rt-ok  clear
+(0x1.0p0#z) token pop type /name-type eq  (hexfloat-sad: #z invalid suffix) rt-ok  clear
+
+% --- sad: trailing # without suffix ---
+(0x1.0p0#) token pop type /name-type eq  (hexfloat-sad: trailing # no suffix) rt-ok  clear
+
+% --- sad: sign not supported ---
+(-0x1.0p0) token pop type /name-type eq  (hexfloat-sad: -0x1.0p0 is name) rt-ok  clear
+
+% --- stress: large exponent ---
+0x1.0p30 1073741824.0 eq  (hexfloat-stress: 0x1.0p30 = 2^30) rt-ok  clear
+0x1.0p-30#d type /double-type eq  (hexfloat-stress: tiny exponent type) rt-ok  clear
+
+% --- stress: many hex digits (real rounds to 2.0, double preserves) ---
+0x1.FFFFFFp0 2.0 eq  (hexfloat-stress: 24-bit mantissa rounds to 2.0 as real) rt-ok  clear
+0x1.FFFFFFp0#d 1.9999999403953552d eq  (hexfloat-stress: 24-bit mantissa as double) rt-ok  clear
+
+% --- stress: overflow ---
+<< /numerical-overflow { clear true } >> { (0x1.0p128) token pop pop } try-catch
+(hexfloat-stress: 0x1.0p128 overflows real) rt-ok  clear
+
+<< /numerical-overflow { clear true } >> { (0x1.0p1024#d) token pop pop } try-catch
+(hexfloat-stress: 0x1.0p1024#d overflows double) rt-ok  clear
+
+% --- stress: real overflow but double fits ---
+0x1.0p128#d type /double-type eq  (hexfloat-stress: 2^128 fits double) rt-ok  clear
+
+% --- stress: underflow is an error ---
+<< /numerical-overflow { clear true } >> { (0x1.0p-2000#d) token pop pop } try-catch
+(hexfloat-stress: underflow is error) rt-ok  clear
+
+% --- fuzz: uppercase suffix ---
+0x1.0p0#D type /double-type eq  (hexfloat-fuzz: #D uppercase) rt-ok  clear
+0x1.0p0#R type /real-type eq  (hexfloat-fuzz: #R uppercase) rt-ok  clear
+
+% --- fuzz: zero mantissa ---
+0x0p0 0.0 eq  (hexfloat-fuzz: 0x0p0 = 0.0) rt-ok  clear
+0x0.0p0#d 0.0d eq  (hexfloat-fuzz: 0x0.0p0#d = 0.0d) rt-ok  clear
+
+% --- fuzz: leading zeros in mantissa ---
+0x001.0p0 1.0 eq  (hexfloat-fuzz: leading zeros mantissa) rt-ok  clear
+0x0.001p0 type /real-type eq  (hexfloat-fuzz: leading zeros frac) rt-ok  clear
+
+% --- fuzz: large exponent sign ---
+0x1.0p+0 1.0 eq  (hexfloat-fuzz: explicit + exponent) rt-ok  clear
+0x1.0p-0 1.0 eq  (hexfloat-fuzz: negative zero exponent) rt-ok  clear
+
+% --- boundary: 0x with dot but no p stays integer ---
+% 0x1.0 scans as: integer 0x1, then name .0 (no p = not a hex float)
+0x1 1 eq  (hexfloat-boundary: 0x1 without .p is integer) rt-ok  clear
+
+% --- boundary: hex float vs integer coexistence ---
+0xFF 255 eq  (hexfloat-boundary: 0xFF still integer) rt-ok  clear
+0xFFp0 255.0 eq  (hexfloat-boundary: 0xFFp0 is float) rt-ok  clear
+0xFF type /integer-type eq  (hexfloat-boundary: 0xFF type) rt-ok  clear
+0xFFp0 type /real-type eq  (hexfloat-boundary: 0xFFp0 type) rt-ok  clear
+
+% --- boundary: equivalence with decimal ---
+0x1.0p0 1.0 eq  (hexfloat-equiv: 0x1.0p0 = 1.0) rt-ok  clear
+0x1.0p0#d 1.0d eq  (hexfloat-equiv: 0x1.0p0#d = 1.0d) rt-ok  clear
+0x1.4p2 5.0 eq  (hexfloat-equiv: 0x1.4p2 = 5.0) rt-ok  clear
+0x1.9p6 100.0 eq  (hexfloat-equiv: 0x1.9p6 = 100.0) rt-ok  clear
+
+% ====================================================================
+% Final report
+% ====================================================================
+(Scanner tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

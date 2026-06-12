@@ -1,0 +1,70 @@
+% ====================================================================
+% test_extvalue_locals.trx -- regression: ExtValue values can be bound
+% as proc-body locals via local-def.
+%
+% Bug (fixed): the scanner's finalize_local_bindings (called for any
+% proc body with a |...|#+N or ||#N preamble) freed the ExtValues of
+% the body elements right after packing the body via make_packed_data.
+% But ULong / Long / Address / Double / 128-bit literals encode into
+% the packed byte stream as an OFFSET to their VM-heap ExtValue slot,
+% not as the value itself.  Freeing the ExtValue dangled the packed
+% reference, so the FIRST replay of begin-locals (proc body entry)
+% accessed a freed ExtValue and raised internal-error
+% "extvalue: accessing freed or invalid ExtValue at offset N".
+%
+% Pre-fix repros: any of `ulong-foo`, `long-foo`, `addr-foo`,
+% `double-foo` below would raise the internal error on the first call.
+% Post-fix: each prints the bound value cleanly.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ULong
+/ulong-foo {||#+1 /x 5ul local-def x} def
+ulong-foo 5ul eq                              (locals: ULong) rt-ok
+
+% Long
+/long-foo {||#+1 /x 5l local-def x} def
+long-foo 5l eq                                (locals: Long) rt-ok
+
+% Address
+/addr-foo {||#+1 /x 16#1234#a local-def x} def
+addr-foo 16#1234#a eq                         (locals: Address) rt-ok
+
+% Double
+/double-foo {||#+1 /x 1.5d local-def x} def
+double-foo 1.5d eq                            (locals: Double) rt-ok
+
+% Int128
+/int128-foo {||#+1 /x 1234567890123456789q local-def x} def
+int128-foo 1234567890123456789q eq            (locals: Int128) rt-ok
+
+% UInt128
+/uint128-foo {||#+1 /x 1234567890123456789uq local-def x} def
+uint128-foo 1234567890123456789uq eq          (locals: UInt128) rt-ok
+
+% Args path: ExtValue passed AS an arg has always worked (different
+% code path that doesn't go through finalize_local_bindings).  Cover
+% it for completeness.
+/ulong-arg {|x|#+1 x x add} def
+5ul ulong-arg 10ul eq                         (args: ULong arg passed in) rt-ok
+
+% Repeated invocations: the Trix-side proc body packs ExtValues by
+% offset; each invocation re-binds them in a fresh frame dict.  Verify
+% the references survive across multiple calls (would crash on the
+% second call if the first call accidentally freed the packed
+% references).
+ulong-foo pop ulong-foo pop ulong-foo
+5ul eq                                        (locals: ULong survives N calls) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_extvalue_locals: ALL TESTS PASSED) =
+(__test_ok__) =

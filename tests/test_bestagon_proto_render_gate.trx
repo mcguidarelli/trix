@@ -1,0 +1,21 @@
+% ====================================================================
+% test_bestagon_proto_render_gate.trx -- run examples/bestagon-proto/
+% proto-render-gate.trx self-test via the standard tests/ harness.
+% ====================================================================
+%
+% Thin wrapper: loads proto-render-gate.trx (Phase 0.6B: 5x9 flat-top
+% hex renderer per GDD section A.7), which auto-runs its self-test on
+% load.  We just need to confirm the test reached its end without
+% throwing.
+%
+% Asserts:
+%   - section A.7.1 empty 7-hex diamond reproduces byte-for-byte
+%   - section A.7.2 terrain mix reproduces byte-for-byte
+%   - section A.7.3 unit formation reproduces byte-for-byte
+%   - section A.7.0 canvas dimension (23 wide x 13 tall) matches
+%
+% Runs on default 1 MB VM.
+% ====================================================================
+
+(examples/bestagon-proto/proto-render-gate.trx) run
+(__test_ok__) =

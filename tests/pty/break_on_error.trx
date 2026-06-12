@@ -1,0 +1,7 @@
+% break_on_error.trx -- PTY gate for --inspect-on-error (S11).
+% The undefined name below must drop into the inspector (FATAL status
+% bar); the feeder's q ends the session and the error finishes on the
+% real terminal with its diagnostic and exit code 40.
+(before-error) =
+no-such-op-zzz
+(after) =

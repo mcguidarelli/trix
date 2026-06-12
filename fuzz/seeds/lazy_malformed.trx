@@ -1,0 +1,6 @@
+% malformed lazy plumbing: bad cons tails, non-callable scan, OOB nth.
+{ 1 (notatail) lazy-cons lazy-to-array } try clear
+{ [1 2 3] lazy-seq (notaproc) lazy-scan } try clear
+{ [1 2 3] lazy-seq 99 lazy-nth } try clear
+1 null lazy-cons lazy-to-array length
+2 [9 8] lazy-seq lazy-cons lazy-to-array length

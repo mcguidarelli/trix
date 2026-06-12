@@ -1,0 +1,5 @@
+% perform inside ${...}: continuation runs with the saved alloc flag;
+% allocate after resume on both sides.
+<< /p { [ 4 5 6 ] exch exec } >>
+{ ${ /p perform length } [ 7 8 ] length add }
+handle-effect

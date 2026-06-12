@@ -1,0 +1,153 @@
+% ====================================================================
+% test_gc_local_packed_global_ref.trx -- Phase C regression
+% ====================================================================
+% Phase C of plan_gc_walks_local_containers.md (shipped 2026-05-09).
+% A top-level proc defined outside any `${...}` block lands in local
+% VM (its Packed body is vm_alloc'd, sub-m_vm_global).  An inner
+% `${ ... }` nested inside that body allocates ITS body proc -- AND
+% any literals scanned within -- in GLOBAL VM, because
+% scan_global_block toggles m_curr_alloc_global=true during the inner
+% scan.  The reference chain is therefore:
+%
+%     dict-root -> /local-proc (LOCAL Packed)
+%                       -> ${ [ ... ] } body literal (GLOBAL Packed)
+%                              -> [ ... ] Array literal (GLOBAL Array)
+%
+% Pre-Phase-C, gc_mark_object silent-skipped local Packeds (Phases A
+% + B walked Dict/Set/Tagged/Array/Record but not Packed), so GC
+% sweeps the global body-proc + Array on its first pass.  When the
+% local proc next runs, the Packed decoder reads the freed bytes;
+% if the allocator has reused the slot the bytes are scratch -- a 0 byte
+% in the stream decodes as common-op index 0 (`Exch`), which then
+% trips opstack-underflow as the canonical symptom.
+%
+% Phase C walks local Packeds via extract_next_packed (the same
+% decoder global Packeds use), recursing gc_mark_object on each
+% literal.  The visited-offset set (shared with Phases A+B) breaks
+% cycles -- local blocks have no GvmBlock header so the per-block
+% m_mark_gen short-circuit doesn't apply.
+%
+% This file is isolated from test_gc_local_dict_global_ref.trx so the
+% heap state at GC time is clean -- the bug requires the freed
+% global-VM body-proc block to be reissued before the next decode,
+% and earlier sections' allocations can otherwise displace the
+% reuse to a different slot.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --------------------------------------------------------------------
+% Force any freed global blocks to be reissued so a stale offset
+% reads scratch values, not coincidentally-intact bytes.  Match the
+% shape of the inner ${ [...] } body proc closely: small Packed
+% bodies + 10-element Arrays.  Each iteration allocates and drops
+% several global composites of varying sizes so the allocator's free
+% list services the inner-${} block whatever its exact size class.
+% --------------------------------------------------------------------
+/force-reuse-mixed {
+    0 1 19 {
+        pop
+        ${ [ 9001 9002 9003 9004 9005 9006 9007 9008 9009 9010 ] } pop
+        ${ [ 7001 7002 7003 7004 7005 ] } pop
+        ${ [ 8001 8002 8003 ] } pop
+    } for
+} def
+
+% --------------------------------------------------------------------
+% SECTION 1: local Packed proc with inner ${...} body proc literal
+% --------------------------------------------------------------------
+% /inner-loop is defined at top-level (m_curr_alloc_global=false at
+% scan time) so its Packed body is in LOCAL VM.  The for-body
+% contains `${ [ 901..910 ] }` -- scan_global_block toggles
+% m_curr_alloc_global=true during the inner scan, so:
+%   - the inner ${...}'s body proc is a Packed in GLOBAL VM
+%   - the [ 901..910 ] literal Array is in GLOBAL VM
+% The inner body proc Object literal is encoded inside /inner-loop's
+% LOCAL Packed bytes -- the only path to mark it from the dict root
+% is to decode local Packed bodies, which is exactly what Phase C
+% adds.
+
+/inner-loop {
+    0 1 5 {
+        pop
+        ${ [ 901 902 903 904 905 906 907 908 909 910 ] } pop
+    } for
+} def
+
+% Warm-up call: no GC has fired yet, just confirm the proc runs.
+inner-loop
+
+% Outer ${...} containing an array-from-mark op (executable names
+% inside [ ... ] force a runtime build instead of a scan-time
+% literal).  Inside the body, vm-global-gc walks all roots; without
+% Phase C the inner-${} body proc + [ 901..910 ] Array become
+% unreachable and get swept.  The force-reuse-mixed step then
+% over-writes the freed bytes.  Re-running inner-loop reads the
+% reissued bytes; without Phase C the decoder dispatches `Exch`
+% (or another corrupt token) and trips opstack-underflow.
+${
+    [
+        201 202 203
+        vm-global-gc pop
+        force-reuse-mixed
+        inner-loop
+        301 302 303
+    ]
+    make-executable
+}
+exec
+
+% Stack now has: 201 202 203 301 302 303 (top).
+303 eq                                        (1: outer 303 intact) rt-ok
+302 eq                                        (1: outer 302 intact) rt-ok
+301 eq                                        (1: outer 301 intact) rt-ok
+203 eq                                        (1: outer 203 intact) rt-ok
+202 eq                                        (1: outer 202 intact) rt-ok
+201 eq                                        (1: outer 201 intact) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 2: nested local Packeds (Packed -> Packed chain)
+% --------------------------------------------------------------------
+% /outer-proc is a local Packed whose body contains a literal local
+% Packed (the inline {...} sub-proc) which in turn contains an inner
+% ${...} body literal in global VM.  Phase C must descend through
+% both local Packeds to reach the global body proc.
+
+/outer-proc {
+    {
+        ${ [ 1001 1002 1003 1004 1005 ] } pop
+    } exec
+} def
+
+outer-proc                                    % warm-up
+
+${
+    vm-global-gc pop
+    force-reuse-mixed
+    outer-proc
+    42
+}
+exec
+42 eq                                         (2: nested-local-Packed chain works) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 3: probe sees retained globals as live
+% --------------------------------------------------------------------
+% After everything, the probe should see at least the inner ${...}
+% body procs we retain via /inner-loop and /outer-proc.  Two retained
+% globals minimum (one body proc per def).
+
+vm-global-gc-probe /probe-final exch def
+probe-final /live get 2 ge                    (3: probe sees >= 2 live retained) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_gc_local_packed_global_ref: ALL TESTS PASSED) =
+(__test_ok__) =

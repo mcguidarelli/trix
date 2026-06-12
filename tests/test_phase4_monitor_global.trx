@@ -1,0 +1,112 @@
+% ====================================================================
+% test_phase4_monitor_global.trx -- VM Redux Phase 4 invariants
+% ====================================================================
+% After Phase 4, MonitorEntry is allocated from global VM via
+% gvm_alloc<MonitorEntry>(sizeof, ChunkKind::Monitor).  The pool
+% collapses from per-save-level [MaxSaveLevel] to a single bare
+% offset head.
+%
+% Three invariants:
+%   I1. monitor / link allocates from global VM and bumps
+%       /by-kind/monitor.
+%   I2. Above-barrier monitor relationships do NOT leak across
+%       restore -- coroutine_kill -> supervision_notify_death
+%       symmetrically unlinks both sides AND frees the entry.
+%   I3. Surviving monitor relationships work after restore.
+%
+% Note: monitor / link / spawn-monitor all require the caller to be
+% an actor (have a mailbox).  All assertions live inside a "tester"
+% actor body; main just yields to drive it.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+/yield-many { 0 1 29 { pop 0 coroutine-sleep } for } def
+
+% Tester body -- spawned as an actor below.  Owns all monitor
+% relationships; reports results via println.
+/tester-body {
+    % --- SECTION 1: monitor allocation lands in /by-kind/monitor ---
+    vm-global-info /by-kind get /monitor get /count get /pre1 exch def
+
+    [ { 0 coroutine-sleep coroutine-die } actor-spawn /target1 exch def
+    target1 monitor pop
+    yield-many
+
+    vm-global-info /by-kind get /monitor get /count get /post1 exch def
+    post1 pre1 sub 1 ge   (s1: monitor count +>=1 after monitor op)  rt-ok
+
+    % Drain any /down messages.
+    yield-many
+
+    % --- SECTION 2: monitor entries do NOT leak across restore ---
+    vm-global-info /by-kind get /monitor get /count get /pre2 exch def
+
+    save /sv2 exch def
+    [ { 0 coroutine-sleep coroutine-die } actor-spawn /target2 exch def
+    target2 monitor pop
+    yield-many
+    sv2 restore
+
+    yield-many
+
+    [ { 0 coroutine-sleep coroutine-die } actor-spawn /target2b exch def
+    target2b monitor pop
+    yield-many
+
+    vm-global-info /by-kind get /monitor get /count get /post2 exch def
+    post2 pre2 sub 1 le   (s2: monitor entries not leaked across restore)  rt-ok
+
+    yield-many
+
+    % --- SECTION 3: link/unlink leaves bounded growth ---
+    vm-global-info /by-kind get /monitor get /count get /pre3 exch def
+
+    [ { 100 coroutine-sleep coroutine-die } actor-spawn /partner exch def
+    partner link
+    yield-many
+    partner unlink
+    yield-many
+
+    [ { 100 coroutine-sleep coroutine-die } actor-spawn /partner2 exch def
+    partner2 monitor pop
+    yield-many
+
+    vm-global-info /by-kind get /monitor get /count get /post3 exch def
+    post3 pre3 sub 1 le   (s3: link/unlink + monitor leaves bounded growth)  rt-ok
+
+    partner coroutine-kill
+    partner2 coroutine-kill
+    yield-many
+
+    % --- SECTION 4: nested save/monitor/restore cycles bounded ---
+    vm-global-info /by-kind get /monitor get /count get /pre4 exch def
+
+    3 1 1 {
+        pop
+        save /sv-loop exch def
+        [ { coroutine-die } actor-spawn /t exch def
+        t monitor pop
+        yield-many
+        sv-loop restore
+    } for
+    yield-many
+
+    vm-global-info /by-kind get /monitor get /count get /post4 exch def
+    post4 pre4 sub 3 le   (s4: 3 nested save/monitor/restore cycles bounded)  rt-ok
+} def
+
+% Spawn the tester actor.  Loop yielding until tester is /dead.
+[ { tester-body } actor-spawn /tester exch def
+{ tester coroutine-status /dead eq { exit } if 0 coroutine-sleep } loop
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_phase4_monitor_global: ALL TESTS PASSED) =
+(__test_ok__) =

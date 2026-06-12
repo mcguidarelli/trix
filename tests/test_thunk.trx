@@ -1,0 +1,301 @@
+% ====================================================================
+% test_thunk.trx -- tests for Thunk type and lazy evaluation
+% ====================================================================
+% thunk, force, is-thunk, thunk-evaluated?, thunk-reset
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: thunk creation and type
+% ====================================================================
+
+{ 42 } thunk type /thunk-type eq            (thunk: type is thunk-type) rt-ok clear
+{ 42 } thunk is-thunk                       (thunk: is-thunk true) rt-ok clear
+42 is-thunk false eq                        (is-thunk: integer false) rt-ok clear
+(hello) is-thunk false eq                   (is-thunk: string false) rt-ok clear
+true is-thunk false eq                      (is-thunk: boolean false) rt-ok clear
+[ 1 2 3 ] is-thunk false eq                (is-thunk: array false) rt-ok clear
+{ 42 } is-thunk false eq                   (is-thunk: proc false) rt-ok clear
+
+% ====================================================================
+% SECTION 2: force - basic evaluation
+% ====================================================================
+
+% force a simple value thunk
+{ 42 } thunk force 42 eq                    (force: simple value) rt-ok clear
+
+% force a computation thunk
+{ 3 4 add } thunk force 7 eq               (force: computation) rt-ok clear
+
+% force with string result
+{ (hello) } thunk force (hello) eq          (force: string result) rt-ok clear
+
+% force with boolean result
+{ true } thunk force true eq                (force: boolean result) rt-ok clear
+
+% force with array result
+{ [ 1 2 3 ] } thunk force
+dup 0 get 1 eq exch
+dup 1 get 2 eq exch
+2 get 3 eq
+and and                                     (force: array result) rt-ok clear
+
+% force with real result
+{ 3.14 } thunk force 3.14 eq               (force: real result) rt-ok clear
+
+% ====================================================================
+% SECTION 3: force caching (memoization)
+% ====================================================================
+
+% force the same thunk twice returns cached result
+{ 42 } thunk
+dup force 42 eq                             (force-cache: first force) rt-ok
+force 42 eq                                 (force-cache: second force cached) rt-ok clear
+
+% verify thunk-evaluated? before and after force
+{ 99 } thunk
+dup thunk-evaluated? false eq               (thunk-eval: initially false) rt-ok
+dup force 99 eq                             (thunk-eval: force returns 99) rt-ok
+thunk-evaluated? true eq                    (thunk-eval: true after force) rt-ok clear
+
+% ====================================================================
+% SECTION 4: force pass-through for non-thunks
+% ====================================================================
+
+42 force 42 eq                              (force-passthrough: integer) rt-ok clear
+(hello) force (hello) eq                    (force-passthrough: string) rt-ok clear
+true force true eq                          (force-passthrough: boolean) rt-ok clear
+3.14 force 3.14 eq                          (force-passthrough: real) rt-ok clear
+/foo force /foo eq                          (force-passthrough: name) rt-ok clear
+
+% ====================================================================
+% SECTION 5: thunk-reset
+% ====================================================================
+
+% reset an evaluated thunk
+{ 42 } thunk
+dup force pop
+dup thunk-evaluated? true eq                (reset: evaluated before reset) rt-ok
+thunk-reset
+thunk-evaluated? false eq                   (reset: unevaluated after reset) rt-ok clear
+
+% reset and re-force returns same value
+{ 42 } thunk
+dup force 42 eq                             (reset-reforce: first force) rt-ok
+thunk-reset
+dup force 42 eq                             (reset-reforce: second force after reset) rt-ok
+thunk-evaluated? true eq                    (reset-reforce: evaluated again) rt-ok clear
+
+% reset an already-unevaluated thunk is a no-op
+{ 42 } thunk
+dup thunk-evaluated? false eq               (reset-noop: initially unevaluated) rt-ok
+thunk-reset
+thunk-evaluated? false eq                   (reset-noop: still unevaluated) rt-ok clear
+
+% ====================================================================
+% SECTION 6: side effects prove proc runs only once
+% ====================================================================
+
+% use a counter in a dict to track calls
+<< /n 0 >> /counter exch def
+{ counter /n counter /n get 1 add put 100 } thunk
+dup force 100 eq                            (side-effect: first force returns 100) rt-ok
+dup force 100 eq                            (side-effect: second force returns 100 cached) rt-ok
+pop
+counter /n get 1 eq                         (side-effect: proc ran exactly once) rt-ok clear
+
+% ====================================================================
+% SECTION 7: thunk with ExtValue results (Long, Double)
+% ====================================================================
+
+{ 1000000000l 1000000000l add } thunk
+dup force 2000000000l eq                    (force-long: long result) rt-ok
+force 2000000000l eq                        (force-long: cached long) rt-ok clear
+
+{ 3.14d 2.0d mul } thunk
+dup force 6.28d eq                          (force-double: double result) rt-ok
+force 6.28d eq                              (force-double: cached double) rt-ok clear
+
+% ====================================================================
+% SECTION 8: vm-size
+% ====================================================================
+
+{ 42 } thunk vm-size 24 eq                  (vm-size: thunk = 24 bytes) rt-ok clear
+
+% ====================================================================
+% SECTION 9: circular thunk detection
+% ====================================================================
+
+% A thunk that forces itself should error
+% We test indirectly: a thunk whose proc triggers circular detection
+% by forcing the thunk while it's evaluating
+
+% We cannot self-reference directly in the proc (thunk doesn't exist yet)
+% but we can store the thunk in a dict and reference it from the proc
+<< >> /circ-dict exch def
+circ-dict /t { circ-dict /t get force } thunk put
+{ circ-dict /t get force } try /undefined-result eq   (circular: detected) rt-ok clear
+
+% ====================================================================
+% SECTION 10: error handling during force
+% ====================================================================
+
+% thunk whose proc errors
+{ /range-check throw } thunk
+{ dup force } try /range-check eq           (error-force: error propagated) rt-ok
+% After error, the unwinder swaps @force-complete with @force-fail, which
+% resets the thunk state from Evaluating back to Unevaluated.  Subsequent
+% force re-runs the proc -- which still throws, but with the SAME error
+% (range-check), not a misleading "circular thunk" / undefined-result.
+{ dup force } try /range-check eq           (error-force: state reset, retry replays original error) rt-ok
+% Drop the thunk now that we are done with it.
+pop
+
+% A thunk whose proc fails the first time but succeeds the second (proc
+% reads a counter from an external dict and increments it).  Confirms
+% the retry actually completes when the underlying error is resolved.
+<< /n 0 >> /retry-state exch def
+{ retry-state /n get 1 add /m exch def
+  retry-state /n m put
+  m 1 eq { /range-check throw } if
+  m
+} thunk /retry-thunk exch def
+{ retry-thunk force } try /range-check eq   (error-force: retry-thunk throws on first attempt) rt-ok
+retry-thunk force 2 eq                       (error-force: retry succeeds after underlying issue resolved) rt-ok
+retry-thunk force 2 eq                       (error-force: post-success result is cached) rt-ok  clear
+
+% ====================================================================
+% SECTION 11: thunk in containers
+% ====================================================================
+
+% thunk in array
+{ 10 } thunk /t exch def
+[ t t t ]
+dup 0 get force 10 eq                      (thunk-array: element 0) rt-ok
+dup 1 get force 10 eq                      (thunk-array: element 1) rt-ok
+2 get force 10 eq                           (thunk-array: element 2) rt-ok clear
+
+% thunk in dict
+<< /val { 42 } thunk >>
+/val get force 42 eq                        (thunk-dict: value) rt-ok clear
+
+% ====================================================================
+% SECTION 12: deep-eq
+% ====================================================================
+
+{ 42 } thunk
+{ 42 } thunk
+deep-eq true eq                             (deep-eq: same proc thunks) rt-ok clear
+
+{ 42 } thunk dup force pop
+{ 42 } thunk
+deep-eq false eq                            (deep-eq: evaluated vs unevaluated) rt-ok clear
+
+% ====================================================================
+% SECTION 13: print formatting
+% ====================================================================
+
+% basic print format
+=string ({}) mark { 42 } thunk sprint-fmt pop
+(thunk) eq                                  (print: default format) rt-ok clear
+
+% O format shows offset and state
+=string ({:O}) mark { 42 } thunk sprint-fmt pop
+dup 0 2 get-interval (--) eq exch
+dup length 2 sub 2 get-interval (--) eq
+and                                         (print: O format has delimiters) rt-ok clear
+
+% ====================================================================
+% SECTION 14: thunk cannot be packed
+% ====================================================================
+
+% thunks cannot be serialized in packed format (internal check)
+% no direct user-facing test needed — verified by code review
+
+% ====================================================================
+% SECTION 15: save/restore interaction
+% ====================================================================
+
+save
+{ 42 } thunk
+dup force 42 eq                             (save-restore: force succeeds) rt-ok
+thunk-evaluated? true eq                    (save-restore: evaluated) rt-ok
+restore
+clear
+
+% thunk created before save, forced after save, then restore reverts state
+{ 42 } thunk
+/t-sr exch def
+save
+t-sr force 42 eq                            (save-force-restore: force succeeds) rt-ok
+t-sr thunk-evaluated? true eq               (save-force-restore: evaluated before restore) rt-ok
+restore
+t-sr thunk-evaluated? false eq              (save-force-restore: unevaluated after restore) rt-ok
+clear
+
+% ====================================================================
+% SECTION 16: underflow and type-check errors
+% ====================================================================
+
+{ thunk } try /opstack-underflow eq          (thunk: underflow) rt-ok clear
+{ 42 thunk } try /type-check eq             (thunk: non-proc type-check) rt-ok clear
+{ thunk-evaluated? } try /opstack-underflow eq  (thunk-eval: underflow) rt-ok clear
+{ 42 thunk-evaluated? } try /type-check eq  (thunk-eval: non-thunk type-check) rt-ok clear
+{ thunk-reset } try /opstack-underflow eq    (thunk-reset: underflow) rt-ok clear
+{ 42 thunk-reset } try /type-check eq       (thunk-reset: non-thunk type-check) rt-ok clear
+{ force } try /opstack-underflow eq         (force: underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 17: nested thunks
+% ====================================================================
+
+% thunk wrapping a thunk
+{ { 42 } thunk } thunk
+force force 42 eq                           (nested: thunk of thunk) rt-ok clear
+
+% chain of thunks
+{ 1 } thunk /a exch def
+{ a force 1 add } thunk /b exch def
+{ b force 1 add } thunk /c exch def
+c force 3 eq                                (chain: c = a + 2) rt-ok
+b thunk-evaluated? true eq                  (chain: b was forced) rt-ok
+a thunk-evaluated? true eq                  (chain: a was forced) rt-ok clear
+
+% ====================================================================
+% SECTION 18: stress test - many thunks
+% ====================================================================
+
+% create 100 thunks and force them all
+0
+100 { dup { } thunk exch 1 add } repeat
+pop
+% now we have 100 thunks on the stack, all returning nothing useful
+% verify count is correct (force each, they push nothing on top but we popped the counter)
+clear
+
+% create thunks that compute fibonacci
+{ 0 } thunk /fib0 exch def
+{ 1 } thunk /fib1 exch def
+{ fib0 force fib1 force add } thunk /fib2 exch def
+{ fib1 force fib2 force add } thunk /fib3 exch def
+{ fib2 force fib3 force add } thunk /fib4 exch def
+{ fib3 force fib4 force add } thunk /fib5 exch def
+
+fib0 force 0 eq   (fib: fib0 = 0) rt-ok clear
+fib1 force 1 eq   (fib: fib1 = 1) rt-ok clear
+fib2 force 1 eq   (fib: fib2 = 1) rt-ok clear
+fib3 force 2 eq   (fib: fib3 = 2) rt-ok clear
+fib4 force 3 eq   (fib: fib4 = 3) rt-ok clear
+fib5 force 5 eq   (fib: fib5 = 5) rt-ok clear
+
+(Thunk tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

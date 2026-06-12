@@ -1,0 +1,399 @@
+% ====================================================================
+% Introspection Batch Tests
+% Tests: actor-status, actor-mailbox-capacity, pipe-status,
+%        supervisor-spec, is-supervisor, :status: composability keys
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+/yield-many { 0 1 49 { pop 0 coroutine-sleep } for } def
+
+% ====================================================================
+% SECTION 1: actor-mailbox-capacity
+% ====================================================================
+
+/a1 [ { { actor-recv pop 0 coroutine-sleep } loop } actor-spawn def
+
+a1 actor-mailbox-capacity 64 eq
+    (actor-mailbox-capacity: default is 64) rt-ok
+
+/a2 [ { { actor-recv pop 0 coroutine-sleep } loop } 8 actor-spawn-capacity def
+
+a2 actor-mailbox-capacity 8 eq
+    (actor-mailbox-capacity: custom is 8) rt-ok
+
+% sad path: non-actor
+{ 42 actor-mailbox-capacity } try /type-check eq
+    (actor-mailbox-capacity: type-check on integer) rt-ok
+
+% sad path: coroutine without mailbox
+{ [ { 100 coroutine-sleep } coroutine-launch actor-mailbox-capacity } try /invalid-access eq
+    (actor-mailbox-capacity: invalid-access on non-actor) rt-ok
+
+a1 coroutine-kill  a2 coroutine-kill  yield-many clear
+
+% ====================================================================
+% SECTION 2: is-supervisor
+% ====================================================================
+
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /w1  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /permanent >>
+    ]
+>> supervisor /sup exch def
+
+sup is-supervisor
+    (is-supervisor: true for supervisor) rt-ok
+
+sup is-actor
+    (is-supervisor: supervisor is also an actor) rt-ok
+
+% non-supervisor actor
+/plain-actor [ { { actor-recv pop 0 coroutine-sleep } loop } actor-spawn def
+yield-many
+plain-actor is-supervisor not
+    (is-supervisor: false for plain actor) rt-ok
+
+% non-actor coroutine
+[ { 100 coroutine-sleep } coroutine-launch is-supervisor not
+    (is-supervisor: false for plain coroutine) rt-ok
+
+% non-coroutine types
+42 is-supervisor not
+    (is-supervisor: false for integer) rt-ok
+(hello) is-supervisor not
+    (is-supervisor: false for string) rt-ok
+null is-supervisor not
+    (is-supervisor: false for null) rt-ok
+
+sup coroutine-kill  plain-actor coroutine-kill  yield-many clear
+
+% ====================================================================
+% SECTION 3: actor-status
+% ====================================================================
+
+/a3 [ { { actor-recv pop 0 coroutine-sleep } loop } actor-spawn def
+yield-many
+
+a3 actor-status /s exch def
+
+s /status get /sleeping eq
+    (actor-status: status is sleeping) rt-ok
+
+s /mailbox-count get 0 eq
+    (actor-status: mailbox-count is 0) rt-ok
+
+s /mailbox-capacity get 64 eq
+    (actor-status: mailbox-capacity is 64) rt-ok
+
+s /has-joiner get not
+    (actor-status: has-joiner is false) rt-ok
+
+s /trap-exit get not
+    (actor-status: trap-exit is false) rt-ok
+
+s /monitor-count get 0 eq
+    (actor-status: monitor-count is 0) rt-ok
+
+s /name get null eq
+    (actor-status: name is null when unnamed) rt-ok
+
+% send a message and check mailbox-count
+42 a3 actor-send
+a3 actor-status /mailbox-count get 1 eq
+    (actor-status: mailbox-count after send) rt-ok
+
+% set name and check
+/test-actor a3 actor-set-name
+a3 actor-status /name get /test-actor eq
+    (actor-status: name after actor-set-name) rt-ok
+
+% monitor-count: test via supervised child (supervisor monitors its children)
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /mc1  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /permanent >>
+    ]
+>> supervisor /mc-sup exch def
+mc-sup /mc1 supervisor-get-child { actor-status /monitor-count get 1 eq } { false } if-else
+    (actor-status: monitor-count via supervision) rt-ok
+mc-sup coroutine-kill  yield-many
+
+% sad path: non-actor
+{ 42 actor-status } try /type-check eq
+    (actor-status: type-check on integer) rt-ok
+
+% sad path: no mailbox
+{ [ { 100 coroutine-sleep } coroutine-launch actor-status } try /invalid-access eq
+    (actor-status: invalid-access on non-actor) rt-ok
+
+% dict is read-only
+{ a3 actor-status /foo 99 put } try /read-only eq
+    (actor-status: dict is read-only) rt-ok
+
+a3 coroutine-kill  yield-many clear
+
+% ====================================================================
+% SECTION 4: pipe-status
+% ====================================================================
+
+8 pipe-buffer /buf exch def
+
+buf pipe-status /ps1 exch def
+
+ps1 /count get 0 eq
+    (pipe-status: count is 0) rt-ok
+
+ps1 /capacity get 8 eq
+    (pipe-status: capacity is 8) rt-ok
+
+ps1 /closed get not
+    (pipe-status: closed is false) rt-ok
+
+ps1 /error get null eq
+    (pipe-status: error is null) rt-ok
+
+ps1 /has-producer get not
+    (pipe-status: has-producer is false) rt-ok
+
+ps1 /has-consumer get not
+    (pipe-status: has-consumer is false) rt-ok
+
+% put items and check count
+42 buf pipe-put
+99 buf pipe-put
+buf pipe-status /count get 2 eq
+    (pipe-status: count after 2 puts) rt-ok
+
+% close and check
+buf pipe-close
+buf pipe-status /closed get
+    (pipe-status: closed after pipe-close) rt-ok
+
+% sad path: non-buffer
+{ 42 pipe-status } try /type-check eq
+    (pipe-status: type-check on integer) rt-ok
+
+% dict is read-only
+{ 8 pipe-buffer pipe-status /foo 99 put } try /read-only eq
+    (pipe-status: dict is read-only) rt-ok
+
+clear
+
+% ====================================================================
+% SECTION 5: supervisor-spec
+% ====================================================================
+
+<<
+    /strategy /one-for-all  /intensity 3  /period 10000
+    /children [
+        << /id /c1  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /permanent >>
+        << /id /c2  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /temporary >>
+    ]
+>> supervisor /sup2 exch def
+
+sup2 supervisor-spec /spec exch def
+
+spec /strategy get /one-for-all eq
+    (supervisor-spec: strategy) rt-ok
+
+spec /intensity get 3 eq
+    (supervisor-spec: intensity) rt-ok
+
+spec /period get 10000 eq
+    (supervisor-spec: period) rt-ok
+
+spec /child-count get 2 eq
+    (supervisor-spec: child-count) rt-ok
+
+spec /active-count get 2 eq
+    (supervisor-spec: active-count) rt-ok
+
+spec /max-children get 2 ge
+    (supervisor-spec: max-children >= 2) rt-ok
+
+spec /restart-count get 0 eq
+    (supervisor-spec: restart-count is 0) rt-ok
+
+% dict is read-only
+{ sup2 supervisor-spec /foo 99 put } try /read-only eq
+    (supervisor-spec: dict is read-only) rt-ok
+
+% sad path: non-supervisor
+/pa [ { { actor-recv pop 0 coroutine-sleep } loop } actor-spawn def
+yield-many
+{ pa supervisor-spec } try /type-check eq
+    (supervisor-spec: type-check on plain actor) rt-ok
+pa coroutine-kill  yield-many clear
+
+% sad path: dead supervisor
+sup2 coroutine-kill  yield-many
+{ sup2 supervisor-spec } try /invalid-access eq
+    (supervisor-spec: invalid-access on dead supervisor) rt-ok
+
+clear
+
+% ====================================================================
+% SECTION 6: :status: composability keys
+% ====================================================================
+
+% protocol-count
+//:status:protocol-count 0 ge
+    (status: protocol-count >= 0) rt-ok
+
+% protocol-method-count
+//:status:protocol-method-count 0 ge
+    (status: protocol-method-count >= 0) rt-ok
+
+% gen-ref-counter: monotonic counter
+//:status:gen-ref-counter 0ul ge
+    (status: gen-ref-counter >= 0) rt-ok
+
+clear
+
+% ====================================================================
+% SECTION 7: stress -- actor-status in a loop
+% ====================================================================
+
+/a4 [ { { actor-recv pop 0 coroutine-sleep } loop } actor-spawn def
+yield-many
+
+0 1 99 {
+    pop
+    a4 actor-status /status get /sleeping eq
+        { } { (FAILED: actor-status stress) = } if-else
+} for
+true (actor-status: 100x loop stress) rt-ok
+
+a4 coroutine-kill  yield-many clear
+
+% ====================================================================
+% SECTION 8: pipe-status with producer/consumer binding
+% ====================================================================
+
+/buf2 8 pipe-buffer def
+/producer [ { 1 buf2 pipe-put } coroutine-launch def
+yield-many
+buf2 pipe-status /has-producer get
+    (pipe-status: has-producer after pipe-put) rt-ok
+producer coroutine-kill  yield-many clear
+
+% ====================================================================
+% SECTION 9: BOUNDARY -- actor-status on dead actor
+% ====================================================================
+
+/a5 [ { { actor-recv pop 0 coroutine-sleep } loop } actor-spawn def
+yield-many
+a5 coroutine-kill  yield-many
+a5 actor-status /status get /dead eq
+    (actor-status: boundary dead actor status) rt-ok  clear
+
+% ====================================================================
+% SECTION 10: BOUNDARY -- actor-mailbox-capacity after kill
+% ====================================================================
+
+/a6 [ { { actor-recv pop 0 coroutine-sleep } loop } actor-spawn def
+yield-many
+a6 coroutine-kill  yield-many
+a6 actor-mailbox-capacity 64 eq
+    (actor-mailbox-capacity: boundary dead actor) rt-ok  clear
+
+% ====================================================================
+% SECTION 11: BOUNDARY -- pipe-status on full pipe
+% ====================================================================
+
+4 pipe-buffer /buf3 exch def
+1 buf3 pipe-put  2 buf3 pipe-put  3 buf3 pipe-put  4 buf3 pipe-put
+buf3 pipe-status /count get 4 eq
+    (pipe-status: boundary full pipe count=capacity) rt-ok
+buf3 pipe-status /count get buf3 pipe-status /capacity get eq
+    (pipe-status: boundary count equals capacity) rt-ok  clear
+
+% ====================================================================
+% SECTION 12: BOUNDARY -- is-supervisor on dead supervisor
+% ====================================================================
+
+<<
+    /strategy /one-for-one  /intensity 5  /period 30000
+    /children [
+        << /id /d1  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /permanent >>
+    ]
+>> supervisor /dsup exch def
+dsup coroutine-kill  yield-many
+dsup is-supervisor not
+    (is-supervisor: boundary false for dead supervisor) rt-ok  clear
+
+% ====================================================================
+% SECTION 13: BOUNDARY -- supervisor-spec one-for-one strategy
+% ====================================================================
+
+<<
+    /strategy /one-for-one  /intensity 10  /period 5000
+    /children [
+        << /id /s1  /start { { actor-recv pop 0 coroutine-sleep } loop }  /restart /temporary >>
+    ]
+>> supervisor /sup3 exch def
+sup3 supervisor-spec /strategy get /one-for-one eq
+    (supervisor-spec: boundary one-for-one strategy) rt-ok
+sup3 supervisor-spec /intensity get 10 eq
+    (supervisor-spec: boundary custom intensity) rt-ok
+sup3 supervisor-spec /period get 5000 eq
+    (supervisor-spec: boundary custom period) rt-ok
+sup3 coroutine-kill  yield-many clear
+
+% ====================================================================
+% SECTION 14: STRESS -- pipe-status in a loop
+% ====================================================================
+
+8 pipe-buffer /buf4 exch def
+0 1 99 {
+    pop
+    buf4 pipe-status /capacity get 8 eq
+        { } { (FAILED: pipe-status stress) = } if-else
+} for
+true (pipe-status: 100x loop stress) rt-ok  clear
+
+% ====================================================================
+% SECTION 15: FUZZ -- actor-status with full mailbox
+% ====================================================================
+
+/a7 [ { { 100 coroutine-sleep } loop } 4 actor-spawn-capacity def
+yield-many
+1 a7 actor-send  2 a7 actor-send  3 a7 actor-send  4 a7 actor-send
+a7 actor-status /mailbox-count get 4 eq
+    (actor-status: fuzz full mailbox count) rt-ok
+a7 actor-status /mailbox-capacity get 4 eq
+    (actor-status: fuzz full mailbox capacity) rt-ok
+a7 coroutine-kill  yield-many clear
+
+% ====================================================================
+% SECTION 16: FUZZ -- is-supervisor on various types
+% ====================================================================
+
+[] is-supervisor not                      (is-supervisor: fuzz false for array) rt-ok
+<< >> is-supervisor not                   (is-supervisor: fuzz false for dict) rt-ok
+true is-supervisor not                    (is-supervisor: fuzz false for bool) rt-ok
+3.14 is-supervisor not                    (is-supervisor: fuzz false for real) rt-ok  clear
+
+% ====================================================================
+% SECTION 17: BOUNDARY -- actor-status stack underflow
+% ====================================================================
+
+{ actor-status } try /opstack-underflow eq
+    (actor-status: boundary underflow) rt-ok
+{ pipe-status } try /opstack-underflow eq
+    (pipe-status: boundary underflow) rt-ok
+{ supervisor-spec } try /opstack-underflow eq
+    (supervisor-spec: boundary underflow) rt-ok
+{ actor-mailbox-capacity } try /opstack-underflow eq
+    (actor-mailbox-capacity: boundary underflow) rt-ok  clear
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

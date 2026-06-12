@@ -1,0 +1,12 @@
+% test_command_line_args_helper.trx -- helper script invoked by
+% test_command_line_args.trx via the `shell` operator.  Prints each
+% argv element on its own line so the parent test can split on \n
+% and assert exact byte equality.
+%
+% Output: one line per element, plus a trailing /END marker so the
+% parent can detect a clean exit even when argv is empty.
+
+command-line-args
+{ print (\n) print } for-all
+(END\n) print
+flush

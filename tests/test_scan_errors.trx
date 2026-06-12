@@ -1,0 +1,198 @@
+% ====================================================================
+% test_scan_errors.trx -- Phase-3 P3 batch 2: scanner and infix
+% sad paths (scanner.inl / scanner_infix.inl), plus regressions for
+% the planted-error-object fix in scan_procedure's unwind cleanup.
+%
+% Scan errors are triggered by scanning STRINGS at runtime
+% (make-executable exec) or generated files (run), so a failure is
+% catchable without killing this file.  Every trigger and error name
+% was probed live before being pinned.  Watch the (...)-literal trap:
+% an unbalanced '(' inside a string literal must be written \( -- the
+% scanner tracks paren depth inside (strings).
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+/longname (a) 130 repeat-string def
+
+% ====================================================================
+% SECTION 1: planted-error-object regressions.  try_catch_handler
+% plants /error-name (and the failing op, for the REPL barrier) on the
+% operand stack BEFORE error() throws; the C++ unwind then runs
+% scan_procedure's cleanup, which used to reset m_op_ptr below the
+% plant -- @try-rollback then misread stale slots as the error name
+% (or underflowed on an empty stack).  These pin the preserved plant.
+% ====================================================================
+
+/badproc ({ ) longname concat ( }) concat def
+
+{ badproc make-executable exec } try
+/limit-check eq (plant: try catches mid-proc-scan limit error) rt-ok clear
+
+% sentinels below the try must survive untouched, error name on top
+111 222 333
+{ badproc make-executable exec } try
+/limit-check eq
+exch 333 eq and
+exch 222 eq and
+exch 111 eq and
+(plant: sentinels intact under the replanted error name) rt-ok clear
+
+% try-catch dispatches on the planted name
+<< /limit-check { pop true } /default { pop false } >>
+{ badproc make-executable exec } try-catch
+(plant: try-catch dispatches mid-proc-scan limit error) rt-ok clear
+
+% nested procs: every unwinding scan frame preserves the plant
+/nested ({ 1 { 2 { ) longname concat ( } } }) concat def
+{ nested make-executable exec } try
+/limit-check eq (plant: survives nested proc-scan unwind) rt-ok clear
+
+% locals preamble shares the same cleanup
+/loclong ({ |) longname concat (| 1 }) concat def
+{ loclong make-executable exec } try
+/syntax-error eq (plant: locals-preamble scan error caught) rt-ok clear
+
+% ====================================================================
+% SECTION 2: name-length limit (MaxNameLength 127)
+% ====================================================================
+
+{ longname make-executable exec } try
+/limit-check eq (scan: top-level name too long) rt-ok clear
+
+{ badproc make-executable exec } try
+/limit-check eq (scan: in-proc name too long) rt-ok clear
+
+% ====================================================================
+% SECTION 3: #$ / #$$ on collections with executable names (runtime
+% from-mark fallback cannot force a region; scanner pushes toward
+% ${...} / $${...})
+% ====================================================================
+
+{ ({ [ x ]#$ }) make-executable exec } try
+/syntax-error eq (scan: array execname #$ rejected) rt-ok clear
+{ ({ [ x ]#$$ }) make-executable exec } try
+/syntax-error eq (scan: array execname #$$ rejected) rt-ok clear
+{ ({ {{ x }}#$ }) make-executable exec } try
+/syntax-error eq (scan: set execname #$ rejected) rt-ok clear
+{ ({ {{ x }}#$$ }) make-executable exec } try
+/syntax-error eq (scan: set execname #$$ rejected) rt-ok clear
+{ ({ << /k x >>#$ }) make-executable exec } try
+/syntax-error eq (scan: dict execname #$ rejected) rt-ok clear
+{ ({ << /k x >>#$$ }) make-executable exec } try
+/syntax-error eq (scan: dict execname #$$ rejected) rt-ok clear
+
+% ====================================================================
+% SECTION 4: field-access sugar limits (.name expansion)
+% ====================================================================
+
+{ ({ z.) longname concat ( }) concat make-executable exec } try
+/limit-check eq (scan: field-access name too long) rt-ok clear
+
+/chain ({ z) def
+0 1 70 { pop /chain chain (.a) concat def } for
+/chain chain ( }) concat def
+{ chain make-executable exec } try
+/limit-check eq (scan: field-access chain too deep) rt-ok clear
+
+% ====================================================================
+% SECTION 5: |locals| capacity suffix
+% ====================================================================
+
+{ ({ ||#99999 1 }) make-executable exec } try
+/limit-check eq (scan: locals capacity suffix too large) rt-ok clear
+
+{ ({ |a b|#1 1 }) make-executable exec } try
+/syntax-error eq (scan: locals capacity below named count) rt-ok clear
+
+% ====================================================================
+% SECTION 6: eqproc length cap (array-backed #=a form; the packed
+% default has no element cap)
+% ====================================================================
+
+({ 1 2 add }#=a) make-executable exec exec
+3 eq (scan: small #=a eqproc works) rt-ok clear
+
+/bigproc ({ ) def
+0 1 39 { pop /bigproc bigproc (11 ) concat def } for
+/bigproc bigproc (}#=a) concat def
+{ bigproc make-executable exec } try
+/limit-check eq (scan: #=a eqproc beyond --eq-proc cap) rt-ok clear
+
+% ====================================================================
+% SECTION 7: string interpolation \{name}
+% ====================================================================
+
+{ (\\{nosuchnamehere}) make-executable exec } try
+/undefined eq (scan: interpolation of undefined name) rt-ok clear
+
+/big (a) 60000 repeat-string def
+{ ((x-\\{big}-\\{big})) make-executable exec } try
+/limit-check eq (scan: interpolation expansion exceeds string max) rt-ok clear
+
+% ====================================================================
+% SECTION 8: infix $( ... ) errors
+% ====================================================================
+
+{ ($\( \)) make-executable exec } try
+/syntax-error eq (infix: empty expression) rt-ok clear
+
+{ ($\(5 + 3) make-executable exec } try
+/syntax-error eq (infix: missing closing paren) rt-ok clear
+
+{ ($\(5 + \)) make-executable exec } try
+/syntax-error eq (infix: operator without right operand) rt-ok clear
+
+{ ($\(@ 5\)) make-executable exec } try
+/syntax-error eq (infix: unexpected character) rt-ok clear
+
+{ ($\(sin\(0.5\)) make-executable exec } try
+/syntax-error eq (infix: unterminated function arguments) rt-ok clear
+
+/deep ($\() def
+0 1 70 { pop /deep deep (\() concat def } for
+/deep deep (5) concat def
+{ deep make-executable exec } try
+/limit-check eq (infix: nesting beyond MaxInfixNesting) rt-ok clear
+
+/longinfix ($\() longname concat ( + 1\)) concat def
+{ longinfix make-executable exec } try
+/limit-check eq (infix: identifier too long) rt-ok clear
+
+% ====================================================================
+% SECTION 9: oversized string literals via generated files (a source
+% string cannot exceed 65,535 chars, so these arms need file delivery)
+% ====================================================================
+
+/chunk (b) 60000 repeat-string def
+
+/f (/tmp/trix_scan_big1.trx) (w)#b stream def
+f (\() write-string  f chunk write-string  f chunk write-string  f (\)) write-string
+f close-stream
+{ (/tmp/trix_scan_big1.trx) run } try
+/limit-check eq (scan: file paren-string beyond 65535) rt-ok clear
+
+/f2 (/tmp/trix_scan_big2.trx) (w)#b stream def
+f2 (<\() write-string  f2 chunk write-string  f2 chunk write-string  f2 (\)>) write-string
+f2 close-stream
+{ (/tmp/trix_scan_big2.trx) run } try
+/limit-check eq (scan: file raw-string beyond 65535) rt-ok clear
+
+% control: the scanner still works after the gauntlet
+(7 6 mul) make-executable exec 42 eq (scan: clean exec after gauntlet) rt-ok clear
+
+% ====================================================================
+% Done
+% ====================================================================
+
+(Scan error tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

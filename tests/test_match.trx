@@ -1,0 +1,443 @@
+% ====================================================================
+% test_match.trx -- let, destructure, match, when, cond
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% =================================================================
+% SECTION 1: HAPPY PATH -- let basics
+% =================================================================
+
+10 20 30 [/a /b /c] let
+  a 10 eq                                   (let: a = 10) rt-ok
+  b 20 eq                                   (let: b = 20) rt-ok
+  c 30 eq                                   (let: c = 30) rt-ok
+end clear
+
+42 [/x] let
+  x 42 eq                                   (let: single binding) rt-ok
+end clear
+
+% let with mixed types
+(hello) 3.14 true [/s /r /b] let
+  s (hello) eq                              (let: string binding) rt-ok
+  r 3.14 eq                                 (let: real binding) rt-ok
+  b true eq                                 (let: bool binding) rt-ok
+end clear
+
+% =================================================================
+% SECTION 2: HAPPY PATH -- destructure arrays
+% =================================================================
+
+[10 20 30] [/x /y /z] destructure
+  x 10 eq                                   (destr-arr: x = 10) rt-ok
+  y 20 eq                                   (destr-arr: y = 20) rt-ok
+  z 30 eq                                   (destr-arr: z = 30) rt-ok
+end clear
+
+% Partial destructure (fewer names than elements)
+[1 2 3 4 5] [/a /b] destructure
+  a 1 eq                                    (destr-arr: partial a = 1) rt-ok
+  b 2 eq                                    (destr-arr: partial b = 2) rt-ok
+end clear
+
+% =================================================================
+% SECTION 3: HAPPY PATH -- destructure dicts
+% =================================================================
+
+<< /name (Alice) /age 30 /city (NYC) >> [/name /age] destructure
+  name (Alice) eq                           (destr-dict: name) rt-ok
+  age 30 eq                                 (destr-dict: age) rt-ok
+end clear
+
+% =================================================================
+% SECTION 4: HAPPY PATH -- destructure records
+% =================================================================
+
+/Person [/name /age] record-type def
+(Bob) 25 Person /p exch def
+
+p [/name /age] destructure
+  name (Bob) eq                             (destr-rec: name) rt-ok
+  age 25 eq                                 (destr-rec: age) rt-ok
+end clear
+
+% =================================================================
+% SECTION 5: HAPPY PATH -- match basics
+% =================================================================
+
+42 [
+  { is-string }  { pop (string) }
+  { is-integer } { pop (integer) }
+  { pop true }   { pop (other) }
+] match
+(integer) eq                                (match: integer branch) rt-ok  clear
+
+(hello) [
+  { is-integer } { pop (int) }
+  { is-string }  { pop (str) }
+] match
+(str) eq                                    (match: string branch) rt-ok  clear
+
+% =================================================================
+% SECTION 6: HAPPY PATH -- match with value transformation
+% =================================================================
+
+10 [
+  { 5 gt }     { 2 mul }
+  { pop true } { }
+] match
+20 eq                                       (match: value transform) rt-ok  clear
+
+% =================================================================
+% SECTION 7: HAPPY PATH -- match default arm
+% =================================================================
+
+3.14 [
+  { is-integer } { pop (int) }
+  { is-string }  { pop (str) }
+  { pop true }   { pop (default) }
+] match
+(default) eq                                (match: default arm) rt-ok  clear
+
+% =================================================================
+% SECTION 8: HAPPY PATH -- match with tagged values
+% =================================================================
+
+42 /ok tag [
+  { tag-name /ok eq }    { tag-value 1 add }
+  { tag-name /error eq } { tag-value }
+] match
+43 eq                                       (match: tagged ok) rt-ok  clear
+
+(oops) /error tag [
+  { tag-name /ok eq }    { tag-value }
+  { tag-name /error eq } { tag-value }
+] match
+(oops) eq                                   (match: tagged error) rt-ok  clear
+
+% =================================================================
+% SECTION 9: HAPPY PATH -- when (true case)
+% =================================================================
+
+10 { 5 gt } { 2 mul } when
+20 eq                                       (when: true -> transform) rt-ok  clear
+
+% =================================================================
+% SECTION 10: HAPPY PATH -- when (false case)
+% =================================================================
+
+3 { 5 gt } { 2 mul } when
+3 eq                                        (when: false -> unchanged) rt-ok  clear
+
+% =================================================================
+% SECTION 11: HAPPY PATH -- cond
+% =================================================================
+
+42
+[
+  { dup 100 gt } { (big) }
+  { dup 10 gt }  { (medium) }
+  { true }       { (small) }
+] cond
+(medium) eq                                 (cond: medium branch) rt-ok  clear
+
+% =================================================================
+% SECTION 12: SAD PATH -- let empty names
+% =================================================================
+
+{ [/a /b /c] let } try /opstack-underflow eq
+                                            (sad: let insufficient stack) rt-ok  clear
+
+{ [] let } try /range-check eq              (sad: let empty names) rt-ok  clear
+
+% =================================================================
+% SECTION 13: SAD PATH -- let non-name in array
+% =================================================================
+
+{ 1 2 [/a 42] let } try /type-check eq     (sad: let non-name element) rt-ok  clear
+
+% =================================================================
+% SECTION 14: SAD PATH -- destructure wrong type
+% =================================================================
+
+{ 42 [/x] destructure } try /type-check eq (sad: destr integer) rt-ok  clear
+
+% =================================================================
+% SECTION 15: SAD PATH -- destructure too many names
+% =================================================================
+
+{ [1 2] [/a /b /c] destructure } try /range-check eq
+                                            (sad: destr too many names) rt-ok  clear
+
+% =================================================================
+% SECTION 16: SAD PATH -- destructure missing dict key
+% =================================================================
+
+{ << /a 1 >> [/a /b] destructure } try /undefined eq
+                                            (sad: destr missing dict key) rt-ok  clear
+
+% =================================================================
+% SECTION 17: SAD PATH -- match no matching pattern
+% =================================================================
+
+{ 3.14 [{ is-integer } { pop }] match } try /match eq
+                                            (sad: match no pattern) rt-ok  clear
+
+% =================================================================
+% SECTION 18: SAD PATH -- match odd-length pairs
+% =================================================================
+
+{ 42 [{ true } { } { true }] match } try /range-check eq
+                                            (sad: match odd pairs) rt-ok  clear
+
+% =================================================================
+% SECTION 19: SAD PATH -- match empty pairs
+% =================================================================
+
+{ 42 [] match } try /range-check eq        (sad: match empty pairs) rt-ok  clear
+
+% =================================================================
+% SECTION 20: STRESS -- let with many bindings
+% =================================================================
+
+1 2 3 4 5 6 7 8 [/a /b /c /d /e /f /g /h] let
+  a b add c add d add e add f add g add h add
+  36 eq                                     (stress: 8 bindings sum) rt-ok
+end clear
+
+% =================================================================
+% SECTION 21: STRESS -- match many arms
+% =================================================================
+
+(target) [
+  { is-integer }  { pop (int) }
+  { is-boolean }  { pop (bool) }
+  { is-real }     { pop (real) }
+  { is-array }    { pop (arr) }
+  { is-dict }     { pop (dict) }
+  { is-string }   { pop (str) }
+] match
+(str) eq                                    (stress: match 6 arms) rt-ok  clear
+
+% =================================================================
+% SECTION 22: BOUNDARY -- let then match inside scope
+% =================================================================
+
+42 [/val] let
+  val [
+    { 42 eq }   { pop (found-42) }
+    { pop true } { pop (other) }
+  ] match
+  (found-42) eq                             (boundary: let+match combo) rt-ok
+end clear
+
+% =================================================================
+% SECTION 23: BOUNDARY -- nested let scopes
+% =================================================================
+
+10 [/x] let
+  20 [/y] let
+    x y add 30 eq                           (boundary: nested let) rt-ok
+  end
+end clear
+
+% =================================================================
+% SECTION 24: BOUNDARY -- when with type predicate
+% =================================================================
+
+42 { is-integer } { 1 add } when
+43 eq                                       (boundary: when is-integer) rt-ok  clear
+
+(hi) { is-integer } { 1 add } when
+(hi) eq                                     (boundary: when string unchanged) rt-ok  clear
+
+% =================================================================
+% SECTION 25: BOUNDARY -- cond first arm matches
+% =================================================================
+
+[
+  { true } { (first) }
+  { true } { (second) }
+] cond
+(first) eq                                  (boundary: cond first wins) rt-ok  clear
+
+% =================================================================
+% SECTION 26: HAPPY PATH -- match on null value
+% =================================================================
+
+null [
+  { is-null } { pop (was-null) }
+  { pop true } { pop (other) }
+] match
+(was-null) eq                               (match: null value) rt-ok  clear
+
+% =================================================================
+% SECTION 27: HAPPY PATH -- match on ExtValue types
+% =================================================================
+
+1000000000000l [
+  { is-long } { pop (long) }
+  { pop true } { pop (other) }
+] match
+(long) eq                                   (match: long value) rt-ok  clear
+
+3.14d [
+  { is-double } { pop (double) }
+  { pop true } { pop (other) }
+] match
+(double) eq                                 (match: double value) rt-ok  clear
+
+% =================================================================
+% SECTION 28: HAPPY PATH -- match on boolean
+% =================================================================
+
+true [
+  { is-boolean } { pop (bool) }
+  { pop true }   { pop (other) }
+] match
+(bool) eq                                   (match: boolean value) rt-ok  clear
+
+% =================================================================
+% SECTION 29: HAPPY PATH -- match on array
+% =================================================================
+
+[1 2 3] [
+  { is-array } { length }
+  { pop true } { pop 0 }
+] match
+3 eq                                        (match: array length) rt-ok  clear
+
+% =================================================================
+% SECTION 30: HAPPY PATH -- match single arm
+% =================================================================
+
+42 [
+  { is-integer } { 1 add }
+] match
+43 eq                                       (match: single arm) rt-ok  clear
+
+% =================================================================
+% SECTION 31: HAPPY PATH -- nested match
+% =================================================================
+
+42 /ok tag [
+  { tag-name /ok eq } {
+    tag-value [
+      { 0 gt } { (positive) }
+      { pop true } { (other) }
+    ] match
+  }
+  { pop true } { pop (not-ok) }
+] match
+(positive) eq                               (match: nested) rt-ok  clear
+
+% =================================================================
+% SECTION 32: HAPPY PATH -- when with ExtValue
+% =================================================================
+
+100000000000l { is-long } { 1l add } when
+100000000001l eq                            (when: long true) rt-ok  clear
+
+(hello) { is-long } { 1l add } when
+(hello) eq                                  (when: long false) rt-ok  clear
+
+% =================================================================
+% SECTION 33: HAPPY PATH -- let with ExtValue types
+% =================================================================
+
+1000000000000l 3.14d [/a /b] let
+  a 1000000000000l eq                       (let: long binding) rt-ok
+  b 3.14d eq                                (let: double binding) rt-ok
+end clear
+
+% =================================================================
+% SECTION 34: HAPPY PATH -- destructure record all fields
+% =================================================================
+
+/Point [/x /y] record-type def
+10 20 Point /pt exch def
+pt [/x /y] destructure
+  x 10 eq                                   (destr-rec: all x) rt-ok
+  y 20 eq                                   (destr-rec: all y) rt-ok
+end clear
+
+% =================================================================
+% SECTION 35: SAD PATH -- match test returns non-boolean
+% =================================================================
+
+{ 42 [{ 99 } { }] match } try /type-check eq
+                                            (sad: test non-bool) rt-ok  clear
+
+% =================================================================
+% SECTION 36: SAD PATH -- cond no match
+% =================================================================
+
+{ 42 [{ dup 100 gt } { }] cond } try /match eq
+                                            (sad: cond no match) rt-ok  clear
+
+% =================================================================
+% SECTION 37: STRESS -- cond many arms
+% =================================================================
+
+99
+[
+  { dup 1 eq }   { pop (one) }
+  { dup 2 eq }   { pop (two) }
+  { dup 3 eq }   { pop (three) }
+  { dup 10 gt }  { pop (big) }
+  { dup 5 lt }   { pop (small) }
+  { true }       { pop (medium) }
+] cond
+(big) eq                                    (stress: cond 6 arms) rt-ok  clear
+
+% =================================================================
+% SECTION 38: STRESS -- match on many types
+% =================================================================
+
+/match-type { [
+  { is-integer } { pop (int) }
+  { is-string }  { pop (str) }
+  { is-real }    { pop (real) }
+  { is-boolean } { pop (bool) }
+  { is-array }   { pop (arr) }
+  { is-name }    { pop (name) }
+  { is-null }    { pop (null) }
+  { pop true }   { pop (other) }
+] match } def
+
+42 match-type (int) eq                      (types: integer) rt-ok  clear
+(hi) match-type (str) eq                    (types: string) rt-ok  clear
+3.14 match-type (real) eq                   (types: real) rt-ok  clear
+true match-type (bool) eq                   (types: boolean) rt-ok  clear
+[1] match-type (arr) eq                     (types: array) rt-ok  clear
+/foo match-type (name) eq                   (types: name) rt-ok  clear
+null match-type (null) eq                   (types: null) rt-ok  clear
+
+% =================================================================
+% SECTION 39: BOUNDARY -- destructure partial dict
+% =================================================================
+
+<< /a 1 /b 2 /c 3 >> [/a /c] destructure
+  a 1 eq                                    (destr-dict: partial a) rt-ok
+  c 3 eq                                    (destr-dict: partial c) rt-ok
+end clear
+
+% =================================================================
+% INTEGRITY
+% =================================================================
+
+/vm-validate query-status                    (integrity: vm-validate) rt-ok  clear
+/extvalue-validate query-status              (integrity: extvalue-validate) rt-ok  clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_match: ALL TESTS PASSED) =
+(__test_ok__) =

@@ -1,0 +1,128 @@
+% test_ansi_trx.trx -- exercises lib/ansi.trx via make-string-stream
+% capture (no real terminal needed).  Each helper is checked for the exact
+% byte sequence it emits.
+
+(lib/ansi.trx) run
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+% Capture redirect.  Tests use a fresh stream per assertion so checks are
+% independent and easy to read.
+/with-capture {
+    % proc -- str ; runs proc with ansi-out bound to a fresh string-stream,
+    % returns the captured bytes.  Closes the stream so its slot returns to
+    % the pool before the next call (the pool is small).
+    /saved-out ansi-out store
+    4096 make-string-stream
+    /cap exch store
+    /ansi-out cap store
+    exec
+    /ansi-out saved-out store
+    cap get-string-stream
+    cap close-stream
+} def
+
+% --- Cursor positioning ------------------------------------------------------
+
+{ 3 5 move-to } with-capture (\e[5;3H) eq (move-to col=3 row=5) rt-ok
+{ 1 1 move-to } with-capture (\e[1;1H) eq (move-to home) rt-ok
+{ 80 24 move-to } with-capture (\e[24;80H) eq (move-to bottom-right) rt-ok
+
+{ 2 move-up }    with-capture (\e[2A) eq (move-up 2)    rt-ok
+{ 5 move-down }  with-capture (\e[5B) eq (move-down 5)  rt-ok
+{ 3 move-right } with-capture (\e[3C) eq (move-right 3) rt-ok
+{ 4 move-left }  with-capture (\e[4D) eq (move-left 4)  rt-ok
+
+{ cursor-save }    with-capture (\e7) eq (cursor-save)    rt-ok
+{ cursor-restore } with-capture (\e8) eq (cursor-restore) rt-ok
+{ cursor-hide }    with-capture (\e[?25l) eq (cursor-hide) rt-ok
+{ cursor-show }    with-capture (\e[?25h) eq (cursor-show) rt-ok
+
+% --- Erase -------------------------------------------------------------------
+
+{ clear-screen } with-capture (\e[2J\e[H) eq (clear-screen) rt-ok
+{ clear-line }   with-capture (\e[2K) eq (clear-line) rt-ok
+{ clear-to-eol } with-capture (\e[K) eq (clear-to-eol) rt-ok
+{ clear-to-bol } with-capture (\e[1K) eq (clear-to-bol) rt-ok
+
+% --- Alt-screen --------------------------------------------------------------
+
+{ alt-screen-enter } with-capture (\e[?1049h) eq (alt-screen-enter) rt-ok
+{ alt-screen-leave } with-capture (\e[?1049l) eq (alt-screen-leave) rt-ok
+
+% --- SGR attributes ----------------------------------------------------------
+
+{ bold }        with-capture (\e[1m) eq (bold)       rt-ok
+{ dim }         with-capture (\e[2m) eq (dim)        rt-ok
+{ italic }      with-capture (\e[3m) eq (italic)     rt-ok
+{ underline }   with-capture (\e[4m) eq (underline)  rt-ok
+{ blink }       with-capture (\e[5m) eq (blink)      rt-ok
+{ reverse }     with-capture (\e[7m) eq (reverse)    rt-ok
+{ strike }      with-capture (\e[9m) eq (strike)     rt-ok
+{ reset-attrs } with-capture (\e[0m) eq (reset-attrs) rt-ok
+
+% --- Color (16-palette) ------------------------------------------------------
+
+{ 0 fg-16 } with-capture (\e[30m) eq (fg-16 black)         rt-ok
+{ 7 fg-16 } with-capture (\e[37m) eq (fg-16 white)         rt-ok
+{ 8 fg-16 } with-capture (\e[90m) eq (fg-16 bright black)  rt-ok
+{ 15 fg-16 } with-capture (\e[97m) eq (fg-16 bright white) rt-ok
+
+{ 0 bg-16 } with-capture (\e[40m) eq (bg-16 black)          rt-ok
+{ 7 bg-16 } with-capture (\e[47m) eq (bg-16 white)          rt-ok
+{ 8 bg-16 } with-capture (\e[100m) eq (bg-16 bright black)  rt-ok
+{ 15 bg-16 } with-capture (\e[107m) eq (bg-16 bright white) rt-ok
+
+% --- Color (256-palette) -----------------------------------------------------
+
+{ 0 fg-256 }   with-capture (\e[38;5;0m)   eq (fg-256 0)   rt-ok
+{ 196 fg-256 } with-capture (\e[38;5;196m) eq (fg-256 196) rt-ok
+{ 255 fg-256 } with-capture (\e[38;5;255m) eq (fg-256 255) rt-ok
+
+{ 40 bg-256 }  with-capture (\e[48;5;40m)  eq (bg-256 40)  rt-ok
+{ 0 bg-256 }   with-capture (\e[48;5;0m)   eq (bg-256 0)   rt-ok
+
+% --- Color (truecolor) -------------------------------------------------------
+
+{ 255 128 0 fg-rgb } with-capture (\e[38;2;255;128;0m) eq (fg-rgb orange) rt-ok
+{ 0 64 128 bg-rgb }  with-capture (\e[48;2;0;64;128m)  eq (bg-rgb navy)   rt-ok
+
+{ default-fg } with-capture (\e[39m) eq (default-fg) rt-ok
+{ default-bg } with-capture (\e[49m) eq (default-bg) rt-ok
+
+% --- Composite helpers -------------------------------------------------------
+
+{ 3 9 (Hello) print-at }
+    with-capture (\e[9;3HHello) eq (print-at) rt-ok
+
+{ [ /bold /reverse ] { (Hi) _emit } with-attrs }
+    with-capture (\e[1m\e[7mHi\e[0m) eq (with-attrs bold+reverse) rt-ok
+
+{ 196 { (X) _emit } with-fg }
+    with-capture (\e[38;5;196mX\e[39m) eq (with-fg) rt-ok
+
+{ 17 { (Y) _emit } with-bg }
+    with-capture (\e[48;5;17mY\e[49m) eq (with-bg) rt-ok
+
+% --- Summary -----------------------------------------------------------------
+
+(\npassed: ) print passed = (failed: ) print failed = (total: ) print total =
+failed 0 eq { (test_ansi_trx OK) } { (test_ansi_trx FAILED) } if-else =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

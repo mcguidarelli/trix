@@ -1,0 +1,27 @@
+% examples/keytest.trx -- manual smoke test for the raw-mode keyboard surface.
+%
+% Run from a real terminal (not piped, not tmux without a tty):
+%   ./trix examples/keytest.trx
+%
+% Each keystroke is printed as the decoded Name produced by lib/keys.trx.
+% Press 'q' to quit.  Press Ctrl-C to demonstrate the crash-safe restore handler --
+% the terminal returns to cooked mode and your prompt comes back unbroken.
+
+(lib/keys.trx) run
+
+(Press keys to see their decoded names.  Press 'q' to quit.) =
+(Try: arrow keys, Home/End, F1-F12, Tab, Enter, Ctrl-A through Ctrl-Z,) =
+(     printable letters, Ctrl-C \(handler test\), Esc \(short timeout\).) =
+() =
+
+{
+    {
+        % Each iteration: read one decoded key and print it.
+        { read-key-byte } { 50 read-key-byte-timeout } decode-key
+        dup ==
+        /q eq { exit } if
+    } loop
+} with-raw-mode
+
+(Goodbye.) =
+quit

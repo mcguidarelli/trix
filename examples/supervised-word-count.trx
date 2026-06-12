@@ -1,0 +1,196 @@
+% ======================================================================
+% Showcase: Supervised, Concurrent Word-Count
+% ----------------------------------------------------------------------
+% Demonstrates three Trix concurrency features working together:
+%
+%   pipelines    -- each worker tokenizes its file through a four-stage
+%                   pipeline (regex-split -> lowercase -> filter-empty ->
+%                   poison-check -> collect).  Five coroutines transiently
+%                   share the VM heap per file, with bounded-buffer
+%                   backpressure between stages.
+%
+%   actors       -- dispatcher actor holds the filename queue; reducer
+%                   actor folds per-file counts into a merged dict; N
+%                   worker actors ask the dispatcher for work, tokenize,
+%                   and send results to the reducer.
+%
+%   supervision  -- one corpus file (poison.txt) contains a sentinel token
+%                   (POISONWORD).  When a worker tokenizes it, its
+%                   pipeline's tap stage fires /require, the worker dies.
+%                   A /one-for-one /transient supervisor observes the
+%                   /down, restarts the worker, and the run completes with
+%                   no operator input.
+%
+% Each actor body wraps its work in `8 dict begin ... end` so its locals
+% live in a per-actor dict rather than the shared userdict: multiple
+% workers can all bind /msg, /path, /counts simultaneously with no
+% interference.  The per-coroutine name-binding cache (see
+% src/binding_table.inl) handles the read side -- each actor's cache
+% returns its own slot pointer, never another actor's.
+%
+% Run:
+%     ./trix examples/supervised-word-count.trx
+% ======================================================================
+
+% ---- Configuration ---------------------------------------------------
+
+/poison-sentinel    (POISONWORD)            def
+/poison-lc          poison-sentinel lowercase def
+/worker-count       3                       def
+/top-n              10                      def
+
+/corpus [
+    (examples/word-count-corpus/sonnet-18.txt)
+    (examples/word-count-corpus/sonnet-29.txt)
+    (examples/word-count-corpus/poison.txt)
+    (examples/word-count-corpus/sonnet-73.txt)
+] def
+
+% ---- Tokenization pipeline -------------------------------------------
+% path :- per-file-count-dict
+% The pipe-tap stage raises /require on the sentinel; pipe-collect
+% re-raises to the caller, killing the worker.
+/tokenize-file {
+    (r)#b stream                                 % path -> stream
+    dup read-all                                 % stream -> stream raw
+    exch close-stream                            % raw (stream closed)
+
+    ([^A-Za-z']+) regex-split
+        { lowercase }                       pipe-map
+        { length 0 gt }                     pipe-filter
+        { dup poison-lc ne precondition }   pipe-tap
+        16 pipe-collect
+    frequencies
+} def
+
+% ---- Reducer actor ---------------------------------------------------
+% Folds per-file dicts into one merged dict.  Returns the final dict as
+% its coroutine return value, so `reducer coroutine-join` yields it.
+% Locals live in a per-actor dict (8 dict begin ... end) so /done here
+% doesn't collide with the dispatcher's /done.
+/reducer [ {
+    8 dict begin
+        /merged 256 dynamic-dict def
+        /done   false              def
+        {
+            done { exit } if
+            /msg actor-recv def
+            msg tag-name /finalize eq
+                { /done true def }
+                {
+                    msg tag-value {
+                        /v exch def
+                        /k exch def
+                        merged k  v merged k 0 get-default add  put
+                    } for-all
+                }
+            if-else
+        } loop
+        merged                                   % actor return value
+    end
+} actor-spawn def
+
+% ---- Dispatcher actor ------------------------------------------------
+% Single point of truth for the queue and the /done count.  When every
+% worker has received /done, it signals the reducer to finalize and exits.
+/dispatcher [ {
+    8 dict begin
+        /idx     0              def
+        /pending worker-count   def
+        /done    false          def
+        {
+            done { exit } if
+            /msg   actor-recv          def
+            /reply msg tag-value       def
+            idx corpus length lt
+                {
+                    corpus idx get /file tag  reply actor-send
+                    /idx idx 1 add def
+                }
+                {
+                    null /done tag            reply actor-send
+                    /pending pending 1 sub def
+                    pending 0 eq
+                        {
+                            null /finalize tag  reducer actor-send
+                            /done true def
+                        }
+                    if
+                }
+            if-else
+        } loop
+    end
+} actor-spawn def
+
+% ---- Worker body (multiple instances) --------------------------------
+% Every (re)start prints a banner so the restart is visible.  Each
+% worker's /msg, /path, /counts defs live in its own per-actor dict so
+% peer workers' matching names don't interfere.
+/worker-body {
+    (  [worker] started) =
+    8 dict begin
+        {
+            actor-self /req tag dispatcher actor-send
+            /msg actor-recv def
+            msg tag-name /done eq
+                { exit }
+                {
+                    /path   msg tag-value        def
+                    /counts path tokenize-file   def
+                    counts /merge tag reducer actor-send
+                    (  [worker] processed {0}\n) mark path print-fmt pop pop
+                }
+            if-else
+        } loop
+    end
+} def
+
+% ---- Supervisor ------------------------------------------------------
+/sup
+<<
+    /strategy   /one-for-one
+    /intensity  5
+    /period     30000
+    /children   [
+        << /id /w1  /start { worker-body }  /restart /transient >>
+        << /id /w2  /start { worker-body }  /restart /transient >>
+        << /id /w3  /start { worker-body }  /restart /transient >>
+    ]
+>> supervisor def
+
+% ---- Wait for reducer, collect final dict ----------------------------
+/start-us clock def
+/final reducer coroutine-join pop def                         % drop /normal-exit bool
+/elapsed-us clock start-us sub def
+
+% ---- Report ----------------------------------------------------------
+(\n=== Supervised Word Count ===\n\n) print
+(Corpus       : {0} files\n) mark corpus length        print-fmt pop pop
+(Workers      : {0}\n)       mark worker-count          print-fmt pop pop
+(Unique words : {0}\n)       mark final length          print-fmt pop pop
+(Elapsed time : {0:.1f} ms\n\n) mark elapsed-us 1000.0d promote div print-fmt pop pop
+
+(Top {0} words:\n) mark top-n print-fmt pop pop
+
+% Sort [word count] pairs by descending count.
+% W07: build the pairs array via an explicit accumulator instead of
+% leaking each iteration's array into a surrounding [ ... ] literal.
+/pairs [] def
+final {
+    /v exch def
+    /k exch def
+    /pairs pairs mark k v array-from-mark append store
+} for-all
+/sorted pairs { 1 get neg } sort-by def
+
+0 1 top-n 1 sub {
+    /i exch def
+    i sorted length lt
+    {
+        /pair sorted i get def
+        (  {0:>5}  {1}\n) mark pair 1 get pair 0 get print-fmt pop pop
+    }
+    if
+} for
+
+nl

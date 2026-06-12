@@ -1,0 +1,4 @@
+${ $$/foo pop }
+$/glo $$/loc /a /b def def
+{ $$\xname } pop
+{ $\yname } pop

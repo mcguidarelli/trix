@@ -1,0 +1,141 @@
+% ====================================================================
+% test_b5_safety_2.trx -- B5 review group-2 regressions
+% ====================================================================
+% Semantic-correctness + resource-leak fixes:
+%   C12  kahan-sum / dot-product reject non-numeric elements (/type-check)
+%   C19  fe-set-env / fe-update-env validate rounding mode BEFORE mutating
+%        the exception flags (atomic on a bad-rounding range-check)
+%   C10  frequencies stores cloned keys (no aliasing of the source array's
+%        ExtValue -> no use-after-free when a result key is freed)
+%   C16  regex-search / regex-find-all keep groups AFTER an unmatched
+%        optional group (no break-at-first-unmatched truncation)
+%   leak pad-left/right free the width operand's ExtValue
+%   leak at_match_test frees the value clone on the type-check error path
+%   leak writable? re-validates a stale stream handle like readable? does
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% FP exception flag constants (UInteger values from numbers:environment dict)
+/fe-all     //:systemdict:numbers:environment:fe-all-except def
+/fe-inex    //:systemdict:numbers:environment:fe-inexact def
+
+% ====================================================================
+% C12: kahan-sum / dot-product reject non-numeric elements
+% ====================================================================
+% Was: object_to_double's default arm silently coerced non-numerics to 0.0.
+{ [ 1 (x) 3 ] kahan-sum } try /type-check eq   (kahan-sum: string element -> type-check) rt-ok clear
+{ [ 1 true 3 ] kahan-sum } try /type-check eq  (kahan-sum: boolean element -> type-check) rt-ok clear
+{ 10 (x) 30 3 packed kahan-sum } try /type-check eq  (kahan-sum: non-numeric in packed -> type-check) rt-ok clear
+{ [ 1 2 ] [ 1 true ] dot-product } try /type-check eq  (dot-product: boolean element -> type-check) rt-ok clear
+
+% valid numeric cases still compute (no false positive)
+[ 1 2 3 ] kahan-sum 6.0d eq            (kahan-sum: numeric array sums to 6.0d) rt-ok clear
+[ 1 2 3 ] [ 4 5 6 ] dot-product 32.0d eq  (dot-product: 1.4+2.5+3.6 = 32.0d) rt-ok clear
+
+% ====================================================================
+% C19: fe-set-env / fe-update-env are atomic on a bad rounding mode.
+% packed ULong 0x7FFFFFFF00000000: exception field = 0 (valid),
+% rounding field = 0x7FFFFFFF (invalid mode).  The op must reject it
+% WITHOUT having first clobbered the live exception flags.
+% ====================================================================
+fe-all fe-clear-except pop
+fe-inex fe-raise-except pop            % known state: INEXACT set
+{ 9223372032559808512ul fe-set-env } try /range-check eq
+  (fe-set-env: bad rounding mode -> range-check) rt-ok clear
+fe-inex fe-test-except fe-inex eq      (fe-set-env: bad rounding leaves exception flags intact) rt-ok clear
+fe-all fe-clear-except pop
+
+fe-all fe-clear-except pop
+fe-inex fe-raise-except pop
+{ 9223372032559808512ul fe-update-env } try /range-check eq
+  (fe-update-env: bad rounding mode -> range-check) rt-ok clear
+fe-inex fe-test-except fe-inex eq      (fe-update-env: bad rounding leaves exception flags intact) rt-ok clear
+fe-all fe-clear-except pop
+
+% ====================================================================
+% C10: frequencies must clone ExtValue keys, not alias the source array.
+% Build the dict, free a key (undef), reuse the freed ExtValue slot with a
+% new Double, then read the source element: if the key had aliased the
+% source's cell it now reads the reused value (corruption); the clone keeps
+% the source intact.
+% ====================================================================
+/src [ 1.5d 2.5d 1.5d ] def
+/freq src frequencies def
+freq 1.5d get 2 eq                     (frequencies: counts duplicate doubles) rt-ok clear
+freq 2.5d get 1 eq                     (frequencies: counts singleton double) rt-ok clear
+freq 1.5d undef                        % free the dict's 1.5d key ExtValue
+777.0d pop                             % reuse the just-freed slot (LIFO free list)
+src 0 get 1.5d eq                      (frequencies: source element intact after key free+reuse) rt-ok clear
+
+% ====================================================================
+% C16: an unmatched optional group BEFORE a matched group must not drop
+% the later matched groups (group N stays at index N).
+% ====================================================================
+% regex-search: pattern ^(a)(b)?(c)$ on "ac" -> groups [ac, a, "", c]
+(ac) (^(a)(b)?(c)$) regex-search       % -- [matches] true
+  (regex-search: (a)(b)?(c) on "ac" matched) rt-ok           % -- [matches]
+dup length 4 eq                        (regex-search: group array length 4) rt-ok
+dup 1 get (a) eq                       (regex-search: group 1 = "a") rt-ok
+dup 2 get length 0 eq                  (regex-search: unmatched optional group 2 = empty string) rt-ok
+dup 3 get (c) eq                       (regex-search: matched group 3 = "c" survives) rt-ok
+0 get (ac) eq                          (regex-search: group 0 = whole match "ac") rt-ok clear
+
+% regex-search: contiguous groups (no false positive)
+(abc-123) (([a-z]+)-([0-9]+)) regex-search
+  (regex-search: contiguous groups matched) rt-ok
+dup length 3 eq                        (regex-search: contiguous group count 3) rt-ok
+2 get (123) eq                         (regex-search: group 2 = "123") rt-ok clear
+
+% regex-find-all: each match keeps full + all groups incl. unmatched optional
+(ab) (([a-z])(X)?) regex-find-all      % 2 matches; each [full, g1, g2(unmatched)]
+dup length 2 eq                        (regex-find-all: 2 matches found) rt-ok
+dup 0 get length 3 eq                  (regex-find-all: match keeps full+2 groups) rt-ok
+0 get 2 get length 0 eq                (regex-find-all: unmatched optional group -> empty) rt-ok clear
+
+% ====================================================================
+% leak: pad-left / pad-right free the width operand's ExtValue (Long width).
+% extvalue-active must return to baseline after the op (net 0).
+% ====================================================================
+/bl0 //:status:extvalue-active def
+(ab) 100l 32b pad-left pop             % normal padding path, Long width
+//:status:extvalue-active bl0 eq       (pad-left: width ExtValue freed, padding path) rt-ok clear
+
+/bl1 //:status:extvalue-active def
+(abcdef) 3l 32b pad-left pop           % early-return path (already wide enough)
+//:status:extvalue-active bl1 eq       (pad-left: width ExtValue freed, early-return path) rt-ok clear
+
+/bl2 //:status:extvalue-active def
+(ab) 100l 32b pad-right pop
+//:status:extvalue-active bl2 eq       (pad-right: width ExtValue freed) rt-ok clear
+
+% ====================================================================
+% leak: at_match_test frees the value clone (exec-stack value_ptr) on the
+% type-check error path, mirroring the no-match path.  Behavioral check
+% only -- the exec-stack clone is not script-observable in isolation (the
+% test-proc's own op-stack residue confounds an extvalue-active delta), but
+% reaching this error path is what exercises the freed-clone fix.
+% ====================================================================
+{ 1.5d [ { pop 99 } { } ] match } try /type-check eq
+  (match: non-boolean test result -> type-check) rt-ok clear
+
+% ====================================================================
+% leak/consistency: writable? re-validates a stale stream handle, so it
+% reports false in lockstep with readable? (was: returned the cached RW bit).
+% ====================================================================
+(/tmp/trix_b5_writable.txt) (w)#b stream   % -- handle
+dup close-stream                            % close; the remaining copy is now stale
+dup writable? false eq                      (writable?: stale write handle -> false) rt-ok
+readable? false eq                          (readable?: stale write handle -> false) rt-ok clear
+(/tmp/trix_b5_writable.txt) delete-file
+
+(test_b5_safety_2.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

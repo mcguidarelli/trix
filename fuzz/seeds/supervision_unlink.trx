@@ -1,0 +1,4 @@
+mark { actor-recv pop 1 } actor-spawn /b exch def
+mark b { dup link unlink } actor-spawn coroutine-join pop pop
+/go b actor-send
+b coroutine-join pop pop

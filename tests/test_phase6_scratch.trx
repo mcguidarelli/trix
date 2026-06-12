@@ -1,0 +1,94 @@
+% ====================================================================
+% test_phase6_scratch.trx -- VM Redux Phase 6 invariants
+% ====================================================================
+% Phase 6 added a per-coroutine scratch arena carved from the back of
+% the contiguous stack block (and from a dedicated slab in main's
+% case).  Three Trix ops:
+%   scratch-push    val --        push val into running coroutine's scratch
+%   scratch-collect -- array      drain to fresh array, reset arena
+%   scratch-clear   --            reset arena, freeing any ExtValue contents
+%
+% Five invariants:
+%   I1. Push order is preserved by collect (oldest first).
+%   I2. Empty collect returns an empty array; arena starts idle.
+%   I3. Mixed types (Integer / Long / Real / String / Name) round-trip.
+%   I4. clear resets the arena without producing a result.
+%   I5. Two concurrent coroutines have INDEPENDENT scratch arenas;
+%       yielding mid-fill does not leak across coroutines.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- SECTION 1 (I1): push / collect roundtrip preserves order ---
+1 scratch-push
+2 scratch-push
+3 scratch-push
+scratch-collect /a1 exch def
+a1 length 3 eq                              (s1: collect length = 3)              rt-ok
+a1 0 get 1 eq                               (s1: a1[0] = 1 (oldest))               rt-ok
+a1 1 get 2 eq                               (s1: a1[1] = 2)                        rt-ok
+a1 2 get 3 eq                               (s1: a1[2] = 3 (newest))               rt-ok
+
+% --- SECTION 2 (I2): empty collect after collect returns []  ---
+scratch-collect /a2 exch def
+a2 length 0 eq                              (s2: empty after drain)                rt-ok
+
+% --- SECTION 3 (I3): mixed types round-trip ---
+42 scratch-push
+3.14 scratch-push
+(hello) scratch-push
+/sym scratch-push
+1234567890123l scratch-push                 % Long (ExtValue)
+scratch-collect /a3 exch def
+a3 length 5 eq                              (s3: 5 mixed entries)                  rt-ok
+a3 0 get 42 eq                              (s3: integer round-trip)               rt-ok
+a3 1 get 3.14 eq                            (s3: real round-trip)                  rt-ok
+a3 2 get (hello) eq                         (s3: string round-trip)                rt-ok
+a3 3 get /sym eq                            (s3: name round-trip)                  rt-ok
+a3 4 get 1234567890123l eq                  (s3: long (ExtValue) round-trip)       rt-ok
+
+% --- SECTION 4 (I4): clear resets without producing a result ---
+1 scratch-push
+2 scratch-push
+3 scratch-push
+scratch-clear
+scratch-collect /a4 exch def
+a4 length 0 eq                              (s4: clear empties the arena)          rt-ok
+
+% --- SECTION 5 (I5): two coroutines, independent scratch arenas ---
+% Spawn a child that pushes its own values then yields and collects.
+% Main pushes its own values in between yields.  Independence means
+% the collected arrays match exactly what each side pushed -- no
+% cross-leak.  Child returns its scratch-collect result via the
+% coroutine return value (top of op stack at proc end).
+[ { 11 scratch-push 22 scratch-push 33 scratch-push
+    0 coroutine-sleep
+    scratch-collect } coroutine-launch /child exch def
+
+100 scratch-push
+200 scratch-push
+0 coroutine-sleep                           % let child run + yield
+300 scratch-push
+0 coroutine-sleep                           % let child finish
+scratch-collect /main-result exch def
+
+main-result length 3 eq                     (s5: main pushed 3 items)              rt-ok
+main-result 0 get 100 eq                    (s5: main[0] = 100)                    rt-ok
+main-result 2 get 300 eq                    (s5: main[2] = 300 -- across yield)    rt-ok
+
+child coroutine-await /child-result exch def
+child-result length 3 eq                    (s5: child pushed 3 items)             rt-ok
+child-result 0 get 11 eq                    (s5: child[0] = 11)                    rt-ok
+child-result 2 get 33 eq                    (s5: child[2] = 33)                    rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_phase6_scratch: ALL TESTS PASSED) =
+(__test_ok__) =

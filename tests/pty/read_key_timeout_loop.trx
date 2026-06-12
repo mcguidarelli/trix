@@ -1,0 +1,24 @@
+% S8: read-key-byte-timeout in a loop -- every 50ms timeout wakes the
+% reader via timer_sweep_expired and the NEXT call re-registers it as
+% the stdin reader.  Regression: the sweep did not release
+% m_stdin_blocked_reader, so the second call saw its own stale
+% registration and raised /invalid-access ("another coroutine is
+% already reading stdin") -- tetrix/chip8 input actors died on their
+% first quiet 50ms.  The byte at t+2s requires ~40 clean timeout
+% cycles first.
+(lib/keys.trx) run
+/done false def
+/reader {
+    (reader-start\n) print flush
+    {
+        50 read-key-byte-timeout
+        { (got-byte: ) print /integer-type cast = flush /done true store exit }
+        if
+    } loop
+} def
+{
+    mark { reader } actor-spawn pop
+    { done not } { 20 coroutine-sleep } while
+} with-raw-mode
+(S8-done\n) print flush
+quit

@@ -1,0 +1,109 @@
+% ====================================================================
+% Regression tests for Int128 / UInt128 UB sites fixed on 2026-04-17.
+%
+% Every test here corresponds to a switch-on-type site that previously
+% hit std::unreachable() or assert(false) when called with a 128-bit
+% argument, despite VerifyIntegers / VerifyNumbers permitting them.
+% If any of these CRASH, the feature-sprint regression has returned.
+%
+% Grouped by fix category:
+%   A. UB -> correct behavior (feature supported)
+%   B. UB -> clean TypeCheck rejection (feature deferred)
+%   C. Silent-wrong-answer -> correct result
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ---------- A. UB -> supported (feature works) ----------
+
+% sum over Int128/UInt128 arrays (was: std::unreachable on zero-accumulator)
+[1q 2q 3q]    sum    6q deep-eq     (sum int128 [1q 2q 3q] = 6q)      rt-ok clear
+[1uq 2uq 3uq] sum    6uq deep-eq    (sum uint128 [1uq 2uq 3uq] = 6uq) rt-ok clear
+[-5q 10q 2q]  sum    7q deep-eq     (sum int128 signed mix)           rt-ok clear
+
+% product over Int128/UInt128 arrays (was: rejected as "not numeric")
+[2q 3q 4q]    product   24q  deep-eq  (product int128 [2q 3q 4q])     rt-ok clear
+[2uq 3uq 4uq] product   24uq deep-eq  (product uint128 [2uq 3uq 4uq]) rt-ok clear
+[1q]          product   1q   deep-eq  (product int128 single elem)    rt-ok clear
+
+% lazy-from over Int128/UInt128 (was: std::unreachable on increment)
+5q  lazy-from 3 lazy-take lazy-to-array [5q 6q 7q]     deep-eq (lazy-from int128 5q)   rt-ok clear
+5uq lazy-from 3 lazy-take lazy-to-array [5uq 6uq 7uq]  deep-eq (lazy-from uint128 5uq) rt-ok clear
+
+% min-of/max-of over 128-bit arrays
+[3q 1q 4q 1q 5q]     min-of  1q  deep-eq    (min-of int128)    rt-ok clear
+[3q 1q 4q 1q 5q]     max-of  5q  deep-eq    (max-of int128)    rt-ok clear
+[3uq 1uq 4uq 1uq 5uq] min-of 1uq deep-eq    (min-of uint128)   rt-ok clear
+[3uq 1uq 4uq 1uq 5uq] max-of 5uq deep-eq    (max-of uint128)   rt-ok clear
+
+% kahan-sum over 128-bit (was: object_to_double returned 0.0 silently)
+[1q 2q 3q]       kahan-sum 6.0d  deep-eq  (kahan-sum int128)   rt-ok clear
+[10uq 20uq 30uq] kahan-sum 60.0d deep-eq  (kahan-sum uint128)  rt-ok clear
+
+% sort over Int128/UInt128 arrays (was: all elements compared equal)
+[3q 1q 4q 1q 5q] sort [1q 1q 3q 4q 5q] deep-eq (sort int128)  rt-ok clear
+[3uq 1uq 4uq]    sort [1uq 3uq 4uq]    deep-eq (sort uint128) rt-ok clear
+
+% ---------- A. Object::is_numeric_zero via for-loop ----------
+% 128-bit counters are rejected by for_op with TypeCheck -- the important
+% thing is that is_numeric_zero no longer silently returns false (which
+% would mask a zero-increment infinite-loop bug if a path ever reached it).
+{ 0q 0q 10q { pop } for } try /no-error ne (for int128 -> error) rt-ok clear
+
+% ---------- B. UB -> clean TypeCheck rejection ----------
+{ 10q factorial } try        /type-check eq (factorial int128 -> TypeCheck)    rt-ok clear
+{ 10uq factorial } try       /type-check eq (factorial uint128 -> TypeCheck)   rt-ok clear
+{ 7q prime? } try            /type-check eq (prime? int128 -> TypeCheck)       rt-ok clear
+{ 7uq prime? } try           /type-check eq (prime? uint128 -> TypeCheck)      rt-ok clear
+{ 2q 10q 7q pow-mod } try    /type-check eq (pow-mod int128 -> TypeCheck)      rt-ok clear
+{ 2uq 10uq 7uq pow-mod } try /type-check eq (pow-mod uint128 -> TypeCheck)     rt-ok clear
+{ 100q isqrt } try           /type-check eq (isqrt int128 -> TypeCheck)        rt-ok clear
+{ 100uq isqrt } try          /type-check eq (isqrt uint128 -> TypeCheck)       rt-ok clear
+
+% ---------- A. object_less_than same-type 128-bit ----------
+[5q 3q 4q 1q 2q] { dup } sort-by [1q 2q 3q 4q 5q] deep-eq
+    (sort-by int128 with identity) rt-ok clear
+
+% ---------- Unique / dedupe on 128-bit arrays ----------
+[1q 2q 1q 3q 2q 1q] unique [1q 2q 3q] deep-eq (unique int128) rt-ok clear
+[1q 1q 2q 2q 3q]    dedupe [1q 2q 3q] deep-eq (dedupe int128) rt-ok clear
+
+% ---------- swap-at with 128-bit in array ----------
+[10q 20q 30q] dup 0 2 swap-at [30q 20q 10q] deep-eq (swap-at int128) rt-ok clear
+
+% ---------- opstack backtrace display must not crash on 128-bit ----------
+% format_backtrace now prints Int128/UInt128 value digits instead of just the type.
+5q 7uq opstack clear
+
+% ---------- repeat / for reject 128-bit loop counts ----------
+% Regression: fuzz/crashes/crash-166491ad tripped Object::ulong_value's
+% assert via `repeat` with an Int128 count (repeat's if-is_long else
+% ulong_value chain assumed the only non-long integer was ulong).
+% Both ops now reject Int128/UInt128 at the verify_operands boundary
+% (VerifyIntegers64).
+{ 3q { 1 } repeat } try /type-check eq
+(repeat: Int128 count rejected) rt-ok clear
+{ 3uq { 1 } repeat } try /type-check eq
+(repeat: UInt128 count rejected) rt-ok clear
+{ 1q 1q 5q { = } for } try /type-check eq
+(for: Int128 initial rejected) rt-ok clear
+{ 1uq 1uq 5uq { = } for } try /type-check eq
+(for: UInt128 initial rejected) rt-ok clear
+
+% Happy path: 64-bit counts still work for both.
+0 /sum exch def 5 { sum 1 add /sum exch def } repeat sum 5 eq
+(repeat: Integer count still works) rt-ok clear
+0l /sum exch def 1l 1l 3l { sum exch add /sum exch def } for sum 6l eq
+(for: Long range still works) rt-ok clear
+
+(INT128 UB-REGRESSION TESTS DONE -- no crashes, no wrong answers) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

@@ -1,0 +1,6 @@
+% gen-server call/cast spines inside ${...} under pressure.
+${ mark 20 { 256 string } repeat array-from-mark } pop
+<< /init { 0 } /handle-call { pop exch pop dup 1 add } >> gen-server /s exch def
+mark s { ${ (ping) exch gen-call } pop } actor-spawn coroutine-join pop pop
+s (note) gen-cast
+s /normal gen-stop

@@ -1,0 +1,2 @@
+10 cell /c exch def
+c cell-get 20 c cell-set c cell-get

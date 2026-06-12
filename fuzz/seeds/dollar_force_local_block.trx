@@ -1,0 +1,3 @@
+${ $${ /a pop } ${ /b pop } }
+$${ /c pop }
+mark { $${ /e1 throw } } try clear

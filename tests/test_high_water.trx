@@ -1,0 +1,165 @@
+% ====================================================================
+% Stack High-Water Marks and TCO Counter Tests
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: High-water marks are accessible and positive
+% ====================================================================
+
+//:status:op-high-water 0 gt          (hw: op-high-water > 0) rt-ok clear
+//:status:exec-high-water 0 gt        (hw: exec-high-water > 0) rt-ok clear
+//:status:dict-high-water 0 gt        (hw: dict-high-water > 0) rt-ok clear
+//:status:error-high-water 0 ge        (hw: error-high-water >= 0) rt-ok clear
+
+% ====================================================================
+% SECTION 2: High-water <= max depth
+% ====================================================================
+
+//:status:op-high-water //:status:max-op-depth le
+(hw: op-high-water <= max-op-depth) rt-ok clear
+
+//:status:exec-high-water //:status:max-exec-depth le
+(hw: exec-high-water <= max-exec-depth) rt-ok clear
+
+//:status:dict-high-water //:status:max-dict-depth le
+(hw: dict-high-water <= max-dict-depth) rt-ok clear
+
+//:status:error-high-water //:status:max-error-depth le
+(hw: error-high-water <= max-error-depth) rt-ok clear
+
+% ====================================================================
+% SECTION 3: High-water increases with large operand stack usage
+% ====================================================================
+
+% Push enough values to exceed any prior high-water mark (which could be
+% up to ~900 under test_all.trx).  If we push 950, the high-water must
+% grow.  If it was already at the max, we accept that too.
+/hw-before //:status:op-high-water def
+0 1 949 { } for
+/hw-after //:status:op-high-water def
+clear
+hw-after hw-before ge               (hw: 950 pushes raises or matches op-hw) rt-ok clear
+
+% ====================================================================
+% SECTION 4: TCO counter -- tail recursion increments tco-count
+% ====================================================================
+
+//:status:tco-count
+/countdown { dup 0 le { pop } { 1 sub countdown } if-else } def
+100 countdown
+//:status:tco-count
+exch sub 100ul eq                     (tco: 100 countdown = 100 tail calls) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Non-tail recursion does NOT increment tco-count
+% ====================================================================
+
+//:status:tco-count
+/non-tail { dup 0 le { pop } { 1 sub non-tail 1 pop } if-else } def
+{ 50 non-tail } try pop
+//:status:tco-count
+eq                                    (tco: non-tail does not increment tco-count) rt-ok clear
+
+% ====================================================================
+% SECTION 6: TCO keeps exec-high-water bounded
+% ====================================================================
+
+% Record exec high water before deep tail recursion
+//:status:exec-high-water
+
+% Deep tail recursion: 50000 calls
+50000 countdown
+
+% High water should still be modest (not 50000 * 4 slots)
+//:status:exec-high-water
+exch sub 20 lt                        (tco: 50000 countdown exec-hw growth < 20) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Error stack high-water increases with nested finally
+% ====================================================================
+
+% If error-hw is already at max, it cannot grow further -- that's fine,
+% it proves the stack was exercised to capacity.
+/hw-err-before //:status:error-high-water def
+
+% 8 levels of nested finally to push error stack deep
+{ { { { { { { { 1 pop } { } finally } { } finally } { } finally } { } finally
+} { } finally } { } finally } { } finally } { } finally
+
+/hw-err-after //:status:error-high-water def
+hw-err-after hw-err-before ge
+hw-err-after 0 gt and               (hw: error-hw grew or was already positive) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Dict high-water increases with local bindings
+% ====================================================================
+
+% If dict-hw is already at max, it cannot grow further.
+/hw-dict-before //:status:dict-high-water def
+
+% Nested local bindings push to dict stack (5 levels)
+{ |a| { |b| { |c| { |d| { |e|
+    a b c d e
+} 5 exch exec } 4 exch exec } 3 exch exec } 2 exch exec } 1 exch exec
+pop pop pop pop pop
+
+/hw-dict-after //:status:dict-high-water def
+hw-dict-after hw-dict-before ge
+hw-dict-after 0 gt and              (hw: dict-hw grew or was already positive) rt-ok clear
+
+% ====================================================================
+% SECTION 9: query-status runtime access
+% ====================================================================
+
+/op-high-water query-status 0 gt      (hw: query-status op-high-water) rt-ok clear
+/exec-high-water query-status 0 gt    (hw: query-status exec-high-water) rt-ok clear
+/tco-count query-status type /ulong-type eq   (hw: tco-count is ulong) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Mutual tail recursion TCO count
+% ====================================================================
+
+//:status:tco-count
+/ping { dup 0 le { pop } { 1 sub pong } if-else } def
+/pong { dup 0 le { pop } { 1 sub ping } if-else } def
+200 ping
+//:status:tco-count
+exch sub 200ul eq                     (tco: mutual 200 ping = 200 tail calls) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Exec high-water reflects non-tail depth
+% ====================================================================
+
+% Non-tail recursion should push exec high water significantly.
+% If exec-hw is already at max (from prior tests in test_all.trx), the
+% delta will be 0 -- but that proves the stack was fully exercised.
+/hw-exec-before //:status:exec-high-water def
+
+/deep-non-tail { dup 0 le { pop } { 1 sub deep-non-tail 1 pop } if-else } def
+{ 80 deep-non-tail } try pop
+
+/hw-exec-after //:status:exec-high-water def
+hw-exec-after hw-exec-before ge      (hw: non-tail exec-hw grew or already at peak) rt-ok clear
+
+% ====================================================================
+% SECTION 12: TCO count for large recursion
+% ====================================================================
+
+//:status:tco-count
+100000 countdown
+//:status:tco-count
+exch sub 100000ul eq                  (tco: 100000 countdown = 100000 tail calls) rt-ok clear
+
+(test_high_water: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

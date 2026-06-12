@@ -1,0 +1,177 @@
+% ====================================================================
+% Blocked Sender List Tests (Phase 6.1 Scheduler)
+% ====================================================================
+% Tests that multiple senders can block on a full mailbox and all
+% eventually deliver their messages when the receiver drains the queue.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Two senders block on a capacity-1 mailbox
+% ====================================================================
+
+% Receiver actor with capacity 1 that collects 3 messages into globals
+/msg1a null def
+/msg1b null def
+/msg1c null def
+/recv-actor1 [
+    {
+        actor-recv /msg1a exch def
+        actor-recv /msg1b exch def
+        actor-recv /msg1c exch def
+    }
+    1 actor-spawn-capacity def
+
+% Fill the mailbox (capacity 1)
+10 recv-actor1 actor-send
+
+% Now two senders block because mailbox is full
+/s1-done false def
+/s2-done false def
+
+[
+    { 20 recv-actor1 actor-send
+      /s1-done true def
+    }
+    coroutine-launch
+
+[
+    { 30 recv-actor1 actor-send
+      /s2-done true def
+    }
+    coroutine-launch
+
+% Wait for everything to complete
+coroutine-join pop pop
+coroutine-join pop pop
+recv-actor1 coroutine-join pop pop
+
+s1-done                                   (two-senders: sender 1 completed) rt-ok
+s2-done                                   (two-senders: sender 2 completed) rt-ok
+msg1a 10 eq                               (two-senders: first message is 10) rt-ok
+% Second and third messages are 20 and 30 in some order
+msg1b msg1c add 50 eq                     (two-senders: senders delivered 20+30) rt-ok
+
+% ====================================================================
+% SECTION 2: Three senders block on a capacity-1 mailbox
+% ====================================================================
+
+/msg2a null def
+/msg2b null def
+/msg2c null def
+/msg2d null def
+/recv-actor2 [
+    {
+        actor-recv /msg2a exch def
+        actor-recv /msg2b exch def
+        actor-recv /msg2c exch def
+        actor-recv /msg2d exch def
+    }
+    1 actor-spawn-capacity def
+
+% Fill mailbox
+100 recv-actor2 actor-send
+
+% Three senders block
+/s2a-done false def
+/s2b-done false def
+/s2c-done false def
+
+[
+    { 200 recv-actor2 actor-send /s2a-done true def }
+    coroutine-launch
+[
+    { 300 recv-actor2 actor-send /s2b-done true def }
+    coroutine-launch
+[
+    { 400 recv-actor2 actor-send /s2c-done true def }
+    coroutine-launch
+
+coroutine-join pop pop
+coroutine-join pop pop
+coroutine-join pop pop
+recv-actor2 coroutine-join pop pop
+
+s2a-done                                  (three-senders: sender A completed) rt-ok
+s2b-done                                  (three-senders: sender B completed) rt-ok
+s2c-done                                  (three-senders: sender C completed) rt-ok
+msg2a 100 eq                              (three-senders: first message is 100) rt-ok
+% Sum of remaining = 200+300+400 = 900
+msg2b msg2c add msg2d add 900 eq          (three-senders: all sender values delivered) rt-ok
+
+% ====================================================================
+% SECTION 3: Senders blocked when actor dies -- all wake and silent-drop
+% ====================================================================
+
+/s3a-done false def
+/s3b-done false def
+
+/dying-actor [
+    { actor-recv pop }
+    1 actor-spawn-capacity def
+
+% Fill mailbox
+1 dying-actor actor-send
+
+% Two senders block
+[
+    { 2 dying-actor actor-send /s3a-done true def }
+    coroutine-launch
+[
+    { 3 dying-actor actor-send /s3b-done true def }
+    coroutine-launch
+
+% Let senders block
+0 coroutine-sleep
+
+% Kill the actor -- should wake all blocked senders
+dying-actor coroutine-kill
+
+% Let senders wake, find dead target, silent-drop
+0 coroutine-sleep
+
+coroutine-join pop pop
+coroutine-join pop pop
+
+s3a-done                                  (die-wake: sender A completed after actor death) rt-ok
+s3b-done                                  (die-wake: sender B completed after actor death) rt-ok
+
+% ====================================================================
+% SECTION 4: Single sender (regression -- existing behavior preserved)
+% ====================================================================
+
+/s4-result null def
+/s4-actor [
+    {
+        actor-recv pop
+        actor-recv /s4-result exch def
+    }
+    1 actor-spawn-capacity def
+
+% Fill mailbox
+(first) s4-actor actor-send
+
+% One sender blocks
+/s4-done false def
+[
+    { (second) s4-actor actor-send /s4-done true def }
+    coroutine-launch
+
+coroutine-join pop pop
+s4-actor coroutine-join pop pop
+
+s4-done                                   (single-sender: sender completed) rt-ok
+s4-result (second) eq                     (single-sender: message delivered correctly) rt-ok
+
+clear
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_blocked_senders: ALL TESTS PASSED) =
+(__test_ok__) =

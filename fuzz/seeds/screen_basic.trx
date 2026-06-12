@@ -1,0 +1,8 @@
+10 5 make-screen pop
+10 5 make-screen 2 1 65 7 0 0 screen-put-cell pop
+10 5 make-screen 0 0 (hello) 7 0 0 screen-put-string pop
+10 5 make-screen 1 1 4 3 90 6 1 0 screen-fill-rect pop
+10 5 make-screen 4096 make-string-stream screen-render-to pop
+10 5 make-screen 5 5 screen-resize pop
+10 5 make-screen screen? =
+10 5 make-screen handle-kind =

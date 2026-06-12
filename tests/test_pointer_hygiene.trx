@@ -1,0 +1,183 @@
+% ====================================================================
+% test_pointer_hygiene.trx -- VM Redux R6 (Phase 2 deferred)
+% ====================================================================
+% Pointer-hygiene rule: a global container must never reference local-
+% VM storage allocated above the BASE save level.  Such a reference
+% would dangle if a future restore reclaimed the local storage, while
+% the global container (restore-immune) kept holding the offset.
+%
+% R6 fires when:
+%   - container is in global VM, AND
+%   - save is active (sl >= 1), AND
+%   - value's storage is local-VM at offset >= m_save_stack[BASE+1]
+%     (i.e., allocated at sl >= 1).
+%
+% R6 is a NO-OP when:
+%   - container is local (no permanence -> no dangling concern),
+%   - save is not active (everything live is at BASE),
+%   - value is a pure value type (Integer/Boolean/Byte/Real/Mark),
+%   - value is in global VM (already restore-immune),
+%   - value is local at BASE (offset < m_save_stack[BASE+1]).
+%
+% Coverage: dict put / put-persist / def-persist; set set-add / set-
+% add-persist; array put / put-persist / array-store / array-store-
+% persist.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Dict::put -- local Name at sl=1 into global dict rejected.
+% ====================================================================
+${ 4 dict } /gd1 exch def
+save /sv1 exch def
+mark { gd1 /local-1 99 put } try
+/invalid-access eq                          (s1: dict put rejects local Name)        rt-ok
+clear
+sv1 restore
+
+% Pre-interned-at-BASE Name is allowed (offset < m_save_stack[1]).
+/preinterned-1 pop
+${ 4 dict } /gd1b exch def
+save /sv1b exch def
+gd1b /preinterned-1 11 put                  % no error
+gd1b /preinterned-1 get 11 eq               (s1: BASE Name into global allowed)      rt-ok
+sv1b restore
+gd1b /preinterned-1 get 11 eq               (s1: BASE-Name entry survives restore)   rt-ok
+
+% Global Name via $/foo always works.
+${ 4 dict } /gd1c exch def
+save /sv1c exch def
+gd1c $/global-1 22 put
+gd1c $/global-1 get 22 eq                   (s1: $/global Name into global allowed)  rt-ok
+sv1c restore
+
+% ====================================================================
+% SECTION 2: Dict put-persist + def-persist -- the persist family's
+% existing /above-barrier rule (current-sl strict) fires FIRST for the
+% same-sl-as-curr case, ahead of R6.  R6 is the new mechanism for
+% non-persist puts where /above-barrier doesn't apply.  Net effect:
+% local Names + persist family still raise (just with /above-barrier).
+% ====================================================================
+${ 4 dict } /gd2 exch def
+save /sv2 exch def
+mark { gd2 /local-2 33 put-persist } try
+/above-barrier eq                           (s2: put-persist /above-barrier wins)    rt-ok
+clear
+sv2 restore
+
+${ 4 dict } /gd2b exch def
+save /sv2b exch def
+gd2b $/global-2 44 put-persist              % global Name OK
+gd2b $/global-2 get 44 eq                   (s2: put-persist global Name OK)         rt-ok
+sv2b restore
+gd2b $/global-2 get 44 eq                   (s2: persisted entry survives restore)   rt-ok
+
+% ====================================================================
+% SECTION 3: Dict::set_put + set_add_persist_or_create -- same rule.
+% ====================================================================
+${ 4 set } /gs3 exch def
+save /sv3 exch def
+mark { gs3 /local-3 set-add } try
+/invalid-access eq                          (s3: set-add rejects local Name)         rt-ok
+clear
+sv3 restore
+
+${ 4 set } /gs3b exch def
+save /sv3b exch def
+mark { gs3b /local-3b set-add-persist } try
+/above-barrier eq                           (s3: set-add-persist /above-barrier wins) rt-ok
+clear
+sv3b restore
+
+% Global Name via $/foo always works.
+${ 4 set } /gs3c exch def
+save /sv3c exch def
+gs3c $/global-3 set-add pop
+gs3c $/global-3 set-member?                 (s3: $/global into set allowed)          rt-ok
+sv3c restore
+
+% ====================================================================
+% SECTION 4: Array put + put-persist -- same rule for array values.
+% ====================================================================
+${ 4 array } /ga4 exch def
+save /sv4 exch def
+mark { ga4 0 (local-string-at-sl1) put } try
+/invalid-access eq                          (s4: array put rejects local string)     rt-ok
+clear
+sv4 restore
+
+${ 4 array } /ga4b exch def
+save /sv4b exch def
+mark { ga4b 0 (local-str-pp) put-persist } try
+/above-barrier eq                           (s4: array put-persist /above-barrier)   rt-ok
+clear
+sv4b restore
+
+% Pure values into global array are always fine.
+${ 4 array } /ga4c exch def
+save /sv4c exch def
+ga4c 0 42 put                               % integer (pure value)
+ga4c 1 true put                             % boolean (pure value)
+ga4c 0 get 42 eq                            (s4: integer into global array)          rt-ok
+ga4c 1 get true eq                          (s4: boolean into global array)          rt-ok
+sv4c restore
+
+% ====================================================================
+% SECTION 5: array-store + array-store-persist (batch path).
+% ====================================================================
+${ 4 array } /ga5 exch def
+save /sv5 exch def
+mark { 1 2 3 (local-str) ga5 array-store } try
+/invalid-access eq                          (s5: array-store rejects local in batch) rt-ok
+clear
+sv5 restore
+
+${ 4 array } /ga5b exch def
+save /sv5b exch def
+mark { 10 20 30 (sl1-str) ga5b array-store-persist } try
+/above-barrier eq                           (s5: array-store-persist /above-barrier) rt-ok
+clear
+sv5b restore
+
+% Pure-value batch into global array works.
+${ 4 array } /ga5c exch def
+save /sv5c exch def
+1 2 3 4 ga5c array-store pop
+ga5c 0 get 1 eq                             (s5: pure-value batch [0])               rt-ok
+ga5c 3 get 4 eq                             (s5: pure-value batch [3])               rt-ok
+sv5c restore
+
+% ====================================================================
+% SECTION 6: R6 is a no-op at BASE (no save active).
+% ====================================================================
+% At sl=0, R6 short-circuits because no above-BASE local storage exists.
+${ 4 dict } /gd6 exch def
+gd6 /any-name 999 put                       % at BASE, no rejection
+gd6 /any-name get 999 eq                    (s6: R6 no-op at BASE -- dict)           rt-ok
+
+${ 4 array } /ga6 exch def
+ga6 0 (any-string) put                      % at BASE, no rejection
+ga6 0 get (any-string) eq                   (s6: R6 no-op at BASE -- array)          rt-ok
+
+% ====================================================================
+% SECTION 7: R6 is a no-op for local containers.
+% ====================================================================
+% Even at sl >= 1, putting local-VM stuff into a LOCAL dict is fine.
+4 dict /ld7 exch def
+save /sv7 exch def
+ld7 /any-key 50 put                         % local dict -- R6 doesn't fire
+ld7 /any-key get 50 eq                      (s7: local dict accepts local Name)      rt-ok
+sv7 restore
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_pointer_hygiene: ALL TESTS PASSED) =
+(__test_ok__) =

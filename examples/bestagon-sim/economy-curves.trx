@@ -1,0 +1,341 @@
+% =====================================================================
+% economy-curves.trx -- Bestagon Wars economy build-curves (Phase 0.5G)
+% =====================================================================
+%
+% Tier 3-light of plan_bestagon_balance_prototyping.md.  Pure-math sim:
+% per-turn funds + unit-affordable milestones across a fixed grid of
+% (HQ count, city count, starting funds) scenarios.  No combat, no
+% RNG, no save/restore -- just GDD section 12.1 income arithmetic
+% rolled out 30 turns.
+%
+% Method (per plan section 0.5G):
+%   funds(t) = starting_funds + t * 1000 * (hq_count + city_count)
+%   For each scenario X turn cell, list which units are affordable
+%   (unit_cost <= funds).
+%   For each scenario X unit, compute first-turn-affordable:
+%     ceil((cost - start) / income), clamped to >= 0.
+%     If cost <= start, immediately at turn 0 (pre-first-tick).
+%
+% Note on CO permutation: GDD section 6 has NO CO-specific unit-cost
+% modifier.  Scenarios can override via /unit-cost-overrides but no
+% CO does it natively.  So the plan's "CO+city-count permutations"
+% collapses to "city-count + starting-funds permutations".  Recorded
+% as a finding in the plan's Findings log.
+%
+% Outputs (gitignored under examples/bestagon-sim/out/):
+%   economy-curves.csv      per-(scenario, turn): funds + affordability bits
+%   economy-summary.md      milestone matrix + per-scenario ASCII curve
+%
+% Run with the prod build (debug is 10-30x slower):
+%   ./trix.opt examples/bestagon-sim/economy-curves.trx
+%
+% The self-test (section 3) always runs before the sim -- pure-math
+% assertions take <1 ms and gate the rest of the script.
+% =====================================================================
+
+(examples/bestagon-sim/combat-core.trx) run
+
+
+% ====================================================================
+% Section 1: configuration
+% ====================================================================
+
+/turns 30 def
+
+% Each scenario row:  [ /name  hq-count  city-count  starting-funds ]
+/scenarios [
+    [ /A-tutorial-rich   1 0 7000 ]
+    [ /B-min-base        1 0 0    ]
+    [ /C-small-2c        1 2 0    ]
+    [ /D-medium-4c       1 4 0    ]
+    [ /E-large-6c        1 6 0    ]
+    [ /F-rich-8c         1 8 0    ]
+    [ /G-twin-hq-4c      2 4 0    ]
+] def
+
+% Unit names in ascending cost order.  Drives column order in the CSV
+% + row order in the milestone matrix.
+/cost-order [
+    /infantry /mech /recon /apc /artillery
+    /tank /anti-air /battle-copter /lander
+    /rocket /heavy-tank /destroyer /fighter
+    /submarine /bomber /battleship /carrier
+] def
+
+/out-curves   (examples/bestagon-sim/out/economy-curves.csv)  def
+/out-summary  (examples/bestagon-sim/out/economy-summary.md)  def
+
+
+% ====================================================================
+% Section 2: pure-math helpers (used by both sim + self-test)
+% ====================================================================
+
+% hq-count cities -- income-per-turn
+/compute-income {|hq cities|
+    $[ 1000 * (hq + cities) ]
+} def
+
+% start income t -- funds-at-start-of-turn-t
+% Semantics: at start of turn t the t'th income tick has just been
+% applied (section 12.1: "At start of each faction's turn ... income").
+% So funds during the build phase of turn t = start + t * income.
+/funds-at-turn {|start income t|
+    $[ start + (income * t) ]
+} def
+
+% cost start income -- first-affordable-turn  (>= 0; -1 if never)
+% Algebra: smallest t such that start + t * income >= cost
+%        = ceil( (cost - start) / income ) for cost > start
+%        = 0 when cost <= start
+%        = -1 when income == 0 AND cost > start
+/first-affordable-turn {|cost start income|
+    cost start le {
+        0
+    } {
+        income 0 le {
+            -1                          % impossible income (defensive)
+        } {
+            % ceil-div(cost - start, income) for positive integers
+            $[ ((cost - start) + income - 1) / income ]
+        } if-else
+    } if-else
+} def
+
+
+% ====================================================================
+% Section 3: self-test
+% ====================================================================
+%
+% Validates section 12.1 income arithmetic + the helpers.  Section 4+
+% of the sim only consume the helpers, so passing self-test is the
+% load-bearing correctness check for the whole sim.
+
+/run-self-test {||#+1
+    /fails 0 local-def
+
+    % --- compute-income ----------------------------------------------
+    1 0 compute-income 1000 ne { /fails fails 1 add store
+        (FAIL: compute-income 1 0 != 1000\n) print } if
+    1 2 compute-income 3000 ne { /fails fails 1 add store
+        (FAIL: compute-income 1 2 != 3000\n) print } if
+    2 4 compute-income 6000 ne { /fails fails 1 add store
+        (FAIL: compute-income 2 4 != 6000\n) print } if
+    1 8 compute-income 9000 ne { /fails fails 1 add store
+        (FAIL: compute-income 1 8 != 9000\n) print } if
+
+    % --- funds-at-turn -----------------------------------------------
+    0 1000 1 funds-at-turn 1000 ne { /fails fails 1 add store
+        (FAIL: funds-at-turn 0 1000 1 != 1000\n) print } if
+    0 1000 7 funds-at-turn 7000 ne { /fails fails 1 add store
+        (FAIL: funds-at-turn 0 1000 7 != 7000\n) print } if
+    7000 1000 0 funds-at-turn 7000 ne { /fails fails 1 add store
+        (FAIL: funds-at-turn 7000 1000 0 != 7000\n) print } if
+    7000 1000 1 funds-at-turn 8000 ne { /fails fails 1 add store
+        (FAIL: funds-at-turn 7000 1000 1 != 8000\n) print } if
+    0 3000 10 funds-at-turn 30000 ne { /fails fails 1 add store
+        (FAIL: funds-at-turn 0 3000 10 != 30000\n) print } if
+
+    % --- first-affordable-turn ---------------------------------------
+    % Tank (7000) on (start=0, income=1000) --> turn 7
+    7000 0 1000 first-affordable-turn 7 ne { /fails fails 1 add store
+        (FAIL: first-affordable-turn 7000 0 1000 != 7\n) print } if
+
+    % Tank (7000) on (start=7000, income=1000) --> turn 0 (already affordable)
+    7000 7000 1000 first-affordable-turn 0 ne { /fails fails 1 add store
+        (FAIL: first-affordable-turn 7000 7000 1000 != 0\n) print } if
+
+    % Bomber (22000) on (start=0, income=3000) --> ceil(22000/3000) = 8
+    22000 0 3000 first-affordable-turn 8 ne { /fails fails 1 add store
+        (FAIL: first-affordable-turn 22000 0 3000 != 8\n) print } if
+
+    % Bomber (22000) on (start=7000, income=3000) --> ceil(15000/3000) = 5
+    22000 7000 3000 first-affordable-turn 5 ne { /fails fails 1 add store
+        (FAIL: first-affordable-turn 22000 7000 3000 != 5\n) print } if
+
+    % Infantry (1000) on (start=0, income=1000) --> turn 1
+    1000 0 1000 first-affordable-turn 1 ne { /fails fails 1 add store
+        (FAIL: first-affordable-turn 1000 0 1000 != 1\n) print } if
+
+    % HTank (16000) on (start=0, income=9000) --> ceil(16000/9000) = 2
+    16000 0 9000 first-affordable-turn 2 ne { /fails fails 1 add store
+        (FAIL: first-affordable-turn 16000 0 9000 != 2\n) print } if
+
+    % Carrier (30000) on (start=0, income=2000) --> turn 15
+    30000 0 2000 first-affordable-turn 15 ne { /fails fails 1 add store
+        (FAIL: first-affordable-turn 30000 0 2000 != 15\n) print } if
+
+    fails 0 eq {
+        (self-test PASS (15 assertions)\n) print
+    } {
+        (self-test FAIL: {0} failed\n) mark fails print-fmt pop pop
+        /failed-self-test throw
+    } if-else
+} def
+
+
+% ====================================================================
+% Section 4: CSV writer (per-turn detail)
+% ====================================================================
+%
+% Columns: scenario, hqs, cities, start, turn, funds,
+%          can_<unit1>, can_<unit2>, ... (17 affordability bits, 0/1)
+
+/write-curves-csv {||#+3
+    /f out-curves (w)#b stream local-def
+
+    % Header row.
+    f (scenario,hqs,cities,start_funds,turn,funds) write-string
+    cost-order { |u|
+        f (,can_{0:s}) mark u fprint-fmt pop pop
+    } for-all
+    f (\n) write-string
+
+    scenarios { |scn|#+5
+        /name    scn 0 get local-def
+        /hq      scn 1 get local-def
+        /cities  scn 2 get local-def
+        /start   scn 3 get local-def
+        /income  hq cities compute-income local-def
+
+        % Per-turn rows (1..turns inclusive).
+        1 1 turns { |t|#+1
+            /funds start income t funds-at-turn local-def
+
+            f ({0:s},{1},{2},{3},{4},{5})
+                mark name hq cities start t funds
+                fprint-fmt pop pop
+            cost-order { |u|
+                unit-costs u get funds le {
+                    f (,1) write-string
+                } {
+                    f (,0) write-string
+                } if-else
+            } for-all
+            f (\n) write-string
+        } for
+    } for-all
+
+    f close-stream
+} def
+
+
+% ====================================================================
+% Section 5: summary writer (milestone matrix + ASCII curves)
+% ====================================================================
+
+/write-summary {||#+4
+    /s out-summary (w)#b stream local-def
+
+    s (# Bestagon economy-curves sim summary\n\n) write-string
+    s (Per-turn funds = starting + t * 1000 * (hq + cities), per GDD section 12.1.\n)
+        write-string
+    s (No CO-specific cost modifier in v1 (GDD section 6) -- scenarios\n)
+        write-string
+    s (vary on (hq, cities, starting_funds) only.\n\n) write-string
+
+    s (## Scenarios\n\n) write-string
+    s (| id | hqs | cities | start | income/turn |\n) write-string
+    s (|---|---|---|---|---|\n) write-string
+    scenarios { |scn|#+5
+        /name    scn 0 get local-def
+        /hq      scn 1 get local-def
+        /cities  scn 2 get local-def
+        /start   scn 3 get local-def
+        /income  hq cities compute-income local-def
+        s (| {0:s} | {1} | {2} | {3} | {4} |\n)
+            mark name hq cities start income
+            fprint-fmt pop pop
+    } for-all
+    s (\n) write-string
+
+    % --- Milestone matrix: rows = unit, cols = scenario, cell = first turn affordable ---
+    s (## First-turn-affordable matrix (turn number; 0 = pre-tick / already affordable)\n\n)
+        write-string
+
+    % Header.
+    s (| unit | cost) write-string
+    scenarios { |scn|
+        s ( | {0:s}) mark scn 0 get fprint-fmt pop pop
+    } for-all
+    s ( |\n|---|---) write-string
+    scenarios {
+        pop                                    % discard scenario, just count
+        s (|---) write-string
+    } for-all
+    s (|\n) write-string
+
+    % Rows.
+    cost-order { |u|#+1
+        /cost unit-costs u get local-def
+        s (| {0:s} | {1}) mark u cost fprint-fmt pop pop
+        scenarios { |scn|#+5
+            /hq      scn 1 get local-def
+            /cities  scn 2 get local-def
+            /start   scn 3 get local-def
+            /income  hq cities compute-income local-def
+            /milestone cost start income first-affordable-turn local-def
+
+            milestone -1 eq {
+                s ( | never) write-string
+            } {
+                milestone turns gt {
+                    s ( | >{0}) mark turns fprint-fmt pop pop
+                } {
+                    s ( | {0}) mark milestone fprint-fmt pop pop
+                } if-else
+            } if-else
+        } for-all
+        s ( |\n) write-string
+    } for-all
+    s (\n) write-string
+
+    % --- ASCII funds curve per scenario (sparse: every 5 turns) ---
+    s (## Funds-over-time (every 5 turns; values in thousands)\n\n) write-string
+    s (| scenario | t=1 | t=5 | t=10 | t=15 | t=20 | t=25 | t=30 |\n) write-string
+    s (|---|---|---|---|---|---|---|---|\n) write-string
+    scenarios { |scn|#+5
+        /name    scn 0 get local-def
+        /hq      scn 1 get local-def
+        /cities  scn 2 get local-def
+        /start   scn 3 get local-def
+        /income  hq cities compute-income local-def
+
+        s (| {0:s}) mark name fprint-fmt pop pop
+        [ 1 5 10 15 20 25 30 ] { |t|#+1
+            /funds start income t funds-at-turn local-def
+            s ( | {0}) mark $[ funds / 1000 ] fprint-fmt pop pop
+        } for-all
+        s ( |\n) write-string
+    } for-all
+    s (\n) write-string
+
+    % --- Tier reference: what each milestone column buys ---
+    s (## Tier reference (key unit milestones across all scenarios)\n\n)
+        write-string
+    s (Cheap (<= 5k): Inf 1k, Mech 3k, Recon 4k, APC 5k\n) write-string
+    s (Core (6k-9k):  Artillery 6k, Tank 7k, AA 8k, BCop 9k\n) write-string
+    s (Mid (12k-16k): Lander 12k, Rocket 15k, HTank 16k\n) write-string
+    s (Heavy (18k-22k): Destroyer 18k, Fighter 20k, Sub 20k, Bomber 22k\n)
+        write-string
+    s (Capital (28k-30k): Battleship 28k, Carrier 30k\n\n) write-string
+
+    s (## Cross-references\n\n) write-string
+    s (- GDD section 6 -- unit costs (AW1/AW2 canon).\n) write-string
+    s (- GDD section 12.1 -- income formula.\n) write-string
+    s (- GDD section 12.3 -- starting funds.\n) write-string
+    s (- GDD section 13.2 -- AI v1 build priority (Tank > Inf > Mech > Recon > AA).\n)
+        write-string
+
+    s close-stream
+} def
+
+
+% ====================================================================
+% Section 6: entry point
+% ====================================================================
+
+run-self-test                                  % always validate first
+write-curves-csv
+write-summary
+(economy-curves: wrote out/economy-curves.csv + out/economy-summary.md\n)
+    print

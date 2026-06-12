@@ -1,0 +1,42 @@
+% ====================================================================
+% test_no_zlib.trx -- the TRIX_NO_ZLIB compile-time feature gate
+% ====================================================================
+% Build-portable: verifies the correct behaviour in BOTH builds.
+%   - zlib present (default):  deflate/inflate round-trip.
+%   - TRIX_NO_ZLIB:            the six deflate/inflate operators stay
+%                             registered but raise /unsupported.
+% In either build crc32 / adler32 are hand-rolled and unaffected by the
+% gate.  See src/build_config.inl (ZlibEnabled) and STYLE.md.
+
+% rt-ok counts failures in a restore-immune 1-byte slot; the file THROWS
+% at EOF if any assertion failed, so a print-only failure cannot slip the
+% suite verdict (run_all.sh keys on the __test_ok__ sentinel).
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% Probe the gate: does deflate run, or raise /unsupported?
+<< /unsupported { false } >> { (x) deflate pop true } try-catch /zlib-on? exch def
+
+zlib-on? {
+    % zlib compiled in: round-trips and produces a non-empty stream.
+    (hello world) deflate inflate (hello world) eq   (zlib on: deflate/inflate round-trip)  rt-ok
+    (x) deflate length 0 gt                          (zlib on: deflate produces output)     rt-ok
+} {
+    % TRIX_NO_ZLIB: every deflate/inflate operator raises /unsupported.
+    % The stubs raise before touching operands, so a bare call suffices.
+    { deflate } try /unsupported eq                  (no-zlib: deflate)               rt-ok clear
+    { deflate-level } try /unsupported eq            (no-zlib: deflate-level)         rt-ok clear
+    { inflate } try /unsupported eq                  (no-zlib: inflate)               rt-ok clear
+    { deflate-stream } try /unsupported eq           (no-zlib: deflate-stream)        rt-ok clear
+    { deflate-stream-level } try /unsupported eq     (no-zlib: deflate-stream-level)  rt-ok clear
+    { inflate-stream } try /unsupported eq           (no-zlib: inflate-stream)        rt-ok clear
+} if-else
+
+% crc32 / adler32 are hand-rolled -- they work regardless of the gate.
+(123456789) crc32 16#CBF43926#u eq                   (crc32 independent of zlib)      rt-ok
+(abc) adler32 0u gt                                  (adler32 independent of zlib)    rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_no_zlib: ALL TESTS PASSED) =
+(__test_ok__) =

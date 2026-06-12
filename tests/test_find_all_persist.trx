@@ -1,0 +1,688 @@
+% ====================================================================
+% test_find_all_persist.trx -- persistent scratch region tests
+% find-all and find-n with the new persistent region implementation
+% ====================================================================
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+% Helper: build executable [n] from integer on stack
+/make-push-proc { 1 array dup 0 4 -1 roll put make-executable } def
+
+% =================================================================
+% SECTION 1: HAPPY -- find-all Integer results
+% =================================================================
+
+[ { 1 } { 2 } { 3 } ] find-all
+dup length 3 eq                           (fa: 3 integers length) rt-ok
+dup 0 get 1 eq                            (fa: int 0) rt-ok
+dup 1 get 2 eq                            (fa: int 1) rt-ok
+2 get 3 eq                                (fa: int 2) rt-ok  clear
+
+% =================================================================
+% SECTION 2: HAPPY -- find-all Real results
+% =================================================================
+
+[ { 1.5 } { 2.5 } ] find-all
+dup 0 get 1.5 eq                          (fa: real 0) rt-ok
+1 get 2.5 eq                              (fa: real 1) rt-ok  clear
+
+% =================================================================
+% SECTION 3: HAPPY -- find-all Boolean results
+% =================================================================
+
+[ { true } { false } { true } ] find-all
+dup length 3 eq                           (fa: 3 booleans) rt-ok
+dup 0 get true eq                         (fa: bool 0) rt-ok
+dup 1 get false eq                        (fa: bool 1) rt-ok
+2 get true eq                             (fa: bool 2) rt-ok  clear
+
+% =================================================================
+% SECTION 4: HAPPY -- find-all Byte results
+% =================================================================
+
+[ { 65b } { 66b } ] find-all
+dup 0 get 65b eq                          (fa: byte 0) rt-ok
+1 get 66b eq                              (fa: byte 1) rt-ok  clear
+
+% =================================================================
+% SECTION 5: HAPPY -- find-all Name results
+% =================================================================
+
+[ { /alpha } { /beta } { /gamma } ] find-all
+dup 0 get /alpha eq                       (fa: name 0) rt-ok
+dup 1 get /beta eq                        (fa: name 1) rt-ok
+2 get /gamma eq                           (fa: name 2) rt-ok  clear
+
+% =================================================================
+% SECTION 6: HAPPY -- find-all Long results (ExtValue)
+% =================================================================
+
+[ { 9999999999l } { 1111111111l } ] find-all
+dup 0 get 9999999999l eq                  (fa: long 0) rt-ok
+1 get 1111111111l eq                      (fa: long 1) rt-ok  clear
+
+% =================================================================
+% SECTION 7: HAPPY -- find-all Double results (ExtValue)
+% =================================================================
+
+[ { 3.14d } { 2.71d } ] find-all
+dup 0 get 3.14d eq                        (fa: double 0) rt-ok
+1 get 2.71d eq                            (fa: double 1) rt-ok  clear
+
+% =================================================================
+% SECTION 8: HAPPY -- find-all mixed types (inline + ExtValue)
+% =================================================================
+
+[ { 42 } { true } { /foo } { 99999999999l } { 1.5 } ] find-all
+dup length 5 eq                           (fa: mixed length) rt-ok
+dup 0 get 42 eq                           (fa: mixed int) rt-ok
+dup 1 get true eq                         (fa: mixed bool) rt-ok
+dup 2 get /foo eq                         (fa: mixed name) rt-ok
+dup 3 get 99999999999l eq                 (fa: mixed long) rt-ok
+4 get 1.5 eq                              (fa: mixed real) rt-ok  clear
+
+% =================================================================
+% SECTION 9: HAPPY -- find-all empty (all fail)
+% =================================================================
+
+[ { false guard } { false guard } ] find-all
+length 0 eq                               (fa: all-fail empty) rt-ok  clear
+
+% =================================================================
+% SECTION 10: HAPPY -- find-all single success
+% =================================================================
+
+[ { 42 } ] find-all
+dup length 1 eq                           (fa: single length) rt-ok
+0 get 42 eq                               (fa: single value) rt-ok  clear
+
+% =================================================================
+% SECTION 11: HAPPY -- find-all empty alternatives
+% =================================================================
+
+[ ] find-all
+length 0 eq                               (fa: empty input) rt-ok  clear
+
+% =================================================================
+% SECTION 12: HAPPY -- find-all ordering first-found..last-found
+% =================================================================
+
+[ { 10 } { false guard } { 30 } { false guard } { 50 } ] find-all
+dup length 3 eq                           (fa: order length) rt-ok
+dup 0 get 10 eq                           (fa: order first) rt-ok
+dup 1 get 30 eq                           (fa: order second) rt-ok
+2 get 50 eq                               (fa: order third) rt-ok  clear
+
+% =================================================================
+% SECTION 13: HAPPY -- find-all Null results
+% =================================================================
+
+[ { null } { null } ] find-all
+dup length 2 eq                           (fa: null length) rt-ok
+dup 0 get null eq                         (fa: null 0) rt-ok
+1 get null eq                             (fa: null 1) rt-ok  clear
+
+% =================================================================
+% SECTION 14: HAPPY -- find-all UInteger results
+% =================================================================
+
+[ { 42u } { 99u } ] find-all
+dup 0 get 42u eq                          (fa: uint 0) rt-ok
+1 get 99u eq                              (fa: uint 1) rt-ok  clear
+
+% =================================================================
+% SECTION 15: HAPPY -- find-all Address results (ExtValue)
+% =================================================================
+
+[ { 16#DEADBEEF#a } ] find-all
+0 get 16#DEADBEEF#a eq                    (fa: address 0) rt-ok  clear
+
+% =================================================================
+% SECTION 16: HAPPY -- find-all ULong results (ExtValue)
+% =================================================================
+
+[ { 18446744073709551615ul } ] find-all
+0 get 18446744073709551615ul eq           (fa: ulong max) rt-ok  clear
+
+% =================================================================
+% SECTION 17: HAPPY -- find-n bounded collection
+% =================================================================
+
+2 [ { 10 } { 20 } { 30 } { 40 } ] find-n
+dup length 2 eq                           (fn: bounded length 2) rt-ok
+dup 0 get 10 eq                           (fn: bounded first) rt-ok
+1 get 20 eq                               (fn: bounded second) rt-ok  clear
+
+% =================================================================
+% SECTION 18: HAPPY -- find-n short-circuits
+% =================================================================
+
+1 [ { 99 } { 1 0 div } ] find-n
+dup length 1 eq                           (fn: short-circuit length) rt-ok
+0 get 99 eq                               (fn: short-circuit value) rt-ok  clear
+
+% =================================================================
+% SECTION 19: HAPPY -- find-n zero count
+% =================================================================
+
+0 [ { 1 } { 2 } ] find-n
+length 0 eq                               (fn: zero count empty) rt-ok  clear
+
+% =================================================================
+% SECTION 20: HAPPY -- find-n with failures
+% =================================================================
+
+3 [ { false guard } { 10 } { false guard } { 20 } { 30 } ] find-n
+dup length 3 eq                           (fn: skip failures length) rt-ok
+dup 0 get 10 eq                           (fn: skip first) rt-ok
+dup 1 get 20 eq                           (fn: skip second) rt-ok
+2 get 30 eq                               (fn: skip third) rt-ok  clear
+
+% =================================================================
+% SECTION 21: SAD -- find-all Array result raises TypeCheck
+% =================================================================
+
+{ [ { [ 1 2 3 ] } ] find-all } try
+/type-check eq                            (fa-sad: array type-check) rt-ok  clear
+
+% =================================================================
+% SECTION 22: SAD -- find-all String result raises TypeCheck
+% =================================================================
+
+{ [ { (hello) } ] find-all } try
+/type-check eq                            (fa-sad: string type-check) rt-ok  clear
+
+% =================================================================
+% SECTION 23: SAD -- find-all Dict result raises TypeCheck
+% =================================================================
+
+{ [ { << /a 1 >> } ] find-all } try
+/type-check eq                            (fa-sad: dict type-check) rt-ok  clear
+
+% =================================================================
+% SECTION 24: SAD -- find-all Tagged result raises TypeCheck
+% =================================================================
+
+{ [ { /ok 42 tag } ] find-all } try
+/type-check eq                            (fa-sad: tagged type-check) rt-ok  clear
+
+% =================================================================
+% SECTION 25: SAD -- find-all non-fail error propagates
+% =================================================================
+
+{ [ { 1 } { 1 0 div } { 3 } ] find-all } try
+/div-by-zero eq                           (fa-sad: non-fail propagates) rt-ok  clear
+
+% =================================================================
+% SECTION 26: SAD -- find-n composite restriction
+% =================================================================
+
+{ 1 [ { [ 1 2 ] } ] find-n } try
+/type-check eq                            (fn-sad: array type-check) rt-ok  clear
+
+{ 1 [ { (hello) } ] find-n } try
+/type-check eq                            (fn-sad: string type-check) rt-ok  clear
+
+% =================================================================
+% SECTION 27: SAD -- nested find-all (inner result is array)
+% =================================================================
+
+{ [ { [ { 1 } ] find-all } ] find-all } try
+/type-check eq                            (fa-sad: nested array type-check) rt-ok  clear
+
+% =================================================================
+% SECTION 28: STRESS -- 1000+ Integer results
+% =================================================================
+
+[ 0 1 1000 { make-push-proc } for ] find-all
+dup length 1001 eq                        (stress: 1001 results) rt-ok
+dup 0 get 0 eq                            (stress: first is 0) rt-ok
+dup 500 get 500 eq                        (stress: middle is 500) rt-ok
+1000 get 1000 eq                          (stress: last is 1000) rt-ok  clear
+
+% =================================================================
+% SECTION 30: STRESS -- alternating success/fail
+% =================================================================
+
+[
+    0 1 99 {
+        dup 2 mod 0 eq
+            { make-push-proc }
+            { pop { false guard } }
+        if-else
+    } for
+] find-all
+dup length 50 eq                          (stress: alternating 50 results) rt-ok
+dup 0 get 0 eq                            (stress: alt first 0) rt-ok
+49 get 98 eq                              (stress: alt last 98) rt-ok  clear
+
+% =================================================================
+% SECTION 31: STRESS -- all fail (large array)
+% =================================================================
+
+[ 0 1 99 { pop { false guard } } for ] find-all
+length 0 eq                               (stress: 100 all-fail empty) rt-ok  clear
+
+% =================================================================
+% SECTION 32: EXTVALUE HAPPY -- multiple Longs survive
+% =================================================================
+
+[ { 100000000000l } { 200000000000l } { 300000000000l } ] find-all
+dup length 3 eq                           (ev: 3 longs length) rt-ok
+dup 0 get 100000000000l eq               (ev: long 0 correct) rt-ok
+dup 1 get 200000000000l eq               (ev: long 1 correct) rt-ok
+2 get 300000000000l eq                   (ev: long 2 correct) rt-ok  clear
+
+% =================================================================
+% SECTION 33: EXTVALUE HAPPY -- multiple Doubles survive
+% =================================================================
+
+[ { 1.1d } { 2.2d } { 3.3d } ] find-all
+dup length 3 eq                           (ev: 3 doubles length) rt-ok
+dup 0 get 1.1d eq                        (ev: double 0) rt-ok
+dup 1 get 2.2d eq                        (ev: double 1) rt-ok
+2 get 3.3d eq                            (ev: double 2) rt-ok  clear
+
+% =================================================================
+% SECTION 34: EXTVALUE HAPPY -- mixed Long/Double/Address
+% =================================================================
+
+[ { 111111111111l } { 3.14159d } { 16#CAFE#a } { 222222222222l } { 2.71828d } ] find-all
+dup length 5 eq                           (ev: mixed ev length) rt-ok
+dup 0 get 111111111111l eq               (ev: mixed long 0) rt-ok
+dup 1 get 3.14159d eq                    (ev: mixed double 1) rt-ok
+dup 2 get 16#CAFE#a eq                   (ev: mixed addr 2) rt-ok
+dup 3 get 222222222222l eq               (ev: mixed long 3) rt-ok
+4 get 2.71828d eq                        (ev: mixed double 4) rt-ok  clear
+
+% =================================================================
+% SECTION 35: EXTVALUE HAPPY -- Long with interleaved failures
+% =================================================================
+
+[ { 10l } { false guard } { 20l } { false guard } { 30l } ] find-all
+dup length 3 eq                           (ev: long+fail length) rt-ok
+dup 0 get 10l eq                         (ev: long+fail 0) rt-ok
+dup 1 get 20l eq                         (ev: long+fail 1) rt-ok
+2 get 30l eq                             (ev: long+fail 2) rt-ok  clear
+
+% =================================================================
+% SECTION 36: EXTVALUE HAPPY -- Double with interleaved failures
+% =================================================================
+
+[ { 1.0d } { false guard } { 2.0d } { false guard } ] find-all
+dup length 2 eq                           (ev: dbl+fail length) rt-ok
+dup 0 get 1.0d eq                        (ev: dbl+fail 0) rt-ok
+1 get 2.0d eq                            (ev: dbl+fail 1) rt-ok  clear
+
+% =================================================================
+% SECTION 37: EXTVALUE HAPPY -- single Long
+% =================================================================
+
+[ { 42l } ] find-all
+dup length 1 eq                           (ev: single long length) rt-ok
+0 get 42l eq                             (ev: single long value) rt-ok  clear
+
+% =================================================================
+% SECTION 38: EXTVALUE HAPPY -- single Double
+% =================================================================
+
+[ { 99.99d } ] find-all
+dup length 1 eq                           (ev: single double length) rt-ok
+0 get 99.99d eq                          (ev: single double value) rt-ok  clear
+
+% =================================================================
+% SECTION 39: EXTVALUE HAPPY -- Long boundary values
+% =================================================================
+
+[ { 9223372036854775807l } { -9223372036854775808l } { 0l } ] find-all
+dup 0 get 9223372036854775807l eq        (ev: long max) rt-ok
+dup 1 get -9223372036854775808l eq       (ev: long min) rt-ok
+2 get 0l eq                              (ev: long zero) rt-ok  clear
+
+% =================================================================
+% SECTION 40: EXTVALUE HAPPY -- Double boundary values
+% =================================================================
+
+[ { 1.7976931348623157e+308d } { 5e-324d } { 0.0d } { -1.0d } ] find-all
+dup 0 get 1.7976931348623157e+308d eq    (ev: dbl max) rt-ok
+dup 1 get 5e-324d eq                     (ev: dbl min positive) rt-ok
+dup 2 get 0.0d eq                        (ev: dbl zero) rt-ok
+3 get -1.0d eq                           (ev: dbl neg) rt-ok  clear
+
+% =================================================================
+% SECTION 41: EXTVALUE HAPPY -- ULong values
+% =================================================================
+
+[ { 0ul } { 18446744073709551615ul } { 12345678901234ul } ] find-all
+dup 0 get 0ul eq                         (ev: ulong zero) rt-ok
+dup 1 get 18446744073709551615ul eq      (ev: ulong max) rt-ok
+2 get 12345678901234ul eq                (ev: ulong mid) rt-ok  clear
+
+% =================================================================
+% SECTION 42: EXTVALUE HAPPY -- Address values preserved
+% =================================================================
+
+[ { 0a } { 16#FFFFFFFF#a } { 16#12345678#a } ] find-all
+dup 0 get 0a eq                          (ev: addr zero) rt-ok
+dup 1 get 16#FFFFFFFF#a eq              (ev: addr max32) rt-ok
+2 get 16#12345678#a eq                   (ev: addr mid) rt-ok  clear
+
+% =================================================================
+% SECTION 43: EXTVALUE HAPPY -- mixed inline + ExtValue ordering
+% =================================================================
+
+[ { 1 } { 10l } { 2 } { 20l } { 3 } ] find-all
+dup length 5 eq                           (ev-mix: length 5) rt-ok
+dup 0 get 1 eq                           (ev-mix: int 0) rt-ok
+dup 1 get 10l eq                         (ev-mix: long 1) rt-ok
+dup 2 get 2 eq                           (ev-mix: int 2) rt-ok
+dup 3 get 20l eq                         (ev-mix: long 3) rt-ok
+4 get 3 eq                               (ev-mix: int 4) rt-ok  clear
+
+% =================================================================
+% SECTION 44: EXTVALUE HAPPY -- Double precision preserved
+% =================================================================
+
+[ { 1.23456789012345d } ] find-all
+0 get 1.23456789012345d eq               (ev: double precision) rt-ok  clear
+
+% =================================================================
+% SECTION 45: EXTVALUE HAPPY -- find-n with Long/Double
+% =================================================================
+
+2 [ { 1111111111l } { false guard } { 2.22d } { 3333333333l } ] find-n
+dup length 2 eq                           (fn-ev: bounded 2) rt-ok
+dup 0 get 1111111111l eq                 (fn-ev: long 0) rt-ok
+1 get 2.22d eq                           (fn-ev: double 1) rt-ok  clear
+
+3 [ { 10l } { 20l } { 30l } { 40l } ] find-n
+dup length 3 eq                           (fn-ev: 3 longs) rt-ok
+dup 0 get 10l eq                         (fn-ev: l0) rt-ok
+dup 1 get 20l eq                         (fn-ev: l1) rt-ok
+2 get 30l eq                             (fn-ev: l2) rt-ok  clear
+
+% =================================================================
+% SECTION 46: EXTVALUE HAPPY -- find-n with ULong/Address
+% =================================================================
+
+2 [ { 12345ul } { 16#ABCD#a } { 67890ul } ] find-n
+dup 0 get 12345ul eq                     (fn-ev: ulong 0) rt-ok
+1 get 16#ABCD#a eq                       (fn-ev: addr 1) rt-ok  clear
+
+% ExtValue leak tests use save/restore to properly reclaim heap-allocated
+% ExtValues.  ExtValues in array elements are not freed by pop/clear --
+% they live in the VM heap and are reclaimed by restore.
+
+% =================================================================
+% SECTION 47: EXTVALUE LEAK -- Long no leak after find-all
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+[ { 100000000000l } { 200000000000l } { 300000000000l } ] find-all
+pop s restore
+//:status:extvalue-active ev-before eq   (ev-leak: long no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 48: EXTVALUE LEAK -- Double no leak after find-all
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+[ { 1.1d } { 2.2d } ] find-all
+pop s restore
+//:status:extvalue-active ev-before eq   (ev-leak: double no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 49: EXTVALUE LEAK -- Mixed Long/Double no leak
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+[ { 10l } { 1.1d } { 20l } { 2.2d } ] find-all
+pop s restore
+//:status:extvalue-active ev-before eq   (ev-leak: mixed no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 50: EXTVALUE LEAK -- Long with failures no leak
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+[ { 10l } { false guard } { 20l } { false guard } ] find-all
+pop s restore
+//:status:extvalue-active ev-before eq   (ev-leak: long+fail no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 51: EXTVALUE LEAK -- error path frees persistent ExtValues
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+{ [ { 100000000000l } { (hello) } ] find-all } try pop clear
+s restore
+//:status:extvalue-active ev-before eq   (ev-leak: error path no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 52: EXTVALUE LEAK -- find-n Long no leak
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+2 [ { 10l } { 20l } { 30l } ] find-n
+pop s restore
+//:status:extvalue-active ev-before eq   (ev-leak: find-n long no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 53: EXTVALUE LEAK -- non-fail error no leak
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+{ [ { 10l } { 1 0 div } ] find-all } try pop clear
+s restore
+//:status:extvalue-active ev-before eq   (ev-leak: non-fail error no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 54: EXTVALUE LEAK -- Address no leak
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+[ { 16#DEAD#a } { 16#BEEF#a } ] find-all
+pop s restore
+//:status:extvalue-active ev-before eq   (ev-leak: address no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 55: EXTVALUE LEAK -- ULong no leak
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+[ { 12345678901234ul } { 98765432109876ul } ] find-all
+pop s restore
+//:status:extvalue-active ev-before eq   (ev-leak: ulong no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 56: EXTVALUE LEAK -- find-n error path no leak
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+{ 1 [ { 10l } { (hello) } ] find-n } try pop clear
+s restore
+//:status:extvalue-active ev-before eq   (ev-leak: find-n error no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 57: EXTVALUE STRESS -- many Long results
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+% Build 50 procs that each push a long literal
+[ 0 1 49 { pop { 999999999999l } } for ] find-all
+dup length 50 eq                          (ev-stress: 50 longs length) rt-ok
+dup 0 get 999999999999l eq               (ev-stress: first long correct) rt-ok
+pop s restore
+//:status:extvalue-active ev-before eq   (ev-stress: 50 longs no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 58: EXTVALUE STRESS -- alternating Long/fail
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+[
+    0 1 39 {
+        2 mod 0 eq
+            { { 888888888888l } }
+            { { false guard } }
+        if-else
+    } for
+] find-all
+dup length 20 eq                          (ev-stress: alt 20 longs) rt-ok
+pop s restore
+//:status:extvalue-active ev-before eq   (ev-stress: alt longs no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 59: FUZZ -- repeated find-all cycles (no accumulation)
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save /s exch def
+0 1 9 {
+    pop
+    [ { 99999l } { 88888l } { false guard } ] find-all pop clear
+} for
+s restore
+//:status:extvalue-active ev-before eq   (fuzz: 10 cycles no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 60: FUZZ -- find-all then find-n sequential
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+[ { 10l } { 20l } ] find-all pop clear
+2 [ { 30l } { 40l } { 50l } ] find-n pop clear
+[ { 1.1d } { 2.2d } ] find-all pop clear
+s restore
+//:status:extvalue-active ev-before eq   (fuzz: sequential no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 61: FUZZ -- repeated find-n cycles
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save /s exch def
+0 1 9 {
+    pop
+    2 [ { 11111l } { 22222l } { 33333l } ] find-n pop clear
+} for
+s restore
+//:status:extvalue-active ev-before eq   (fuzz: 10 find-n cycles no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 65: EXTVALUE HAPPY -- all 4 ExtValue types in one find-all
+% =================================================================
+
+[ { 42l } { 3.14d } { 999ul } { 16#FF#a } ] find-all
+dup length 4 eq                           (ev-all4: length) rt-ok
+dup 0 get 42l eq                         (ev-all4: long) rt-ok
+dup 1 get 3.14d eq                       (ev-all4: double) rt-ok
+dup 2 get 999ul eq                       (ev-all4: ulong) rt-ok
+3 get 16#FF#a eq                         (ev-all4: address) rt-ok  clear
+
+% =================================================================
+% SECTION 66: EXTVALUE LEAK -- all 4 ExtValue types no leak
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+[ { 42l } { 3.14d } { 999ul } { 16#FF#a } ] find-all pop clear
+s restore
+//:status:extvalue-active ev-before eq   (ev-leak: all 4 types no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 67: EXTVALUE LEAK -- all-fail with no ExtValues allocated
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+[ { false guard } { false guard } { false guard } ] find-all pop clear
+//:status:extvalue-active ev-before eq   (ev-leak: all-fail no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 68: SAD -- find-all error after successful Long collect
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+{ [ { 10l } { 20l } { (hello) } ] find-all } try pop clear
+s restore
+//:status:extvalue-active ev-before eq   (ev-leak: partial+error no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 69: SAD -- find-n error after successful Long collect
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+{ 5 [ { 10l } { 20l } { (hello) } ] find-n } try pop clear
+s restore
+//:status:extvalue-active ev-before eq   (ev-leak: fn partial+error no leak) rt-ok  clear
+
+% =================================================================
+% SECTION 70: EXTVALUE STRESS -- many Doubles
+% =================================================================
+
+//:status:extvalue-active /ev-before exch def
+save
+/s exch def
+[ 0 1 49 { pop { 3.14159265d } } for ] find-all
+dup length 50 eq                          (ev-stress: 50 doubles length) rt-ok
+dup 0 get 3.14159265d eq                 (ev-stress: first double correct) rt-ok
+pop s restore
+//:status:extvalue-active ev-before eq   (ev-stress: 50 doubles no leak) rt-ok  clear
+
+% =================================================================
+% Results
+% =================================================================
+
+failed 0 eq
+{ (find-all-persist: ) print total = (find-all-persist: all tests passed) = }
+{ (find-all-persist: FAILURES = ) print failed = } if-else
+failed 0 eq { } { /assert-failed throw } if-else
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

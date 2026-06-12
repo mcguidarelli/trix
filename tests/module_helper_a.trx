@@ -1,0 +1,8 @@
+% module_helper_a.trx -- defines module /test-mod-a for test_modules.trx
+
+/test-mod-a {
+    /square { |x| x x mul } def
+    /cube { |x| x x mul x mul } def
+    /pi 3 def
+    /_private 42 def
+} module

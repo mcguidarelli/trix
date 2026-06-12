@@ -1,0 +1,77 @@
+% ====================================================================
+% test_gc_stress_logic.trx -- deterministic GC-UAF guard for the
+% logic / backtracking family (find-all, find-n, aggregate, choice) run
+% inside ${...} under vm-gc-stress + vm-gc-poison with ExtValue (Long) and
+% WideValue (Int128) payloads.  Two distinct root causes, both surfaced here:
+%
+%  (A) RESULT-CLONE UAF (at_find_all_barrier_op / at_find_n_barrier_op):
+%      each succeeding alternative's result was POPPED to a bare C local and
+%      THEN make_clone'd into the scratch arena.  Under ${...} make_clone is a
+%      global alloc that fires vm_global_gc; with the result already off the op
+%      stack it was unrooted, swept, and the clone read a freed (poisoned) cell
+%      -- every Long result came back 0xA5A5..  Fix: clone while the result is
+%      still on the op stack, then pop.  (Reproduces with literal-Long alts; no
+%      logic variable needed.)
+%
+%  (B) GLOBAL-LVAR BINDING not undone by restore (lvar_bind / Flavor::LvarBinding):
+%      an lvar created inside ${...} has a GLOBAL inner array; its binding was
+%      journal-skipped, so the per-alternative restore could not unbind it and
+%      every alternative after the first unified against the stale binding and
+%      was silently dropped (find-all returned only the first).  Fix: journal the
+%      global binding cell (Flavor::LvarBinding) so restore reverts it; gc_walk_chain
+%      pins the inner-array block so the slot stays valid until restore.
+% ====================================================================
+% Debug-only (needs vm-gc-stress / vm-gc-poison).  Run via
+% tests/run_gc_stress_tests.sh; run_all.sh skips test_gc_stress_*.
+% Exact-SUM asserts only: poison 0xA5.. sails through inequalities, so only an
+% exact sum over every element proves each survived intact.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+true vm-gc-stress
+true vm-gc-poison
+
+% ====================================================================
+% (A) RESULT-CLONE UAF -- literal-Long / Int128 alts, no logic var
+% ====================================================================
+${ [ { 10l } { 20l } { 30l } ] find-all } /a exch def
+a length 3 eq                    (A find-all literal-Long len 3)        rt-ok
+a 0l { add } reduce 60l eq       (A find-all literal-Long sum 60l)      rt-ok clear
+${ [ { 10l } ] find-all } 0l { add } reduce 10l eq (A find-all single-Long 10l) rt-ok clear
+${ [ { 100q } { 200q } { 300q } ] find-all } 0q { add } reduce 600q eq (A find-all literal-Int128 sum 600q) rt-ok clear
+${ 2 [ { 10l } { 20l } { 30l } ] find-n } 0l { add } reduce 30l eq (A find-n literal-Long first2 30l) rt-ok clear
+
+% ====================================================================
+% (B) GLOBAL-LVAR backtracking -- binding must be undone between alts
+% ====================================================================
+${ /y logic-var def [ { y 10l unify guard y deref } { y 20l unify guard y deref } { y 30l unify guard y deref } ] find-all } /r exch def
+r length 3 eq                    (B find-all global-lvar len 3)         rt-ok
+r 0l { add } reduce 60l eq       (B find-all global-lvar sum 60l)       rt-ok clear
+${ /yq logic-var def [ { yq 100q unify guard yq deref } { yq 200q unify guard yq deref } { yq 300q unify guard yq deref } ] find-all } 0q { add } reduce 600q eq (B find-all global-lvar Int128 sum 600q) rt-ok clear
+${ /yn logic-var def 2 [ { yn 10l unify guard yn deref } { yn 20l unify guard yn deref } { yn 30l unify guard yn deref } ] find-n } 0l { add } reduce 30l eq (B find-n global-lvar first2 sum 30l) rt-ok clear
+% named global lvar (inner array is [null, name]) -- same binding path
+${ /nv /nv named-var def [ { nv 5l unify guard nv deref } { nv 7l unify guard nv deref } ] find-all } 0l { add } reduce 12l eq (B find-all named global-lvar sum 12l) rt-ok clear
+% choice commits to the first success
+${ /yc logic-var def [ { yc 99l unify guard yc deref } { yc 11l unify guard yc deref } ] choice } 99l eq (B choice global-lvar first 99l) rt-ok clear
+% aggregate folds every solution
+${ /ya logic-var def 0l { add } [ { ya 10l unify guard ya deref } { ya 20l unify guard ya deref } { ya 30l unify guard ya deref } ] aggregate } 60l eq (B aggregate global-lvar sum 60l) rt-ok clear
+% LOCAL lvar (created outside ${}) bound inside ${}: control -- local binding cell
+% was always journaled (worked pre-fix); verify it still backtracks AND its global
+% result clones survive (exercises (A)'s clone-while-rooted fix).
+/lz logic-var def
+${ [ { lz 10l unify guard lz deref } { lz 20l unify guard lz deref } { lz 30l unify guard lz deref } ] find-all } 0l { add } reduce 60l eq (B find-all local-lvar sum 60l) rt-ok clear
+
+false vm-gc-poison
+false vm-gc-stress
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_gc_stress_logic: ALL TESTS PASSED) =
+(__test_ok__) =

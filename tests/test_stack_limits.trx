@@ -1,0 +1,67 @@
+% ====================================================================
+% test_stack_limits.trx -- Phase-3 stress bucket: fixed-stack overflow
+% arms at MINIMUM configured depths.  STANDALONE ONLY -- run_all.sh
+% invokes it with:
+%   --operand-depth=128 --exec-depth=128 --dict-depth=16
+%   --error-depth=8 --save-depth=4 --scratch-depth=16
+% (each the documented minimum for its flag), so every overflow fires
+% after a handful of iterations instead of thousands.  The companion
+% in-process arms at default depths live in test_stress_errors.trx.
+% Every trigger and error name was probed live before being pinned.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% operand stack: 128 slots.  A COMPLETELY full stack bypasses try
+% (no slot to deliver the error name; the interpreter escalates to the
+% global handler -- pinned as an exit-28 case in run_cli_tests.sh), so
+% fill to two-free and trip a guard that needs three: token pushes
+% post + value + flag.
+{ count 126 ge { exit } if 1 } loop
+{ (1 2) token } try /opstack-overflow eq /op-ovf exch def
+clear
+op-ovf (limits: operand stack overflow at depth 128) rt-ok clear
+
+% exec stack: 128 slots (non-tail recursion so TCO cannot flatten it)
+/deep { deep 1 pop } def
+{ deep } try
+/execstack-overflow eq (limits: exec stack overflow at depth 128) rt-ok clear
+
+% dict stack: 16 slots; unwind with end afterwards
+/begins 0 def
+{ { 1 dict begin /begins begins 1 add def } loop } try
+/dictstack-overflow eq (limits: dict stack overflow at depth 16) rt-ok clear
+begins { end } repeat
+(limits: dict stack unwound) =
+
+% error stack: 8 slots of control-op companion state
+/g-nest { ${ g-nest } } def
+{ g-nest } try
+/errstack-overflow eq (limits: error stack overflow at depth 8) rt-ok clear
+
+% save stack: 4 levels
+/saves 0 def
+{ { save pop /saves saves 1 add def } loop } try
+/limit-check eq (limits: save depth overflow at depth 4) rt-ok clear
+saves 4 lt (limits: save limit honored the small flag) rt-ok clear
+saves neg restore
+
+% scratch arena: 16 Objects
+/scratched 0 def
+{ { 0 scratch-push /scratched scratched 1 add def } loop } try
+/vm-full eq (limits: scratch arena overflow at depth 16) rt-ok clear
+scratched 16 eq (limits: exactly 16 scratch pushes fit) rt-ok clear
+scratch-clear
+
+(Stack limit tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

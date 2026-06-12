@@ -1,0 +1,76 @@
+% test_eqref_coroutine.trx
+%
+% All coroutines share the same eq-storage buffers and generation counters.
+% If coroutine A creates a `#=` ref, then the main thread creates another
+% ref of the same kind, the counter bump invalidates A's ref -- even though
+% A already returned and its stack frame is gone.
+%
+% This test proves the staleness invariant survives the coroutine boundary:
+% the generation counter is a Trix-global, not per-coroutine, so there is no
+% way to escape staleness by creating the ref inside a coroutine.
+%
+% Note: the outer proc bodies use `}#a` (array form) rather than the default
+% packed form because an eqref (eqproc / eqset from scan-time `{{}}#=` or
+% `{...}#=`) cannot be stored in a packed array -- make_packed_data rejects
+% eq-storage refs at pack time.
+
+(=== eqref coroutine tests ===) =
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- eqstring (via runtime =string) ---
+[ { =string } coroutine-launch coroutine-join
+    (coro: eqstring join flag true) rt-ok
+% stack: [ref-from-coro]
+(garbage)#= pop
+% stack: [ref-from-coro] (now stale)
+{ 0 get pop } try
+    exch pop /unsupported eq
+    (coro: eqstring ref from coroutine is stale after main creates another) rt-ok clear
+
+% --- eqarray (via runtime =array) ---
+[ { =array } coroutine-launch coroutine-join
+    (coro: eqarray join flag true) rt-ok
+[9 9 9]#= pop
+{ 0 get pop } try
+    exch pop /unsupported eq
+    (coro: eqarray ref from coroutine is stale after main creates another) rt-ok clear
+
+% --- eqdict (via runtime =dict) ---
+[ { =dict } coroutine-launch coroutine-join
+    (coro: eqdict join flag true) rt-ok
+<< /x 9 >>#= pop
+{ length pop } try
+    exch pop /unsupported eq
+    (coro: eqdict ref from coroutine is stale after main creates another) rt-ok clear
+
+% --- eqset (scan-time {{}}#= inside }#a array-form proc) ---
+[ { {{ /a /b }}#= }#a coroutine-launch coroutine-join
+    (coro: eqset join flag true) rt-ok
+{{ /x /y }}#= pop
+{ length pop } try
+    exch pop /unsupported eq
+    (coro: eqset ref from coroutine is stale after main creates another) rt-ok clear
+
+% --- eqproc (stack shape after try-catch of exec differs from the other
+%     kinds: `exec` consumes the top ref onto the exec stack before running
+%     it, so on error the operand stack is empty; try therefore leaves only
+%     /unsupported, no need for exch/pop.)
+[ { [ { 1 2 add }#= ] 0 get }#a coroutine-launch coroutine-join
+    (coro: eqproc join flag true) rt-ok
+{ 9 9 add }#= pop
+{ exec } try
+    /unsupported eq
+    (coro: eqproc ref from coroutine is stale after main creates another) rt-ok clear
+
+(eqref coroutine tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

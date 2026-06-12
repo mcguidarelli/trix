@@ -1,0 +1,265 @@
+% ====================================================================
+% test_closure.trx -- closure-capture, closure-with-dict, closure-env
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% =================================================================
+% SECTION 1: HAPPY PATH -- basic capture
+% =================================================================
+
+/a 10 def /b 20 def
+{ a b add } [/a /b] closure-capture /add-ab exch def
+add-ab 30 eq                                (capture: a+b=30) rt-ok  clear
+
+% =================================================================
+% SECTION 2: HAPPY PATH -- captured values are frozen
+% =================================================================
+
+/x 5 def
+{ x x mul } [/x] closure-capture /sq5 exch def
+/x 999 def
+sq5 25 eq                                   (capture: frozen x=5) rt-ok  clear
+
+% =================================================================
+% SECTION 3: HAPPY PATH -- closure-env extracts dict
+% =================================================================
+
+/val 42 def
+{ val } [/val] closure-capture /cl exch def
+/cl load closure-env /val get 42 eq         (env: extract val=42) rt-ok  clear
+
+% =================================================================
+% SECTION 4: HAPPY PATH -- closure-with-dict
+% =================================================================
+
+<< /x 10 /y 20 >> { x y mul } closure-with-dict
+200 eq                                      (with-dict: x*y=200) rt-ok  clear
+
+% =================================================================
+% SECTION 5: HAPPY PATH -- closure-with-dict scope isolation
+% =================================================================
+
+/z 100 def
+<< /z 7 >> { z } closure-with-dict
+7 eq                                        (with-dict: z=7 shadows) rt-ok
+z 100 eq                                    (with-dict: outer z intact) rt-ok  clear
+
+% =================================================================
+% SECTION 6: HAPPY PATH -- capture multiple values
+% =================================================================
+
+/p 3 def /q 4 def /r 5 def
+{ p p mul q q mul add r r mul add } [/p /q /r] closure-capture exec
+50 eq                                       (capture: p^2+q^2+r^2=50) rt-ok  clear
+
+% =================================================================
+% SECTION 7: HAPPY PATH -- closure as callback
+% =================================================================
+
+/threshold 10 def
+{ threshold gt } [/threshold] closure-capture /above10 exch def
+[5 15 3 20 8 12] { above10 } filter
+dup length 3 eq                             (callback: filter count) rt-ok
+0 get 15 eq                                 (callback: first match) rt-ok  clear
+
+% =================================================================
+% SECTION 8: HAPPY PATH -- nested closures
+% =================================================================
+
+/outer 100 def
+{ outer a add } [/outer] closure-capture /add-outer exch def
+/a 42 def
+add-outer 142 eq                            (nested: outer+a) rt-ok  clear
+
+% =================================================================
+% SECTION 9: SAD PATH -- empty name array
+% =================================================================
+
+{ { } [] closure-capture } try /range-check eq
+                                            (sad: empty names) rt-ok  clear
+
+% =================================================================
+% SECTION 10: SAD PATH -- undefined name
+% =================================================================
+
+{ { } [/nonexistent-xyz] closure-capture } try /undefined eq
+                                            (sad: undefined name) rt-ok  clear
+
+% =================================================================
+% SECTION 11: SAD PATH -- non-name in array
+% =================================================================
+
+{ { } [42] closure-capture } try /type-check eq
+                                            (sad: non-name in array) rt-ok  clear
+
+% =================================================================
+% SECTION 12: SAD PATH -- closure-env on non-closure
+% =================================================================
+
+{ 42 closure-env } try /type-check eq       (sad: env on integer) rt-ok  clear
+
+% =================================================================
+% SECTION 13: BOUNDARY -- capture single name
+% =================================================================
+
+/solo 7 def
+{ solo } [/solo] closure-capture exec
+7 eq                                        (boundary: single capture) rt-ok  clear
+
+% =================================================================
+% SECTION 14: BOUNDARY -- captured dict is read-only
+% =================================================================
+
+/m 10 def
+{ m } [/m] closure-capture /cl exch def
+/cl load closure-env
+writable? not                               (boundary: captured dict is read-only) rt-ok  clear
+
+% =================================================================
+% SECTION 15: BOUNDARY -- closure-with-dict then normal dict access
+% =================================================================
+
+/base 1 def
+<< /base 1000 >> { base } closure-with-dict
+1000 eq                                     (boundary: with-dict overrides) rt-ok
+base 1 eq                                   (boundary: original restored) rt-ok  clear
+
+% =================================================================
+% SECTION 16: HAPPY PATH -- ExtValue capture (Long)
+% =================================================================
+
+/big 1000000000000l def
+{ big 1l add } [/big] closure-capture exec
+1000000000001l eq                           (capture: long value) rt-ok  clear
+
+% =================================================================
+% SECTION 17: HAPPY PATH -- ExtValue capture (Double)
+% =================================================================
+
+/pi 3.14159265d def
+{ pi 2.0d mul } [/pi] closure-capture exec
+dup 6.28d gt exch 6.29d lt and              (capture: double value) rt-ok  clear
+
+% =================================================================
+% SECTION 18: HAPPY PATH -- closure invoked multiple times
+% =================================================================
+
+/n 7 def
+{ n n mul } [/n] closure-capture /sq7 exch def
+sq7 49 eq                                   (multi-invoke: first) rt-ok  clear
+sq7 49 eq                                   (multi-invoke: second) rt-ok  clear
+sq7 49 eq                                   (multi-invoke: third) rt-ok  clear
+
+% =================================================================
+% SECTION 19: HAPPY PATH -- true nested closure (closure captures closure)
+% =================================================================
+
+/x 10 def
+{ x mul } [/x] closure-capture /times-x exch def
+/y 3 def
+{ y times-x } [/y /times-x] closure-capture exec
+30 eq                                       (nested: captured closure) rt-ok  clear
+
+% =================================================================
+% SECTION 20: HAPPY PATH -- multiple closures different values
+% =================================================================
+
+/v 1 def
+{ v } [/v] closure-capture /cl1 exch def
+/v 2 def
+{ v } [/v] closure-capture /cl2 exch def
+/v 3 def
+{ v } [/v] closure-capture /cl3 exch def
+
+cl1 1 eq                                    (multi-cl: first=1) rt-ok  clear
+cl2 2 eq                                    (multi-cl: second=2) rt-ok  clear
+cl3 3 eq                                    (multi-cl: third=3) rt-ok  clear
+
+% =================================================================
+% SECTION 21: HAPPY PATH -- closure captures shadowed name
+% =================================================================
+
+/w 100 def
+/cl-inner null def
+<< /w 42 >> begin
+  { w } [/w] closure-capture /cl-inner exch store
+end
+cl-inner 42 eq                              (shadow: captures inner) rt-ok  clear
+
+% =================================================================
+% SECTION 22: SAD PATH -- closure-with-dict non-dict
+% =================================================================
+
+{ 42 { } closure-with-dict } try /type-check eq
+                                            (sad: with-dict non-dict) rt-ok  clear
+
+% =================================================================
+% SECTION 23: SAD PATH -- closure-with-dict non-proc
+% =================================================================
+
+{ << >> 42 closure-with-dict } try /type-check eq
+                                            (sad: with-dict non-proc) rt-ok  clear
+
+% =================================================================
+% SECTION 24: HAPPY PATH -- error in closure body (dict stack cleanup)
+% =================================================================
+
+/guard 5 def
+{ << /guard 99 >> { 1 0 div } closure-with-dict } try
+/div-by-zero eq                             (error-cleanup: right error) rt-ok
+guard 5 eq                                  (error-cleanup: dict stack ok) rt-ok  clear
+
+% =================================================================
+% SECTION 25: HAPPY PATH -- exit inside closure body
+% =================================================================
+
+/exit-result 0 def
+5 { << /inc 1 >> { exit-result inc add /exit-result exch store } closure-with-dict } repeat
+exit-result 5 eq                            (exit: loop through closure) rt-ok  clear
+
+% =================================================================
+% SECTION 26: STRESS -- large capture (8 names)
+% =================================================================
+
+/s1 1 def /s2 2 def /s3 3 def /s4 4 def
+/s5 5 def /s6 6 def /s7 7 def /s8 8 def
+{ s1 s2 add s3 add s4 add s5 add s6 add s7 add s8 add }
+[/s1 /s2 /s3 /s4 /s5 /s6 /s7 /s8] closure-capture exec
+36 eq                                       (stress: 8-name capture) rt-ok  clear
+
+% =================================================================
+% SECTION 27: BOUNDARY -- closure-with-dict empty dict
+% =================================================================
+
+<< >> { 42 } closure-with-dict
+42 eq                                       (boundary: empty dict) rt-ok  clear
+
+% =================================================================
+% SECTION 28: BOUNDARY -- closure-env dict has correct keys
+% =================================================================
+
+/k1 10 def /k2 20 def
+{ k1 k2 add } [/k1 /k2] closure-capture /cl exch def
+/cl load closure-env dup
+/k1 known?                                  (env-keys: k1 present) rt-ok
+/k2 known?                                  (env-keys: k2 present) rt-ok  clear
+
+% =================================================================
+% INTEGRITY
+% =================================================================
+
+/vm-validate query-status                    (integrity: vm-validate) rt-ok  clear
+/extvalue-validate query-status              (integrity: extvalue-validate) rt-ok  clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_closure: ALL TESTS PASSED) =
+(__test_ok__) =

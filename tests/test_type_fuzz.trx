@@ -1,0 +1,408 @@
+% ====================================================================
+% test_type_fuzz.trx -- exhaustive type conversion and cast tests
+% ====================================================================
+% All pairwise numeric type casts, reinterpret, boundary casts,
+% type predicates, to-string/to-number round-trips
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+/approx-eq {
+  3 1 roll sub abs ge
+} def
+
+% ====================================================================
+% SECTION 1: Cast from Integer to all numeric types
+% ====================================================================
+
+42 /byte-type cast dup type /byte-type eq  (cast-int: -> byte type) rt-ok
+42b eq  (cast-int: -> byte value) rt-ok clear
+
+42 /uinteger-type cast dup type /uinteger-type eq  (cast-int: -> uint type) rt-ok
+42u eq  (cast-int: -> uint value) rt-ok clear
+
+42 /long-type cast dup type /long-type eq  (cast-int: -> long type) rt-ok
+42l eq  (cast-int: -> long value) rt-ok clear
+
+42 /ulong-type cast dup type /ulong-type eq  (cast-int: -> ulong type) rt-ok
+42ul eq  (cast-int: -> ulong value) rt-ok clear
+
+42 /real-type cast dup type /real-type eq  (cast-int: -> real type) rt-ok
+42.0 eq  (cast-int: -> real value) rt-ok clear
+
+42 /double-type cast dup type /double-type eq  (cast-int: -> double type) rt-ok
+42.0d eq  (cast-int: -> double value) rt-ok clear
+
+42 /boolean-type cast true eq  (cast-int: 42 -> true) rt-ok clear
+0 /boolean-type cast false eq  (cast-int: 0 -> false) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Cast from Byte to all numeric types
+% ====================================================================
+
+42b /integer-type cast dup type /integer-type eq  (cast-byte: -> int type) rt-ok
+42 eq  (cast-byte: -> int value) rt-ok clear
+
+42b /uinteger-type cast 42u eq  (cast-byte: -> uint) rt-ok clear
+42b /long-type cast 42l eq      (cast-byte: -> long) rt-ok clear
+42b /ulong-type cast 42ul eq    (cast-byte: -> ulong) rt-ok clear
+42b /real-type cast 42.0 eq     (cast-byte: -> real) rt-ok clear
+42b /double-type cast 42.0d eq  (cast-byte: -> double) rt-ok clear
+0b /boolean-type cast false eq  (cast-byte: 0 -> false) rt-ok clear
+1b /boolean-type cast true eq   (cast-byte: 1 -> true) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Cast from UInteger to all numeric types
+% ====================================================================
+
+42u /integer-type cast 42 eq   (cast-uint: -> int) rt-ok clear
+42u /byte-type cast 42b eq     (cast-uint: -> byte) rt-ok clear
+42u /long-type cast 42l eq     (cast-uint: -> long) rt-ok clear
+42u /ulong-type cast 42ul eq   (cast-uint: -> ulong) rt-ok clear
+42u /real-type cast 42.0 eq    (cast-uint: -> real) rt-ok clear
+42u /double-type cast 42.0d eq (cast-uint: -> double) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Cast from Long to all numeric types
+% ====================================================================
+
+42l /integer-type cast 42 eq   (cast-long: -> int) rt-ok clear
+42l /byte-type cast 42b eq     (cast-long: -> byte) rt-ok clear
+42l /uinteger-type cast 42u eq (cast-long: -> uint) rt-ok clear
+42l /ulong-type cast 42ul eq   (cast-long: -> ulong) rt-ok clear
+42l /real-type cast 42.0 eq    (cast-long: -> real) rt-ok clear
+42l /double-type cast 42.0d eq (cast-long: -> double) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Cast from ULong to all numeric types
+% ====================================================================
+
+42ul /integer-type cast 42 eq   (cast-ulong: -> int) rt-ok clear
+42ul /byte-type cast 42b eq     (cast-ulong: -> byte) rt-ok clear
+42ul /uinteger-type cast 42u eq (cast-ulong: -> uint) rt-ok clear
+42ul /long-type cast 42l eq     (cast-ulong: -> long) rt-ok clear
+42ul /real-type cast 42.0 eq    (cast-ulong: -> real) rt-ok clear
+42ul /double-type cast 42.0d eq (cast-ulong: -> double) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Cast from Real to all numeric types
+% ====================================================================
+
+3.7 /integer-type cast 3 eq      (cast-real: -> int truncates) rt-ok clear
+3.7 /byte-type cast 3b eq        (cast-real: -> byte truncates) rt-ok clear
+3.7 /uinteger-type cast 3u eq    (cast-real: -> uint truncates) rt-ok clear
+3.7 /long-type cast 3l eq        (cast-real: -> long truncates) rt-ok clear
+3.7 /ulong-type cast 3ul eq      (cast-real: -> ulong truncates) rt-ok clear
+3.7 /double-type cast 3.7d 0.001d approx-eq  (cast-real: -> double) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Cast from Double to all numeric types
+% ====================================================================
+
+3.7d /integer-type cast 3 eq     (cast-double: -> int truncates) rt-ok clear
+3.7d /byte-type cast 3b eq       (cast-double: -> byte truncates) rt-ok clear
+3.7d /uinteger-type cast 3u eq   (cast-double: -> uint truncates) rt-ok clear
+3.7d /long-type cast 3l eq       (cast-double: -> long truncates) rt-ok clear
+3.7d /ulong-type cast 3ul eq     (cast-double: -> ulong truncates) rt-ok clear
+3.7d /real-type cast type /real-type eq  (cast-double: -> real type) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Cast from Boolean to numeric types
+% ====================================================================
+
+true /integer-type cast 1 eq    (cast-bool: true -> 1) rt-ok clear
+false /integer-type cast 0 eq   (cast-bool: false -> 0) rt-ok clear
+true /byte-type cast 1b eq      (cast-bool: true -> 1b) rt-ok clear
+true /real-type cast 1.0 eq     (cast-bool: true -> 1.0) rt-ok clear
+true /double-type cast 1.0d eq  (cast-bool: true -> 1.0d) rt-ok clear
+true /long-type cast 1l eq      (cast-bool: true -> 1l) rt-ok clear
+true /ulong-type cast 1ul eq    (cast-bool: true -> 1ul) rt-ok clear
+true /uinteger-type cast 1u eq  (cast-bool: true -> 1u) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Cast boundary values
+% ====================================================================
+
+% Large int to byte (truncation)
+256 /byte-type cast 0b eq    (cast-boundary: 256 -> byte 0) rt-ok clear
+255 /byte-type cast 255b eq  (cast-boundary: 255 -> byte 255) rt-ok clear
+-1 /byte-type cast 255b eq   (cast-boundary: -1 -> byte 255) rt-ok clear
+
+% Large uint to byte
+300u /byte-type cast 44b eq  (cast-boundary: 300u -> byte 44) rt-ok clear
+
+% Negative int to uint
+-1 /uinteger-type cast 16#FFFFFFFF#u eq  (cast-boundary: -1 -> uint max) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Cast error paths
+% ====================================================================
+
+% Non-numeric source
+{ (hello) /integer-type cast } try /type-check eq  (cast-err: string source) rt-ok clear
+{ null /integer-type cast } try /type-check eq     (cast-err: null source) rt-ok clear
+
+% Invalid type name
+{ 42 /not-a-type cast } try /type-check eq  (cast-err: bad type name) rt-ok clear
+{ 42 /string-type cast } try /type-check eq (cast-err: non-numeric target) rt-ok clear
+
+% ====================================================================
+% SECTION 11: to-string round-trips
+% ====================================================================
+
+42 =string to-string to-number 42 eq  (round-trip: int -> string -> int) rt-ok clear
+255b /integer-type cast =string to-string to-number 255 eq  (round-trip: byte value) rt-ok clear
+true =string to-string (true) eq  (round-trip: bool -> string) rt-ok clear
+
+% ====================================================================
+% SECTION 12: to-number edge cases
+% ====================================================================
+
+(0) to-number 0 eq              (to-number: zero) rt-ok clear
+(-42) to-number -42 eq          (to-number: negative) rt-ok clear
+(3.14) to-number 3.14 0.001 approx-eq  (to-number: real) rt-ok clear
+(1e10) to-number 1.0e10 0.001 approx-eq  (to-number: scientific) rt-ok clear
+{ () to-number } try /type-check eq       (to-number: empty throws) rt-ok clear
+{ (abc) to-number } try /type-check eq    (to-number: non-numeric throws) rt-ok clear
+{ (  42  ) to-number } try /type-check eq (to-number: spaces throws) rt-ok clear
+
+% ====================================================================
+% SECTION 13: type operator on all types
+% ====================================================================
+
+42 type /integer-type eq        (type: integer) rt-ok clear
+42b type /byte-type eq          (type: byte) rt-ok clear
+42u type /uinteger-type eq      (type: uinteger) rt-ok clear
+42l type /long-type eq          (type: long) rt-ok clear
+42ul type /ulong-type eq        (type: ulong) rt-ok clear
+3.14 type /real-type eq         (type: real) rt-ok clear
+3.14d type /double-type eq      (type: double) rt-ok clear
+true type /boolean-type eq      (type: boolean) rt-ok clear
+null type /null-type eq         (type: null) rt-ok clear
+(hello) type /string-type eq    (type: string) rt-ok clear
+/foo type /name-type eq         (type: name) rt-ok clear
+[1 2 3] type /array-type eq    (type: array) rt-ok clear
+<< /a 1 >> type /dict-type eq  (type: dict) rt-ok clear
+mark type /mark-type eq         (type: mark) rt-ok clear
+
+% ====================================================================
+% SECTION 14: Reinterpret basics
+% ====================================================================
+
+% reinterpret int bits as uint and back
+-1 /uinteger-type reinterpret 16#FFFFFFFF#u eq  (reinterpret: -1 as uint) rt-ok clear
+16#FFFFFFFF#u /integer-type reinterpret -1 eq    (reinterpret: max-uint as int) rt-ok clear
+
+% reinterpret preserves bit pattern
+0 /uinteger-type reinterpret 0u eq  (reinterpret: 0 -> 0u) rt-ok clear
+
+% reinterpret error on non-numeric
+{ (hello) /integer-type reinterpret } try /type-check eq  (reinterpret-err: string) rt-ok clear
+
+% ====================================================================
+% SECTION 15: make-literal / make-executable / executable?
+% ====================================================================
+
+/foo make-executable executable? true eq  (exec-attr: make-executable) rt-ok clear
+/foo make-literal executable? false eq    (exec-attr: make-literal) rt-ok clear
+
+% make-literal rejects Operator (Operator must remain executable)
+{ /add load make-literal } try /type-check eq
+    (exec-attr: make-literal on operator raises type-check) rt-ok clear
+
+% make-literal rejects Curry (Curry must remain executable)
+5 /add load curry   % create curry outside try
+{ make-literal } try /type-check eq
+    (exec-attr: make-literal on curry raises type-check) rt-ok clear
+
+% make-executable rejects Tagged (Tagged must remain literal)
+{ 42 /ok tag make-executable } try /type-check eq
+    (exec-attr: make-executable on tagged raises type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 16: Exhaustive cast matrix stress (all 7x7 numeric pairs)
+% ====================================================================
+
+% We test all 49 pairwise casts with value 1 to verify no crashes
+% Source types: byte, integer, uinteger, long, ulong, real, double
+
+% From byte 1
+1b /byte-type cast 1b eq      (matrix: byte->byte) rt-ok clear
+1b /integer-type cast 1 eq    (matrix: byte->int) rt-ok clear
+1b /uinteger-type cast 1u eq  (matrix: byte->uint) rt-ok clear
+1b /long-type cast 1l eq      (matrix: byte->long) rt-ok clear
+1b /ulong-type cast 1ul eq    (matrix: byte->ulong) rt-ok clear
+1b /real-type cast 1.0 eq     (matrix: byte->real) rt-ok clear
+1b /double-type cast 1.0d eq  (matrix: byte->double) rt-ok clear
+
+% From integer 1
+1 /byte-type cast 1b eq       (matrix: int->byte) rt-ok clear
+1 /integer-type cast 1 eq     (matrix: int->int) rt-ok clear
+1 /uinteger-type cast 1u eq   (matrix: int->uint) rt-ok clear
+1 /long-type cast 1l eq       (matrix: int->long) rt-ok clear
+1 /ulong-type cast 1ul eq     (matrix: int->ulong) rt-ok clear
+1 /real-type cast 1.0 eq      (matrix: int->real) rt-ok clear
+1 /double-type cast 1.0d eq   (matrix: int->double) rt-ok clear
+
+% From uinteger 1
+1u /byte-type cast 1b eq      (matrix: uint->byte) rt-ok clear
+1u /integer-type cast 1 eq    (matrix: uint->int) rt-ok clear
+1u /uinteger-type cast 1u eq  (matrix: uint->uint) rt-ok clear
+1u /long-type cast 1l eq      (matrix: uint->long) rt-ok clear
+1u /ulong-type cast 1ul eq    (matrix: uint->ulong) rt-ok clear
+1u /real-type cast 1.0 eq     (matrix: uint->real) rt-ok clear
+1u /double-type cast 1.0d eq  (matrix: uint->double) rt-ok clear
+
+% From long 1
+1l /byte-type cast 1b eq      (matrix: long->byte) rt-ok clear
+1l /integer-type cast 1 eq    (matrix: long->int) rt-ok clear
+1l /uinteger-type cast 1u eq  (matrix: long->uint) rt-ok clear
+1l /long-type cast 1l eq      (matrix: long->long) rt-ok clear
+1l /ulong-type cast 1ul eq    (matrix: long->ulong) rt-ok clear
+1l /real-type cast 1.0 eq     (matrix: long->real) rt-ok clear
+1l /double-type cast 1.0d eq  (matrix: long->double) rt-ok clear
+
+% From ulong 1
+1ul /byte-type cast 1b eq     (matrix: ulong->byte) rt-ok clear
+1ul /integer-type cast 1 eq   (matrix: ulong->int) rt-ok clear
+1ul /uinteger-type cast 1u eq (matrix: ulong->uint) rt-ok clear
+1ul /long-type cast 1l eq     (matrix: ulong->long) rt-ok clear
+1ul /ulong-type cast 1ul eq   (matrix: ulong->ulong) rt-ok clear
+1ul /real-type cast 1.0 eq    (matrix: ulong->real) rt-ok clear
+1ul /double-type cast 1.0d eq (matrix: ulong->double) rt-ok clear
+
+% From real 1.0
+1.0 /byte-type cast 1b eq     (matrix: real->byte) rt-ok clear
+1.0 /integer-type cast 1 eq   (matrix: real->int) rt-ok clear
+1.0 /uinteger-type cast 1u eq (matrix: real->uint) rt-ok clear
+1.0 /long-type cast 1l eq     (matrix: real->long) rt-ok clear
+1.0 /ulong-type cast 1ul eq   (matrix: real->ulong) rt-ok clear
+1.0 /real-type cast 1.0 eq    (matrix: real->real) rt-ok clear
+1.0 /double-type cast 1.0d eq (matrix: real->double) rt-ok clear
+
+% From double 1.0
+1.0d /byte-type cast 1b eq      (matrix: double->byte) rt-ok clear
+1.0d /integer-type cast 1 eq    (matrix: double->int) rt-ok clear
+1.0d /uinteger-type cast 1u eq  (matrix: double->uint) rt-ok clear
+1.0d /long-type cast 1l eq      (matrix: double->long) rt-ok clear
+1.0d /ulong-type cast 1ul eq    (matrix: double->ulong) rt-ok clear
+1.0d /real-type cast type /real-type eq  (matrix: double->real) rt-ok clear
+1.0d /double-type cast 1.0d eq  (matrix: double->double) rt-ok clear
+
+% ====================================================================
+% SECTION: promote (pairwise)
+% ====================================================================
+
+% same type: no-op
+1 2 promote
+dup type /integer-type eq   (promote-pair: same int y) rt-ok pop
+dup type /integer-type eq   (promote-pair: same int x) rt-ok pop clear
+
+% int + real -> both real
+1 2.0 promote
+dup type /real-type eq      (promote-pair: int+real -> real y) rt-ok pop
+dup type /real-type eq      (promote-pair: int+real -> real x) rt-ok pop clear
+
+% byte + integer -> both integer
+65b 1000 promote
+dup type /integer-type eq   (promote-pair: byte+int -> int y) rt-ok pop
+dup type /integer-type eq   (promote-pair: byte+int -> int x) rt-ok pop clear
+
+% int + uint -> both long (safe widening)
+1 2u promote
+dup type /long-type eq      (promote-pair: int+uint -> long y) rt-ok pop
+dup type /long-type eq      (promote-pair: int+uint -> long x) rt-ok pop clear
+
+% real + long -> both double
+1.0 2l promote
+dup type /double-type eq    (promote-pair: real+long -> double y) rt-ok pop
+dup type /double-type eq    (promote-pair: real+long -> double x) rt-ok pop clear
+
+% values preserved through promotion
+3 4.0 promote
+4.0 eq  (promote-pair: value y=4.0) rt-ok
+3.0 eq  (promote-pair: value x=3.0) rt-ok clear
+
+% error: non-numeric
+{ 1 (hello) promote } try /type-check eq  (promote-pair: non-numeric error) rt-ok clear
+
+% ====================================================================
+% SECTION: promote (array)
+% ====================================================================
+
+% mixed int + real -> all real
+[1 2 3.0] promote
+dup 0 get type /real-type eq        (promote-arr: int+real -> real [0]) rt-ok
+dup 1 get type /real-type eq        (promote-arr: int+real -> real [1]) rt-ok
+dup 2 get type /real-type eq        (promote-arr: int+real -> real [2]) rt-ok
+dup 0 get 1.0 eq                    (promote-arr: value [0]) rt-ok
+dup 2 get 3.0 eq                    (promote-arr: value [2]) rt-ok
+pop clear
+
+% all same type: no conversion needed
+[10 20 30] promote
+dup 0 get type /integer-type eq     (promote-arr: all-int type) rt-ok
+dup 0 get 10 eq                     (promote-arr: all-int value) rt-ok
+pop clear
+
+% byte + integer -> all integer
+[65b 1000 2000] promote
+dup 0 get type /integer-type eq     (promote-arr: byte+int -> int [0]) rt-ok
+dup 0 get 65 eq                     (promote-arr: byte+int value [0]) rt-ok
+pop clear
+
+% integer + ulong -> all ulong
+[1 2ul 3] promote
+dup 0 get type /ulong-type eq       (promote-arr: int+ulong -> ulong [0]) rt-ok
+dup 1 get type /ulong-type eq       (promote-arr: int+ulong -> ulong [1]) rt-ok
+pop clear
+
+% real + long -> all double
+[1.0 2l 3.0] promote
+dup 0 get type /double-type eq      (promote-arr: real+long -> double [0]) rt-ok
+dup 1 get type /double-type eq      (promote-arr: real+long -> double [1]) rt-ok
+pop clear
+
+% empty array
+[] promote length 0 eq              (promote-arr: empty) rt-ok clear
+
+% single element
+[42] promote
+dup length 1 eq                     (promote-arr: single length) rt-ok
+dup 0 get 42 eq                     (promote-arr: single value) rt-ok
+pop clear
+
+% packed array input
+{ 1 2 3.0 }#p promote
+dup 0 get type /real-type eq        (promote-arr: packed -> real [0]) rt-ok
+dup 2 get type /real-type eq        (promote-arr: packed -> real [2]) rt-ok
+dup 0 get 1.0 eq                    (promote-arr: packed value [0]) rt-ok
+pop clear
+
+% non-numeric element in array -> error
+{ [1 (hello) 2] promote } try /type-check eq  (promote-arr: non-numeric error) rt-ok clear
+
+% non-numeric first element
+{ [(hello) 1 2] promote } try /type-check eq  (promote-arr: non-numeric first error) rt-ok clear
+
+% original array unchanged
+[1 2 3.0] /orig exch def
+orig promote pop
+orig 0 get type /integer-type eq    (promote-arr: original unchanged) rt-ok clear
+
+% pipeline: promote then sum
+[1 2l 3] promote sum 6l eq         (promote-arr: promote+sum pipeline) rt-ok clear
+
+% underflow
+{ promote } try /opstack-underflow eq  (promote: underflow) rt-ok clear
+
+(Type fuzz tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

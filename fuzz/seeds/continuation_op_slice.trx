@@ -1,0 +1,9 @@
+% op-stack capture on `capture`: ambient op-stack items between the
+% matched @delimit-barrier and the capture point are saved as a
+% slice, trimmed from the live op stack (so handler sees clean op),
+% and restored below the resume value on resume.
+{ 42 { } capture add } delimit /k exch def 10 /k load exec pop
+{ 1 2 3 { } capture add add add } delimit /k exch def 4 /k load exec pop
+{ { dup is-continuation } capture } delimit pop
+{ 100 200 300 { pop } capture } delimit clear
+{ 5 { 10 exch abort-exec } capture add } delimit pop

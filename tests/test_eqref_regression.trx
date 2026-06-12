@@ -1,0 +1,42 @@
+% test_eqref_regression.trx
+%
+% Regression tests for the eqref stale-detection mechanism.
+%
+% The fuzz artifact fuzz/crashes/crash-aa07fe0be616f163549fbd0b3400ada0d76dd2c9
+% originally tripped a UBSan alignment error inside print-stack: two sequential
+% }#= procs (one }#=a array then }#= packed) aliased the same m_eqproc_storage
+% buffer; reading the first proc's stale reference reinterpreted packed bytes
+% as Objects and produced misaligned m_offset values.  The assertions below
+% exercise the same code path -- scan two eqprocs in sequence, then print-stack.
+% The expected outcome is now a clean Unsupported error, not UB.
+%
+% If any of these start reporting /no-error or the process crashes, the
+% generation-counter staleness detection has regressed.
+
+(=== eqref regression tests ===) =
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% fuzz/crashes/crash-aa07fe0be616f163549fbd0b3400ada0d76dd2c9 minimized:
+% }#=a Array proc followed by }#= Packed proc aliases eqproc_storage; printing
+% the stack walks the stale array ref and must raise stale-}#=.
+{ { 42 }#=a { 7 }#= print-stack }#a try /unsupported eq
+  (fuzz-regression: crash-aa07fe0b array then packed) rt-ok clear
+
+% Sibling cases: two packed, two array -- same staleness semantics.
+{ { 42 }#= { 7 }#= print-stack }#a try /unsupported eq
+  (fuzz-regression: two packed }#= procs) rt-ok clear
+{ { 42 }#=a { 7 }#=a print-stack }#a try /unsupported eq
+  (fuzz-regression: two array }#=a procs) rt-ok clear
+
+(eqref regression tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =
