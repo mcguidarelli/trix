@@ -50,6 +50,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include <glob.h>
+#include <limits.h>
 #include <locale.h>
 #include <poll.h>
 #ifndef TRIX_NO_READLINE
