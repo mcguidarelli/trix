@@ -21,7 +21,7 @@ jobs:
         build_type: [Debug, Release]
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install gcc-15 (toolchain PPA)
         if: matrix.compiler == 'gcc-15'
@@ -106,7 +106,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install clang-format
         run: |
@@ -140,7 +140,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install clang-20 (LLVM apt; ubuntu-24.04 ships only clang-18)
         run: |

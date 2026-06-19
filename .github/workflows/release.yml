@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout (with tag history)
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -94,7 +94,7 @@ jobs:
     needs: linux-x86_64
     steps:
       - name: Checkout (with tag history)
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -163,7 +163,7 @@ jobs:
       packages: write  # push to ghcr.io
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set up QEMU (arm64 emulation for the multi-arch build)
         uses: docker/setup-qemu-action@v3
