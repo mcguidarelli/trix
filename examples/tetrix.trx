@@ -1,0 +1,3372 @@
+%===------------------------------------------------------------------------===%
+%                                                                              %
+%     __        ______    _                                                    %
+%    / /_ ___  /_  __/___(_)_  __                                              %
+%   / __// _ \  / / / __/ /\ \/ /                                              %
+%  / /_ /  __/ / / / / / /  > · <                                              %
+%  \__/ \___/ /_/ /_/ /_/  /_/\_\                                              %
+%                                                                              %
+%===------------------------------------------------------------------------===%
+
+% tetrix.trx -- playable terminal falling-block game in Trix.
+%
+% This showcase is built up vertically:
+%   Phase 1: pure data + pure transformations.
+%       7 tetromino specs, SRS kick tables, playfield primitives,
+%       piece-collides?, piece-merge, clear-lines, rotate-with-kick,
+%       tspin-classify.  No I/O.
+%   Phase 2: bag + scoring + level
+%   Phase 3: rendering on the virtual screen
+%   Phase 4: input + gravity coroutines + main loop
+%   Phase 5: T-spin scoring wired in
+%   Phase 6: AI heuristic + --ai-peek
+%   Phase 7: --ai-oracle N-piece search
+%   Phase 8: pack/unpack persistence
+%   Phase 9: polish / title screen / line-clear flash / game-over flash
+%
+% Default invocation `./trix examples/tetrix.trx` launches the game in
+% human mode -- this is a showcase, the player should land in the
+% action.  Pass `--self-test` to run the in-source assertions instead.
+% See the TOP-LEVEL DISPATCH section near the bottom of the file.
+%
+% Coordinate system:
+%   row 0 = top of field, row 19 = bottom.
+%   col 0 = left, col 9 = right.
+%   Each piece has a 4x4 bounding box; piece position (py, px) is the
+%   field-coords of the box's top-left corner.  Cells inside the box
+%   are listed as [dr dc] offsets.
+
+(lib/screen.trx) require
+(lib/keys.trx) require
+
+%%%---------------------------------------------------------------------
+%%% TETROMINO DATA
+%%%---------------------------------------------------------------------
+%
+% Each piece carries:
+%   /name    symbolic name (/I /O /T /S /Z /J /L)
+%   /color   SGR 256-color palette index (guideline palette, Q5)
+%   /shapes  array of 4 rotation states; each state is a 4-cell list
+%            [[dr dc] [dr dc] [dr dc] [dr dc]] in 4x4-box-relative coords.
+%   /kicks-cw  one of the kick tables below (shared between similar pieces)
+%   /kicks-ccw same
+%
+% Rotation states are numbered 0 (spawn), 1 (R, CW from spawn), 2 (180),
+% 3 (L, CCW from spawn).  CW transitions: 0->1, 1->2, 2->3, 3->0.
+%
+% Guideline 256-color palette (cyan I / yellow O / purple T / green S /
+% red Z / blue J / orange L).
+
+%%% --- SRS kick tables ------------------------------------------------
+%
+% In standard SRS notation, +y means "up"; in our screen-space we use
+% +y means "down" (greater row index), so the published y values are
+% negated.  Each row is the 5 (dx, dy) offsets to test for a rotation
+% leaving the named source state, in order of preference.
+
+% J L S T Z (shared)
+/jlstz-kicks-cw [
+    [ [0 0] [-1 0] [-1 -1] [0 2]  [-1 2]  ]   % 0 -> R
+    [ [0 0] [1 0]  [1 1]   [0 -2] [1 -2]  ]   % R -> 2
+    [ [0 0] [1 0]  [1 -1]  [0 2]  [1 2]   ]   % 2 -> L
+    [ [0 0] [-1 0] [-1 1]  [0 -2] [-1 -2] ]   % L -> 0
+] def
+
+/jlstz-kicks-ccw [
+    [ [0 0] [1 0]  [1 -1]  [0 2]  [1 2]   ]   % 0 -> L
+    [ [0 0] [1 0]  [1 1]   [0 -2] [1 -2]  ]   % R -> 0
+    [ [0 0] [-1 0] [-1 -1] [0 2]  [-1 2]  ]   % 2 -> R
+    [ [0 0] [-1 0] [-1 1]  [0 -2] [-1 -2] ]   % L -> 2
+] def
+
+% I (its own table)
+/i-kicks-cw [
+    [ [0 0] [-2 0] [1 0]  [-2 1]  [1 -2]  ]   % 0 -> R
+    [ [0 0] [-1 0] [2 0]  [-1 -2] [2 1]   ]   % R -> 2
+    [ [0 0] [2 0]  [-1 0] [2 -1]  [-1 2]  ]   % 2 -> L
+    [ [0 0] [1 0]  [-2 0] [1 2]   [-2 -1] ]   % L -> 0
+] def
+
+/i-kicks-ccw [
+    [ [0 0] [-1 0] [2 0]  [-1 -2] [2 1]   ]   % 0 -> L
+    [ [0 0] [2 0]  [-1 0] [2 -1]  [-1 2]  ]   % R -> 0
+    [ [0 0] [1 0]  [-2 0] [1 2]   [-2 -1] ]   % 2 -> R
+    [ [0 0] [-2 0] [1 0]  [-2 1]  [1 -2]  ]   % L -> 2
+] def
+
+% O doesn't rotate -- single zero-kick row repeated four times so the
+% generic rotate path can index by from-state without special-casing.
+/o-kicks-cw  [ [[0 0]] [[0 0]] [[0 0]] [[0 0]] ] def
+/o-kicks-ccw [ [[0 0]] [[0 0]] [[0 0]] [[0 0]] ] def
+
+%%% --- The seven tetrominoes ------------------------------------------
+%
+% Cells are placed inside a 4x4 bounding box with center (1,1) for
+% J/L/S/T/Z, (1,1)-area for O, and uniform 4x4 orbit for I.
+
+% /unique-rots: distinct rotation states for the AI placement enumerator.
+% O is rotationally symmetric; I, S, Z repeat at the 180-degree mark; J,
+% L, T are fully asymmetric.  Search loops below iterate `0..unique-rots-1`
+% so the AI doesn't waste time evaluating duplicate placements.
+
+/I-piece <<
+    /name /I  /color 51              % bright cyan
+    /shapes [
+        [ [1 0] [1 1] [1 2] [1 3] ]
+        [ [0 2] [1 2] [2 2] [3 2] ]
+        [ [2 0] [2 1] [2 2] [2 3] ]
+        [ [0 1] [1 1] [2 1] [3 1] ]
+    ]
+    /kicks-cw    i-kicks-cw
+    /kicks-ccw   i-kicks-ccw
+    /unique-rots 2
+>> def
+
+/O-piece <<
+    /name /O  /color 226             % bright yellow
+    /shapes [
+        [ [0 1] [0 2] [1 1] [1 2] ]
+        [ [0 1] [0 2] [1 1] [1 2] ]
+        [ [0 1] [0 2] [1 1] [1 2] ]
+        [ [0 1] [0 2] [1 1] [1 2] ]
+    ]
+    /kicks-cw    o-kicks-cw
+    /kicks-ccw   o-kicks-ccw
+    /unique-rots 1
+>> def
+
+/T-piece <<
+    /name /T  /color 129             % purple
+    /shapes [
+        [ [0 1] [1 0] [1 1] [1 2] ]   % spawn (point up)
+        [ [0 1] [1 1] [1 2] [2 1] ]   % R     (point right)
+        [ [1 0] [1 1] [1 2] [2 1] ]   % 2     (point down)
+        [ [0 1] [1 0] [1 1] [2 1] ]   % L     (point left)
+    ]
+    /kicks-cw    jlstz-kicks-cw
+    /kicks-ccw   jlstz-kicks-ccw
+    /unique-rots 4
+>> def
+
+/S-piece <<
+    /name /S  /color 46              % green
+    /shapes [
+        [ [0 1] [0 2] [1 0] [1 1] ]
+        [ [0 1] [1 1] [1 2] [2 2] ]
+        [ [1 1] [1 2] [2 0] [2 1] ]
+        [ [0 0] [1 0] [1 1] [2 1] ]
+    ]
+    /kicks-cw    jlstz-kicks-cw
+    /kicks-ccw   jlstz-kicks-ccw
+    /unique-rots 2
+>> def
+
+/Z-piece <<
+    /name /Z  /color 196             % red
+    /shapes [
+        [ [0 0] [0 1] [1 1] [1 2] ]
+        [ [0 2] [1 1] [1 2] [2 1] ]
+        [ [1 0] [1 1] [2 1] [2 2] ]
+        [ [0 1] [1 0] [1 1] [2 0] ]
+    ]
+    /kicks-cw    jlstz-kicks-cw
+    /kicks-ccw   jlstz-kicks-ccw
+    /unique-rots 2
+>> def
+
+/J-piece <<
+    /name /J  /color 21              % blue
+    /shapes [
+        [ [0 0] [1 0] [1 1] [1 2] ]
+        [ [0 1] [0 2] [1 1] [2 1] ]
+        [ [1 0] [1 1] [1 2] [2 2] ]
+        [ [0 1] [1 1] [2 0] [2 1] ]
+    ]
+    /kicks-cw    jlstz-kicks-cw
+    /kicks-ccw   jlstz-kicks-ccw
+    /unique-rots 4
+>> def
+
+/L-piece <<
+    /name /L  /color 208             % orange
+    /shapes [
+        [ [0 2] [1 0] [1 1] [1 2] ]
+        [ [0 1] [1 1] [2 1] [2 2] ]
+        [ [1 0] [1 1] [1 2] [2 0] ]
+        [ [0 0] [0 1] [1 1] [2 1] ]
+    ]
+    /kicks-cw    jlstz-kicks-cw
+    /kicks-ccw   jlstz-kicks-ccw
+    /unique-rots 4
+>> def
+
+% Convenience: array of all 7 pieces, in canonical bag order.
+/all-pieces [ I-piece O-piece T-piece S-piece Z-piece J-piece L-piece ] def
+
+%%% --- T-spin corner tables -------------------------------------------
+%
+% The 3-corner rule: at lock time, count corners around the T's center
+% (offset [1,1] of its 4x4 box).  The T's center sits one cell inside
+% the bounding box; corners are the four diagonal cells.  Front corners
+% are the two corners on the side the T points to in its current rot.
+
+/T-corners [ [0 0] [0 2] [2 0] [2 2] ] def
+
+/T-front-corners [
+    [ [0 0] [0 2] ]      % spawn (point up)    -> top corners
+    [ [0 2] [2 2] ]      % R     (point right) -> right corners
+    [ [2 0] [2 2] ]      % 2     (point down)  -> bottom corners
+    [ [0 0] [2 0] ]      % L     (point left)  -> left corners
+] def
+
+%%%---------------------------------------------------------------------
+%%% FIELD PRIMITIVES
+%%%---------------------------------------------------------------------
+%
+% Field is a 20-element array of 10-element rows; each cell is 0 (empty)
+% or a positive integer (the locking piece's color, used by render).
+
+/field-rows 20 def
+/field-cols 10 def
+
+/make-row {
+    % -- arr10                                      % fresh 10-zero row
+    ||#2
+    field-cols array /row exch local-def
+    0 1 field-cols 1 sub { /j exch local-def row j 0 put } for
+    row
+} def
+
+/make-field {
+    % -- field
+    ||#2
+    field-rows array /fld exch local-def
+    0 1 field-rows 1 sub { /j exch local-def fld j make-row put } for
+    fld
+} def
+
+/field-get {
+    % field row col -- val
+    |fld r c|#3
+    fld r get c get
+} def
+
+/field-set {
+    % field row col val --
+    |fld r c v|#4
+    fld r get c v put
+} def
+
+/field-row-full? {
+    % field row -- bool
+    get
+    true exch                                       % true row
+    { 0 eq { pop false } if } for-all               % AND across cells
+} def
+
+% field-clear-rows: drops every full row, shifting upper rows downward
+% and zero-filling the freed top rows.  Returns the (mutated) field
+% along with the number of rows cleared.
+%
+% Strategy: scan from bottom up; rows we keep have their contents copied
+% (via row-level `copy`, NOT pointer-aliasing put) to a "write" pointer
+% that starts at row 19 and decrements; rows we drop just advance the
+% read pointer.  At the end, zero rows 0..(write+1) in place.
+%
+% Allocation-free: no make-row, no array allocation in the hot path.
+% Critical for the AI search at depth 3+ (oracle visits thousands of
+% boards per move and ran out of VM when each clear allocated rows).
+% Also fixes a latent row-aliasing bug from the old put-based shift,
+% where two field slots could end up sharing the same row array.
+/field-clear-rows {
+    % field -- field cleared-count
+    |f|#8
+    /write field-rows 1 sub local-def                     % 19
+    /read  field-rows 1 sub local-def                     % 19
+    {
+        read 0 lt { exit } if
+        f read field-row-full?
+            {
+                /read read 1 sub local-def
+            }
+            {
+                read write ne {
+                    f read get  f write get  copy pop
+                } if
+                /read  read 1 sub local-def
+                /write write 1 sub local-def
+            }
+        if-else
+    } loop
+    /cleared write 1 add local-def
+    0 1 write {
+        /i exch local-def
+        /row f i get local-def
+        0 1 field-cols 1 sub { /c exch local-def row c 0 put } for
+    } for
+    f cleared
+} def
+
+%%%---------------------------------------------------------------------
+%%% PIECE PRIMITIVES
+%%%---------------------------------------------------------------------
+
+/piece-shape {
+    % piece state -- cell-list
+    exch /shapes get exch get
+} def
+
+/piece-collides? {
+    % field piece state row col -- bool
+    |fld pc st py px|#10
+    /hit false local-def
+    pc st piece-shape {
+        % each cell: [dr dc]
+        array-load pop /dc exch local-def /dr exch local-def
+        /r py dr add local-def /c px dc add local-def
+        r 0 lt r field-rows ge or
+        c 0 lt c field-cols ge or
+        or
+            { /hit true local-def }
+            { fld r c field-get 0 ne { /hit true local-def } if }
+        if-else
+    } for-all
+    hit
+} def
+
+/piece-merge {
+    % field piece state row col -- field           % mutates and returns field
+    |fld pc st py px|#10
+    /color pc /color get local-def
+    pc st piece-shape {
+        array-load pop /dc exch local-def /dr exch local-def
+        /r py dr add local-def /c px dc add local-def
+        r 0 ge r field-rows lt and
+        c 0 ge c field-cols lt and
+        and
+            { fld r c color field-set }
+        if
+    } for-all
+    fld
+} def
+
+% piece-ghost-row -- field piece state row col -- ghost-row
+% Drops the piece downward until it would collide with the next row;
+% returns the deepest row at which it still fits.  The ghost overlay
+% in the renderer hangs at this row.
+/piece-ghost-row {
+    |fld pc st py px|#6
+    /try-row py local-def
+    {
+        fld pc st try-row 1 add px piece-collides?
+        { exit } if
+        /try-row try-row 1 add local-def
+    } loop
+    try-row
+} def
+
+%%%---------------------------------------------------------------------
+%%% ROTATION + KICK
+%%%---------------------------------------------------------------------
+
+/state-cw  { 1 add 4 mod } def                     % state -- next-state CW
+/state-ccw { 3 add 4 mod } def                     % state -- next-state CCW
+
+% rotate-with-kick: try each of the 5 SRS offsets in order; first one
+% that doesn't collide wins.  Returns the new state + position + a
+% success bool.  On failure, returns the original state/pos + false.
+/rotate-with-kick {
+    % field piece state row col cw? -- new-state new-row new-col success?
+    |fld pc st py px cw|#20
+    /from-state st local-def
+    /to-state cw { st state-cw } { st state-ccw } if-else local-def
+    /kicks pc cw { /kicks-cw } { /kicks-ccw } if-else get from-state get local-def
+    /landed false local-def
+    /found-state to-state local-def
+    /found-row py local-def
+    /found-col px local-def
+    kicks {
+        landed
+            { pop }                                  % skip remaining once we land one
+            {
+                array-load pop /dy exch local-def /dx exch local-def
+                /try-row py dy add local-def
+                /try-col px dx add local-def
+                fld pc to-state try-row try-col piece-collides?
+                    { }
+                    { /found-row try-row local-def
+                      /found-col try-col local-def
+                      /landed true local-def }
+                if-else
+            }
+        if-else
+    } for-all
+    found-state found-row found-col landed
+} def
+
+%%%---------------------------------------------------------------------
+%%% T-SPIN CLASSIFICATION
+%%%---------------------------------------------------------------------
+%
+% Standard 3-corner rule: at lock time, count how many of the 4 corners
+% around the T's center are "filled" (locked or out-of-bounds).  >=3 is
+% a T-spin.  Both front corners filled -> full T-spin; only one front
+% corner filled -> mini T-spin.
+
+/corner-filled? {
+    % field row col -- bool
+    |f r c|#3
+    r 0 lt r field-rows ge or
+    c 0 lt c field-cols ge or
+    or
+        { true }                                    % out of bounds counts as filled
+        { f r c field-get 0 ne }
+    if-else
+} def
+
+/count-corners {
+    % field corners-list py px -- count
+    |f corners py px|#8
+    /n 0 local-def
+    corners {
+        array-load pop /dc exch local-def /dr exch local-def
+        f py dr add px dc add corner-filled?
+            { /n n 1 add local-def } if
+    } for-all
+    n
+} def
+
+/tspin-classify {
+    % field piece state row col last-was-rotation? -- /none|/mini|/full
+    |fld pc st py px last-rot|#8
+    pc /name get /T eq not last-rot not or
+        {
+            /none
+        }
+        {
+            /total fld T-corners py px count-corners local-def
+            total 3 lt
+                {
+                    /none
+                }
+                {
+                    /front fld T-front-corners st get py px count-corners local-def
+                    front 2 eq { /full } { /mini } if-else
+                }
+            if-else
+        }
+    if-else
+} def
+
+%%%---------------------------------------------------------------------
+%%% SEVEN-BAG RANDOMIZER
+%%%---------------------------------------------------------------------
+%
+% Modern guideline: each tetromino appears exactly once before any
+% repeats.  Implementation = a 7-element shuffle buffer that gets refilled
+% (Fisher-Yates) every time it's exhausted.  Determinism is the PRNG's
+% job -- seed once via init-bag, after which the sequence is fixed.
+%
+% Lookahead queue: oracle mode wants to peek N pieces ahead.  We
+% materialize generated pieces into a queue and serve next/peek from it
+% so the bag's PRNG state advances exactly as far as anyone has peeked.
+
+/bag-shuffle-buf 7 array def                       % current 7-piece bag
+/bag-shuffle-pos 7 def                             % position; 7 = drained, refill
+/bag-queue 32 array def                            % future-piece cache
+/bag-queue-len 0 def                               % valid prefix length
+/bag-seed 0 def                                    % seed last passed to init-bag (for save)
+/bag-refills 0 def                                 % # of times emit-piece refilled (for save)
+
+% Module-scope state is updated via `store` (writes to the first dict on
+% the dict stack containing the name -- userdict, where these were
+% def'd).  Plain `def` would land in the proc's |...| frame and not
+% propagate.
+
+% emit-piece -- piece                              % internal: pull next piece
+% from the shuffle buf, refilling if needed.  Advances PRNG state.
+/emit-piece {
+    ||#3
+    bag-shuffle-pos 7 ge {
+        % refill: fill shuffle-buf with all-pieces, then Fisher-Yates
+        0 1 6 { /i exch local-def bag-shuffle-buf i all-pieces i get put-persist } for
+        0 1 5 {
+            /j exch local-def
+            7 j sub /uinteger-type cast rand-bounded-uinteger /integer-type cast j add /k exch local-def
+            % swap-at decomposed for the -persist family (no swap-at-persist op):
+            %   tmp = arr[j]; arr[j] = arr[k]; arr[k] = tmp.
+            bag-shuffle-buf j get
+            bag-shuffle-buf j  bag-shuffle-buf k get  put-persist
+            bag-shuffle-buf k 3 -1 roll              put-persist
+        } for
+        /bag-shuffle-pos 0 def-persist
+        /bag-refills bag-refills 1 add def-persist
+    } if
+    bag-shuffle-buf bag-shuffle-pos get
+    /bag-shuffle-pos bag-shuffle-pos 1 add def-persist
+} def
+
+% init-bag -- seed --
+/init-bag {
+    |seed|#3
+    /bag-seed seed /ulong-type cast def-persist
+    bag-seed rand-seed
+    /bag-shuffle-pos 7 def-persist
+    /bag-queue-len 0 def-persist
+    /bag-refills 0 def-persist
+} def
+
+% restore-bag -- seed refills sh-pos sh-buf-arr q-len q-arr --
+% Re-establish bag module state from a save image.  Reseeds the PRNG
+% with `seed`, then advances it by (refills * 6) rand-bounded-uinteger
+% calls so the next refill produces the same sequence the original
+% game was about to produce.  The current shuffle bag and queue are
+% then overwritten verbatim.
+/restore-bag {
+    |seed refills sh-pos sh-buf q-len q-arr|#10
+    /bag-seed seed /ulong-type cast def-persist
+    bag-seed rand-seed
+    % Replay the 6 random calls per past refill so the PRNG is at the
+    % right spot for the next emit-piece refill.  refills can arrive as
+    % UInteger (from unpack `>I`); cast for the integer-range for-loop.
+    /refills-int refills /integer-type cast local-def
+    0 1 refills-int 1 sub {
+        pop
+        0 1 5 {
+            /j exch local-def
+            7 j sub /uinteger-type cast rand-bounded-uinteger pop
+        } for
+    } for
+    /bag-refills refills-int def-persist
+    /bag-shuffle-pos sh-pos /integer-type cast def-persist
+    % sh-buf and q-arr hold piece IDs (Bytes 0..6); the live bag stores
+    % piece Records.  Convert via id-to-piece on the way in.
+    0 1 6 { /i exch local-def bag-shuffle-buf i sh-buf i get id-to-piece put-persist } for
+    /bag-queue-len q-len def-persist
+    0 1 31 { /i exch local-def bag-queue i q-arr i get id-to-piece put-persist } for
+} def
+
+% bag-peek-piece -- k -- piece                     % piece at queue offset k.
+% Generates as many pieces as needed to fill the queue up to index k.
+/bag-peek-piece {
+    |k|#1
+    { bag-queue-len k le }
+    {
+        bag-queue bag-queue-len emit-piece put-persist
+        /bag-queue-len bag-queue-len 1 add def-persist
+    }
+    while
+    bag-queue k get
+} def
+
+% bag-next-piece -- -- piece                       % consume the head piece;
+% shifts the queue left by one.
+/bag-next-piece {
+    ||#2
+    0 bag-peek-piece /head exch local-def                % materialize + capture head
+    0 1 bag-queue-len 2 sub {
+        /i exch local-def
+        bag-queue i bag-queue i 1 add get put-persist
+    } for
+    /bag-queue-len bag-queue-len 1 sub def-persist
+    head
+} def
+
+%%%---------------------------------------------------------------------
+%%% NES DROP-TABLE
+%%%---------------------------------------------------------------------
+%
+% Frames-per-cell at NTSC 60 fps for level 0..29.  Level 29+ caps at 1.
+% Source: reverse-engineered NES gravity table; the modern guideline
+% overlay punts to the NES values here.
+
+/drop-frames-table [
+     48 43 38 33 28 23 18 13  8  6     %  0..9
+      5  5  5  4  4  4  3  3  3  2     % 10..19
+      2  2  2  2  2  2  2  2  2  1     % 20..29
+] def
+
+% level-drop-ms -- level -- int (ms per gravity tick)
+/level-drop-ms {
+    |level|#2
+    /idx level 29 lt { level } { 29 } if-else local-def
+    drop-frames-table idx get
+    1000 mul 60 div
+} def
+
+%%%---------------------------------------------------------------------
+%%% SCORING
+%%%---------------------------------------------------------------------
+%
+% Guideline values.  Level multiplier = (level + 1).  Back-to-back x1.5
+% applies to consecutive four-line clears and T-spins-with-lines.  Combo bonus
+% = 50 * (combo-count) * (level + 1) and is reset by any non-clearing
+% lock.  Soft/hard drop are flat per-cell (NOT level-multiplied).
+
+/line-points-none [   0  100  300  500  800 ] def
+/line-points-full [ 400  800 1200 1600 1600 ] def
+/line-points-mini [ 100  200  400  400  400 ] def
+
+/compute-line-points {
+    |lines tspin|#2
+    tspin /full eq { line-points-full lines get } if
+    tspin /mini eq { line-points-mini lines get } if
+    tspin /none eq { line-points-none lines get } if
+} def
+
+% compute-score -- lines tspin level last-b2b combo soft hard -- pts new-b2b new-combo
+/compute-score {
+    |lines tspin level last-b2b combo soft hard|#14
+    /base lines tspin compute-line-points local-def
+    /b2b-eligible lines 4 eq tspin /none ne lines 0 ne and or local-def
+    last-b2b b2b-eligible and { /base base 3 mul 2 div local-def } if
+
+    /new-combo lines 0 eq { -1 } { combo 1 add } if-else local-def
+    /combo-bonus new-combo 0 gt { 50 new-combo mul level 1 add mul } { 0 } if-else local-def
+
+    /level-mult level 1 add local-def
+    /drop-pts soft hard 2 mul add local-def
+
+    base level-mult mul combo-bonus add drop-pts add
+    b2b-eligible
+    new-combo
+} def
+
+%%%---------------------------------------------------------------------
+%%% PHASE 3: RENDERING ON THE VIRTUAL SCREEN
+%%%---------------------------------------------------------------------
+%
+% The whole display is a single virtual `Screen` (lib/screen.trx).
+% A single `redraw` proc paints the entire scene every call; the renderer
+% diffs against the previous frame and emits only changed cells, so this
+% stays cheap at gravity-tick rates.
+%
+% Layout (38 cols x 22 rows minimum):
+%   col 0..21    mode-colored playfield border (22 cells wide)
+%   col 1..20    field cells (10 playfield cols * 2 chars each)
+%   col 24..     HUD: SCORE / LEVEL / LINES / NEXT / HOLD / MODE
+%
+% Each playfield cell renders as the bracket-pair "[]" so the field is
+% aspect-correct in any monospace terminal.
+%
+% State is a dict with /field /piece /piece-state /piece-row /piece-col
+% /next /hold /score /level /lines /mode keys.  Phase 3 only consumes
+% state; mutation is Phase 4's job.
+
+/border-x  0 def
+/border-y  0 def
+/border-w 22 def
+/border-h 22 def
+/cells-x   1 def                                   % first field-cell col (inside border)
+/cells-y   1 def                                   % first field-cell row
+/hud-x    24 def
+/hud-y     1 def
+
+% mode-color -- mode -- color  (HUMAN white / AI-PEEK cyan / AI-ORACLE magenta)
+/mode-color {
+    |m|#1
+    m /ai-peek eq { 51 } {
+        m /ai-oracle eq { 201 } { 15 } if-else
+    } if-else
+} def
+
+% int-to-string -- n -- str   (uses to-string with a fresh 32-byte buffer)
+/int-to-string {
+    |n|#1
+    n 32 string to-string
+} def
+
+% put-block -- screen col row clr att --
+% Paints a 2-cell "[]" tile at (col, row) in the given fg color + attrs.
+/put-block {
+    |scr x y clr att|#5
+    scr x y 91 clr 0 att screen-put-cell pop
+    scr x 1 add y 93 clr 0 att screen-put-cell pop
+} def
+
+% put-empty -- screen col row --
+/put-empty {
+    |scr x y|#3
+    scr x y 32 7 0 0 screen-put-cell pop
+    scr x 1 add y 32 7 0 0 screen-put-cell pop
+} def
+
+% draw-border -- screen color --
+/draw-border {
+    |scr clr|#3
+    scr border-x  border-y  border-w 1 45 clr 0 0 screen-fill-rect pop
+    scr border-x  border-y border-h 1 sub add  border-w 1 45 clr 0 0 screen-fill-rect pop
+    scr border-x  border-y  1 border-h 124 clr 0 0 screen-fill-rect pop
+    scr border-x border-w 1 sub add  border-y  1 border-h 124 clr 0 0 screen-fill-rect pop
+    scr border-x  border-y  43 clr 0 0 screen-put-cell pop
+    scr border-x border-w 1 sub add  border-y  43 clr 0 0 screen-put-cell pop
+    scr border-x  border-y border-h 1 sub add  43 clr 0 0 screen-put-cell pop
+    scr border-x border-w 1 sub add  border-y border-h 1 sub add  43 clr 0 0 screen-put-cell pop
+} def
+
+% draw-field -- screen state --
+/draw-field {
+    |scr st|#10
+    /fld st /field get local-def
+    0 1 field-rows 1 sub {
+        /r exch local-def
+        0 1 field-cols 1 sub {
+            /c exch local-def
+            /v fld r c field-get local-def
+            /sx cells-x c 2 mul add local-def
+            /sy cells-y r add local-def
+            v 0 ne
+                { scr sx sy v 0 put-block }
+                { scr sx sy put-empty }
+            if-else
+        } for
+    } for
+} def
+
+% overlay-piece-cells -- screen piece state row col clr attrs --
+% Paints the four cells of `piece` (rotation `state`) at field offsets
+% (row, col).  Cells outside the visible field are skipped.
+/overlay-piece-cells {
+    |scr pc st py px clr att|#11
+    pc st piece-shape {
+        array-load pop /dc exch local-def /dr exch local-def
+        /r py dr add local-def /c px dc add local-def
+        r 0 ge r field-rows lt and
+        c 0 ge c field-cols lt and
+        and
+            { scr cells-x c 2 mul add  cells-y r add  clr att put-block }
+        if
+    } for-all
+} def
+
+% draw-piece-and-ghost -- screen state --
+/draw-piece-and-ghost {
+    |scr st|#10
+    /pc st /piece get local-def
+    /pst st /piece-state get local-def
+    /py st /piece-row get local-def
+    /px st /piece-col get local-def
+    /clr pc /color get local-def
+    /gr st /field get pc pst py px piece-ghost-row local-def
+    gr py ne                                       % suppress when ghost == live
+        { scr pc pst gr px clr 2 overlay-piece-cells }
+    if
+    scr pc pst py px clr 0 overlay-piece-cells
+} def
+
+% draw-mini-piece -- screen piece px py --
+% Renders the piece's spawn rotation into a 4x4 slot (8 chars wide) at
+% screen (px, py).  Empty mini-cells are spaces.
+/draw-mini-piece {
+    |scr pc px py|#8
+    scr px py 8 4 32 7 0 0 screen-fill-rect pop
+    /clr pc /color get local-def
+    pc 0 piece-shape {
+        array-load pop /dc exch local-def /dr exch local-def
+        scr px dc 2 mul add  py dr add  clr 0 put-block
+    } for-all
+} def
+
+% draw-mini-empty -- screen px py --   (clears a 4x4 slot)
+/draw-mini-empty {
+    |scr px py|#3
+    scr px py 8 4 32 7 0 0 screen-fill-rect pop
+} def
+
+% draw-hud -- screen state --
+/draw-hud {
+    |scr st|#10
+    /md st /mode get local-def
+    /banner md /human eq
+        { (HUMAN) }
+        { md /ai-peek eq { (AI-PEEK) } { (AI-ORACLE) } if-else }
+    if-else local-def
+    scr hud-x  hud-y          banner md mode-color 0 1 screen-put-string pop
+    scr hud-x  hud-y 2 add (SCORE) 7 0 0 screen-put-string pop
+    scr hud-x 7 add  hud-y 2 add  st /score get int-to-string  15 0 0 screen-put-string pop
+    scr hud-x  hud-y 3 add (LEVEL) 7 0 0 screen-put-string pop
+    scr hud-x 7 add  hud-y 3 add  st /level get int-to-string  15 0 0 screen-put-string pop
+    scr hud-x  hud-y 4 add (LINES) 7 0 0 screen-put-string pop
+    scr hud-x 7 add  hud-y 4 add  st /lines get int-to-string  15 0 0 screen-put-string pop
+    scr hud-x  hud-y 6 add (NEXT) 7 0 0 screen-put-string pop
+    scr st /next get hud-x hud-y 7 add draw-mini-piece
+    scr hud-x  hud-y 12 add (HOLD) 7 0 0 screen-put-string pop
+    /hp st /hold get local-def
+    hp /none ne
+        { scr hp hud-x hud-y 13 add draw-mini-piece }
+        { scr hud-x hud-y 13 add draw-mini-empty }
+    if-else
+
+    % Status banner (PAUSED / GAME OVER / SAVED / SAVE FAILED / blank).
+    % /save-flash overrides the normal banner whenever a save action
+    % completed; cleared on any subsequent input by the game loop.
+    % Single fixed slot so the renderer's diff cleanly overwrites
+    % whichever message preceded.
+    /sf st /save-flash get local-def
+    /status-text sf /none ne
+        { sf /ok eq { (SAVED       ) } { (SAVE FAILED ) } if-else }
+        {
+            st /game-over get
+                { (GAME OVER   ) }
+                { st /paused get { (PAUSED      ) } { (            ) } if-else }
+            if-else
+        }
+    if-else local-def
+    scr hud-x hud-y 18 add status-text 196 0 1 screen-put-string pop
+} def
+
+% redraw -- screen state --
+% One-shot full repaint.  Caller renders after.
+/redraw {
+    |scr st|#3
+    scr st /mode get mode-color draw-border
+    scr st draw-field
+    scr st draw-piece-and-ghost
+    scr st draw-hud
+} def
+
+% make-state -- mode -- state
+% Builds an initial game state with a fresh field + the current bag's
+% next two pieces.  /hold is /none until the player presses hold.
+% /can-hold flips false on hold, true on lock; /last-b2b + /combo feed
+% compute-score; /paused + /game-over gate the game loop's input
+% dispatch.  /banner is the HUD status text ("PAUSED", "GAME OVER" or "").
+/make-state {
+    |mode|#3
+    /first bag-next-piece local-def
+    /peek 0 bag-peek-piece local-def
+    <<
+        /field         make-field
+        /piece         first
+        /piece-state   0
+        /piece-row     0
+        /piece-col     3
+        /next          peek
+        /hold          /none
+        /can-hold      true
+        /score         0
+        /level         0
+        /lines         0
+        /last-b2b      false
+        /combo         -1
+        /last-rotation false
+        /mode          mode
+        /paused        false
+        /game-over     false
+        /piece-seq     0
+        /save-flash    /none
+        /last-plan-seq -1
+        /ai-keystrokes []
+        /ai-keystrokes-len     0
+        /ai-key-idx            0
+        /ai-request-buf        7 array
+        /ai-field-snapshot-buf make-field
+        /ai-futures-buf        0 array
+    >>
+} def
+
+%%%---------------------------------------------------------------------
+%%% PHASE 4: STATE TRANSITIONS + GAME LOOP
+%%%---------------------------------------------------------------------
+%
+% Pure mutations on the state dict (try-move / try-rotate / soft-drop /
+% hard-drop / lock-piece / hold-piece / toggle-pause / handle-tick) plus
+% the actor coroutines that drive the game.  All state mutation is via
+% `state /key value put` -- no copy-then-rebind, no /name def-shadowing.
+%
+% Coroutine layout:
+%   game-actor   (this proc is its body) drains its mailbox and dispatches
+%   input-actor  reads decoded keys, sends them to game-actor
+%   gravity-actor sleeps level-drop-ms and sends /tick; main also tells it
+%                 to update its delay when level changes
+%
+% Phase 4 wires human controls only.  T-spin classification remains
+% unwired (Phase 5) and AI plans are not yet generated (Phase 6+).
+
+% Phase 9: shared mutable cell holding the live screen handle so
+% lock-piece can drive line-clear / game-over flash without plumbing
+% scr through hard-drop and handle-tick (which would also force every
+% test caller of lock-piece to pass null).  game-actor-body initializes
+% it on entry; lock-piece skips the flash when the cell is null (which
+% covers all in-source self-tests).
+/flash-screen-cell 1 array def
+flash-screen-cell 0 null put
+
+% try-move state dy dx -- bool
+% Mutate state's piece-row/col by (dy, dx) if the resulting placement
+% doesn't collide.  Returns true on success.
+/try-move {
+    |st dy dx|#10
+    /pc st /piece get local-def
+    /pst st /piece-state get local-def
+    /ny st /piece-row get dy add local-def
+    /nx st /piece-col get dx add local-def
+    st /field get pc pst ny nx piece-collides? not
+        {
+            st /piece-row ny put-persist
+            st /piece-col nx put-persist
+            st /last-rotation false put-persist
+            true
+        }
+        { false }
+    if-else
+} def
+
+% try-rotate state cw? -- bool
+% Rotate the live piece using SRS kicks.  Returns true if a kick landed.
+/try-rotate {
+    |st cw|#15
+    /pc st /piece get local-def
+    /pst st /piece-state get local-def
+    /py st /piece-row get local-def
+    /px st /piece-col get local-def
+    st /field get pc pst py px cw rotate-with-kick
+    /landed exch local-def
+    /nc exch local-def
+    /nr exch local-def
+    /ns exch local-def
+    landed
+        {
+            st /piece-state ns put-persist
+            st /piece-row   nr put-persist
+            st /piece-col   nc put-persist
+            st /last-rotation true put-persist
+            true
+        }
+        { false }
+    if-else
+} def
+
+% soft-drop state --   ( +1 score per cell on success )
+/soft-drop {
+    |st|#3
+    st 1 0 try-move
+        { st /score st /score get 1 add put-persist }
+    if
+} def
+
+% hard-drop state --   ( drops piece to ghost row, locks immediately )
+% Translation, not rotation -- clears /last-rotation so the lock is
+% never scored as a T-spin even if a rotation happened earlier.
+/hard-drop {
+    |st|#8
+    /pc st /piece get local-def
+    /pst st /piece-state get local-def
+    /py st /piece-row get local-def
+    /px st /piece-col get local-def
+    /gr st /field get pc pst py px piece-ghost-row local-def
+    /dropped gr py sub local-def
+    st /piece-row gr put-persist
+    st /score st /score get  dropped 2 mul  add put-persist
+    dropped 0 gt
+        { st /last-rotation false put-persist }
+    if
+    st lock-piece
+} def
+
+% Phase 9: do-line-clear-flash full-rows --
+% 4-frame attribute flash on the cleared rows before they're shifted out
+% of the field.  Bright/bright/dim/dim toggle on a fixed `#` glyph reads
+% as a satisfying "blink" without depending on per-cell colors.  No-op
+% when the screen pointer hasn't been wired (in-source self-tests, AI
+% search paths) or no rows are cleared.
+/do-line-clear-flash {
+    |full-rows|#5
+    /scr flash-screen-cell 0 get local-def
+    scr null ne full-rows length 0 gt and {
+        [ 1 1 2 2 ] {
+            /attr exch local-def
+            full-rows {
+                /r exch local-def
+                scr cells-x cells-y r add  field-cols 2 mul 1  35 15 0 attr screen-fill-rect pop
+            } for-all
+            scr screen-render pop
+            70 coroutine-sleep
+        } for-all
+    } if
+} def
+
+% Phase 9: do-game-over-flash state --
+% 3-frame field-wide red flash when the spawn collision check fires.
+% Final frame restores the proper field via redraw so the GAME OVER
+% banner caller sees the field intact when its own redraw runs.
+/do-game-over-flash {
+    |st|#5
+    /scr flash-screen-cell 0 get local-def
+    scr null ne {
+        [ 1 0 1 ] {
+            /attr exch local-def
+            scr cells-x cells-y  field-cols 2 mul  field-rows  35 196 0 attr screen-fill-rect pop
+            scr screen-render pop
+            120 coroutine-sleep
+        } for-all
+        scr st redraw
+        scr screen-render pop
+    } if
+} def
+
+% lock-piece state --
+% Classify T-spin against the pre-merge field, merge the live piece,
+% clear lines, score with the classification + line count, then spawn
+% the next piece from the bag.  Detects game-over (collision at spawn).
+/lock-piece {
+    |st|#16
+    /pc st /piece get local-def
+    /pst st /piece-state get local-def
+    /py st /piece-row get local-def
+    /px st /piece-col get local-def
+    /tspin st /field get pc pst py px st /last-rotation get tspin-classify local-def
+    st /field get pc pst py px piece-merge pop
+    % Phase 9: collect full-row indices BEFORE clearing so we can flash
+    % them in place.  Bounded loop (at most 4 in canonical play) so an
+    % allocating `append` here is cheap and doesn't touch the hot AI path
+    % (which routes through scratch fields, not lock-piece).
+    /full-rows [] local-def
+    0 1 field-rows 1 sub {
+        /r exch local-def
+        st /field get r field-row-full?
+            { /full-rows full-rows r append local-def }
+        if
+    } for
+    full-rows do-line-clear-flash
+    st /field get field-clear-rows
+    /cleared exch local-def
+    pop                                            % drop the field handle
+    cleared tspin st /level get
+    st /last-b2b get st /combo get
+    0 0 compute-score
+    {|pts new-b2b new-combo|#3
+        st /score   st /score get pts add put-persist
+        st /last-b2b new-b2b put-persist
+        st /combo    new-combo put-persist
+    } exec
+    cleared 0 gt {
+        st /lines st /lines get cleared add put-persist
+        /new-level st /lines get 10 div local-def
+        /new-level new-level 29 lt { new-level } { 29 } if-else local-def
+        st /level new-level put-persist
+    } if
+    % Spawn the next piece (was previewed in /next).
+    st /piece bag-next-piece put-persist
+    st /piece-state 0 put-persist
+    st /piece-row 0 put-persist
+    st /piece-col 3 put-persist
+    st /next 0 bag-peek-piece put-persist
+    st /can-hold true put-persist
+    st /last-rotation false put-persist
+    st /piece-seq st /piece-seq get 1 add put-persist
+    % Game-over if the spawn position itself collides.
+    st /field get
+        st /piece get  0  0  3  piece-collides?
+            { st /game-over true put-persist  st do-game-over-flash }
+        if
+} def
+
+% hold-piece state --
+% Swap the live piece with the hold slot.  Once-per-spawn; the
+% /can-hold flag re-enables on the next lock.
+/hold-piece {
+    |st|#5
+    st /can-hold get
+        {
+            /old-hold st /hold get local-def
+            st /hold st /piece get put-persist
+            old-hold /none eq
+                {
+                    st /piece bag-next-piece put-persist
+                    st /next 0 bag-peek-piece put-persist
+                }
+                { st /piece old-hold put-persist }
+            if-else
+            st /piece-state 0 put-persist
+            st /piece-row 0 put-persist
+            st /piece-col 3 put-persist
+            st /can-hold false put-persist
+            st /last-rotation false put-persist
+            st /piece-seq st /piece-seq get 1 add put-persist
+        }
+    if
+} def
+
+% toggle-pause state --
+/toggle-pause {
+    |st|#3
+    st /paused st /paused get not put-persist
+} def
+
+% handle-tick state --
+% Gravity step.  Move down if possible; otherwise lock.
+/handle-tick {
+    |st|#3
+    st 1 0 try-move
+        { }
+        { st lock-piece }
+    if-else
+} def
+
+% input-body main --   (actor body for the input coroutine)
+% Reads decoded keys via lib/keys.trx and forwards them to
+% main.  Exits when the user presses /q -- main will also exit on /q
+% and may coroutine-kill us if we're still parked in read-key-byte.
+/input-body {|main|#3
+    {
+        { read-key-byte } { 50 read-key-byte-timeout } decode-key
+        /key exch local-def
+        key main actor-send
+        key /q eq { exit } if
+    } loop
+} def
+
+% gravity-body main delay --
+% Sleeps `delay` ms between /tick posts.  Drains its own mailbox each
+% cycle; any integer message replaces `delay` (used when level changes).
+/gravity-body {|main delay|#3
+    {
+        { actor-self actor-mailbox-empty? not } { actor-recv /delay exch local-def } while
+        delay coroutine-sleep
+        /tick main actor-send
+    } loop
+} def
+
+%%%---------------------------------------------------------------------
+%%% PHASE 6: AI HEURISTIC + 2-PIECE SEARCH (--ai-peek)
+%%%---------------------------------------------------------------------
+%
+% Pierre-Dellacherie / Lee Yiyuan-style linear evaluator.  Weights are
+% scaled by 1000 so the entire AI runs in fixed-point integer arithmetic
+% (Trix integers are 32-bit, plenty of headroom for these magnitudes).
+% Reader can swap the weights at the top of the file to watch the AI
+% degrade.
+%
+% Source: Lee Yiyuan's published falling-block AI weights (2013)
+% augmented with a small well-depth term in the Dellacherie tradition.
+%
+% Architecture:
+%   ai-actor       receives [piece next field cur-rot cur-col mode]
+%                  messages, runs a 2-piece max-min search, sends a
+%                  [/ai-plan keystroke-list] message back to game-actor.
+%   ai-tick-actor  posts /ai-tick to game-actor every (ai-speed * 16) ms.
+%                  Game-actor consumes one queued keystroke per /ai-tick.
+%   game-actor     replans whenever piece-seq advances (lock-piece /
+%                  hold-piece bump it).  Synthetic AI keystrokes flow
+%                  through the same dispatch path as human input.
+
+/ai-weights <<
+    /lines     760     %  +0.760  lines cleared (biggest reward)
+    /height   -510     %  -0.510  aggregate column height
+    /holes    -357     %  -0.357  holes
+    /bumpy    -184     %  -0.184  bumpiness
+    /well     -150     %  -0.150  cumulative wells (Dellacherie addition)
+>> def
+
+% --- AI-kernel dispatch ---------------------------------------------
+% The C-side `tetrix` binary registers `field-copy-fast` and
+% `score-board-fast` as user operators (see tetrix.cpp).  The default
+% `trix` binary doesn't.  At startup (right before parse-tetrix-args)
+% we detect availability + honor --ai-kernel; if native is selected we
+% rebind /field-copy-into, /score-board, /score-board-into to dispatch
+% to the C ops, leaving every existing call site (simulate-into,
+% best-placement-peek, oracle-recurse, etc.) unchanged.
+%
+% Why rebind rather than introduce *-active alias names: simulate-into
+% calls /score-board (no hbuf), other call sites call /score-board-into
+% (with hbuf).  Adding alias names per signature multiplies the dispatch
+% surface; rebinding the originals keeps call shapes uniform and limits
+% the wiring change to one block.
+%
+% ai-weights-array is the 5-int Integer array score-board-fast consumes
+% in place of per-call dict lookups; built once at startup and shared
+% across all leaf calls.
+
+/ai-weights-array [
+    ai-weights /lines  get
+    ai-weights /height get
+    ai-weights /holes  get
+    ai-weights /bumpy  get
+    ai-weights /well   get
+] def
+
+/native-kernels-available userdict /field-copy-fast known? def
+
+/use-native-kernels false def                      % set after parse-tetrix-args (see resolve block)
+
+% Effective kernel resolution + name rebinding is inlined at module
+% scope after parse-tetrix-args returns and after the original
+% score-board / field-copy-into definitions exist (~line 1330).
+% Done at top level (not inside a proc) so /use-native-kernels def
+% lands in userdict, not a discarded locals frame.
+
+% --- pure board features --------------------------------------------
+
+% column-heights field -- arr10
+% Entry c is (field-rows - row-of-topmost-block-in-col-c).  Empty col -> 0.
+% Inner loop exits as soon as the topmost block is found (avg 5x speedup
+% over scanning every cell).
+/column-heights {
+    |fld|#5
+    /heights field-cols array local-def
+    fld heights column-heights-into
+    heights
+} def
+
+% column-heights-into field dst --
+% Allocation-free variant.  Overwrites every entry of `dst` (a 10-element
+% array) with the column heights of `field`.  Used by the oracle search
+% to share one heights buffer across millions of leaf evaluations.
+/column-heights-into {
+    |fld dst|#5
+    0 1 field-cols 1 sub {
+        /c exch local-def
+        /h 0 local-def
+        0 1 field-rows 1 sub {
+            /r exch local-def
+            fld r get c get 0 ne {
+                /h field-rows r sub local-def
+                exit
+            } if
+        } for
+        dst c h put
+    } for
+} def
+
+% aggregate-height heights -- int
+/aggregate-height { sum } def
+
+% count-holes field heights -- int
+% Empty cells with at least one filled cell above in the same column.
+/count-holes {
+    |fld heights|#7
+    /holes 0 local-def
+    0 1 field-cols 1 sub {
+        /c exch local-def
+        /h heights c get local-def
+        h 0 gt {
+            field-rows h sub 1 add 1 field-rows 1 sub {
+                /r exch local-def
+                fld r c field-get 0 eq { /holes holes 1 add local-def } if
+            } for
+        } if
+    } for
+    holes
+} def
+
+% bumpiness heights -- int
+% Sum of |h[i] - h[i+1]| across adjacent columns.
+/bumpiness {
+    |arr|#5
+    /sum 0 local-def
+    0 1 arr length 2 sub {
+        /i exch local-def
+        /d arr i get arr i 1 add get sub local-def
+        d 0 lt { /d 0 d sub local-def } if
+        /sum sum d add local-def
+    } for
+    sum
+} def
+
+% well-depth heights -- int
+% A "well" is a column with both neighbors at least 2 cells higher.  Depth
+% contribution = min(left-neighbor, right-neighbor) - h.  Edge columns are
+% bordered by a virtual wall of height field-rows.
+/well-depth {
+    |arr|#12
+    /total 0 local-def
+    /n arr length local-def
+    0 1 n 1 sub {
+        /i exch local-def
+        /h arr i get local-def
+        /left  i 0 eq       { field-rows } { arr i 1 sub get } if-else local-def
+        /right i n 1 sub eq { field-rows } { arr i 1 add get } if-else local-def
+        /min-side left right lt { left } { right } if-else local-def
+        /depth min-side h sub local-def
+        depth 2 ge { /total total depth add local-def } if
+    } for
+    total
+} def
+
+% score-board field lines -- score
+% Linear combination scaled by ai-weights.  Higher is better.
+/score-board {
+    |fld lines|#10
+    /heights fld column-heights local-def
+    /h-sum   heights aggregate-height local-def
+    /n-holes fld heights count-holes local-def
+    /n-bumpy heights bumpiness local-def
+    /n-well  heights well-depth local-def
+    lines   ai-weights /lines  get mul
+    h-sum   ai-weights /height get mul add
+    n-holes ai-weights /holes  get mul add
+    n-bumpy ai-weights /bumpy  get mul add
+    n-well  ai-weights /well   get mul add
+} def
+
+% score-board-into field lines hbuf -- score
+% Allocation-free variant of score-board.  `hbuf` is a 10-element scratch
+% array (caller-owned) used for the column-heights computation; nothing
+% else allocates.  The oracle search hands the same hbuf to every leaf.
+/score-board-into {
+    |fld lines hbuf|#10
+    fld hbuf column-heights-into
+    /h-sum   hbuf aggregate-height local-def
+    /n-holes fld hbuf count-holes local-def
+    /n-bumpy hbuf bumpiness local-def
+    /n-well  hbuf well-depth local-def
+    lines   ai-weights /lines  get mul
+    h-sum   ai-weights /height get mul add
+    n-holes ai-weights /holes  get mul add
+    n-bumpy ai-weights /bumpy  get mul add
+    n-well  ai-weights /well   get mul add
+} def
+
+% --- field cloning + placement simulation ----------------------------
+
+% clone-field field -- new-field
+% One-shot allocator; the search loops below prefer field-copy-into to
+% avoid cloning ~1600 fields per AI move.
+/clone-field {
+    |fld|#5
+    /new make-field local-def
+    0 1 field-rows 1 sub {
+        /r exch local-def
+        0 1 field-cols 1 sub {
+            /c exch local-def
+            new r c fld r c field-get field-set
+        } for
+    } for
+    new
+} def
+
+% field-copy-into src dst --
+% Overwrites every cell of dst with the corresponding cell of src.  Used
+% by simulate-into so each placement test reuses one preallocated scratch
+% buffer instead of cloning a fresh field.  Row-level `copy` (10x faster
+% than cell-by-cell) is safe because cells are Integer values, not refs.
+/field-copy-into {
+    |src dst|#4
+    0 1 field-rows 1 sub {
+        /r exch local-def
+        src r get  dst r get  copy pop
+    } for
+} def
+
+% simulate-into scratch field piece state x -- score
+% Lock the piece in place on `scratch` (overwritten with `field`'s
+% contents), clear lines, score.  Returns a sentinel low score if the
+% piece can't spawn at (state, 0, x).  No allocation per call.
+/simulate-into {
+    |scratch fld pc st x|#12
+    fld pc st 0 x piece-collides?
+        { -1000000000 }
+        {
+            /gr fld pc st 0 x piece-ghost-row local-def
+            fld scratch field-copy-into
+            scratch pc st gr x piece-merge pop
+            scratch field-clear-rows
+            /cleared exch local-def
+            pop
+            scratch cleared score-board
+        }
+    if-else
+} def
+
+% --- placement enumeration + search ----------------------------------
+
+% best-placement field piece -- best-rot best-col
+% Single-piece search: enumerate (rot, x), pick the (rot, x) maximizing
+% score-board on the post-lock board.  Reuses one scratch field for all
+% placements so the search is allocation-light.
+%
+% A save/restore wraps the body so the per-call scratch field is
+% reclaimed when the search returns.  Without this each call would
+% permanently leak ~1.7KB; result (two integers) is pushed before
+% restore so it survives.  Same pattern as best-placement-oracle.
+/best-placement {
+    |fld pc|#12
+    save                                                % stack: sv
+    /scratch make-field local-def
+    /best-score -1000000000 local-def
+    /best-rot 0 local-def
+    /best-col 0 local-def
+    0 1 pc /unique-rots get 1 sub {
+        /rs exch local-def
+        -3 1 field-cols 1 sub {
+            /xc exch local-def
+            /sc scratch fld pc rs xc simulate-into local-def
+            sc best-score gt {
+                /best-score sc local-def
+                /best-rot rs local-def
+                /best-col xc local-def
+            } if
+        } for
+    } for
+    best-rot best-col                                   % stack: sv, br, bc
+    3 -1 roll restore                                   % stack: br, bc (sv consumed)
+} def
+
+% best-placement-peek field piece next-piece -- best-rot best-col
+% Two-piece search: for each (rot, x) of `piece`, simulate the lock and
+% then run a single-piece search over `next-piece` on the resulting
+% board.  Returns the (rot, x) for `piece` that maximizes
+%   (lines-bonus from this placement) + (best next-piece score).
+% Reuses two scratch fields (outer + inner); the outer scratch holds the
+% post-lock board for the inner enumeration to copy from.
+%
+% A save/restore wraps the body so the two scratch fields are reclaimed
+% when the search returns.  Without this each call permanently leaked
+% ~3.5KB and a 256MB VM would OOM after ~76K AI-peek decisions
+% (~10-60 minutes of play).  Same pattern as best-placement-oracle.
+/best-placement-peek {
+    |fld pc nxt|#22
+    save                                                % stack: sv
+    /outer-scratch make-field local-def
+    /inner-scratch make-field local-def
+    /best-score -1000000000 local-def
+    /best-rot 0 local-def
+    /best-col 0 local-def
+    /n-outer pc /unique-rots get local-def
+    /n-inner nxt /unique-rots get local-def
+    0 1 n-outer 1 sub {
+        /rs exch local-def
+        -3 1 field-cols 1 sub {
+            /xc exch local-def
+            fld pc rs 0 xc piece-collides?
+                { }
+                {
+                    /gr fld pc rs 0 xc piece-ghost-row local-def
+                    fld outer-scratch field-copy-into
+                    outer-scratch pc rs gr xc piece-merge pop
+                    outer-scratch field-clear-rows
+                    /cur-cleared exch local-def
+                    pop
+                    /immediate cur-cleared ai-weights /lines get mul local-def
+                    /inner-best -1000000000 local-def
+                    0 1 n-inner 1 sub {
+                        /ns exch local-def
+                        -3 1 field-cols 1 sub {
+                            /nx exch local-def
+                            /isc inner-scratch outer-scratch nxt ns nx simulate-into local-def
+                            isc inner-best gt { /inner-best isc local-def } if
+                        } for
+                    } for
+                    /total immediate inner-best add local-def
+                    total best-score gt {
+                        /best-score total local-def
+                        /best-rot rs local-def
+                        /best-col xc local-def
+                    } if
+                }
+            if-else
+        } for
+    } for
+    best-rot best-col                                   % stack: sv, br, bc
+    3 -1 roll restore                                   % stack: br, bc (sv consumed)
+} def
+
+% --- Phase 7: oracle search (N-piece deterministic lookahead) -------
+
+% oracle-recurse src pcs idx n-pcs bufs hbuf lvl -- score
+% Recursive helper for best-placement-oracle.  Enumerates placements of
+% pcs[idx] on `src`, copies into bufs[lvl], merges/clears, recurses (or
+% scores at the leaf via score-board-into).  Returns the max total score
+% across all placement sequences.  Score model matches best-placement-peek:
+% each level adds cleared * w.lines, and the leaf calls score-board-into
+% with lines=0 so the line bonus is counted exactly once per cleared line.
+% `hbuf` is a single shared heights array reused at every leaf so the
+% search has zero heap allocation inside the inner loop.
+/oracle-recurse {
+    |src pcs idx n-pcs bufs hbuf lvl|#20
+    /pc pcs idx get local-def
+    /is-last idx n-pcs 1 sub eq local-def
+    /best -1000000000 local-def
+    0 1 pc /unique-rots get 1 sub {
+        /rs exch local-def
+        -3 1 field-cols 1 sub {
+            /xc exch local-def
+            src pc rs 0 xc piece-collides? not {
+                /gr src pc rs 0 xc piece-ghost-row local-def
+                /scratch bufs lvl get local-def
+                src scratch field-copy-into
+                scratch pc rs gr xc piece-merge pop
+                scratch field-clear-rows
+                /cleared exch local-def
+                pop
+                /immediate cleared ai-weights /lines get mul local-def
+                is-last
+                    { immediate scratch 0 hbuf score-board-into add }
+                    { immediate scratch pcs idx 1 add n-pcs bufs hbuf lvl 1 add oracle-recurse add }
+                if-else
+                /candidate exch local-def
+                candidate best gt { /best candidate local-def } if
+            } if
+        } for
+    } for
+    best
+} def
+
+% best-placement-oracle field current-piece future-pieces -- best-rot best-col
+% N-piece deterministic search.  `future-pieces` is an array of pieces
+% to place AFTER `current-piece` (in order); total search depth =
+% length(future-pieces) + 1.  At depth 1 (empty future-pieces) collapses
+% to best-placement.
+%
+% A save/restore wraps the entire search so the per-call scratch (bufs,
+% hbuf, frame-dict pool growth, dropped intermediates) is reclaimed when
+% the search returns.  Without this, every move would permanently leak
+% ~2KB plus the pool growth from depth-N recursion -- enough to OOM the
+% default 1MB VM after a few dozen AI moves.  The save handle is kept on
+% the operand stack (not in the frame dict) since post-save defs revert
+% on restore, and the result (two integers) is pushed before restore so
+% it survives.
+/best-placement-oracle {
+    |fld pc futures|#25
+    save                                                % stack: sv
+    /n-fut futures length local-def
+    /total-depth n-fut 1 add local-def
+    /bufs total-depth array local-def
+    0 1 n-fut {
+        /i exch local-def
+        bufs i make-field put
+    } for
+    /hbuf field-cols array local-def
+    /best-score -1000000000 local-def
+    /best-rot 0 local-def
+    /best-col 0 local-def
+    0 1 pc /unique-rots get 1 sub {
+        /rs exch local-def
+        -3 1 field-cols 1 sub {
+            /xc exch local-def
+            fld pc rs 0 xc piece-collides? not {
+                /gr fld pc rs 0 xc piece-ghost-row local-def
+                /scratch bufs 0 get local-def
+                fld scratch field-copy-into
+                scratch pc rs gr xc piece-merge pop
+                scratch field-clear-rows
+                /cleared exch local-def
+                pop
+                /immediate cleared ai-weights /lines get mul local-def
+                n-fut 0 eq
+                    { immediate scratch 0 hbuf score-board-into add }
+                    { immediate scratch futures 0 n-fut bufs hbuf 1 oracle-recurse add }
+                if-else
+                /candidate exch local-def
+                candidate best-score gt {
+                    /best-score candidate local-def
+                    /best-rot rs local-def
+                    /best-col xc local-def
+                } if
+            } if
+        } for
+    } for
+    best-rot best-col                                   % stack: sv, br, bc
+    3 -1 roll restore                                   % stack: br, bc (sv consumed)
+} def
+
+% --- keystroke synthesis ---------------------------------------------
+
+% synthesize-keys-into cur-rot tgt-rot cur-col tgt-col buf -- length
+% Fills `buf` with the [/up... /z? /left... /right... /space] sequence
+% that drives the live piece from (cur-rot, cur-col) to (tgt-rot,
+% tgt-col), then locks.  Returns the logical length (number of slots
+% written).  Buffer must hold at least n-rot + n-col + 1 slots; the
+% theoretical max for a 10-wide field is ~17, so callers pre-allocate
+% 20 for headroom.  Mutates via put-persist so the same code is
+% correct under a save/restore wrap (silent-degrade at sl=0).
+/synthesize-keys-into {
+    |cur-rot tgt-rot cur-col tgt-col buf|#16
+    /rot-diff tgt-rot cur-rot sub 4 add 4 mod local-def
+    /col-diff tgt-col cur-col sub local-def
+    /pos 0 local-def
+    rot-diff 3 eq
+        { buf pos /z put-persist /pos pos 1 add local-def }
+        { rot-diff { buf pos /up put-persist /pos pos 1 add local-def } repeat }
+    if-else
+    col-diff 0 lt
+        { col-diff neg { buf pos /left  put-persist /pos pos 1 add local-def } repeat }
+    if
+    col-diff 0 gt
+        { col-diff     { buf pos /right put-persist /pos pos 1 add local-def } repeat }
+    if
+    buf pos /space put-persist
+    pos 1 add
+} def
+
+% synthesize-keys cur-rot tgt-rot cur-col tgt-col -- keys-array
+% Allocating wrapper used by tests / single-shot callers.  ai-actor's
+% main loop calls synthesize-keys-into directly with a pre-allocated
+% keys buffer to avoid the per-message allocation.
+/synthesize-keys {
+    |cur-rot tgt-rot cur-col tgt-col|#10
+    /rot-diff tgt-rot cur-rot sub 4 add 4 mod local-def
+    /col-diff tgt-col cur-col sub local-def
+    /n-rot rot-diff 3 eq { 1 } { rot-diff } if-else local-def
+    /n-col col-diff 0 lt { col-diff neg } { col-diff } if-else local-def
+    /buf n-rot n-col add 1 add array local-def
+    cur-rot tgt-rot cur-col tgt-col buf synthesize-keys-into pop
+    buf
+} def
+
+% --- AI coroutines ---------------------------------------------------
+
+% ai-actor-body main --
+% Loops on actor-recv.  Each request is a 7-element array
+%   [piece next-piece field cur-rot cur-col mode extras].
+% `extras` is an array of pieces beyond `next-piece`, used by the oracle
+% for N-piece search; empty for /ai-peek.  Computes the best
+% (rotation, column) via the mode's search and sends
+%   [/ai-plan keystroke-list]
+% back to main.
+/ai-actor-body {|main|#20
+    % Pre-allocate keys + reply buffers below the barrier.  Reply is a
+    % 3-element [/ai-plan, keys-buf-ref, length] so main knows how
+    % many slots of the 20-slot keys-buf are valid.  Slots 0 and 1 of
+    % reply-buf are stable references; only slot 2 (length) and the
+    % keys-buf interior change per iteration.
+    /keys-buf  20 array local-def
+    /reply-buf  3 array local-def
+    reply-buf 0 /ai-plan put-persist
+    reply-buf 1 keys-buf put-persist
+    {
+        actor-recv /req exch local-def
+        /pc       req 0 get local-def
+        /nxt      req 1 get local-def
+        /fld      req 2 get local-def
+        /cur-rot  req 3 get local-def
+        /cur-col  req 4 get local-def
+        /mode     req 5 get local-def
+        /futures  req 6 get local-def
+        mode /ai-oracle eq
+            { fld pc futures best-placement-oracle }
+            { fld pc nxt     best-placement-peek }
+        if-else
+        /tgt-col exch local-def
+        /tgt-rot exch local-def
+        cur-rot tgt-rot cur-col tgt-col keys-buf synthesize-keys-into
+        /keys-len exch local-def
+        reply-buf 2 keys-len put-persist
+        reply-buf main actor-send
+    } loop
+} def
+
+% ai-tick-body main delay --
+% Sleeps `delay` ms between /ai-tick posts; drains its mailbox each cycle
+% so main can update the cadence on the fly (matches gravity-body's shape
+% even though Phase 6 doesn't change ai-speed at runtime).
+/ai-tick-body {|main delay|#3
+    {
+        { actor-self actor-mailbox-empty? not } { actor-recv /delay exch local-def } while
+        delay coroutine-sleep
+        /ai-tick main actor-send
+    } loop
+} def
+
+% Phase 9: show-title screen mode --
+% Pre-game splash: TETRIX banner, animated parade of all 7 tetrominoes
+% (one piece appears every 80 ms), mode line, then a "press any key"
+% prompt with a 2.5 s auto-advance.  Runs inside fullscreen mode
+% (alt-screen + raw-mode are already up via with-fullscreen-screen),
+% drains any keystrokes typed during the splash, then returns so the
+% caller can spawn its actors and start the real game.
+/show-title {
+    |scr mode|#10
+    scr screen-clear pop
+    scr 24 3 (     __        ______    _)            51 0 1 screen-put-string pop
+    scr 24 4 (    / /_ ___  /_  __/___(_)_  __)      51 0 1 screen-put-string pop
+    scr 24 5 (   / __// _ \\  / / / __/ /\\ \\/ /)   51 0 1 screen-put-string pop
+    % This row carries the logo's UTF-8 middle dot: plain screen-put-string
+    % is Latin-1 (one cell per BYTE -- the dot would smear into two cells);
+    % screen-put-utf8-string decodes to one cell per codepoint.
+    scr 24 6 (  / /_ /  __/ / / / / / /  > · <)      51 0 1 screen-put-utf8-string pop
+    scr 24 7 (  \\__/ \\___/ /_/ /_/ /_/  /_/\\_\\)  51 0 1 screen-put-string pop
+    scr 28 9 (a Trix language showcase)               7 0 0 screen-put-string pop
+    /mode-text mode /human eq
+        { (Mode: HUMAN     -- play it yourself          ) }
+        { mode /ai-peek eq
+            { (Mode: AI-PEEK   -- 2-piece-lookahead AI play  ) }
+            { (Mode: AI-ORACLE -- perfect-info AI play      ) }
+          if-else
+        }
+    if-else local-def
+    scr 14 16 mode-text mode mode-color 0 0 screen-put-string pop
+    0 1 6 {
+        /i exch local-def
+        scr  all-pieces i get  i 9 mul 4 add  10  draw-mini-piece
+        scr screen-render pop
+        80 coroutine-sleep
+    } for
+    scr 18 18 (Press any key to start...) 7 0 1 screen-put-string pop
+    scr screen-render pop
+    2500 read-key-byte-timeout { pop } if              % byte true -> drop byte; false -> nothing extra
+    scr screen-clear pop                               % wipe the title before the game render takes over (parts fall outside the field/HUD redraw rectangle and would otherwise persist)
+} def
+
+% game-actor-body screen cfg --
+% The owner of the play state.  Spawns input + gravity, drains its
+% mailbox, dispatches to the appropriate state mutator, then redraws
+% and commits the diff to the terminal.  Tears down child coroutines
+% on exit so with-fullscreen-screen's restore path runs cleanly.
+/game-actor-body {|scr cfg|#40
+    % Phase 9: publish the live screen so lock-piece's flash helpers can
+    % find it without scr being plumbed through hard-drop / handle-tick.
+    flash-screen-cell 0 scr put
+    % If cfg supplies a loaded state (from continue-from-save),
+    % use it directly -- the bag module state has already been
+    % restored.  Otherwise init the bag from cfg's seed and build a
+    % fresh state.  In both cases /mode comes from the state, so a
+    % continued ai-oracle save resumes in ai-oracle even if the user
+    % didn't pass --ai-oracle on the command line.
+    /st cfg /loaded-state null get-default local-def
+    st null eq
+        {
+            cfg /seed get init-bag
+            /st cfg /mode get make-state local-def
+        }
+    if
+    /mode st /mode get local-def
+    /ai-on mode /human ne local-def
+    % Pre-fill the stable slots of /ai-request-buf and size
+    % /ai-futures-buf from cfg.  /ai-futures-buf carries the full
+    % search horizon for /ai-oracle: slot 0 = next piece, slots 1..N
+    % = bag-peek-piece(1..N) where N = ai-depth - 2.  /ai-peek doesn't
+    % use the futures buffer; it stays size 0.  Sizing the buffer
+    % game-actor-side (game-actor knows cfg /ai-depth; ai-actor doesn't)
+    % keeps the buffer at sl=0 so it survives the loop-body save/restore
+    % wrap below.  Allocating from inside ai-actor while game-actor is
+    % suspended in a save scope would either trip the above-barrier
+    % ref-check or strand a dangling ref in ai-actor's frame dict
+    % (Save::restore's suspended-coroutine scan checks op/exec/err
+    % stacks but not dict stacks).
+    ai-on {
+        mode /ai-oracle eq {
+            /n-extra cfg /ai-depth get 2 sub local-def
+            n-extra 0 lt { /n-extra 0 local-def } if
+            st /ai-futures-buf  n-extra 1 add array  put-persist
+        } if
+        st /ai-request-buf get  2  st /ai-field-snapshot-buf get  put-persist
+        st /ai-request-buf get  5  mode                           put-persist
+        st /ai-request-buf get  6  st /ai-futures-buf get         put-persist
+    } if
+    % Phase 9: title splash on a fresh game only.  When resuming from a
+    % save the player has already chosen "continue" at the cooked-tty
+    % prompt; jumping straight into the game respects that choice.
+    cfg /loaded-state null get-default null eq
+        { scr mode show-title }
+    if
+    /input-actor   [ actor-self                                 { input-body }   actor-spawn local-def
+    /gravity-actor [ actor-self  st /level get level-drop-ms    { gravity-body } actor-spawn local-def
+    /ai-actor      ai-on
+                       { [ actor-self                                       { ai-actor-body } actor-spawn }
+                       { null }
+                   if-else local-def
+    /ai-tick-actor ai-on
+                       { [ actor-self  cfg /ai-speed get 16 mul             { ai-tick-body } actor-spawn }
+                       { null }
+                   if-else local-def
+    % Bootstrap each spawned actor at sl=0 so its |...|#N frame dict
+    % is allocated below the loop-body save barrier we enter below.
+    % If a child actor's first activation lands inside our save scope,
+    % its frame dict ends up above the barrier and Save::restore raises
+    % /invalid-restore on its dict stack (added in src/save.inl --
+    % previously this was a silent SIGTRAP via dangling-offset name
+    % lookup).  Four yields cover all four child actors regardless of
+    % scheduler order; each child reaches its first blocking op
+    % (actor-recv / read-key-byte / coroutine-sleep) and parks.
+    0 coroutine-sleep
+    0 coroutine-sleep
+    0 coroutine-sleep
+    0 coroutine-sleep
+    scr st redraw
+    scr screen-render pop
+    {
+        % Per-iteration save/restore wrap.  All transient allocations
+        % (locals frame puts, lock-piece's full-rows append loop,
+        % draw-hud's int-to-string buffers, etc.) live above this
+        % barrier and reclaim on restore.  Cross-iteration state
+        % flows through `st` via put-persist (B1.5 step 3) and screen
+        % cells via direct C-side writes (ops_screen.inl bypasses the
+        % journal by design).  Cross-actor messages reference
+        % below-barrier buffers (Phases B-F); the mailbox slot stays
+        % valid past the restore.
+        save
+        % Replan whenever a fresh piece has spawned (lock-piece /
+        % hold-piece bump piece-seq).  Send a snapshot of the field so
+        % the AI's reads are race-free against subsequent locks.
+        ai-on st /game-over get not and st /paused get not and {
+            st /piece-seq get  st /last-plan-seq get  ne {
+                % Refresh /ai-futures-buf in place for /ai-oracle:
+                % slot 0 = next piece, slots 1..N = bag-peek-piece(1..N).
+                % /ai-peek leaves the buffer empty (sized 0 at startup).
+                mode /ai-oracle eq {
+                    /futures-buf st /ai-futures-buf get local-def
+                    futures-buf 0 st /next get put-persist
+                    1 1 futures-buf length 1 sub {
+                        /i exch local-def
+                        futures-buf i  i bag-peek-piece  put-persist
+                    } for
+                } if
+                % Snapshot the field into the pre-allocated buffer.
+                st /field get  st /ai-field-snapshot-buf get  field-copy-into
+                % Fill the per-iteration mutable slots of /ai-request-buf.
+                % Slots 2 (field-snapshot-buf), 5 (mode), 6 (futures-buf)
+                % were filled once at startup and never change.
+                /req-buf st /ai-request-buf get local-def
+                req-buf 0 st /piece get        put-persist
+                req-buf 1 st /next get         put-persist
+                req-buf 3 st /piece-state get  put-persist
+                req-buf 4 st /piece-col get    put-persist
+                req-buf ai-actor actor-send
+                st /last-plan-seq      st /piece-seq get put-persist
+                st /ai-keystrokes-len  0                 put-persist
+                st /ai-key-idx         0                 put-persist
+            } if
+        } if
+
+        actor-recv /msg exch local-def
+        /quit msg /q eq local-def
+
+        % AI plan packets stash regardless of paused/game-over so an
+        % in-flight search isn't lost across a pause.  Reply layout is
+        % [/ai-plan, keys-buf-ref, length]; keys-buf is ai-actor's
+        % below-barrier buffer, so storing the reference is safe under
+        % save/restore.
+        msg is-array
+            {
+                msg length 3 ge { msg 0 get /ai-plan eq } { false } if-else
+                    {
+                        st /ai-keystrokes      msg 1 get  put-persist
+                        st /ai-keystrokes-len  msg 2 get  put-persist
+                        st /ai-key-idx         0          put-persist
+                    }
+                if
+            }
+        if
+
+        % Clear the SAVED/FAILED HUD flash on the next interactive
+        % keystroke so the player sees the confirmation just long
+        % enough to register it.  /tick + /ai-tick + array (ai-plan)
+        % messages don't count as interaction.
+        msg is-name msg /tick ne and msg /ai-tick ne and msg /s ne and
+            { st /save-flash /none put-persist }
+        if
+
+        % Game-over only honors /q (handled below) and /s (do-save).
+        st /game-over get
+            {
+                msg /s eq { st save-path do-save } if
+            }
+        if
+
+        st /game-over get not quit not and
+            {
+                st /paused get
+                    {
+                        msg /p eq { st toggle-pause } if
+                        msg /s eq { st save-path do-save } if
+                    }
+                    {
+                        /old-level st /level get local-def
+                        msg /tick eq  { st handle-tick } if
+                        % AI tick: pop one queued keystroke and dispatch
+                        % it through the same path as a human key.
+                        msg /ai-tick eq ai-on and {
+                            st /ai-key-idx get  st /ai-keystrokes-len get  lt {
+                                /idx st /ai-key-idx get local-def
+                                /next-key st /ai-keystrokes get idx get local-def
+                                st /ai-key-idx idx 1 add put-persist
+                                next-key /up eq    { st true try-rotate pop } if
+                                next-key /z eq     { st false try-rotate pop } if
+                                next-key /left eq  { st 0 -1 try-move pop } if
+                                next-key /right eq { st 0 1  try-move pop } if
+                                next-key /down eq  { st soft-drop } if
+                                next-key /space eq { st hard-drop } if
+                            } if
+                        } if
+                        % Direct human keystrokes are gated off in AI mode.
+                        ai-on not {
+                            msg /up eq    { st true try-rotate pop } if
+                            msg /z eq     { st false try-rotate pop } if
+                            msg /left eq  { st 0 -1 try-move pop } if
+                            msg /right eq { st 0 1  try-move pop } if
+                            msg /down eq  { st soft-drop } if
+                            msg /space eq { st hard-drop } if
+                            msg /c eq     { st hold-piece } if
+                        } if
+                        msg /p eq { st toggle-pause } if
+                        /new-level st /level get local-def
+                        old-level new-level ne
+                            { new-level level-drop-ms gravity-actor actor-send }
+                        if
+                    }
+                if-else
+            }
+        if
+        scr st redraw
+        scr screen-render pop
+        % Carry the quit signal across the restore boundary on the
+        % operand stack since locals (msg, quit) revert on restore.
+        % `exch restore` consumes the save handle that `save` parked
+        % under quit; after restore quit is alone on the stack and
+        % the loop-exit decision proceeds with a clean operand stack.
+        quit exch restore
+        { exit } if
+    } loop
+    input-actor coroutine-kill
+    gravity-actor coroutine-kill
+    ai-on
+        {
+            ai-actor      coroutine-kill
+            ai-tick-actor coroutine-kill
+        }
+    if
+} def
+
+%%%---------------------------------------------------------------------
+%%% PHASE 8: PACK/UNPACK PERSISTENCE
+%%%---------------------------------------------------------------------
+%
+% Save format is a flat ~294-byte binary blob laid out via `pack`:
+%
+%   header  : magic "TRX1" (4) + version (1) + mode (1)        = 6
+%   bag     : seed (8) + refills (4) + sh-pos (1) + sh-buf (7)
+%             + queue-len (1) + queue (32)                     = 53
+%   score   : score (8) + level (4) + lines (4) + combo (4)
+%             + last-b2b (1)                                   = 21
+%   piece   : piece-id (1) + piece-state (1) + row (i8) + col (i8)
+%             + next-id (1) + hold-id (1) + can-hold (1)
+%             + last-rotation (1) + piece-seq (4) + paused (1)
+%             + game-over (1)                                  = 14
+%   field   : 200B (20 rows x 10 cols of palette indices)      = 200
+%
+% Pieces are stored as their canonical-order index (0=I, 1=O, 2=T,
+% 3=S, 4=Z, 5=J, 6=L; 7 = /none, only valid in the hold slot).
+% The bag refill counter lets load-state replay the right number of
+% PRNG calls so the next refill matches what the original run was
+% about to produce.  Doesn't promise bit-exact replay if the player
+% had already drawn many bags before saving (we accept divergence on
+% future-bag random calls beyond the current shuffle), but the
+% in-flight state (current piece, next, queue, score, field) is
+% restored exactly.
+%
+% Why pack/unpack instead of snap-shot/thaw: village.trx already
+% demonstrates whole-VM snap-shot/thaw, so this showcase exercises
+% the binary-pack surface instead.  Smaller save file, no OS-state
+% reinit dance on resume, single in-process workflow.
+
+% Save-format constants.
+/save-path          (tetrix.save) def              % default save file location
+/save-magic         (TRX1) def
+/save-version       1b def                         % byte; matches `B` slot in save-fmt-header
+/save-fmt-header    (>4sBB) def                    % magic, version, mode-id
+/save-fmt-bag       (>LIB7BB32B) def               % seed, refills, sh-pos, 7 sh-buf, q-len, 32 q
+/save-fmt-score     (>liiiB) def                   % score, level, lines, combo, last-b2b
+/save-fmt-piece     (>BBbbBBBBiBB) def             % pid, pst, row, col, nid, hid, can-hold, last-rot, seq, paused, game-over
+/save-fmt-field     (>200B) def
+/save-fmt-cksum     (>I) def                       % 4-byte trailing Fletcher-32
+/save-payload-bytes 294 def
+/save-byte-count    298 def                        % payload + 4-byte checksum
+
+% Mode <-> id mapping.
+/mode-to-id {
+    |m|#1
+    m /human eq     { 0 } if
+    m /ai-peek eq   { 1 } if
+    m /ai-oracle eq { 2 } if
+} def
+
+/id-to-mode {
+    |i|#1
+    i [
+        { 0 eq } { pop /human }
+        { 1 eq } { pop /ai-peek }
+        { pop true } { pop /ai-oracle }
+    ] match
+} def
+
+% piece-to-id   piece -- int      ( 0..6 )
+% Reverse-lookup against all-pieces by /name.  /none is never passed
+% here; only the hold slot needs piece-or-none-to-id.
+/piece-to-id {
+    |pc|#5
+    /pname pc /name get local-def
+    /idx -1 local-def
+    0 1 6 {
+        /i exch local-def
+        all-pieces i get /name get pname eq
+            { /idx i local-def }
+        if
+    } for
+    idx
+} def
+
+% piece-or-none-to-id  piece-or-none -- int   ( 0..6 or 7 = /none )
+/piece-or-none-to-id {
+    |x|#1
+    x /none eq { 7 } { x piece-to-id } if-else
+} def
+
+/id-to-piece              { all-pieces exch get } def           % 0..6 -> piece
+/id-to-piece-or-none {
+    % Accept either Integer or Byte; `7` is the /none sentinel.
+    /integer-type cast
+    dup 7 eq { pop /none } { all-pieces exch get } if-else
+} def
+/bool-to-byte             { { 1 } { 0 } if-else } def
+/byte-to-bool             { 0b ne } def                         % byte-strict
+
+% Save-file integrity uses the C-side `fletcher32` op (str :- uint32),
+% Wikipedia byte-stream form, ~50x faster than a Trix-side implementation.
+% Catches all 1-bit errors and ~99.998% of multi-bit corruption on the
+% 294-byte payload -- enough to flag truncation or hand-editing.
+
+% bag-buf-ids -- arr   (7-element array of piece IDs)
+/bag-buf-ids {
+    ||#3
+    /a 7 array local-def
+    0 1 6 { /i exch local-def a i bag-shuffle-buf i get piece-to-id put } for
+    a
+} def
+
+% bag-queue-ids -- arr   (32-element array; unused tail = 0)
+/bag-queue-ids {
+    ||#5
+    /a 32 array local-def
+    0 1 31 {
+        /i exch local-def
+        i bag-queue-len lt
+            { a i bag-queue i get piece-to-id put }
+            { a i 0 put }
+        if-else
+    } for
+    a
+} def
+
+% field-bytes state -- arr   (200-byte row-major field array)
+/field-bytes {
+    |st|#5
+    /fld st /field get local-def
+    /a 200 array local-def
+    0 1 19 {
+        /r exch local-def
+        0 1 9 {
+            /c exch local-def
+            a r 10 mul c add  fld r c field-get  put
+        } for
+    } for
+    a
+} def
+
+% save-state state path --
+% Compose the binary blob and write it to `path`.  One pack call per
+% logical chunk, written into an in-memory string-stream then flushed
+% to a single file write.  Pieces stored as canonical-order indices
+% (see piece-to-id); arrays expanded onto the stack via array-load.
+/save-state {
+    |st path|#10
+    /strm save-byte-count make-string-stream local-def
+
+    % Header: magic + version + mode-id
+    strm
+        mark save-magic save-version st /mode get mode-to-id
+        save-fmt-header pack
+    write-string
+
+    % Bag: seed + refills + shuffle-pos + 7 buf ids + queue-len + 32 queue ids
+    strm
+        mark
+            bag-seed bag-refills bag-shuffle-pos
+            bag-buf-ids   array-load pop
+            bag-queue-len
+            bag-queue-ids array-load pop
+        save-fmt-bag pack
+    write-string
+
+    % Score: score + level + lines + combo + last-b2b
+    strm
+        mark
+            st /score get  st /level get  st /lines get  st /combo get
+            st /last-b2b get bool-to-byte
+        save-fmt-score pack
+    write-string
+
+    % Piece + flags
+    strm
+        mark
+            st /piece get piece-to-id
+            st /piece-state get
+            st /piece-row get  st /piece-col get
+            st /next get piece-to-id
+            st /hold get piece-or-none-to-id
+            st /can-hold get bool-to-byte
+            st /last-rotation get bool-to-byte
+            st /piece-seq get
+            st /paused get bool-to-byte
+            st /game-over get bool-to-byte
+        save-fmt-piece pack
+    write-string
+
+    % Field: 200 bytes
+    strm
+        mark
+            st field-bytes array-load pop
+        save-fmt-field pack
+    write-string
+
+    % Compute Fletcher-32 over the 294-byte payload and append it.
+    % Close the in-memory stream only after we're done reading payload,
+    % since get-string-stream's output may share storage with the stream.
+    /payload strm get-string-stream local-def
+    /cksum payload fletcher32 local-def
+    /trailer mark cksum save-fmt-cksum pack local-def
+    strm close-stream
+
+    path (w)#b stream
+        /out exch local-def
+        out payload write-string
+        out trailer write-string
+    out close-stream
+} def
+
+% load-state path -- state | null
+% Read the file, validate the header, unpack each chunk, rebuild the
+% state dict + restore the bag module state.  Returns null if the
+% file doesn't exist.  Throws /save-corrupt on malformed contents
+% (wrong magic, wrong byte count, unknown version).
+/load-state {
+    |path|#50
+    path file-exists? not { null exit-proc } if
+
+    path (r)#b stream
+    /in exch local-def
+    /buf in read-all local-def
+    in close-stream
+
+    buf length save-byte-count ne { /save-corrupt (save file size mismatch) throw-with } if
+
+    % Verify Fletcher-32 trailer over the payload.  Compare raw 4-byte
+    % bytestrings -- string eq is byte-deep, no type-promotion issues.
+    /payload buf 0 save-payload-bytes get-interval local-def
+    /file-trailer    buf save-payload-bytes 4 get-interval local-def
+    /expect-trailer  mark payload fletcher32 save-fmt-cksum pack local-def
+    file-trailer expect-trailer ne
+        { /save-corrupt (checksum mismatch) throw-with }
+    if
+
+    % unpack pushes values v0 ... v_{N-1} count, with the LAST packed
+    % value on top of the stack.  array-store collects them into a
+    % positional array, which we then index by field offset.
+    % Header (6 bytes at offset 0): magic, version, mode-id
+    buf 0 6 get-interval save-fmt-header unpack
+    /n-h exch local-def n-h array array-store /hdr exch local-def
+    hdr 0 get save-magic ne   { /save-corrupt (bad magic) throw-with } if
+    hdr 1 get save-version ne { /save-corrupt (unknown version) throw-with } if
+    /mode-id hdr 2 get local-def
+
+    % Bag (53 bytes at offset 6): seed, refills, sh-pos, sh-buf[0..6],
+    % q-len, queue[0..31]
+    buf 6 53 get-interval save-fmt-bag unpack
+    /n-b exch local-def n-b array array-store /bag-data exch local-def
+    /seed     bag-data 0 get local-def
+    /refills  bag-data 1 get local-def
+    /sh-pos   bag-data 2 get local-def
+    /sh-arr 7 array local-def
+    0 1 6 { /i exch local-def sh-arr i bag-data 3 i add get put } for
+    /q-len    bag-data 10 get /integer-type cast local-def
+    /q-arr 32 array local-def
+    0 1 31 { /i exch local-def q-arr i bag-data 11 i add get put } for
+
+    % Score (21 bytes at offset 59): score, level, lines, combo, last-b2b
+    buf 59 21 get-interval save-fmt-score unpack
+    /n-s exch local-def n-s array array-store /score-data exch local-def
+    /score-v       score-data 0 get local-def
+    /level-v       score-data 1 get local-def
+    /lines-v       score-data 2 get local-def
+    /combo-v       score-data 3 get local-def
+    /last-b2b-byte score-data 4 get local-def
+
+    % Piece (14 bytes at offset 80)
+    buf 80 14 get-interval save-fmt-piece unpack
+    /n-p exch local-def n-p array array-store /piece-data exch local-def
+    /pid            piece-data 0 get local-def
+    /pst            piece-data 1 get local-def
+    /row-v          piece-data 2 get local-def
+    /col-v          piece-data 3 get local-def
+    /nid            piece-data 4 get local-def
+    /hid            piece-data 5 get local-def
+    /can-hold-byte  piece-data 6 get local-def
+    /last-rot-byte  piece-data 7 get local-def
+    /seq-v          piece-data 8 get local-def
+    /paused-byte    piece-data 9 get local-def
+    /game-over-byte piece-data 10 get local-def
+
+    % Field (200 bytes at offset 94)
+    buf 94 200 get-interval save-fmt-field unpack
+    /n-f exch local-def n-f array array-store /fld-arr exch local-def
+
+    % Restore bag module state.
+    seed refills sh-pos sh-arr q-len q-arr restore-bag
+
+    % Build field from row-major bytes.  Cast each byte back to Integer
+    % so loaded cells match the type of values written by the game code
+    % (piece /color get returns Integer).
+    /new-field make-field local-def
+    0 1 19 {
+        /r exch local-def
+        0 1 9 {
+            /c exch local-def
+            new-field r c  fld-arr r 10 mul c add get /integer-type cast  field-set
+        } for
+    } for
+
+    % Cast everything that came back as Byte/Long down to Integer so
+    % the loaded state dict has the same field types as a fresh
+    % make-state -- the game code (and tests) compare Integer-strict.
+    <<
+        /field         new-field
+        /piece         pid id-to-piece
+        /piece-state   pst   /integer-type cast
+        /piece-row     row-v /integer-type cast
+        /piece-col     col-v /integer-type cast
+        /next          nid id-to-piece
+        /hold          hid id-to-piece-or-none
+        /can-hold      can-hold-byte byte-to-bool
+        /score         score-v /integer-type cast
+        /level         level-v
+        /lines         lines-v
+        /last-b2b      last-b2b-byte byte-to-bool
+        /combo         combo-v
+        /last-rotation last-rot-byte byte-to-bool
+        /mode          mode-id /integer-type cast id-to-mode
+        /paused        paused-byte byte-to-bool
+        /game-over     game-over-byte byte-to-bool
+        /piece-seq     seq-v
+        /save-flash    /none
+        /last-plan-seq -1
+        /ai-keystrokes []
+        /ai-keystrokes-len     0
+        /ai-key-idx            0
+        /ai-request-buf        7 array
+        /ai-field-snapshot-buf make-field
+        /ai-futures-buf        0 array
+    >>
+} def
+
+% do-save state path --
+% Wrap save-state with a try-catch; set the HUD flash banner to /ok
+% on success, /fail on error.  The game loop clears /save-flash on
+% the next non-/s keystroke.
+/do-save {
+    |st path|#5
+    { st path save-state st /save-flash /ok put-persist }
+    try
+    /no-error eq not
+        { st /save-flash /fail put-persist }
+    if
+} def
+
+%%%---------------------------------------------------------------------
+%%% CLI ARG PARSING
+%%%---------------------------------------------------------------------
+%
+% Walks the array returned by command-line-args looking for the flags
+% tetrix understands.  Returns a config dict.  Unknown flags are
+% ignored (forward-compatible with future flags).
+
+% Pure parser: takes an args array and returns a config dict.  Splitting
+% off the I/O lets the self-test exercise real argv shapes without
+% depending on what command-line-args happened to return.
+/parse-args-array {
+    |args|#16
+    /seed -1 local-def                                   % -1 = use clock
+    /render-demo false local-def
+    /self-test false local-def                           % --self-test runs the in-source assertions instead of the game
+    /mode /human local-def                               % default play mode; --human / --ai-peek / --ai-oracle override
+    /ai-speed 2 local-def                                % AI keystroke cadence (frames @ ~60fps)
+    /ai-depth 4 local-def                                % oracle search depth (Phase 7)
+    /ai-kernel /native local-def                         % --ai-kernel native|trix; native uses C-side field-copy-fast / score-board-fast
+    /reset false local-def                               % --reset wipes the save file at startup
+    /help false local-def                                % --help / -h prints usage and exits (handled by caller, not inside this proc)
+    /n args length local-def
+    0 1 n 1 sub {
+        /i exch local-def
+        /arg args i get local-def
+        arg (--seed) eq i n 1 sub lt and {
+            /seed args i 1 add get to-number /integer-type cast local-def
+        } if
+        arg (--ai-speed) eq i n 1 sub lt and {
+            /ai-speed args i 1 add get to-number /integer-type cast local-def
+        } if
+        arg (--ai-depth) eq i n 1 sub lt and {
+            /ai-depth args i 1 add get to-number /integer-type cast local-def
+        } if
+        arg (--ai-kernel) eq i n 1 sub lt and {
+            /ai-kernel args i 1 add get to-name local-def
+        } if
+        arg (--render-demo) eq { /render-demo true local-def } if
+        arg (--self-test) eq   { /self-test true local-def } if
+        arg (--play) eq        { } if              % accepted as a no-op alias; play is now the default mode
+        arg (--human) eq       { /mode /human local-def } if
+        arg (--ai-peek) eq     { /mode /ai-peek local-def } if
+        arg (--ai-oracle) eq   { /mode /ai-oracle local-def } if
+        arg (--reset) eq       { /reset true local-def } if
+        arg (--help) eq        { /help true local-def } if
+        arg (-h) eq            { /help true local-def } if
+    } for
+    % `clock` is a ulong (microseconds); a direct int32 cast can wrap to
+    % negative.  Narrow through uinteger and mask the sign bit so the
+    % final integer seed is always non-negative.
+    /seed-effective seed 0 lt
+        {
+            clock /uinteger-type cast
+            16#7FFFFFFF /uinteger-type cast and
+            /integer-type cast
+        }
+        { seed }
+    if-else local-def
+    <<
+        /seed          seed-effective
+        /seed-from-cli seed 0 ge
+        /render-demo   render-demo
+        /self-test     self-test
+        /mode          mode
+        /ai-speed      ai-speed
+        /ai-depth      ai-depth
+        /ai-kernel     ai-kernel
+        /reset         reset
+        /help          help
+        /loaded-state  null                        % pre-allocated slot so the resume-prompt path's later `put` doesn't grow the dict
+    >>
+} def
+
+% Boot-time wrapper: pulls argv from command-line-args and parses it.
+/parse-tetrix-args {
+    command-line-args parse-args-array
+} def
+
+% Print tetrix CLI usage on stdout.  The trix interpreter handles its
+% own flags (--vm-size, --debug, --sandbox, etc.; see `trix --help`)
+% before passing the remaining args to the script; everything below
+% is tetrix-script-specific.
+/print-tetrix-usage {
+    (Usage: tetrix [tetrix-options]                  \(host binary\)\n) print
+    (       trix examples/tetrix.trx [tetrix-options]\n\n) print
+    (Tetrix is a playable falling-block game in Trix.  By default it boots\n) print
+    (straight into human play mode.  Pass a flag to switch off the default.\n\n) print
+    (Mode:\n) print
+    (  --human         Human play (default).\n) print
+    (  --ai-peek       AI plays using 2-piece lookahead search.\n) print
+    (  --ai-oracle     AI plays using N-piece deterministic search.\n) print
+    (  --self-test     Run in-source assertions \(~50s of pure-logic /\n) print
+    (                  AI-search / save-load checks\); CI-friendly form.\n) print
+    (  --render-demo   Render a representative game state and block on a\n) print
+    (                  key (pre-Phase-4 static rendering smoke check).\n) print
+    (  --play          No-op alias for human (back-compat).\n\n) print
+    (Tuning:\n) print
+    (  --seed N        Bag-RNG seed (non-negative integer; default = clock).\n) print
+    (  --ai-speed N    AI keystroke cadence in frames at ~60fps (default 2).\n) print
+    (  --ai-depth N    Oracle search depth in pieces (default 4).\n) print
+    (                  depth=4 needs the ./tetrix binary or --vm-size=4M\n) print
+    (                  on plain ./trix.\n) print
+    (  --ai-kernel K   K = native \(C user ops, ~30x faster, default in\n) print
+    (                  ./tetrix\) or trix \(interpreted reference impl;\n) print
+    (                  forced when running under plain ./trix\).\n\n) print
+    (Save file:\n) print
+    (  --reset         Wipe the save file at startup \(default location:\n) print
+    (                  $XDG_STATE_HOME/tetrix/state, falling back to\n) print
+    (                  $HOME/.local/state/tetrix/state\).\n\n) print
+    (Help:\n) print
+    (  -h, --help      Print this message and exit.\n\n) print
+    (Run `trix --help` for trix interpreter flags.\n) print
+    flush
+} def
+
+% prompt-resume-action -- /continue | /new | /discard | /quit
+% Show a text prompt on stdout (cooked tty), read a single c/n/d/q
+% character followed by Enter, return the chosen action name.
+% Default (Enter alone) is /continue, the safest non-destructive
+% option.  Loops until a valid choice or EOF.
+/prompt-resume-action {
+    ||#10
+    (\nA saved tetrix game was found at ) print save-path print (.\n) print
+    (  c  continue from save\n) print
+    (  n  new game (keeps save until you save again or pass --reset)\n) print
+    (  d  discard save and start new game\n) print
+    (  q  quit without changing the save\n) print
+    (Choice [c]: ) print flush
+    /buf 16 array local-def
+    current-stream buf read-line
+    /ok exch local-def
+    /line exch local-def
+    ok not
+        { /quit }
+        {
+            /ch line length 0 eq { (c)#b } { line 0 get } if-else local-def
+            ch [
+                { (c)#b eq } { pop /continue }
+                { (n)#b eq } { pop /new }
+                { (d)#b eq } { pop /discard }
+                { (q)#b eq } { pop /quit }
+                { pop true } { pop (Unrecognized; enter c, n, d, or q.\n) print flush prompt-resume-action }
+            ] match
+        }
+    if-else
+} def
+
+%%%---------------------------------------------------------------------
+%%% TOP-LEVEL DISPATCH
+%%%---------------------------------------------------------------------
+%
+% By default `./trix examples/tetrix.trx` launches the game in human
+% mode -- this is a showcase, the player should land in the action.
+%
+% Three flags switch off the default:
+%
+%   --self-test    Run the in-source assertions and exit.  ~50 s of
+%                  pure-logic + AI-search + save/load checks; the form
+%                  CI / regression scripts want.
+%
+%   --render-demo  Render a representative game state on the virtual
+%                  screen and block on a key.  Pre-Phase-4 affordance
+%                  kept around as a static rendering smoke check.
+%
+%   --human / --ai-peek / --ai-oracle
+%                  Pick the play mode (human is the default).  --play
+%                  is accepted as a no-op alias for back-compat.
+%
+% --reset and --seed N apply to the play path.  --ai-speed N and
+% --ai-depth N tune the AI modes.
+
+/cfg parse-tetrix-args def
+
+% --help / -h short-circuits everything else.  Print and exit before
+% any side-effects (kernel resolution, raw-mode setup, save file probe).
+cfg /help get { print-tetrix-usage quit } if
+
+% Resolve effective AI kernel.  /native (default) requires the C-side
+% user ops registered by tetrix.cpp; if --ai-kernel was set to /native
+% but we're running under a binary that doesn't carry those ops (e.g.
+% plain ./trix), fall back to /trix and write the effective value back
+% into cfg so the HUD / self-test reflect what's actually running.
+cfg /ai-kernel get /native eq native-kernels-available and
+    {
+        /use-native-kernels true def
+        cfg /ai-kernel /native put
+    }
+    {
+        /use-native-kernels false def
+        cfg /ai-kernel /trix put
+    }
+if-else
+
+% When native kernels are active, rebind the three Trix-level reference
+% ops to dispatch through the C ops.  *-orig captures the original proc
+% via scan-time \\ lookup (resolved against userdict at this point in
+% the source, where the originals are already defined).  Rebinding
+% leaves every existing call site unchanged -- simulate-into still calls
+% score-board, oracle-recurse still calls score-board-into, and so on;
+% the dispatch happens transparently via the rebound name.
+use-native-kernels {
+    /field-copy-into-orig  \\field-copy-into  def
+    /field-copy-into       { |src dst|#3        src dst field-copy-fast } def
+    /score-board-orig      \\score-board       def
+    /score-board           { |fld lines|#5      fld lines ai-weights-array score-board-fast } def
+    /score-board-into-orig \\score-board-into  def
+    /score-board-into      { |fld lines hbuf|#5 fld lines ai-weights-array score-board-fast } def
+    % piece-collides? / piece-merge: thin wrappers that lift the piece-shape
+    % lookup out to Trix and call the C op with the 4-cell shape array directly.
+    /piece-collides?-orig  \\piece-collides?   def
+    /piece-collides?       { |fld pc st py px|#7
+                             fld  pc st piece-shape  py px  piece-collides-fast } def
+    /piece-merge-orig      \\piece-merge       def
+    /piece-merge           { |fld pc st py px|#7
+                             fld  pc st piece-shape  pc /color get  py px  piece-merge-fast } def
+    /field-clear-rows-orig \\field-clear-rows  def
+    /field-clear-rows      { |fld|#3 fld field-clear-rows-fast } def
+    /piece-ghost-row-orig  \\piece-ghost-row   def
+    /piece-ghost-row       { |fld pc st py px|#7
+                             fld  pc st piece-shape  py px  piece-ghost-row-fast } def
+} if
+
+% Default branch: launch the game.  We invert the gate (`not { ... } if`
+% instead of `cfg /self-test get { ... } if` wrapping the self-test)
+% because the self-test block is ~800 lines of mixed top-level
+% statements -- larger than the scanner can build as a single proc
+% literal.  Wrapping the smaller dispatch block here, then falling
+% through to the unwrapped self-test top-level statements, sidesteps
+% that limit.
+cfg /self-test get not {
+    cfg /render-demo get {
+        cfg /seed get init-bag
+        /demo-state cfg /mode get make-state def
+        % Salt the field with a couple of locked rows + a pocket so the
+        % ghost overlay and field-cell rendering are clearly visible.
+        /df demo-state /field get def
+        0 1 9 { /c exch def df 19 c S-piece /color get field-set } for
+        df 19 4 0 field-set
+        df 19 5 0 field-set
+        0 1 9 { /c exch def df 18 c L-piece /color get field-set } for
+        df 18 0 0 field-set
+        demo-state /piece-row 4 put
+        demo-state /piece-col 3 put
+        demo-state /score 12340 put
+        demo-state /level 7     put
+        demo-state /lines 73    put
+        {|scr|#3
+            scr demo-state redraw
+            scr screen-render pop
+            { read-key-byte } { 100 read-key-byte-timeout } decode-key pop
+        } with-fullscreen-screen
+        quit                                       % --render-demo path stops here (interpreter quit, NOT loop-break exit)
+    } if
+
+    % --- Default: launch the game ---
+    % --reset wipes the save file before any save-detection happens.
+    cfg /reset get save-path file-exists? and
+        { save-path delete-file }
+    if
+    /loaded-state null def
+    save-path file-exists? {
+        /action prompt-resume-action def
+        action /quit eq { quit } if                % user picked Quit at the resume prompt
+        action /discard eq { save-path delete-file } if
+        action /continue eq
+            {
+                /loaded-state save-path load-state def
+                loaded-state null eq
+                    { (Save file vanished; starting a new game.\n) print flush }
+                if
+            }
+        if
+    } if
+    cfg /loaded-state loaded-state put
+    {|scr|#5
+        [ scr cfg { game-actor-body } actor-spawn coroutine-join pop pop
+    } with-fullscreen-screen
+    quit                                           % play path stops here (interpreter quit, NOT loop-break exit)
+} if
+
+% --- Self-test (--self-test flag required) --------------------------
+% These statements are top-level rather than wrapped in a proc literal
+% because the scanner's per-proc temporary storage runs out around 800
+% lines.  Reachable only when the dispatch above did NOT exit early.
+
+/passed 0 def
+/failed 0 def
+/total  0 def
+
+/rt-ok {
+    /total total 1 add store
+    exch
+    { pop /passed passed 1 add store }
+    { /failed failed 1 add store
+      (FAILED: ) print = }
+    if-else
+} def
+
+% --- piece data ------------------------------------------------------
+
+T-piece /name get /T eq                 (T-piece name)               rt-ok
+T-piece /shapes get length 4 eq         (T has 4 rotation states)    rt-ok
+all-pieces length 7 eq                  (7 pieces in canonical order) rt-ok
+
+% Each rotation state has exactly 4 cells.
+all-pieces {
+    /shapes get
+    { length 4 eq (rot has 4 cells) rt-ok }
+    for-all
+} for-all
+
+% --- field primitives -------------------------------------------------
+
+/f make-field def
+f length 20 eq                          (field has 20 rows)          rt-ok
+f 0 get length 10 eq                    (row has 10 cols)            rt-ok
+f 5 3 field-get 0 eq                    (cell starts empty)          rt-ok
+
+f 5 3 7 field-set
+f 5 3 field-get 7 eq                    (cell-set roundtrip)         rt-ok
+f 4 3 field-get 0 eq                    (neighbor untouched)         rt-ok
+
+% Two fresh fields are independent.
+/g make-field def
+g 0 0 9 field-set
+f 0 0 field-get 0 eq                    (independent fields)         rt-ok
+
+% --- field-row-full? + clear-rows -----------------------------------
+
+/h make-field def
+0 1 9 { /c exch def h 19 c 1 field-set } for
+h 19 field-row-full?                   (full row detected)           rt-ok
+h 18 field-row-full? not                (incomplete row not full)     rt-ok
+
+% Three full rows at 17/18/19, plus a stray block at row 0 col 0.
+% After clear-rows the 17 non-full rows shift down by 3 -- the stray
+% block ends up at row 3, and rows 0..2 are freshly empty.
+/h2 make-field def
+h2 0 0 9 field-set
+0 1 9 { /c exch def h2 17 c 5 field-set } for
+0 1 9 { /c exch def h2 18 c 6 field-set } for
+0 1 9 { /c exch def h2 19 c 7 field-set } for
+h2 field-clear-rows
+3 eq                                    (clears 3 full rows)         rt-ok
+pop                                                                  % drop the (returned) field handle
+h2 3 0 field-get 9 eq                   (stray block shifted to row 3) rt-ok
+h2 0 0 field-get 0 eq                   (row 0 freshly empty)        rt-ok
+h2 19 0 field-get 0 eq                  (bottom row empty)           rt-ok
+
+% --- piece-collides? -------------------------------------------------
+
+/c make-field def
+
+% T spawn at (0, 3) on empty field: no collision.
+c T-piece 0 0 3 piece-collides? not     (spawn no collide)           rt-ok
+
+% T pushed past the right wall: collision.
+c T-piece 0 0 8 piece-collides?         (right wall collide)         rt-ok
+
+% T pushed below the floor: collision (cells in spawn rotation are at
+% rows py+0 and py+1; py=19 puts cells at rows 19 and 20 -> 20 OOB).
+c T-piece 0 19 3 piece-collides?        (floor collide)              rt-ok
+
+% Block sitting where the piece wants to be: collision.
+/c2 make-field def
+c2 1 4 1 field-set
+c2 T-piece 0 0 3 piece-collides?        (stack overlap)              rt-ok
+
+% --- piece-merge -----------------------------------------------------
+
+/c3 make-field def
+c3 T-piece 0 18 3 piece-merge pop
+c3 18 4 field-get T-piece /color get eq (merge writes color)         rt-ok
+c3 18 3 field-get 0 eq                  (merge skips empty cells)    rt-ok
+
+% --- rotation + kick -------------------------------------------------
+
+% Free-space CW rotation of T: lands on identity kick (no offset).
+/c4 make-field def
+c4 T-piece 0 5 3 true rotate-with-kick
+% Stack now: new-state new-row new-col success
+/r-success exch def
+/r-col exch def
+/r-row exch def
+/r-state exch def
+r-success                               (rotation success bool)      rt-ok
+r-col 3 eq                              (rotation col unchanged)     rt-ok
+r-row 5 eq                              (rotation row unchanged)     rt-ok
+r-state 1 eq                            (CW state advances)          rt-ok
+
+% State transitions wrap mod 4.
+3 state-cw 0 eq                         (3 CW -> 0)                  rt-ok
+0 state-ccw 3 eq                        (0 CCW -> 3)                 rt-ok
+
+% --- tspin-classify --------------------------------------------------
+
+% Empty field, T at top: not a T-spin (no corners filled).
+/c5 make-field def
+c5 T-piece 0 0 3 true tspin-classify
+/none eq                                (no t-spin on empty)         rt-ok
+
+% Build a T-spin shaped pocket: T pointing down at row 17, col 3,
+% with corners at (17, 3) (17, 5) (19, 3) (19, 5) all filled.
+/c6 make-field def
+c6 17 3 1 field-set
+c6 17 5 1 field-set
+c6 19 3 1 field-set
+c6 19 5 1 field-set
+c6 T-piece 2 17 3 true tspin-classify
+/full eq                                (full t-spin detected)       rt-ok
+
+% Last-move was NOT a rotation -> not a T-spin even with corners filled.
+c6 T-piece 2 17 3 false tspin-classify
+/none eq                                (non-rotation lock not tspin) rt-ok
+
+% Non-T piece -> never a T-spin.
+c6 J-piece 0 17 3 true tspin-classify
+/none eq                                (non-T not tspin)            rt-ok
+
+% --- seven-bag generator ---------------------------------------------
+
+% Same seed -> same first 14 pieces.
+42 init-bag
+/seq1 14 array def
+0 1 13 { /i exch def seq1 i bag-next-piece put } for
+42 init-bag
+/seq2 14 array def
+0 1 13 { /i exch def seq2 i bag-next-piece put } for
+0 1 13 {
+    /i exch def
+    seq1 i get /name get  seq2 i get /name get  eq
+    (bag deterministic by seed)  rt-ok
+} for
+
+% Each 7-piece window has every tetromino exactly once.
+99 init-bag
+/window-1 7 array def
+0 1 6 { /i exch def window-1 i bag-next-piece /name get put } for
+/seen 0 def
+all-pieces { /name get window-1 exch index-of -1 ne { /seen seen 1 add def } if } for-all
+seen 7 eq                               (every piece in first window)  rt-ok
+
+/window-2 7 array def
+0 1 6 { /i exch def window-2 i bag-next-piece /name get put } for
+/seen 0 def
+all-pieces { /name get window-2 exch index-of -1 ne { /seen seen 1 add def } if } for-all
+seen 7 eq                               (every piece in second window) rt-ok
+
+% bag-peek-piece doesn't consume; bag-next-piece does.
+7 init-bag
+/peek0a 0 bag-peek-piece /name get def
+/peek0b 0 bag-peek-piece /name get def
+peek0a peek0b eq                        (peek is idempotent)           rt-ok
+/next0 bag-next-piece /name get def
+peek0a next0 eq                         (peek then next returns same)  rt-ok
+/peek-after 0 bag-peek-piece /name get def
+peek-after next0 ne                     (queue head advances)          rt-ok
+
+% Oracle peeks deeper -- peek 3 then sequential next 3 should match.
+123 init-bag
+/p0 0 bag-peek-piece /name get def
+/p1 1 bag-peek-piece /name get def
+/p2 2 bag-peek-piece /name get def
+/n0 bag-next-piece /name get def
+/n1 bag-next-piece /name get def
+/n2 bag-next-piece /name get def
+p0 n0 eq p1 n1 eq and p2 n2 eq and       (peek 0..2 matches next 0..2) rt-ok
+
+% --- NES drop-table --------------------------------------------------
+
+drop-frames-table length 30 eq          (drop-frames-table has 30)    rt-ok
+drop-frames-table 0 get 48 eq           (level 0 = 48 frames)         rt-ok
+drop-frames-table 9 get 6 eq            (level 9 = 6 frames)          rt-ok
+drop-frames-table 29 get 1 eq           (level 29 = 1 frame)          rt-ok
+
+% level-drop-ms = frames * 1000 / 60
+0 level-drop-ms 800 eq                  (level 0 = 800ms gravity)     rt-ok
+9 level-drop-ms 100 eq                  (level 9 = 100ms gravity)     rt-ok
+29 level-drop-ms 16 eq                  (level 29 = 16ms gravity)     rt-ok
+50 level-drop-ms 16 eq                  (over-cap pegs at level 29)   rt-ok
+
+% --- scoring ---------------------------------------------------------
+%
+% compute-score returns (pts b2b combo).  We bind all three at once via
+% a `{ |pts b2b combo|#3 ... } exec` block per assertion -- one stack
+% pop sequence, no leftovers, locals scoped to the block.
+
+1 /none 0 false -1 0 0 compute-score
+{ |pts b2b combo|#3
+    pts 100 eq                          (single L0 = 100)             rt-ok
+    b2b not                             (single is not b2b-eligible)  rt-ok
+    combo 0 eq                          (combo starts at 0 on clear)  rt-ok
+} exec
+
+4 /none 0 false -1 0 0 compute-score
+{ |pts b2b combo|#3
+    pts 800 eq                          (four-line clear L0 = 800)             rt-ok
+    b2b                                 (four-line clear is b2b-eligible)      rt-ok
+} exec
+
+% Back-to-back four-line clear: 800 * 1.5 = 1200 (integer math: 800*3/2).
+4 /none 0 true -1 0 0 compute-score
+{ |pts b2b combo|#3
+    pts 1200 eq                         (b2b four-line clear = 1200)           rt-ok
+} exec
+
+% T-spin double at level 1 = 1200 * (1+1) = 2400.
+2 /full 1 false -1 0 0 compute-score
+{ |pts b2b combo|#3
+    pts 2400 eq                         (T-spin double L1 = 2400)     rt-ok
+} exec
+
+% Mini T-spin single at level 0 = 200.
+1 /mini 0 false -1 0 0 compute-score
+{ |pts b2b combo|#3
+    pts 200 eq                          (mini T-spin single L0 = 200) rt-ok
+} exec
+
+% Soft drop bonus: 5 cells = +5.
+0 /none 0 false -1 5 0 compute-score
+{ |pts b2b combo|#3
+    pts 5 eq                            (5-cell soft drop = 5pts)     rt-ok
+} exec
+
+% Hard drop bonus: 10 cells = +20.
+0 /none 0 false -1 0 10 compute-score
+{ |pts b2b combo|#3
+    pts 20 eq                           (10-cell hard drop = 20pts)   rt-ok
+} exec
+
+% Combo: 2nd consecutive single at level 0.  Base 100 + combo bonus
+% 50*1*(0+1) = 50.
+1 /none 0 false 0 0 0 compute-score
+{ |pts b2b combo|#3
+    pts 150 eq                          (single + 1-combo = 150)      rt-ok
+    combo 1 eq                          (combo increments)            rt-ok
+} exec
+
+% No-clear lock resets combo to -1.
+0 /none 0 false 5 0 0 compute-score
+{ |pts b2b combo|#3
+    combo -1 eq                         (no-clear resets combo)       rt-ok
+} exec
+
+% --- CLI parsing -----------------------------------------------------
+
+% Empty argv -> seed-from-cli false, seed from clock.
+/cfg-empty [] parse-args-array def
+cfg-empty /seed-from-cli get false eq   (empty argv: seed-from-cli=false) rt-ok
+cfg-empty /seed get 0 ge                (empty argv: seed >= 0)       rt-ok
+
+% --seed N -> seed-from-cli true, seed=N.
+/cfg-seed [(--seed) (42)] parse-args-array def
+cfg-seed /seed-from-cli get true eq     (--seed 42: from-cli=true)    rt-ok
+cfg-seed /seed get 42 eq                (--seed 42: seed=42)          rt-ok
+
+% --seed at the end with no value -> ignored, seed stays default.
+/cfg-trailing [(--seed)] parse-args-array def
+cfg-trailing /seed-from-cli get false eq (--seed alone is ignored)    rt-ok
+
+% Mixed flags -> only --seed picked up.
+/cfg-mixed [(--mono) (--seed) (7) (--ai-peek)] parse-args-array def
+cfg-mixed /seed get 7 eq                (--seed in mixed argv)        rt-ok
+cfg-mixed /seed-from-cli get true eq    (mixed argv: from-cli=true)   rt-ok
+cfg-mixed /mode get /ai-peek eq         (--ai-peek selects mode)      rt-ok
+
+% --render-demo flips render-demo flag.
+/cfg-demo [(--render-demo)] parse-args-array def
+cfg-demo /render-demo get true eq       (--render-demo: flag set)     rt-ok
+cfg-empty /render-demo get false eq     (no flag: render-demo=false)  rt-ok
+
+% --help / -h set the help flag.  parse-args-array does NOT exit
+% itself -- that's the caller's job (parse-tetrix-args at the boot
+% path), so the test can poke the flag without quitting.
+/cfg-help-long  [(--help)]      parse-args-array def
+cfg-help-long  /help get true eq        (--help: flag set)            rt-ok
+/cfg-help-short [(-h)]          parse-args-array def
+cfg-help-short /help get true eq        (-h: flag set)                rt-ok
+cfg-empty /help get false eq            (no flag: help=false)         rt-ok
+
+% --- Phase 3: rendering -------------------------------------------------
+
+% mode-color picks the right border SGR index per mode.
+/human    mode-color 15 eq             (HUMAN border = white)         rt-ok
+/ai-peek  mode-color 51 eq             (AI-PEEK border = cyan)        rt-ok
+/ai-oracle mode-color 201 eq           (AI-ORACLE border = magenta)   rt-ok
+
+% int-to-string round-trip.
+0 int-to-string (0) eq                 (int-to-string 0)              rt-ok
+12345 int-to-string (12345) eq         (int-to-string 12345)          rt-ok
+
+% piece-ghost-row: empty field, T spawning at row 0 col 3 -> bottom of
+% reachable column.  Cells are at rows py+0 and py+1 in spawn rotation,
+% so the deepest row before py+1 leaves the field is field-rows-2 = 18.
+/g make-field def
+g T-piece 0 0 3 piece-ghost-row 18 eq  (ghost row -- empty field)     rt-ok
+
+% T-piece spawn shape has cells at field rows py+0 and py+1.  A block
+% at (3, 4) blocks the T such that the bottom row can't reach row 3:
+% deepest legal py is 1 (T's bottom row at 2, no overlap with row 3).
+/g2 make-field def
+g2 3 4 1 field-set
+g2 T-piece 0 0 3 piece-ghost-row 1 eq  (ghost row above obstacle)     rt-ok
+
+% make-state seeds a fresh game state; bag must be initialised first.
+99 init-bag
+/st0 /human make-state def
+st0 /score get 0 eq                    (state /score starts 0)        rt-ok
+st0 /level get 0 eq                    (state /level starts 0)        rt-ok
+st0 /lines get 0 eq                    (state /lines starts 0)        rt-ok
+st0 /mode get /human eq                (state mode echoes arg)        rt-ok
+st0 /piece get /color get 0 ge          (state piece has color)       rt-ok
+st0 /next get /shapes get length 4 eq  (state next has shapes)        rt-ok
+st0 /hold get /none eq                 (state hold starts /none)      rt-ok
+st0 /field get length 20 eq            (state field is 20 rows)       rt-ok
+
+% redraw produces non-empty output through screen-render-to.
+% with-screen + a 256-byte string-stream gives us a smoke test that the
+% painter actually emits cells without booting the terminal (no raw-mode,
+% no alt-screen).
+40 22 {|scr|#5
+    scr st0 redraw
+    /sink 4096 make-string-stream local-def
+    scr sink screen-render-to pop
+    /bytes sink get-string-stream local-def
+    bytes length 0 gt                  (redraw emits bytes)            rt-ok
+} with-screen
+
+% --- Phase 4: state transitions ----------------------------------------
+
+% try-move into open space succeeds; piece-row/col mutate.
+99 init-bag
+/m1 /human make-state def
+m1 1 0 try-move                        (try-move down on empty)        rt-ok
+m1 /piece-row get 1 eq                 (try-move down: row=1)          rt-ok
+m1 /piece-col get 3 eq                 (try-move down: col=3)          rt-ok
+
+% try-move into the floor fails and leaves state unchanged.
+/m2 /human make-state def
+m2 /piece-row 18 put
+m2 1 0 try-move not                    (try-move into floor: false)    rt-ok
+m2 /piece-row get 18 eq                (try-move floor: row unchanged) rt-ok
+
+% try-rotate CW from spawn lands on identity kick.
+99 init-bag
+/r1 /human make-state def
+r1 /piece T-piece put                  % force a known piece for the test
+r1 /piece-row 5 put
+r1 /piece-col 4 put
+r1 true try-rotate                     (try-rotate cw open space)      rt-ok
+r1 /piece-state get 1 eq               (cw advances state to 1)        rt-ok
+
+% lock-piece on near-floor piece advances /next -> /piece and resets row.
+99 init-bag
+/L1 /human make-state def
+L1 /piece-row 18 put
+/expected-next L1 /next get def
+L1 lock-piece
+L1 /piece get expected-next eq         (lock spawns previewed piece)   rt-ok
+L1 /piece-row get 0 eq                 (lock resets piece-row)         rt-ok
+L1 /piece-col get 3 eq                 (lock resets piece-col)         rt-ok
+L1 /piece-state get 0 eq               (lock resets piece-state)       rt-ok
+L1 /can-hold get true eq               (lock re-enables hold)          rt-ok
+
+% lock fills the bottom row at the merge site (T-piece bottom row at 19).
+99 init-bag
+/L2 /human make-state def
+L2 /piece T-piece put
+L2 /piece-row 18 put
+L2 /piece-col 3 put
+L2 lock-piece
+L2 /field get 19 4 field-get T-piece /color get eq
+                                        (lock writes piece color)      rt-ok
+
+% Pre-fill row 19, then lock a T-piece on top.  field-clear-rows then
+% drops the now-full row and /lines bumps by 1.
+99 init-bag
+/L3 /human make-state def
+0 1 9 { /c exch def L3 /field get 19 c 1 field-set } for
+L3 /piece T-piece put
+L3 /piece-row 18 put
+L3 /piece-col 3 put
+L3 lock-piece
+L3 /lines get 1 eq                     (one full row clears)           rt-ok
+
+% hold-piece on /none takes from bag.
+99 init-bag
+/H1 /human make-state def
+/before-piece H1 /piece get def
+H1 hold-piece
+H1 /hold get before-piece eq           (hold stashes live piece)       rt-ok
+H1 /can-hold get false eq              (hold disables can-hold)        rt-ok
+% Second hold same spawn does nothing.
+/after-piece H1 /piece get def
+H1 hold-piece
+H1 /piece get after-piece eq           (second hold blocked)           rt-ok
+
+% toggle-pause flips the flag.
+/P1 /human make-state def
+P1 toggle-pause
+P1 /paused get true eq                 (toggle-pause: true)            rt-ok
+P1 toggle-pause
+P1 /paused get false eq                (toggle-pause: false)           rt-ok
+
+% --- Phase 5: T-spin scoring wired into lock --------------------------
+
+% try-rotate sets /last-rotation; try-move clears it.
+99 init-bag
+/R1 /human make-state def
+R1 /piece T-piece put
+R1 /piece-row 5 put
+R1 /piece-col 4 put
+R1 /last-rotation get false eq         (initial /last-rotation false)  rt-ok
+R1 true try-rotate pop
+R1 /last-rotation get true eq          (try-rotate sets last-rotation) rt-ok
+R1 0 1 try-move pop
+R1 /last-rotation get false eq         (try-move clears last-rotation) rt-ok
+
+% Build the standard 3-corner T-spin pocket: T points down at row 17,
+% col 3, with corners (17, 3) (17, 5) (19, 3) (19, 5) all filled.
+% Locking with /last-rotation true classifies as /full and awards 400.
+99 init-bag
+/T1 /human make-state def
+/T1-fld T1 /field get def
+T1-fld 17 3 1 field-set
+T1-fld 17 5 1 field-set
+T1-fld 19 3 1 field-set
+T1-fld 19 5 1 field-set
+T1 /piece T-piece put
+T1 /piece-state 2 put
+T1 /piece-row 17 put
+T1 /piece-col 3 put
+T1 /last-rotation true put
+T1 lock-piece
+T1 /score get 400 eq                   (T-spin no-lines = 400 pts)     rt-ok
+T1 /last-b2b get false eq              (T-spin no-lines doesn't set b2b) rt-ok
+
+% Same field, but /last-rotation false -> /none -> no T-spin bonus.
+99 init-bag
+/T2 /human make-state def
+/T2-fld T2 /field get def
+T2-fld 17 3 1 field-set
+T2-fld 17 5 1 field-set
+T2-fld 19 3 1 field-set
+T2-fld 19 5 1 field-set
+T2 /piece T-piece put
+T2 /piece-state 2 put
+T2 /piece-row 17 put
+T2 /piece-col 3 put
+T2 lock-piece
+T2 /score get 0 eq                     (lock w/o rotation: 0 pts)      rt-ok
+T2 /last-b2b get false eq              (no T-spin: not b2b)            rt-ok
+
+% Mini T-spin: only one front corner filled (19, 3) but both back
+% corners (17, 3) (17, 5) plus the front (19, 3).  3 total, 1 front -> /mini.
+% Mini single = line-points-mini[0] = 100; here lines=0 so 0... actually
+% mini[0] is 100 -- a freebie credit for landing the mini even with no
+% lines.  Pocket without (19, 5) so row 19 stays not-full.
+99 init-bag
+/T3 /human make-state def
+/T3-fld T3 /field get def
+T3-fld 17 3 1 field-set
+T3-fld 17 5 1 field-set
+T3-fld 19 3 1 field-set
+T3 /piece T-piece put
+T3 /piece-state 2 put
+T3 /piece-row 17 put
+T3 /piece-col 3 put
+T3 /last-rotation true put
+T3 lock-piece
+T3 /score get 100 eq                   (mini T-spin no-lines = 100)    rt-ok
+
+% hard-drop with non-zero displacement clears /last-rotation, so a
+% rotation followed by a hard-drop is not scored as a T-spin even if
+% the corners would otherwise classify.
+99 init-bag
+/HD /human make-state def
+/HD-fld HD /field get def
+HD-fld 17 3 1 field-set
+HD-fld 17 5 1 field-set
+HD-fld 19 3 1 field-set
+HD-fld 19 5 1 field-set
+HD /piece T-piece put
+HD /piece-state 2 put
+HD /piece-row 5 put                                % well above the pocket
+HD /piece-col 3 put
+HD /last-rotation true put                          % rotation just happened
+HD hard-drop
+% Piece's bottom (row offset +2) lands when its row+2 hits the pre-filled
+% (17, 3)/(17, 5) corners.  Ghost row = 15; dropped = 10 cells = 20 pts.
+HD /score get 20 eq                    (hard-drop 10 cells * 2pts = 20)         rt-ok
+HD /last-b2b get false eq              (hard-drop scrubs T-spin classify)       rt-ok
+
+% --- Phase 6: AI heuristic + placement search -------------------------
+
+% column-heights on an empty field is all zeros.
+/EF make-field def
+/EH EF column-heights def
+EH 0 get 0 eq                          (empty col 0 height = 0)              rt-ok
+EH 9 get 0 eq                          (empty col 9 height = 0)              rt-ok
+
+% Salt one cell at row 17 col 3: heights[3] = 20 - 17 = 3, others stay 0.
+EF 17 3 5 field-set
+/EH2 EF column-heights def
+EH2 3 get 3 eq                         (single block sets height 3)          rt-ok
+EH2 0 get 0 eq                         (untouched col still 0)               rt-ok
+
+% Aggregate height + bumpiness on a flat 4-cell stack.
+/FB make-field def
+0 1 9 { /c exch def FB 19 c 7 field-set } for
+/HB FB column-heights def
+HB aggregate-height 10 eq              (flat row -> aggregate 10)            rt-ok
+HB bumpiness 0 eq                      (flat surface -> 0 bumpiness)         rt-ok
+FB HB count-holes 0 eq                 (no holes on flat surface)            rt-ok
+
+% Holes: a covered empty cell.
+/FH make-field def
+FH 18 5 7 field-set                                  % block at (18,5)
+% (19,5) is empty under the block -> 1 hole.
+/HH FH column-heights def
+FH HH count-holes 1 eq                 (one hole under floating block)       rt-ok
+
+% Bumpiness: stack heights {2 0 0 ...}: |2-0| + |0-0|*8 = 2.
+/FBP make-field def
+FBP 18 0 7 field-set
+FBP 19 0 7 field-set
+/HBP FBP column-heights def
+HBP bumpiness 2 eq                     (height-2 column vs 0 -> bumpy 2)     rt-ok
+
+% Well-depth: dig a 4-deep column at col 5 surrounded by 4-tall walls.
+/FW make-field def
+16 1 19 { /r exch def FW r 4 7 field-set FW r 6 7 field-set } for
+/HW FW column-heights def
+HW well-depth 4 ge                     (well between 4-tall walls counts)    rt-ok
+
+% score-board returns a number.  On an empty field with no clears, the
+% score is simply 0 (no penalties since heights/holes/bumpy/well are all 0).
+EF clear-object pop                    % field is mutable; this is a no-op for empty
+/EF2 make-field def
+EF2 0 score-board 0 eq                 (empty/0-clear -> 0)                  rt-ok
+
+% synthesize-keys: spawn-config moves to (rot=0, col=5).
+0 0 3 5 synthesize-keys /K1 exch def
+K1 length 3 eq                         (3 right-moves + space)               rt-ok
+K1 0 get /right eq                     (first key is /right)                 rt-ok
+K1 2 get /space eq                     (last key is /space)                  rt-ok
+
+% synthesize-keys: rotation diff 1 -> single /up.
+0 1 3 3 synthesize-keys /K2 exch def
+K2 length 2 eq                         (one /up plus /space)                 rt-ok
+K2 0 get /up eq                        (first key is /up)                    rt-ok
+
+% synthesize-keys: rotation diff 3 -> single /z (CCW shortcut).
+0 3 3 3 synthesize-keys /K3 exch def
+K3 0 get /z eq                         (rot-diff 3 emits /z)                 rt-ok
+
+% synthesize-keys: rotation diff 2 -> two /up.
+0 2 3 3 synthesize-keys /K4 exch def
+K4 0 get /up eq                        (rot-diff 2: first up)                rt-ok
+K4 1 get /up eq                        (rot-diff 2: second up)               rt-ok
+
+% best-placement + best-placement-peek on a salted (almost-full) board.
+% Stack rows 16..19 with cells in cols 1..9, leaving column 0 as a deep
+% well; only a handful of placements are now feasible, so the search
+% completes in milliseconds (the empty-board search is ~500 ms / ~16 s
+% respectively -- fine for a real coroutine, ruinous for an inline test).
+/FBP2 make-field def
+16 1 19 { /r exch def 1 1 9 { /c exch def FBP2 r c 7 field-set } for } for
+FBP2 T-piece best-placement
+/BC exch def /BR exch def
+BR 0 ge BR 3 le and                    (best-rot in [0..3])                  rt-ok
+BC -3 ge BC 9 le and                   (best-col in [-3..9])                 rt-ok
+
+FBP2 T-piece I-piece best-placement-peek
+/PC exch def /PR exch def
+PR 0 ge PR 3 le and                    (peek-rot in [0..3])                  rt-ok
+PC -3 ge PC 9 le and                   (peek-col in [-3..9])                 rt-ok
+
+% best-placement-oracle, depth 1 (empty futures): same enumerator as
+% best-placement, so the chosen (rot, col) must equal best-placement's.
+FBP2 T-piece [] best-placement-oracle
+/OC1 exch def /OR1 exch def
+FBP2 T-piece best-placement
+/BC1 exch def /BR1 exch def
+OR1 BR1 eq                             (oracle depth-1 rot = best-placement) rt-ok
+OC1 BC1 eq                             (oracle depth-1 col = best-placement) rt-ok
+
+% best-placement-oracle, depth 2: same shape as best-placement-peek.
+% Both score the same lookahead window, so they should agree.
+FBP2 T-piece [ I-piece ] best-placement-oracle
+/OC2 exch def /OR2 exch def
+FBP2 T-piece I-piece best-placement-peek
+/PC2 exch def /PR2 exch def
+OR2 PR2 eq                             (oracle depth-2 rot = peek)           rt-ok
+OC2 PC2 eq                             (oracle depth-2 col = peek)           rt-ok
+
+% best-placement-oracle, depth 3: returns sane (rot, col) bounds and a
+% valid placement (not the sentinel low-score fallback).
+FBP2 T-piece [ I-piece O-piece ] best-placement-oracle
+/OC3 exch def /OR3 exch def
+OR3 0 ge OR3 3 le and                  (oracle depth-3 rot in [0..3])        rt-ok
+OC3 -3 ge OC3 9 le and                 (oracle depth-3 col in [-3..9])       rt-ok
+
+% piece-seq increments on lock.
+/SQ /human make-state def
+/seq0 SQ /piece-seq get def
+SQ lock-piece
+SQ /piece-seq get seq0 1 add eq        (lock-piece bumps piece-seq)          rt-ok
+
+% piece-seq increments on hold.
+/SQ2 /human make-state def
+/seq1 SQ2 /piece-seq get def
+SQ2 hold-piece
+SQ2 /piece-seq get seq1 1 add eq       (hold-piece bumps piece-seq)          rt-ok
+
+% parse-args-array: --ai-speed and --ai-depth land in cfg.
+/cfg-ai [(--ai-peek) (--ai-speed) (3) (--ai-depth) (5) (--seed) (1)] parse-args-array def
+cfg-ai /ai-speed get 3 eq              (--ai-speed parses to 3)              rt-ok
+cfg-ai /ai-depth get 5 eq              (--ai-depth parses to 5)              rt-ok
+cfg-ai /mode get /ai-peek eq           (--ai-peek selects mode)              rt-ok
+cfg-ai /self-test get false eq         (--ai-peek leaves /self-test off)     rt-ok
+
+% --- Phase 8: pack/unpack persistence ---------------------------------
+
+% fletcher32 sanity: empty -> 0, identical inputs match, single-byte
+% changes are detected (the property the trailing checksum relies on).
+() fletcher32 0u eq                     (fletcher32: empty input -> 0)         rt-ok
+(abcde) fletcher32  (abcde) fletcher32 eq  (fletcher32: deterministic)         rt-ok
+(abcde) fletcher32  (abcdf) fletcher32 ne  (fletcher32: 1-byte change detected) rt-ok
+(hello) fletcher32  (hellp) fletcher32 ne  (fletcher32: tail-byte change detected) rt-ok
+
+% piece <-> id round-trips for all 7 pieces + /none.
+0 1 6 {
+    /i exch def
+    all-pieces i get piece-to-id i eq   (piece-to-id roundtrip)               rt-ok
+    i id-to-piece /name get all-pieces i get /name get eq
+                                        (id-to-piece roundtrip)               rt-ok
+} for
+/none piece-or-none-to-id 7 eq         (/none -> 7)                          rt-ok
+7 id-to-piece-or-none /none eq         (7 -> /none)                          rt-ok
+T-piece piece-or-none-to-id 2 eq       (T-piece -> 2 via or-none variant)    rt-ok
+
+% bool <-> byte round-trips.
+true bool-to-byte 1 eq                  (bool-to-byte: true -> 1)             rt-ok
+false bool-to-byte 0 eq                 (bool-to-byte: false -> 0)            rt-ok
+1b byte-to-bool true eq                 (byte-to-bool: 1b -> true)            rt-ok
+0b byte-to-bool false eq                (byte-to-bool: 0b -> false)           rt-ok
+
+% Mode <-> id round-trips.
+/human mode-to-id 0 eq                  (mode-to-id: human)                   rt-ok
+/ai-peek mode-to-id 1 eq                (mode-to-id: ai-peek)                 rt-ok
+/ai-oracle mode-to-id 2 eq              (mode-to-id: ai-oracle)               rt-ok
+0 id-to-mode /human eq                  (id-to-mode: 0)                       rt-ok
+1 id-to-mode /ai-peek eq                (id-to-mode: 1)                       rt-ok
+2 id-to-mode /ai-oracle eq              (id-to-mode: 2)                       rt-ok
+
+% Save/load round-trip on a fresh state.
+/save-test-path (/tmp/tetrix-test.save) def
+17 init-bag
+/orig-fresh /human make-state def
+orig-fresh save-test-path save-state
+/loaded-fresh save-test-path load-state def
+loaded-fresh /score get        orig-fresh /score get        eq        (rt fresh: score)        rt-ok
+loaded-fresh /level get        orig-fresh /level get        eq        (rt fresh: level)        rt-ok
+loaded-fresh /lines get        orig-fresh /lines get        eq        (rt fresh: lines)        rt-ok
+loaded-fresh /piece get /name get   orig-fresh /piece get /name get   eq  (rt fresh: piece)   rt-ok
+loaded-fresh /next get /name get    orig-fresh /next get /name get    eq  (rt fresh: next)    rt-ok
+loaded-fresh /hold get  /none eq                                              (rt fresh: hold = /none) rt-ok
+loaded-fresh /mode get /human eq                                              (rt fresh: mode)         rt-ok
+loaded-fresh /paused get false eq                                             (rt fresh: paused)       rt-ok
+loaded-fresh /game-over get false eq                                          (rt fresh: game-over)    rt-ok
+
+% Save/load round-trip on a salted state with a populated field, hold,
+% non-zero score/level/lines, paused, ai-oracle mode.
+42 init-bag
+/orig-salt /ai-oracle make-state def
+orig-salt /score 12345 put
+orig-salt /level 7 put
+orig-salt /lines 73 put
+orig-salt /combo 3 put
+orig-salt /last-b2b true put
+orig-salt /paused true put
+orig-salt /piece-seq 99 put
+orig-salt /hold T-piece put
+orig-salt /can-hold false put
+orig-salt /piece-row 4 put
+orig-salt /piece-col 5 put
+orig-salt /piece-state 2 put
+% Salt the field with a few cells.
+/sf orig-salt /field get def
+0 1 9 { /c exch def sf 19 c S-piece /color get field-set } for
+sf 19 4 0 field-set
+sf 19 5 0 field-set
+sf 18 0 L-piece /color get field-set
+sf 17 9 J-piece /color get field-set
+orig-salt save-test-path save-state
+/loaded-salt save-test-path load-state def
+loaded-salt /score get 12345 eq         (rt salt: score)         rt-ok
+loaded-salt /level get 7 eq             (rt salt: level)         rt-ok
+loaded-salt /lines get 73 eq            (rt salt: lines)         rt-ok
+loaded-salt /combo get 3 eq             (rt salt: combo)         rt-ok
+loaded-salt /last-b2b get true eq       (rt salt: last-b2b)      rt-ok
+loaded-salt /paused get true eq         (rt salt: paused)        rt-ok
+loaded-salt /piece-seq get 99 eq        (rt salt: piece-seq)     rt-ok
+loaded-salt /hold get /name get /T eq   (rt salt: hold = T)      rt-ok
+loaded-salt /can-hold get false eq      (rt salt: can-hold)      rt-ok
+loaded-salt /piece-row get 4 eq         (rt salt: piece-row)     rt-ok
+loaded-salt /piece-col get 5 eq         (rt salt: piece-col)     rt-ok
+loaded-salt /piece-state get 2 eq       (rt salt: piece-state)   rt-ok
+loaded-salt /mode get /ai-oracle eq     (rt salt: mode)          rt-ok
+loaded-salt /field get 19 0 field-get S-piece /color get eq  (rt salt: field [19,0]) rt-ok
+loaded-salt /field get 19 4 field-get 0 eq                   (rt salt: field [19,4] gap) rt-ok
+loaded-salt /field get 18 0 field-get L-piece /color get eq  (rt salt: field [18,0]) rt-ok
+loaded-salt /field get 17 9 field-get J-piece /color get eq  (rt salt: field [17,9]) rt-ok
+loaded-salt /field get 0 0 field-get 0 eq                    (rt salt: field [0,0] empty) rt-ok
+
+% Bag continuation: the next piece drawn after load matches what would
+% have been drawn from the original bag.  Capture the next-piece in
+% the original PRE-save, then reload and draw again.
+77 init-bag
+/orig-bag /human make-state def
+% Draw two pieces, save, then re-load and confirm next draws line up.
+/expected-a bag-next-piece def
+/expected-b bag-next-piece def
+/expected-c bag-next-piece def
+% Re-init to capture state at the same point, save, then load.
+77 init-bag
+/orig-bag2 /human make-state def
+bag-next-piece pop                                  % consume one (matches orig-bag's first draw indirectly via make-state's first piece)
+% Save here, mid-bag.
+orig-bag2 save-test-path save-state
+% Force a different PRNG state by reseeding then drawing junk.
+99 init-bag
+0 1 5 { pop bag-next-piece pop } for
+/loaded-bag save-test-path load-state def
+% Now bag-next-piece should produce expected-b, expected-c (after make-state's first consumed expected-a equivalent).
+/got-b bag-next-piece def
+got-b /name get expected-b /name get eq                      (rt bag: continuation B) rt-ok
+
+% Cleanup the test artifact so a stray file doesn't confuse later runs.
+save-test-path delete-file
+
+% Corruption detection: hand-edit a byte and verify load throws.
+17 init-bag
+/orig-corrupt /human make-state def
+orig-corrupt save-test-path save-state
+% Flip a byte in the field area and re-write.
+save-test-path (r)#b stream
+/cs exch def
+cs read-all
+/raw exch def
+cs close-stream
+raw 100 raw 100 get 1b add put                     % bump byte 100 by 1 (byte-add)
+save-test-path (w)#b stream
+/cs2 exch def
+cs2 raw write-string
+cs2 close-stream
+{ save-test-path load-state pop }
+try /save-corrupt eq                              (corruption: caught by checksum) rt-ok
+save-test-path delete-file
+
+% --- Phase 9: polish -------------------------------------------------
+% Phase 9 features (title splash, line-clear flash, game-over flash) are
+% almost entirely visual and observed in fullscreen mode.  The covered
+% assertions verify the no-op contracts that protect the in-source self-
+% test (and the AI-search + pure-test paths) from accidentally driving a
+% screen-render against a null screen handle.
+
+flash-screen-cell 0 get null eq             (Phase 9: flash cell starts null) rt-ok
+
+% do-line-clear-flash on an empty rows array MUST return cleanly without
+% touching the screen even if a screen were wired (early-out on length 0).
+{ [] do-line-clear-flash } try /no-error eq (Phase 9: empty-rows flash no-op) rt-ok
+
+% do-line-clear-flash with rows but null screen MUST also be a clean no-op.
+{ [3 4] do-line-clear-flash } try /no-error eq (Phase 9: null-scr flash no-op) rt-ok
+
+% do-game-over-flash must no-op silently when no screen is wired.
+{ /human make-state do-game-over-flash } try /no-error eq (Phase 9: null-scr go-flash no-op) rt-ok
+
+% lock-piece on a near-full row must clear it AND leave flash cell null
+% (no game-actor-body has run during the self-test).  Re-uses Phase 4's
+% lock-piece on a salted state: pre-fill row 19 cols 0..8 (gap at col 9)
+% and place an I-piece vertically in col 9 spanning rows 16..19; locking
+% it should clear row 19 (1 line) without exploding through the new
+% flash codepath.
+0 init-bag
+/L9 /human make-state def
+0 1 8 { /c exch def L9 /field get 19 c T-piece /color get field-set } for
+L9 /piece I-piece put
+L9 /piece-state 1 put           % vertical orientation (col index 2 in shape)
+L9 /piece-row 16 put
+L9 /piece-col 7 put             % shape col 2 lands in field col 9
+/lines-before L9 /lines get def
+L9 lock-piece
+L9 /lines get lines-before sub 1 eq         (Phase 9: lock + clear via flashpath) rt-ok
+flash-screen-cell 0 get null eq             (Phase 9: flash cell still null after lock) rt-ok
+
+% --- summary --------------------------------------------------------
+
+(\ntetrix.trx Phase 1+2+3+4+5+6+7+8+9 self-test:\n) print
+(  passed: ) print passed =
+(  failed: ) print failed =
+(  total:  ) print total =
+flush
+
+failed 0 ne { (FAIL) /assert-failed throw-with } if

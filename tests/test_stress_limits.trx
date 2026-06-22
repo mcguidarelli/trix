@@ -1,0 +1,233 @@
+% ====================================================================
+% test_stress_limits.trx -- stress tests for stack/VM/data limits
+% ====================================================================
+% Stack exhaustion, VM memory, large data structures, deep nesting
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Operand stack overflow detection
+% ====================================================================
+
+% Verify we can use most of the stack without overflow
+mark
+900 { 42 } repeat
+count-to-mark 900 eq  (stress: 900 items on opstack) rt-ok
+clear-to-mark clear
+
+% ====================================================================
+% SECTION 2: Execution stack overflow detection
+% ====================================================================
+
+% Recursive procedure exhausts execution stack (non-tail to defeat TCO)
+/recurse { recurse 1 pop } def
+{ recurse } try
+/execstack-overflow eq  (stress: execstack overflow detected) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Dictionary stack overflow detection
+% ====================================================================
+
+% Push dicts until dictstack overflow
+{ { 1 dict begin } loop } try
+/dictstack-overflow eq  (stress: dictstack overflow detected) rt-ok
+% Clean up: end all extra dicts (dictstack has 3 permanent base dicts)
+{ count-dictstack 3 gt { end } if count-dictstack 3 le { exit } if } loop
+clear
+
+% ====================================================================
+% SECTION 4: Large array creation and manipulation
+% ====================================================================
+
+% Create a 100-element array via range
+0 100 range-from
+dup length 100 eq    (large-array: 100 elements) rt-ok
+dup 0 get 0 eq       (large-array: first = 0) rt-ok
+dup 99 get 99 eq     (large-array: last = 99) rt-ok
+
+% sum of 0..99 = 4950
+dup sum 4950 eq      (large-array: sum = 4950) rt-ok
+
+% sort is stable on sorted input
+dup sort 0 get 0 eq  (large-array: sort first = 0) rt-ok
+
+% filter: keep evens
+{ 2 mod 0 eq } filter
+dup length 50 eq     (large-array: filter evens = 50) rt-ok
+pop clear
+
+% ====================================================================
+% SECTION 5: Large string creation
+% ====================================================================
+
+% Create a 1000 byte string
+1000 string
+dup length 1000 eq  (large-string: 1000 bytes) rt-ok
+
+% Fill with pattern
+dup 0 65b put
+dup 1 66b put
+dup 999 90b put
+dup 0 get 65b eq  (large-string: first byte) rt-ok
+dup 999 get 90b eq  (large-string: last byte) rt-ok
+pop clear
+
+% --------------------------------------------------------------------
+% SECTION 5b: MaxStringLength boundary (regression: engine bug #19)
+% --------------------------------------------------------------------
+% A 65535-byte string is exactly MaxStringLength, but its backing
+% buffer is length+1 = 65536 bytes (the nul slot), one past length_t.
+% `string`/`repeat-string`/global-dict-key once routed that buffer
+% through the element-count _n alloc path, whose length_t assert
+% aborted the process on this exact size.  These must now succeed.
+
+% `string` at the cap
+65535 string
+dup length 65535 eq  (maxstr: 65535 string) rt-ok
+dup 65534 65b put
+dup 65534 get 65b eq  (maxstr: last byte writable) rt-ok
+pop clear
+
+% `repeat-string` landing exactly on the cap (5 x 13107 = 65535)
+(abcde) 13107 repeat-string
+dup length 65535 eq  (maxstr: repeat-string to cap) rt-ok
+pop clear
+
+% one past the cap still raises limit-check (not abort)
+{ (ab) 32768 repeat-string } try
+/limit-check eq  (maxstr: 65536 raises limit-check) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Large dictionary
+% ====================================================================
+
+% Create dict with 50 entries
+100 dynamic-dict
+/big-dict exch def
+0 1 49 { /i exch def
+  big-dict i i i mul put
+} for
+big-dict length 50 eq    (large-dict: 50 entries) rt-ok clear
+big-dict 0 get 0 eq      (large-dict: key 0 -> 0) rt-ok clear
+big-dict 49 get 2401 eq  (large-dict: key 49 -> 2401) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Deeply nested arrays
+% ====================================================================
+
+% Build nested array 100 levels deep: [[[...[42]...]]]
+42
+100 { 1 array dup 0 4 -1 roll put } repeat
+/nested exch def
+
+% Unwrap 100 levels to get 42
+//nested
+100 { 0 get } repeat
+42 eq  (deep-nest: 100 levels unwrap = 42) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Many save/restore cycles
+% ====================================================================
+
+% Single save and restore cycle
+//:status:save-level /base-sv exch def
+/s save def
+//:status:save-level base-sv 1 add eq  (save-restore: level +1) rt-ok clear
+s restore
+//:status:save-level base-sv eq  (save-restore: level restored) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Heavy string concatenation
+% ====================================================================
+
+% Concatenate 100 copies of "ABCDE" via join
+100 array
+0 1 99 { over exch (ABCDE) put } for
+() join
+dup length 500 eq  (string-concat: 100 x 5 = 500) rt-ok
+dup 0 get 65b eq   (string-concat: first = A) rt-ok
+pop clear
+
+% ====================================================================
+% SECTION 10: Repeated map/filter/reduce stress
+% ====================================================================
+
+% Chain: range -> map -> filter -> reduce
+0 20 range-from                % [0..19]
+{ 2 mul } map             % [0,2,4,...,38]
+{ 3 mod 0 eq } filter     % multiples of 6 in [0..38]: 0,6,12,18,24,30,36
+sum                        % sum = 0+6+12+18+24+30+36 = 126
+126 eq  (chain: map-filter-sum = 126) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Rapid stream open/close cycles
+% ====================================================================
+
+100 {
+  (/tmp/trix_stress_stream.txt) (w)#b stream
+  dup (test) write-string
+  close-stream
+} repeat
+
+(/tmp/trix_stress_stream.txt) (r)#b stream
+read-all (test) eq  (stream-cycle: 100 open/close ok) rt-ok clear
+(/tmp/trix_stress_stream.txt) delete-file
+
+% ====================================================================
+% SECTION 12: Error recovery cycles (try in tight loop)
+% ====================================================================
+
+/error-count 0 def
+100 {
+  { 1 0 div } try clear
+  /error-count error-count 1 add def
+} repeat
+error-count 100 eq  (error-recovery: 100 try cycles) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Regex on moderately large string
+% ====================================================================
+
+% Build a 50 char string of 'a' repeated
+(a) 50 repeat-string
+dup length 50 eq  (regex-stress: 50 char string) rt-ok
+
+% Match all 'a' characters
+dup (a) regex-find-all
+length 50 eq  (regex-stress: 50 matches) rt-ok clear
+
+% ====================================================================
+% SECTION 15: Large for loop
+% ====================================================================
+
+0
+0 1 999 { add } for
+499500 eq  (large-for: sum 0..999 = 499500) rt-ok clear
+
+% ====================================================================
+% SECTION 16: Deep procedure nesting (non-recursive)
+% ====================================================================
+
+% Build 50-deep nested array with proc at core: [[[...[ { 42 } ]...]]]
+% then unwrap all levels and exec the innermost proc
+{ 42 }
+50 { 1 array dup 0 4 -1 roll put } repeat
+50 { 0 get } repeat
+exec
+42 eq  (deep-proc: 50-level nested exec = 42) rt-ok clear
+
+% NOTE: vm-full detection test removed from shared suite.
+% It is covered by test_errors.trx and works standalone but
+% exhausts VM when run inside test_all.trx.
+
+(Stress and limit tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

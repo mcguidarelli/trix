@@ -1,0 +1,17 @@
+% bench_journal_write2.trx -- save_data with many writes per save scope.
+%
+% Different shape from bench_journal_write.trx: ONE outer save wraps
+% MANY puts.  Each unique entry's first put inside the save journals
+% (subsequent puts to the same entry don't re-journal -- save_level
+% matches).  So we pre-populate 1024 distinct keys at BASE, then put
+% to each one inside save -- 1024 journal writes per outer iter.
+
+/N 4096 def       % outer iters -> 4096 * 1024 = ~4M journal writes
+1024 dict /D exch def
+0 1 1023 { dup D exch 0 put pop } for
+
+N {
+    save
+    0 1 1023 { dup D exch 1 put pop } for
+    restore
+} repeat

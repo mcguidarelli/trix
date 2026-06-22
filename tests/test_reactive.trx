@@ -1,0 +1,1814 @@
+% ====================================================================
+% test_reactive.trx -- cell, cell-computed, cell-get, cell-set, cell-value,
+%                      is-cell, cell-dirty?, watch, unwatch, batch
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+/==s { /==s-v exch def =string ({0:O}) [ ==s-v ] asprint-fmt pop } def
+
+% =================================================================
+% SECTION 1: HAPPY PATH -- cell creation and basic ops
+% =================================================================
+
+10 cell is-cell                             (happy: cell creates cell) rt-ok  clear
+42 is-cell not                              (happy: integer is not cell) rt-ok  clear
+(hello) is-cell not                         (happy: string is not cell) rt-ok  clear
+null is-cell not                            (happy: null is not cell) rt-ok  clear
+true is-cell not                            (happy: bool is not cell) rt-ok  clear
+
+% =================================================================
+% SECTION 2: HAPPY PATH -- cell-get returns base cell value
+% =================================================================
+
+10 cell /c exch def
+c cell-get 10 eq                            (happy: cell-get returns initial value) rt-ok  clear
+
+% =================================================================
+% SECTION 3: HAPPY PATH -- cell-set updates base cell
+% =================================================================
+
+10 cell /c exch def
+20 c cell-set
+c cell-get 20 eq                            (happy: cell-set updates value) rt-ok  clear
+
+% =================================================================
+% SECTION 4: HAPPY PATH -- cell-get after cell-set
+% =================================================================
+
+10 cell /c exch def
+c cell-get 10 eq                            (happy: initial cell-get) rt-ok
+99 c cell-set
+c cell-get 99 eq                            (happy: cell-get after cell-set) rt-ok  clear
+
+% =================================================================
+% SECTION 5: HAPPY PATH -- cell-computed cell evaluates proc
+% =================================================================
+
+10 cell /base exch def
+{ base cell-get 2 mul } cell-computed /derived exch def
+derived cell-get 20 eq                      (happy: cell-computed cell evaluates) rt-ok  clear
+
+% =================================================================
+% SECTION 6: HAPPY PATH -- cell-computed cell caches result
+% =================================================================
+
+/eval-count 0 def
+10 cell /base exch def
+{ /eval-count eval-count 1 add def  base cell-get 2 mul } cell-computed /derived exch def
+derived cell-get 20 eq                      (happy: first eval correct) rt-ok
+derived cell-get 20 eq                      (happy: cached eval correct) rt-ok
+eval-count 1 eq                             (happy: proc ran only once) rt-ok  clear
+
+% =================================================================
+% SECTION 7: HAPPY PATH -- cell-set invalidates cell-computed cell
+% =================================================================
+
+10 cell /base exch def
+{ base cell-get 2 mul } cell-computed /derived exch def
+derived cell-get 20 eq                      (happy: initial derived) rt-ok
+15 base cell-set
+derived cell-get 30 eq                      (happy: derived recell-computed after cell-set) rt-ok  clear
+
+% =================================================================
+% SECTION 8: HAPPY PATH -- diamond dependency
+% =================================================================
+
+10 cell /a exch def
+{ a cell-get 1 add } cell-computed /b exch def
+{ a cell-get 2 mul } cell-computed /c exch def
+{ b cell-get c cell-get add } cell-computed /d exch def
+d cell-get 31 eq                            (happy: diamond initial: 11+20=31) rt-ok
+5 a cell-set
+d cell-get 16 eq                            (happy: diamond after update: 6+10=16) rt-ok  clear
+
+% =================================================================
+% SECTION 9: HAPPY PATH -- cell-value reads without dep
+% =================================================================
+
+10 cell /base exch def
+/dep-observed false def
+{ base cell-value 2 mul } cell-computed /c exch def
+c cell-get 20 eq                            (happy: cell-value initial read) rt-ok
+99 base cell-set
+% c was NOT invalidated because cell-value didn't record dependency
+c cell-dirty? not                           (happy: cell-value no dep recorded) rt-ok  clear
+
+% =================================================================
+% SECTION 10: HAPPY PATH -- cell-dirty?
+% =================================================================
+
+10 cell /base exch def
+{ base cell-get 2 mul } cell-computed /derived exch def
+derived cell-dirty?                         (happy: cell-computed starts dirty) rt-ok
+derived cell-get pop
+derived cell-dirty? not                     (happy: not dirty after eval) rt-ok
+99 base cell-set
+derived cell-dirty?                         (happy: dirty after cell-set) rt-ok  clear
+
+% =================================================================
+% SECTION 11: HAPPY PATH -- watch fires on change
+% =================================================================
+
+10 cell /c exch def
+/watch-fired false def
+c { pop pop /watch-fired true def } watch
+20 c cell-set
+watch-fired                                 (happy: watcher fired) rt-ok  clear
+
+% =================================================================
+% SECTION 12: HAPPY PATH -- watcher receives old and new values
+% =================================================================
+
+10 cell /c exch def
+/old-val null def
+/new-val null def
+c { /new-val exch def /old-val exch def } watch
+42 c cell-set
+old-val 10 eq                               (happy: watcher old value) rt-ok
+new-val 42 eq                               (happy: watcher new value) rt-ok  clear
+
+% =================================================================
+% SECTION 13: HAPPY PATH -- unwatch removes watcher
+% =================================================================
+
+10 cell /c exch def
+/watch-fired false def
+/my-watcher { pop pop /watch-fired true def } def
+c //my-watcher watch
+c //my-watcher unwatch
+20 c cell-set
+watch-fired not                             (happy: unwatch prevents firing) rt-ok  clear
+
+% =================================================================
+% SECTION 14: HAPPY PATH -- batch defers then fires watchers
+% =================================================================
+
+10 cell /c exch def
+/fire-count 0 def
+c { pop pop /fire-count fire-count 1 add def } watch
+{
+    20 c cell-set
+    30 c cell-set
+    40 c cell-set
+} batch
+fire-count 1 eq                             (happy: batch watcher fired once) rt-ok
+c cell-get 40 eq                            (happy: batch final value) rt-ok  clear
+
+% =================================================================
+% SECTION 14a: HAPPY -- batch watcher receives correct old/new values
+% =================================================================
+
+10 cell /c exch def
+/batch-old null def
+/batch-new null def
+c { /batch-new exch def /batch-old exch def } watch
+{
+    42 c cell-set
+} batch
+batch-old 10 eq                             (happy: batch old value correct) rt-ok
+batch-new 42 eq                             (happy: batch new value correct) rt-ok  clear
+
+% =================================================================
+% SECTION 14b: HAPPY -- batch set-then-unset (net no change skips watcher)
+% =================================================================
+
+10 cell /c exch def
+/fire-count 0 def
+c { pop pop /fire-count fire-count 1 add def } watch
+{
+    20 c cell-set
+    10 c cell-set
+} batch
+fire-count 0 eq                             (happy: batch no-change skips watcher) rt-ok
+c cell-get 10 eq                            (happy: batch restored value) rt-ok  clear
+
+% =================================================================
+% SECTION 14c: HAPPY -- multiple cells updated in batch
+% =================================================================
+
+10 cell /a exch def
+20 cell /b exch def
+/a-fired false def
+/b-fired false def
+a { pop pop /a-fired true def } watch
+b { pop pop /b-fired true def } watch
+{
+    11 a cell-set
+    21 b cell-set
+} batch
+a-fired                                     (happy: batch cell-a watcher fired) rt-ok
+b-fired                                     (happy: batch cell-b watcher fired) rt-ok  clear
+
+% =================================================================
+% SECTION 14d: HAPPY -- nested batch fires at outermost end
+% =================================================================
+
+10 cell /c exch def
+/fire-count 0 def
+c { pop pop /fire-count fire-count 1 add def } watch
+{
+    20 c cell-set
+    {
+        30 c cell-set
+    } batch
+    fire-count 0 eq                         (happy: nested batch still deferred) rt-ok
+    40 c cell-set
+} batch
+fire-count 1 eq                             (happy: nested batch fired at outermost) rt-ok  clear
+
+% =================================================================
+% SECTION 14e: HAPPY -- batch error discards watchers
+% =================================================================
+
+10 cell /c exch def
+/fire-count 0 def
+c { pop pop /fire-count fire-count 1 add def } watch
+{ { 20 c cell-set  1 0 div } batch } try pop
+fire-count 0 eq                             (happy: batch error discards watchers) rt-ok  clear
+
+% =================================================================
+% SECTION 14f: HAPPY -- batch with downstream cell-computed cell watcher
+% =================================================================
+
+10 cell /base exch def
+{ base cell-get 1 add } cell-computed /derived exch def
+derived cell-get pop                        % force initial eval so cache is populated
+/d-old null def
+/d-new null def
+derived { /d-new exch def /d-old exch def } watch
+{
+    20 base cell-set
+    derived cell-get pop                    % recompute during batch
+} batch
+d-old 11 eq                                 (happy: batch downstream old value) rt-ok
+d-new 21 eq                                 (happy: batch downstream new value) rt-ok  clear
+
+% =================================================================
+% SECTION 14g: STRESS -- multiple watchers on same cell in batch
+% =================================================================
+
+10 cell /c exch def
+/w1 0 def  /w2 0 def  /w3 0 def
+c { pop pop /w1 w1 1 add def } watch
+c { pop pop /w2 w2 1 add def } watch
+c { pop pop /w3 w3 1 add def } watch
+{
+    20 c cell-set
+    30 c cell-set
+} batch
+w1 1 eq                                     (stress: batch multi-watcher w1) rt-ok
+w2 1 eq                                     (stress: batch multi-watcher w2) rt-ok
+w3 1 eq                                     (stress: batch multi-watcher w3) rt-ok  clear
+
+% =================================================================
+% SECTION 14q: BOUNDARY -- empty batch (no cell-sets)
+% =================================================================
+
+10 cell /c exch def
+/fire-count 0 def
+c { pop pop /fire-count fire-count 1 add def } watch
+{ } batch
+fire-count 0 eq                             (boundary: empty batch no watcher) rt-ok
+c cell-get 10 eq                            (boundary: empty batch value unchanged) rt-ok  clear
+
+% =================================================================
+% SECTION 14i: BOUNDARY -- batch with only equality-skip sets
+% =================================================================
+
+42 cell /c exch def
+/fire-count 0 def
+c { pop pop /fire-count fire-count 1 add def } watch
+{
+    42 c cell-set
+    42 c cell-set
+} batch
+fire-count 0 eq                             (boundary: eq-skip batch no watcher) rt-ok  clear
+
+% =================================================================
+% SECTION 14j: FUZZ -- batch with Long (ExtValue) values
+% =================================================================
+
+9999999999l cell /c exch def
+/ev-old null def
+/ev-new null def
+c { /ev-new exch def /ev-old exch def } watch
+{
+    1111111111l c cell-set
+    2222222222l c cell-set
+} batch
+ev-old 9999999999l eq                       (fuzz: batch extvalue old correct) rt-ok
+ev-new 2222222222l eq                       (fuzz: batch extvalue new correct) rt-ok  clear
+
+% =================================================================
+% SECTION 15: HAPPY PATH -- chain of 3 cell-computed cells
+% =================================================================
+
+10 cell /base exch def
+{ base cell-get 1 add } cell-computed /c1 exch def
+{ c1 cell-get 2 mul } cell-computed /c2 exch def
+{ c2 cell-get 3 add } cell-computed /c3 exch def
+c3 cell-get 25 eq                           (happy: chain initial: ((10+1)*2)+3=25) rt-ok
+5 base cell-set
+c3 cell-get 15 eq                           (happy: chain after update: ((5+1)*2)+3=15) rt-ok  clear
+
+% =================================================================
+% SECTION 16: HAPPY PATH -- cell-computed with multiple deps
+% =================================================================
+
+10 cell /x exch def
+20 cell /y exch def
+{ x cell-get y cell-get add } cell-computed /sum-cell exch def
+sum-cell cell-get 30 eq                          (happy: multi-dep initial) rt-ok
+15 x cell-set
+sum-cell cell-get 35 eq                          (happy: multi-dep after x change) rt-ok
+25 y cell-set
+sum-cell cell-get 40 eq                          (happy: multi-dep after y change) rt-ok  clear
+
+% =================================================================
+% SECTION 17: SAD PATH -- cell-set on cell-computed cell
+% =================================================================
+
+{ 42 } cell-computed /c exch def
+{ 99 c cell-set } try /undefined-result eq     (sad: cell-set on cell-computed) rt-ok  clear
+
+% =================================================================
+% SECTION 18: SAD PATH -- cell-get on non-cell
+% =================================================================
+
+{ 42 cell-get } try /type-check eq          (sad: cell-get on int) rt-ok  clear
+{ (hello) cell-get } try /type-check eq     (sad: cell-get on string) rt-ok  clear
+
+% =================================================================
+% SECTION 19: SAD PATH -- cell-set on non-cell
+% =================================================================
+
+{ 99 42 cell-set } try /type-check eq          (sad: cell-set on int) rt-ok  clear
+
+% =================================================================
+% SECTION 20: SAD PATH -- cell-computed with non-executable
+% =================================================================
+
+{ 42 cell-computed } try /type-check eq          (sad: cell-computed non-exec) rt-ok  clear
+
+% =================================================================
+% SECTION 21: SAD PATH -- error in cell-computed proc
+% =================================================================
+
+{ 1 0 div } cell-computed /bad exch def
+{ bad cell-get } try /div-by-zero eq        (sad: error in cell-computed proc) rt-ok  clear
+
+% =================================================================
+% SECTION 22: SAD PATH -- error leaves cell dirty
+% =================================================================
+
+{ 1 0 div } cell-computed /bad exch def
+{ bad cell-get } try pop
+bad cell-dirty?                             (sad: cell stays dirty after error) rt-ok  clear
+
+% =================================================================
+% SECTION 23: SAD PATH -- watch on non-cell
+% =================================================================
+
+{ 42 { } watch } try /type-check eq        (sad: watch on non-cell) rt-ok  clear
+
+% =================================================================
+% SECTION 24: SAD PATH -- unwatch on non-cell
+% =================================================================
+
+{ 42 { } unwatch } try /type-check eq      (sad: unwatch on non-cell) rt-ok  clear
+
+% =================================================================
+% SECTION 25: SAD PATH -- batch with non-executable
+% =================================================================
+
+{ 42 batch } try /type-check eq             (sad: batch non-exec) rt-ok  clear
+
+% =================================================================
+% SECTION 26: SAD PATH -- cell-value on non-cell
+% =================================================================
+
+{ 42 cell-value } try /type-check eq        (sad: cell-value on non-cell) rt-ok  clear
+
+% =================================================================
+% SECTION 27: SAD PATH -- cell-dirty? on non-cell
+% =================================================================
+
+{ 42 cell-dirty? } try /type-check eq       (sad: cell-dirty? on non-cell) rt-ok  clear
+
+% =================================================================
+% SECTION 28: STRESS -- 20-cell dependency chain
+% =================================================================
+
+1 cell /chain-base exch def
+/prev chain-base def
+1 1 20 {
+    pop
+    prev { cell-get 1 add } curry cell-computed /prev exch def
+} for
+prev cell-get 21 eq                         (stress: 20-cell chain initial) rt-ok
+10 chain-base cell-set
+prev cell-get 30 eq                         (stress: 20-cell chain after update) rt-ok  clear
+
+% =================================================================
+% SECTION 29: STRESS -- wide fan-out (1 base, 10 cell-computed)
+% =================================================================
+
+10 cell /fan-base exch def
+/fan-sum 0 def
+1 1 10 {
+    pop
+    fan-base { cell-get } curry cell-computed /fc exch def
+    /fan-sum fan-sum fc cell-get add def
+} for
+fan-sum 100 eq                              (stress: wide fan-out 10*10=100) rt-ok  clear
+
+% =================================================================
+% SECTION 30: STRESS -- repeated cell-set/cell-get cycles
+% =================================================================
+
+0 cell /counter exch def
+{ counter cell-get 1 add } cell-computed /plus-one exch def
+1 1 50 {
+    counter cell-set
+    plus-one cell-get pop
+} for
+counter cell-get 50 eq                      (stress: 50 cell-set/cell-get cycles) rt-ok
+plus-one cell-get 51 eq                     (stress: plus-one after 50 cycles) rt-ok  clear
+
+% =================================================================
+% SECTION 31: STRESS -- multiple watchers on single cell
+% =================================================================
+
+10 cell /mw exch def
+/mw-count 0 def
+mw { pop pop /mw-count mw-count 1 add def } watch
+mw { pop pop /mw-count mw-count 1 add def } watch
+mw { pop pop /mw-count mw-count 1 add def } watch
+20 mw cell-set
+mw-count 3 eq                               (stress: 3 watchers all fired) rt-ok  clear
+
+% =================================================================
+% SECTION 32: STRESS -- nested batch
+% =================================================================
+
+10 cell /nb exch def
+{
+    20 nb cell-set
+    {
+        30 nb cell-set
+    } batch
+    40 nb cell-set
+} batch
+nb cell-get 40 eq                           (stress: nested batch final) rt-ok  clear
+
+% =================================================================
+% SECTION 33: FUZZ -- cell holding various types
+% =================================================================
+
+42 cell /fi exch def
+fi cell-get 42 eq                           (fuzz: cell holds integer) rt-ok
+(hello) fi cell-set
+fi cell-get (hello) eq                      (fuzz: cell holds string) rt-ok
+null fi cell-set
+fi cell-get null eq                         (fuzz: cell holds null) rt-ok
+true fi cell-set
+fi cell-get                                 (fuzz: cell holds boolean) rt-ok  clear
+
+% =================================================================
+% SECTION 34: FUZZ -- cell holding array
+% =================================================================
+
+[ 1 2 3 ] cell /arr-c exch def
+arr-c cell-get length 3 eq                  (fuzz: cell holds array) rt-ok  clear
+
+% =================================================================
+% SECTION 35: FUZZ -- cell holding tagged value
+% =================================================================
+
+42 /:some tag cell /tc exch def
+tc cell-get tag-name /:some eq              (fuzz: cell holds tagged) rt-ok  clear
+
+% =================================================================
+% SECTION 36: FUZZ -- cell-computed returning different types
+% =================================================================
+
+0 cell /type-switch exch def
+{
+    type-switch cell-get
+    0 eq { 42 }
+    { type-switch cell-get 1 eq { (hello) } { true } if-else }
+    if-else
+} cell-computed /multi exch def
+multi cell-get 42 eq                        (fuzz: cell-computed returns int) rt-ok
+1 type-switch cell-set
+multi cell-get (hello) eq                   (fuzz: cell-computed returns string) rt-ok
+2 type-switch cell-set
+multi cell-get                              (fuzz: cell-computed returns bool) rt-ok  clear
+
+% =================================================================
+% SECTION 37: BOUNDARY -- cell-computed with zero deps (constant)
+% =================================================================
+
+{ 42 } cell-computed /const-cell exch def
+const-cell cell-get 42 eq                   (boundary: constant cell-computed) rt-ok
+const-cell cell-dirty? not                  (boundary: constant not dirty) rt-ok  clear
+
+% =================================================================
+% SECTION 38: BOUNDARY -- unwatch on cell with no watchers
+% =================================================================
+
+10 cell /no-w exch def
+no-w { } unwatch
+true                                        (boundary: unwatch no-op) rt-ok  clear
+
+% =================================================================
+% SECTION 39: BOUNDARY -- cell-get on non-dirty cell-computed (cached)
+% =================================================================
+
+/bc-count 0 def
+{ /bc-count bc-count 1 add def  99 } cell-computed /cached exch def
+cached cell-get 99 eq                       (boundary: first get evaluates) rt-ok
+cached cell-get 99 eq                       (boundary: second get uses cache) rt-ok
+bc-count 1 eq                               (boundary: only evaluated once) rt-ok  clear
+
+% =================================================================
+% SECTION 40: BOUNDARY -- single-cell graph (no dependents)
+% =================================================================
+
+10 cell /solo exch def
+solo cell-get 10 eq                         (boundary: solo cell read) rt-ok
+20 solo cell-set
+solo cell-get 20 eq                         (boundary: solo cell updated) rt-ok  clear
+
+% =================================================================
+% SECTION 41: BOUNDARY -- base cell is never dirty
+% =================================================================
+
+10 cell /bd exch def
+bd cell-dirty? not                          (boundary: base cell not dirty) rt-ok
+20 bd cell-set
+bd cell-dirty? not                          (boundary: base cell still not dirty after set) rt-ok  clear
+
+% =================================================================
+% SECTION 42: SAVE/RESTORE -- cell-set inside save reverts
+% =================================================================
+
+10 cell /sv-c exch def
+/sv-save save def
+20 sv-c cell-set
+sv-c cell-get 20 eq                         (save: cell-set value before restore) rt-ok
+sv-save restore
+sv-c cell-get 10 eq                         (save: cell-set reverted after restore) rt-ok  clear
+
+% =================================================================
+% SECTION 43: SAVE/RESTORE -- cell-computed re-evals after restore
+% =================================================================
+
+10 cell /sv-base exch def
+{ sv-base cell-get 2 mul } cell-computed /sv-derived exch def
+sv-derived cell-get 20 eq                   (save: derived initial) rt-ok
+/sv-save save def
+99 sv-base cell-set
+sv-derived cell-get 198 eq                  (save: derived after cell-set) rt-ok
+sv-save restore
+sv-base cell-get 10 eq                      (save: base reverted) rt-ok  clear
+
+% =================================================================
+% SECTION 44: ERROR -- error in batch
+% =================================================================
+
+10 cell /eb exch def
+{ { 1 0 div } batch } try /div-by-zero eq       (error: batch propagates error) rt-ok  clear
+
+% =================================================================
+% SECTION 45: HAPPY -- watcher that updates another cell
+% =================================================================
+
+10 cell /src exch def
+0 cell /dst exch def
+src { /new-val exch def  pop  new-val dst cell-set } watch
+20 src cell-set
+dst cell-get 20 eq                          (happy: watcher updates another cell) rt-ok  clear
+
+% =================================================================
+% SECTION 46: TYPE -- cell type name
+% =================================================================
+
+10 cell type /cell-type eq                  (type: cell type is cell-type) rt-ok  clear
+
+% =================================================================
+% SECTION 47: HAPPY -- equality skip: same value does not invalidate
+% =================================================================
+
+10 cell /c exch def
+{ c cell-get 2 mul } cell-computed /d exch def
+d cell-get 20 eq                           (eq-skip: initial cell-computed) rt-ok
+10 c cell-set                                 % set to same value
+d cell-get 20 eq                           (eq-skip: no recompute needed) rt-ok  clear
+
+% =================================================================
+% SECTION 48: HAPPY -- equality skip: watcher does NOT fire on same value
+% =================================================================
+
+/fired false def
+42 cell /c exch def
+c { pop pop /fired true def } watch
+42 c cell-set                                 % same value
+fired not                                  (eq-skip: watcher not fired) rt-ok  clear
+
+% =================================================================
+% SECTION 49: HAPPY -- equality skip: different value DOES invalidate
+% =================================================================
+
+10 cell /c exch def
+{ c cell-get 2 mul } cell-computed /d exch def
+d cell-get 20 eq                           (eq-skip: initial) rt-ok
+20 c cell-set                                 % different value
+d cell-get 40 eq                           (eq-skip: recell-computed after change) rt-ok  clear
+
+% =================================================================
+% SECTION 50: BOUNDARY -- equality skip with ExtValue (Long)
+% =================================================================
+
+9999999999l cell /c exch def
+/fired false def
+c { pop pop /fired true def } watch
+9999999999l c cell-set                        % same Long value
+fired not                                  (eq-skip: long same no fire) rt-ok
+1l c cell-set                                 % different Long value
+fired                                      (eq-skip: long diff fires) rt-ok  clear
+
+% =================================================================
+% SECTION 51: FUZZ -- equality skip with NaN (NaN != NaN per IEEE 754)
+% =================================================================
+
+nan cell /c exch def
+/fired false def
+c { pop pop /fired true def } watch
+nan c cell-set                                % NaN != NaN, so this SHOULD fire
+fired                                      (eq-skip: nan always invalidates) rt-ok  clear
+
+% =================================================================
+% SECTION 52: HAPPY -- cell-deps on cell-computed cell
+% =================================================================
+
+10 cell /a exch def
+20 cell /b exch def
+{ a cell-get b cell-get add } cell-computed /c exch def
+c cell-get pop
+c cell-deps length 2 eq                    (cell-deps: cell-computed has 2 deps) rt-ok
+c cell-deps 0 get a eq                     (cell-deps: dep 0 is a) rt-ok
+c cell-deps 1 get b eq                     (cell-deps: dep 1 is b) rt-ok  clear
+
+% =================================================================
+% SECTION 53: HAPPY -- cell-deps on base cell (empty)
+% =================================================================
+
+42 cell /x exch def
+x cell-deps length 0 eq                    (cell-deps: base has 0 deps) rt-ok  clear
+
+% =================================================================
+% SECTION 54: HAPPY -- cell-rdeps
+% =================================================================
+
+10 cell /a exch def
+{ a cell-get 2 mul } cell-computed /b exch def
+{ a cell-get 3 mul } cell-computed /c exch def
+b cell-get pop
+c cell-get pop
+a cell-rdeps length 2 eq                   (cell-rdeps: a has 2 dependents) rt-ok
+b cell-rdeps length 0 eq                   (cell-rdeps: leaf has 0 rdeps) rt-ok  clear
+
+% =================================================================
+% SECTION 55: HAPPY -- cell-watchers
+% =================================================================
+
+10 cell /c exch def
+c cell-watchers length 0 eq                (cell-watchers: none initially) rt-ok
+c { pop pop } watch
+c cell-watchers length 1 eq                (cell-watchers: 1 after watch) rt-ok
+c { pop pop } watch
+c cell-watchers length 2 eq                (cell-watchers: 2 after second) rt-ok  clear
+
+% =================================================================
+% SECTION 56: BOUNDARY -- cell-deps after re-evaluation
+% =================================================================
+
+10 cell /a exch def
+20 cell /b exch def
+/use-b true def
+{ a cell-get  use-b { b cell-get add } if } cell-computed /c exch def
+c cell-get pop
+c cell-deps length 2 eq                    (cell-deps: initial 2 deps) rt-ok
+/use-b false def
+30 a cell-set                                 % triggers re-eval of c
+c cell-get pop
+c cell-deps length 1 eq                    (cell-deps: re-eval 1 dep) rt-ok  clear
+
+% =================================================================
+% SECTION 57: STRESS -- chain of 5 cell-computed cells
+% =================================================================
+
+1 cell /c0 exch def
+{ c0 cell-get 1 add } cell-computed /c1 exch def
+{ c1 cell-get 1 add } cell-computed /c2 exch def
+{ c2 cell-get 1 add } cell-computed /c3 exch def
+{ c3 cell-get 1 add } cell-computed /c4 exch def
+c4 cell-get 5 eq                           (chain: c4 = 5) rt-ok
+c0 cell-rdeps length 1 eq                  (chain: c0 has 1 rdep) rt-ok
+c4 cell-deps length 1 eq                   (chain: c4 has 1 dep) rt-ok
+c4 cell-deps 0 get c3 eq                   (chain: c4 dep is c3) rt-ok  clear
+
+% =================================================================
+% SECTION 58: SAD -- cell-deps on non-cell
+% =================================================================
+
+{ 42 cell-deps } try /type-check eq        (cell-deps: non-cell error) rt-ok  clear
+{ 42 cell-rdeps } try /type-check eq       (cell-rdeps: non-cell error) rt-ok  clear
+{ 42 cell-watchers } try /type-check eq    (cell-watchers: non-cell error) rt-ok  clear
+
+% =================================================================
+% SECTION 59: FUZZ -- deps survive cell-set update
+% =================================================================
+
+10 cell /a exch def
+{ a cell-get 2 mul } cell-computed /c exch def
+c cell-get pop
+c cell-deps length 1 eq                    (fuzz: deps before update) rt-ok
+20 a cell-set
+c cell-get pop
+c cell-deps length 1 eq                    (fuzz: deps after update) rt-ok
+c cell-deps 0 get a eq                     (fuzz: dep still a) rt-ok  clear
+
+% =================================================================
+% =================================================================
+% SECTION 60: HAPPY -- batch auto-recomputes dirty cell-computed cell for watcher
+% =================================================================
+% Core bug fix test: watcher on a cell-computed cell must fire even when
+% the cell-computed cell is NOT manually recell-computed inside the batch.
+% Previously, @batch-end read the stale cached value and the old==new
+% equality check suppressed the watcher.
+
+10 cell /base exch def
+{ base cell-get 1 add } cell-computed /derived exch def
+derived cell-get pop                        % initial eval — cache = 11
+/d-old null def
+/d-new null def
+derived { /d-new exch def /d-old exch def } watch
+{
+    20 base cell-set                        % dirty 'derived', but do NOT recompute here
+} batch
+d-old 11 eq                                 (happy: batch lazy cell-computed old value) rt-ok
+d-new 21 eq                                 (happy: batch lazy cell-computed new value) rt-ok  clear
+
+% =================================================================
+% SECTION 61: HAPPY -- batch auto-recomputes chain of dirty cell-computed cells
+% =================================================================
+
+1 cell /a exch def
+{ a cell-get 10 mul } cell-computed /b exch def
+{ b cell-get 1 add } cell-computed /c exch def
+b cell-get pop  c cell-get pop              % initial eval: b=10, c=11
+/c-old null def  /c-new null def
+c { /c-new exch def /c-old exch def } watch
+{
+    5 a cell-set                            % dirty b and c, no manual recompute
+} batch
+c-old 11 eq                                 (happy: batch chain old value) rt-ok
+c-new 51 eq                                 (happy: batch chain new value) rt-ok  clear
+
+% =================================================================
+% SECTION 62: HAPPY -- batch with mixed base + dirty cell-computed watchers
+% =================================================================
+
+10 cell /base exch def
+{ base cell-get 2 mul } cell-computed /comp exch def
+comp cell-get pop                           % initial eval: comp=20
+/base-fired false def
+/comp-fired false def
+base { pop pop /base-fired true def } watch
+comp { pop pop /comp-fired true def } watch
+{
+    99 base cell-set                        % no manual recompute of comp
+} batch
+base-fired                                  (happy: batch mixed base watcher fired) rt-ok
+comp-fired                                  (happy: batch mixed cell-computed watcher fired) rt-ok  clear
+
+% =================================================================
+% SECTION 63: BOUNDARY -- batch cell-computed cell net-no-change skips watcher
+% =================================================================
+% If base is set then set back, cell-computed cell recomputes to same value — skip watcher.
+
+10 cell /base exch def
+{ base cell-get 2 mul } cell-computed /comp exch def
+comp cell-get pop                           % initial eval: comp=20
+/comp-fired false def
+comp { pop pop /comp-fired true def } watch
+{
+    99 base cell-set
+    10 base cell-set                        % restore original value
+} batch
+comp-fired not                              (boundary: batch cell-computed net-no-change skips) rt-ok  clear
+
+% =================================================================
+% SECTION 64: STRESS -- batch with multiple dirty cell-computed cells
+% =================================================================
+
+1 cell /x exch def
+{ x cell-get 10 add } cell-computed /y exch def
+{ x cell-get 100 add } cell-computed /z exch def
+y cell-get pop  z cell-get pop              % initial: y=11, z=101
+/y-old null def  /y-new null def
+/z-old null def  /z-new null def
+y { /y-new exch def /y-old exch def } watch
+z { /z-new exch def /z-old exch def } watch
+{
+    5 x cell-set
+} batch
+y-old 11 eq                                 (stress: batch multi-cell-computed y-old) rt-ok
+y-new 15 eq                                 (stress: batch multi-cell-computed y-new) rt-ok
+z-old 101 eq                                (stress: batch multi-cell-computed z-old) rt-ok
+z-new 105 eq                                (stress: batch multi-cell-computed z-new) rt-ok  clear
+
+% =================================================================
+% SECTION 65: ERROR -- error in batch-fire recomputation propagates
+% =================================================================
+% Computed cell succeeds initially but errors after base changes.
+% @batch-fire-fail must clean up and propagate the error.
+
+10 cell /base exch def
+{ base cell-get dup 20 ge { pop 1 0 div } if } cell-computed /bad exch def
+bad cell-get pop                            % initial eval succeeds (10 < 20)
+bad { pop pop } watch
+{ { 20 base cell-set } batch } try /div-by-zero eq  (error: batch-fire recompute error) rt-ok  clear
+
+% =================================================================
+% SECTION 66: HAPPY -- cell-update basic
+% =================================================================
+
+10 cell /c exch def
+{ 5 add } c cell-update
+c cell-get 15 eq                            (happy: cell-update adds 5) rt-ok  clear
+
+% =================================================================
+% SECTION 67: HAPPY -- cell-update with multiply
+% =================================================================
+
+3 cell /c exch def
+{ 4 mul } c cell-update
+c cell-get 12 eq                            (happy: cell-update multiplies) rt-ok  clear
+
+% =================================================================
+% SECTION 68: HAPPY -- cell-update fires watchers
+% =================================================================
+
+10 cell /c exch def
+/w-old null def  /w-new null def
+c { /w-new exch def /w-old exch def } watch
+{ 1 add } c cell-update
+w-old 10 eq                                 (happy: cell-update watcher old) rt-ok
+w-new 11 eq                                 (happy: cell-update watcher new) rt-ok  clear
+
+% =================================================================
+% SECTION 69: HAPPY -- cell-update equality skip
+% =================================================================
+% If proc returns same value, cell-set equality skip suppresses watcher.
+
+10 cell /c exch def
+/fired false def
+c { pop pop /fired true def } watch
+{ } c cell-update                           % identity proc — no change
+fired not                                   (happy: cell-update eq-skip no watcher) rt-ok  clear
+
+% =================================================================
+% SECTION 70: HAPPY -- cell-update invalidates cell-computed cells
+% =================================================================
+
+10 cell /base exch def
+{ base cell-get 2 mul } cell-computed /derived exch def
+derived cell-get pop                        % initial: 20
+{ 5 add } base cell-update                  % base: 10 -> 15
+derived cell-get 30 eq                      (happy: cell-update invalidates cell-computed) rt-ok  clear
+
+% =================================================================
+% SECTION 71: HAPPY -- cell-update inside batch
+% =================================================================
+
+10 cell /c exch def
+/fired false def
+c { pop pop /fired true def } watch
+{
+    { 1 add } c cell-update
+    { 2 mul } c cell-update
+} batch
+fired                                       (happy: cell-update in batch fires watcher) rt-ok
+c cell-get 22 eq                            (happy: cell-update in batch final value) rt-ok  clear
+
+% =================================================================
+% SECTION 72: SAD -- cell-update on cell-computed cell
+% =================================================================
+
+{ 42 } cell-computed /c exch def
+{ { 1 add } c cell-update } try /undefined-result eq  (sad: cell-update on cell-computed) rt-ok  clear
+
+% =================================================================
+% SECTION 73: SAD -- cell-update non-cell
+% =================================================================
+
+{ { 1 add } 42 cell-update } try /type-check eq  (sad: cell-update non-cell) rt-ok  clear
+
+% =================================================================
+% SECTION 74: SAD -- cell-update non-proc
+% =================================================================
+
+10 cell /c exch def
+{ 42 c cell-update } try /type-check eq    (sad: cell-update non-proc) rt-ok  clear
+
+% =================================================================
+% SECTION 75: ERROR -- cell-update proc error propagates
+% =================================================================
+
+10 cell /c exch def
+{ { 1 0 div } c cell-update } try /div-by-zero eq  (error: cell-update proc error) rt-ok
+c cell-get 10 eq                            (error: cell-update unchanged after error) rt-ok  clear
+
+% =================================================================
+% SECTION 76: STRESS -- cell-update 100 times
+% =================================================================
+
+0 cell /c exch def
+100 { { 1 add } c cell-update } repeat
+c cell-get 100 eq                           (stress: cell-update 100 increments) rt-ok  clear
+
+% =================================================================
+% SECTION 77: FUZZ -- cell-update with ExtValue (Long)
+% =================================================================
+
+1000000000l cell /c exch def
+{ 999999999l add } c cell-update
+c cell-get 1999999999l eq                   (fuzz: cell-update long value) rt-ok  clear
+
+% =================================================================
+% SECTION 78: HAPPY -- cell-update with curry
+% =================================================================
+
+10 cell /c exch def
+7 { add } curry c cell-update
+c cell-get 17 eq                            (happy: cell-update with curry) rt-ok  clear
+
+% =================================================================
+% SECTION 79: HAPPY -- cell-map basic
+% =================================================================
+
+10 cell /base exch def
+base { 2 mul } cell-map /doubled exch def
+doubled cell-get 20 eq                      (happy: cell-map initial) rt-ok
+30 base cell-set
+doubled cell-get 60 eq                      (happy: cell-map after update) rt-ok  clear
+
+% =================================================================
+% SECTION 80: HAPPY -- cell-map records deps
+% =================================================================
+
+5 cell /base exch def
+base { 1 add } cell-map /mapped exch def
+mapped cell-get pop                         % force eval to build deps
+mapped cell-deps length 1 eq                (happy: cell-map has 1 dep) rt-ok
+base cell-rdeps length 1 eq                 (happy: cell-map base has rdep) rt-ok  clear
+
+% =================================================================
+% SECTION 81: HAPPY -- cell-map chain
+% =================================================================
+
+3 cell /a exch def
+a { 10 mul } cell-map /b exch def
+b { 1 add } cell-map /c exch def
+c cell-get 31 eq                            (happy: cell-map chain initial) rt-ok
+7 a cell-set
+c cell-get 71 eq                            (happy: cell-map chain after update) rt-ok  clear
+
+% =================================================================
+% SECTION 82: HAPPY -- cell-map watcher fires
+% =================================================================
+
+10 cell /base exch def
+base { 3 mul } cell-map /tripled exch def
+/w-fired false def
+tripled { pop pop /w-fired true def } watch
+tripled cell-get pop                        % initial eval
+20 base cell-set
+w-fired                                     (happy: cell-map watcher fires) rt-ok  clear
+
+% =================================================================
+% SECTION 83: SAD -- cell-map non-cell
+% =================================================================
+
+{ 42 { 1 add } cell-map } try /type-check eq  (sad: cell-map non-cell) rt-ok  clear
+
+% =================================================================
+% SECTION 84: SAD -- cell-map non-proc
+% =================================================================
+
+10 cell /c exch def
+{ c 42 cell-map } try /type-check eq       (sad: cell-map non-proc) rt-ok  clear
+
+% =================================================================
+% SECTION 85: HAPPY -- cell-combine basic
+% =================================================================
+
+10 cell /a exch def
+20 cell /b exch def
+[ a b ] { add } cell-combine /sum-cell exch def
+sum-cell cell-get 30 eq                          (happy: cell-combine initial) rt-ok
+15 a cell-set
+sum-cell cell-get 35 eq                          (happy: cell-combine after a update) rt-ok
+25 b cell-set
+sum-cell cell-get 40 eq                          (happy: cell-combine after b update) rt-ok  clear
+
+% =================================================================
+% SECTION 86: HAPPY -- cell-combine three sources
+% =================================================================
+
+1 cell /x exch def
+2 cell /y exch def
+3 cell /z exch def
+[ x y z ] { add add } cell-combine /total exch def
+total cell-get 6 eq                         (happy: cell-combine 3 sources) rt-ok
+10 x cell-set
+total cell-get 15 eq                        (happy: cell-combine 3 after update) rt-ok  clear
+
+% =================================================================
+% SECTION 87: HAPPY -- cell-combine records deps from all sources
+% =================================================================
+
+1 cell /a exch def
+2 cell /b exch def
+[ a b ] { mul } cell-combine /product-cell exch def
+product-cell cell-get pop                        % force eval
+product-cell cell-deps length 2 eq               (happy: cell-combine has 2 deps) rt-ok  clear
+
+% =================================================================
+% SECTION 88: HAPPY -- cell-combine watcher fires
+% =================================================================
+
+10 cell /a exch def
+20 cell /b exch def
+[ a b ] { add } cell-combine /sum-cell exch def
+/w-fired false def
+sum-cell { pop pop /w-fired true def } watch
+sum-cell cell-get pop                            % initial eval
+5 a cell-set
+w-fired                                     (happy: cell-combine watcher fires) rt-ok  clear
+
+% =================================================================
+% SECTION 89: SAD -- cell-combine empty array
+% =================================================================
+
+{ [ ] { add } cell-combine } try /range-check eq  (sad: cell-combine empty array) rt-ok  clear
+
+% =================================================================
+% SECTION 90: SAD -- cell-combine non-cell element
+% =================================================================
+
+10 cell /c exch def
+{ [ c 42 ] { add } cell-combine } try /type-check eq  (sad: cell-combine non-cell elem) rt-ok  clear
+
+% =================================================================
+% SECTION 91: SAD -- cell-combine non-array
+% =================================================================
+
+{ 42 { add } cell-combine } try /type-check eq  (sad: cell-combine non-array) rt-ok  clear
+
+% =================================================================
+% SECTION 92: STRESS -- cell-map + cell-combine mixed
+% =================================================================
+
+1 cell /base exch def
+base { 10 mul } cell-map /tens exch def
+base { 100 mul } cell-map /hundreds exch def
+[ tens hundreds ] { add } cell-combine /total exch def
+total cell-get 110 eq                       (stress: map+combine initial) rt-ok
+5 base cell-set
+total cell-get 550 eq                       (stress: map+combine after update) rt-ok  clear
+
+% =================================================================
+% SECTION 93: HAPPY -- cell-map inside batch
+% =================================================================
+
+10 cell /base exch def
+base { 2 mul } cell-map /doubled exch def
+/w-old null def  /w-new null def
+doubled { /w-new exch def /w-old exch def } watch
+doubled cell-get pop                        % initial eval: 20
+{
+    50 base cell-set
+} batch
+w-old 20 eq                                 (happy: cell-map batch old) rt-ok
+w-new 100 eq                                (happy: cell-map batch new) rt-ok  clear
+
+% =================================================================
+% SECTION 94: cell-dispose basic (base cell)
+% =================================================================
+
+10 cell /c exch def
+c cell-dispose
+{ c cell-get } try /invalid-access eq
+    (dispose: cell-get errors on disposed) rt-ok
+{ 20 c cell-set } try /invalid-access eq
+    (dispose: cell-set errors on disposed) rt-ok
+{ { 1 add } c cell-update } try /invalid-access eq
+    (dispose: cell-update errors on disposed) rt-ok
+{ c { pop pop } watch } try /invalid-access eq
+    (dispose: watch errors on disposed) rt-ok  clear
+
+% =================================================================
+% SECTION 95: cell-dispose idempotent
+% =================================================================
+
+42 cell /c exch def
+c cell-dispose
+c cell-dispose  % second dispose is no-op
+true (dispose: idempotent) rt-ok  clear
+
+% =================================================================
+% SECTION 96: cell-dispose disconnects cell-computed deps
+% =================================================================
+
+10 cell /base exch def
+{ base cell-get 2 mul } cell-computed /comp exch def
+comp cell-get 20 eq
+    (dispose-dep: initial cell-computed = 20) rt-ok
+
+% Dispose the base cell
+base cell-dispose
+
+% Computed cell keeps its cached value (not invalidated)
+comp cell-get 20 eq
+    (dispose-dep: cell-computed still has cached 20) rt-ok
+
+% base should be disconnected from comp's deps
+comp cell-deps length 0 eq
+    (dispose-dep: cell-computed deps cleared) rt-ok  clear
+
+% =================================================================
+% SECTION 97: cell-dispose disconnects rdeps
+% =================================================================
+
+10 cell /base exch def
+{ base cell-get 2 mul } cell-computed /comp exch def
+comp cell-get pop  % force evaluation to register deps
+base cell-rdeps length 1 eq
+    (dispose-rdep: base has 1 rdep before dispose) rt-ok
+
+% Dispose the cell-computed cell
+comp cell-dispose
+
+% base's rdeps should no longer include comp
+base cell-rdeps length 0 eq
+    (dispose-rdep: base has 0 rdeps after dispose) rt-ok  clear
+
+% =================================================================
+% SECTION 98: cell-dispose clears watchers
+% =================================================================
+
+10 cell /base exch def
+base { pop pop } watch
+base cell-watchers length 1 eq
+    (dispose-watch: 1 watcher before) rt-ok
+base cell-dispose
+% Can't check watchers on disposed cell, but verifying it ran without error
+true (dispose-watch: dispose cleared watchers) rt-ok  clear
+
+% =================================================================
+% SECTION 99: cell-dispose with ExtValue (Long)
+% =================================================================
+
+1000000000l cell /c exch def
+c cell-dispose
+true (dispose-ext: Long ExtValue freed) rt-ok  clear
+
+% =================================================================
+% SECTION 100: cell-dispose in chain (dispose leaf first)
+% =================================================================
+
+10 cell /a exch def
+{ a cell-get 1 add } cell-computed /b exch def
+{ b cell-get 2 mul } cell-computed /c exch def
+c cell-get 22 eq (dispose-chain: initial c = 22) rt-ok
+
+% Dispose leaf (c), then middle (b)
+c cell-dispose
+b cell-dispose
+
+% a should have no rdeps now
+a cell-rdeps length 0 eq
+    (dispose-chain: a has no rdeps) rt-ok
+
+% a is still live
+20 a cell-set
+a cell-get 20 eq
+    (dispose-chain: a still works) rt-ok  clear
+
+% =================================================================
+% SECTION 101: cell-set-name / cell-name — basic
+% =================================================================
+
+42 cell /c exch def
+
+% unnamed cell returns false
+c cell-name false eq
+    (cell-name: unnamed returns false) rt-ok
+
+% set a debug name
+/temperature c cell-set-name
+
+% named cell returns name true
+c cell-name true eq
+    (cell-name: named returns true) rt-ok
+/temperature eq
+    (cell-name: returns correct name) rt-ok  clear
+
+% =================================================================
+% SECTION 102: cell-set-name — == printing with name
+% =================================================================
+
+99 cell /c exch def
+/pressure c cell-set-name
+
+% == should include the name
+c ==s (--cell:pressure:99--) eq
+    (cell-name: ==s includes name) rt-ok  clear
+
+% =================================================================
+% SECTION 103: cell-set-name — unnamed == printing unchanged
+% =================================================================
+
+77 cell /c exch def
+c ==s (--cell:77--) eq
+    (cell-name: unnamed ==s unchanged) rt-ok  clear
+
+% =================================================================
+% SECTION 104: cell-set-name — dirty cell with name
+% =================================================================
+
+42 cell /a exch def
+/source a cell-set-name
+{ a cell-get 2 mul } cell-computed /b exch def
+/derived b cell-set-name
+
+% b is dirty (not yet evaluated)
+b ==s (--cell:derived:dirty--) eq
+    (cell-name: dirty with name) rt-ok
+
+% after eval, shows value
+b cell-get pop
+b ==s (--cell:derived:84--) eq
+    (cell-name: clean with name) rt-ok  clear
+
+% =================================================================
+% SECTION 105: cell-set-name — disposed cell with name
+% =================================================================
+
+10 cell /c exch def
+/sensor c cell-set-name
+c cell-dispose
+c ==s (--cell:sensor:disposed--) eq
+    (cell-name: disposed with name) rt-ok  clear
+
+% =================================================================
+% SECTION 106: cell-set-name — type errors
+% =================================================================
+
+{ /x 42 cell-set-name } try /type-check eq
+    (cell-set-name: non-cell error) rt-ok
+
+{ 42 cell /c exch def 99 c cell-set-name } try /type-check eq
+    (cell-set-name: non-name error) rt-ok  clear
+
+% =================================================================
+% SECTION 107: cell-name — overwrite name
+% =================================================================
+
+0 cell /c exch def
+/alpha c cell-set-name
+c cell-name pop /alpha eq
+    (cell-name: first name) rt-ok
+/beta c cell-set-name
+c cell-name pop /beta eq
+    (cell-name: overwritten name) rt-ok  clear
+
+% =================================================================
+% SECTION 109: cell-validated — basic creation
+% =================================================================
+
+42 { is-integer } cell-validated /c exch def
+c cell-get 42 eq                            (validated: initial value stored) rt-ok  clear
+
+% =================================================================
+% SECTION 110: cell-validated — invalid initial value
+% =================================================================
+
+{ (hello) { is-integer } cell-validated } try /require eq
+    (validated: invalid initial value raises require) rt-ok  clear
+
+% =================================================================
+% SECTION 111: cell-validated — valid cell-set
+% =================================================================
+
+42 { is-integer } cell-validated /c exch def
+99 c cell-set
+c cell-get 99 eq                            (validated: valid cell-set works) rt-ok  clear
+
+% =================================================================
+% SECTION 112: cell-validated — invalid cell-set
+% =================================================================
+
+42 { is-integer } cell-validated /c exch def
+{ (hello) c cell-set } try /require eq
+    (validated: invalid cell-set raises require) rt-ok
+c cell-get 42 eq
+    (validated: value unchanged after rejection) rt-ok  clear
+
+% =================================================================
+% SECTION 113: cell-validated — cell-update with validator (valid)
+% =================================================================
+
+10 { is-integer } cell-validated /c exch def
+{ 1 add } c cell-update
+c cell-get 11 eq                            (validated: cell-update valid) rt-ok  clear
+
+% =================================================================
+% SECTION 114: cell-validated — cell-update with validator (invalid)
+% =================================================================
+
+10 { is-integer } cell-validated /c exch def
+{ { pop (hello) } c cell-update } try /require eq
+    (validated: cell-update invalid raises require) rt-ok
+c cell-get 10 eq
+    (validated: cell-update value unchanged after rejection) rt-ok  clear
+
+% =================================================================
+% SECTION 115: cell-validated — equality skip (no validation on same value)
+% =================================================================
+
+42 { is-integer } cell-validated /c exch def
+42 c cell-set
+c cell-get 42 eq                            (validated: equality skip works) rt-ok  clear
+
+% =================================================================
+% SECTION 116: cell-validated — watchers fire only on valid set
+% =================================================================
+
+0 cell /fired exch def
+42 { is-integer } cell-validated /c exch def
+c { pop pop 1 fired cell-set } watch
+99 c cell-set
+fired cell-get 1 eq                         (validated: watcher fired on valid set) rt-ok
+{ (nope) c cell-set } try pop
+fired cell-get 1 eq                         (validated: watcher not fired on rejected set) rt-ok  clear
+
+% =================================================================
+% SECTION 117: cell-validated — type errors
+% =================================================================
+
+{ 42 99 cell-validated } try /type-check eq
+    (validated: non-proc validator raises type-check) rt-ok  clear
+
+% =================================================================
+% SECTION 118: cell-validated — complex validator
+% =================================================================
+
+0 { dup is-integer { 0 ge } { pop false } if-else } cell-validated /c exch def
+5 c cell-set
+c cell-get 5 eq                             (validated: complex validator passes) rt-ok
+{ -1 c cell-set } try /require eq
+    (validated: complex validator rejects negative) rt-ok
+{ (hello) c cell-set } try /require eq
+    (validated: complex validator rejects string) rt-ok  clear
+
+% =================================================================
+% SECTION 119: cell-validated — boundary: ExtValue types (Long, Double)
+% =================================================================
+
+0l { is-long } cell-validated /c exch def
+999999999999l c cell-set
+c cell-get 999999999999l eq                 (validated-bnd: Long value accepted) rt-ok
+{ 42 c cell-set } try /require eq
+    (validated-bnd: Integer rejected by Long validator) rt-ok  clear
+
+0.0d { is-double } cell-validated /c exch def
+3.14d c cell-set
+c cell-get 3.14d eq                         (validated-bnd: Double value accepted) rt-ok
+{ 42 c cell-set } try /require eq
+    (validated-bnd: Integer rejected by Double validator) rt-ok  clear
+
+% =================================================================
+% SECTION 120: cell-validated — boundary: always-true / always-false
+% =================================================================
+
+42 { pop true } cell-validated /c exch def
+(hello) c cell-set
+c cell-get (hello) eq                       (validated-bnd: always-true accepts anything) rt-ok  clear
+
+{ 42 { pop false } cell-validated } try /require eq
+    (validated-bnd: always-false rejects initial value) rt-ok  clear
+
+% =================================================================
+% SECTION 121: cell-validated — sad: validator returns non-boolean
+% =================================================================
+
+{ 42 { pop 99 } cell-validated } try /type-check eq
+    (validated-sad: non-boolean return raises type-check) rt-ok  clear
+
+% =================================================================
+% SECTION 122: cell-validated — sad: cell-set on disposed validated cell
+% =================================================================
+
+42 { is-integer } cell-validated /c exch def
+c cell-dispose
+{ 99 c cell-set } try /invalid-access eq
+    (validated-sad: set on disposed raises invalid-access) rt-ok  clear
+
+% =================================================================
+% SECTION 123: cell-validated — edge: validated cell in batch
+% =================================================================
+
+42 { is-integer } cell-validated /c exch def
+0 cell /fired exch def
+c { pop pop 1 fired cell-set } watch
+{ 99 c cell-set  100 c cell-set } batch
+c cell-get 100 eq                           (validated-edge: batch final value) rt-ok
+fired cell-get 1 eq                         (validated-edge: watcher fired after batch) rt-ok  clear
+
+% =================================================================
+% SECTION 124: cell-validated — edge: batch with rejected set
+% =================================================================
+
+42 { is-integer } cell-validated /c exch def
+{ { 99 c cell-set  (bad) c cell-set } batch } try /require eq
+    (validated-edge: batch aborts on invalid set) rt-ok
+c cell-get 99 eq
+    (validated-edge: valid set in batch survives abort) rt-ok  clear
+
+% =================================================================
+% SECTION 125: cell-validated — edge: cell-computed cell reads validated cell
+% =================================================================
+
+10 { is-integer } cell-validated /c exch def
+{ c cell-get 2 mul } cell-computed /d exch def
+d cell-get 20 eq                            (validated-edge: cell-computed reads validated) rt-ok
+5 c cell-set
+d cell-get 10 eq                            (validated-edge: cell-computed tracks invalidation) rt-ok  clear
+
+% =================================================================
+% SECTION 126: cell-validated — stress: rapid valid/invalid set cycles
+% =================================================================
+
+0 { dup is-integer { 100 lt } { pop false } if-else } cell-validated /c exch def
+0 1 49 { c cell-set } for
+c cell-get 49 eq                            (validated-stress: 50 valid sets) rt-ok
+{ 200 c cell-set } try /require eq
+    (validated-stress: invalid after rapid cycle) rt-ok
+c cell-get 49 eq                            (validated-stress: value preserved after reject) rt-ok  clear
+
+% =================================================================
+% SECTION 127: cell-validated — stress: multiple validated cells
+% =================================================================
+
+0 { is-integer } cell-validated /a exch def
+0 { is-integer } cell-validated /b exch def
+0 { is-integer } cell-validated /c exch def
+10 a cell-set  20 b cell-set  30 c cell-set
+a cell-get 10 eq
+b cell-get 20 eq and
+c cell-get 30 eq and                        (validated-stress: three validated cells) rt-ok
+{ (x) a cell-set } try /require eq
+    (validated-stress: a rejects string) rt-ok
+{ (y) b cell-set } try /require eq
+    (validated-stress: b rejects string) rt-ok
+a cell-get 10 eq
+b cell-get 20 eq and
+c cell-get 30 eq and                        (validated-stress: all preserved) rt-ok  clear
+
+% =================================================================
+% SECTION 128: cell-validated — edge: save/restore with validated cell
+% =================================================================
+
+42 { is-integer } cell-validated /c exch def
+save /s exch def
+99 c cell-set
+c cell-get 99 eq                            (validated-edge: value after set) rt-ok
+s restore
+c cell-get 42 eq                            (validated-edge: value restored by save/restore) rt-ok
+77 c cell-set
+c cell-get 77 eq                            (validated-edge: validator still works after restore) rt-ok
+{ (bad) c cell-set } try /require eq
+    (validated-edge: validator rejects after restore) rt-ok  clear
+
+% =================================================================
+% SECTION 129: cell-validated — edge: cell-update with save/restore
+% =================================================================
+
+10 { is-integer } cell-validated /c exch def
+save /s exch def
+{ 5 add } c cell-update
+c cell-get 15 eq                            (validated-edge: update before restore) rt-ok
+s restore
+c cell-get 10 eq                            (validated-edge: update undone by restore) rt-ok  clear
+
+% =================================================================
+% SECTION 130: cell-validated — edge: debug name on validated cell
+% =================================================================
+
+42 { is-integer } cell-validated /c exch def
+/counter c cell-set-name
+c ==s (--cell:counter:42--) eq
+    (validated-edge: named validated cell ==s) rt-ok  clear
+
+% =================================================================
+% SECTION 131: HAPPY -- cell-transduce basic
+% =================================================================
+
+[1 2 3 4 5] cell /src exch def
+src { 1 add } xf-map cell-transduce /mapped exch def
+mapped cell-get [2 3 4 5 6] deep-eq       (cell-transduce: xf-map basic) rt-ok  clear
+
+% =================================================================
+% SECTION 132: HAPPY -- cell-transduce filter
+% =================================================================
+
+[1 2 3 4 5 6] cell /src exch def
+src { 2 mod 0 eq } xf-filter cell-transduce /evens exch def
+evens cell-get [2 4 6] deep-eq            (cell-transduce: xf-filter) rt-ok  clear
+
+% =================================================================
+% SECTION 133: HAPPY -- cell-transduce composed
+% =================================================================
+
+[1 2 3 4 5 6] cell /src exch def
+{ 2 mod 0 eq } xf-filter { 10 mul } xf-map xf-compose
+src exch cell-transduce /result exch def
+result cell-get [20 40 60] deep-eq        (cell-transduce: composed xf) rt-ok  clear
+
+% =================================================================
+% SECTION 134: HAPPY -- cell-transduce reactivity
+% =================================================================
+
+[10 20 30] cell /src exch def
+src { 5 add } xf-map cell-transduce /mapped exch def
+mapped cell-get [15 25 35] deep-eq        (cell-transduce: initial value) rt-ok
+[1 2] src cell-set
+mapped cell-get [6 7] deep-eq             (cell-transduce: after update) rt-ok  clear
+
+% =================================================================
+% SECTION 135: HAPPY -- cell-transduce xf-take
+% =================================================================
+
+[10 20 30 40 50] cell /src exch def
+src 3 xf-take cell-transduce /taken exch def
+taken cell-get [10 20 30] deep-eq         (cell-transduce: xf-take) rt-ok  clear
+
+% =================================================================
+% SECTION 136: HAPPY -- cell-transduce deps
+% =================================================================
+
+[1 2 3] cell /src exch def
+src { 1 add } xf-map cell-transduce /mapped exch def
+mapped cell-get pop
+mapped cell-deps length 1 eq              (cell-transduce: has 1 dep) rt-ok
+src cell-rdeps length 1 eq                (cell-transduce: source has rdep) rt-ok  clear
+
+% =================================================================
+% SECTION 137: HAPPY -- cell-transduce chain with cell-map
+% =================================================================
+
+[1 2 3] cell /src exch def
+src { 10 mul } xf-map cell-transduce /tens exch def
+tens { length } cell-map /count-cell exch def
+count-cell cell-get 3 eq                       (cell-transduce: chain with cell-map initial) rt-ok
+[1 2 3 4 5] src cell-set
+count-cell cell-get 5 eq                       (cell-transduce: chain with cell-map after update) rt-ok  clear
+
+% =================================================================
+% SECTION 138: SAD -- cell-transduce bad xf
+% =================================================================
+
+[1 2 3] cell /src exch def
+{ src 42 cell-transduce } try
+/type-check eq                            (cell-transduce: bad xf type-check) rt-ok  clear
+
+% =================================================================
+% SECTION 139: STRESS -- cell-transduce repeated updates
+% =================================================================
+
+[0] cell /src exch def
+src { 1 add } xf-map cell-transduce /mapped exch def
+1 1 100 { /i exch def [i] src cell-set } for
+mapped cell-get [101] deep-eq             (cell-transduce: stress 100 updates) rt-ok  clear
+
+% =================================================================
+% SECTION 140: HAPPY -- cell-transduce xf-scan
+% =================================================================
+
+[1 2 3 4 5] cell /src exch def
+src 0 { add } xf-scan cell-transduce /sums exch def
+sums cell-get [0 1 3 6 10 15] deep-eq     (cell-transduce: xf-scan running sum-cell) rt-ok  clear
+
+% =================================================================
+% SECTION 141: SAD -- cell-transduce non-cell source
+% =================================================================
+
+{ 42 { 1 add } xf-map cell-transduce } try
+/type-check eq                            (cell-transduce: sad non-cell source) rt-ok  clear
+
+% =================================================================
+% SECTION 142: SAD -- cell-transduce stack underflow
+% =================================================================
+
+{ cell-transduce } try
+/opstack-underflow eq                     (cell-transduce: sad underflow) rt-ok  clear
+
+% =================================================================
+% SECTION 143: SAD -- cell-transduce on disposed cell
+% =================================================================
+
+[1 2 3] cell /src exch def
+src { 1 add } xf-map cell-transduce /mapped exch def
+mapped cell-get pop
+mapped cell-dispose
+{ mapped cell-get } try
+/invalid-access eq                        (cell-transduce: sad disposed cell) rt-ok  clear
+
+% =================================================================
+% SECTION 144: BOUNDARY -- cell-transduce empty array
+% =================================================================
+
+[] cell /src exch def
+src { 1 add } xf-map cell-transduce /mapped exch def
+mapped cell-get [] deep-eq                (cell-transduce: boundary empty array) rt-ok  clear
+
+% =================================================================
+% SECTION 145: BOUNDARY -- cell-transduce single element
+% =================================================================
+
+[42] cell /src exch def
+src { 10 mul } xf-map cell-transduce /mapped exch def
+mapped cell-get [420] deep-eq             (cell-transduce: boundary single element) rt-ok  clear
+
+% =================================================================
+% SECTION 146: BOUNDARY -- cell-transduce xf-take 0
+% =================================================================
+
+[1 2 3 4 5] cell /src exch def
+src 0 xf-take cell-transduce /taken exch def
+taken cell-get [] deep-eq                 (cell-transduce: boundary xf-take 0) rt-ok  clear
+
+% =================================================================
+% SECTION 147: BOUNDARY -- cell-transduce xf-take exact length
+% =================================================================
+
+[1 2 3] cell /src exch def
+src 3 xf-take cell-transduce /taken exch def
+taken cell-get [1 2 3] deep-eq            (cell-transduce: boundary xf-take exact length) rt-ok  clear
+
+% =================================================================
+% SECTION 148: BOUNDARY -- cell-transduce xf-filter matches nothing
+% =================================================================
+
+[1 3 5 7] cell /src exch def
+src { 2 mod 0 eq } xf-filter cell-transduce /evens exch def
+evens cell-get [] deep-eq                 (cell-transduce: boundary filter all rejected) rt-ok  clear
+
+% =================================================================
+% SECTION 149: BOUNDARY -- cell-transduce xf-filter matches all
+% =================================================================
+
+[2 4 6] cell /src exch def
+src { 2 mod 0 eq } xf-filter cell-transduce /evens exch def
+evens cell-get [2 4 6] deep-eq            (cell-transduce: boundary filter all pass) rt-ok  clear
+
+% =================================================================
+% SECTION 150: FUZZ -- cell-transduce with double/long values
+% =================================================================
+
+[1.5d 2.5d 3.5d] cell /src exch def
+src { 1.0d add } xf-map cell-transduce /mapped exch def
+mapped cell-get 0 get 2.5d eq             (cell-transduce: fuzz double values) rt-ok
+mapped cell-get 2 get 4.5d eq             (cell-transduce: fuzz double last) rt-ok  clear
+
+% =================================================================
+% SECTION 151: FUZZ -- cell-transduce with mixed types in array
+% =================================================================
+
+[1 (hello) true 3.14] cell /src exch def
+src 2 xf-take cell-transduce /taken exch def
+taken cell-get length 2 eq                (cell-transduce: fuzz mixed types length) rt-ok
+taken cell-get 0 get 1 eq                 (cell-transduce: fuzz mixed first is int) rt-ok
+taken cell-get 1 get (hello) eq           (cell-transduce: fuzz mixed second is string) rt-ok  clear
+
+% =================================================================
+% SECTION 152: STRESS -- cell-transduce many cells from same source
+% =================================================================
+
+[1 2 3] cell /src exch def
+src { 1 add } xf-map cell-transduce /a exch def
+src { 10 mul } xf-map cell-transduce /b exch def
+src { 2 mod 0 eq } xf-filter cell-transduce /c exch def
+a cell-get [2 3 4] deep-eq               (cell-transduce: stress multi-cell a) rt-ok
+b cell-get [10 20 30] deep-eq             (cell-transduce: stress multi-cell b) rt-ok
+c cell-get [2] deep-eq                    (cell-transduce: stress multi-cell c) rt-ok
+[10 20 30 40] src cell-set
+a cell-get [11 21 31 41] deep-eq          (cell-transduce: stress multi-cell a after) rt-ok
+b cell-get [100 200 300 400] deep-eq      (cell-transduce: stress multi-cell b after) rt-ok
+c cell-get [10 20 30 40] deep-eq          (cell-transduce: stress multi-cell c after) rt-ok  clear
+
+% =================================================================
+% SECTION 153: STRESS -- cell-transduce deep composition
+% =================================================================
+
+[1 2 3 4 5 6 7 8 9 10] cell /src exch def
+{ 2 mod 0 eq } xf-filter
+{ 1 add } xf-map xf-compose
+{ 10 mul } xf-map xf-compose
+src exch cell-transduce /deep exch def
+deep cell-get [30 50 70 90 110] deep-eq   (cell-transduce: stress 3-deep compose) rt-ok  clear
+
+% =================================================================
+% SECTION 154: INTEGRATION -- cell-transduce with watcher
+% =================================================================
+
+[1 2 3] cell /src exch def
+src { 1 add } xf-map cell-transduce /mapped exch def
+mapped cell-get pop
+/watcher-fired false def
+mapped { /watcher-fired true def } watch
+[10 20] src cell-set
+mapped cell-get pop
+watcher-fired                             (cell-transduce: watcher fires on update) rt-ok  clear
+
+% =================================================================
+% SECTION 155: INTEGRATION -- cell-transduce with batch
+% =================================================================
+
+[1 2 3] cell /src exch def
+src { 1 add } xf-map cell-transduce /mapped exch def
+mapped cell-get pop
+/batch-fired false def
+mapped { /batch-fired true def } watch
+{ [10 20 30] src cell-set [40 50] src cell-set } batch
+mapped cell-get [41 51] deep-eq           (cell-transduce: batch final value) rt-ok
+batch-fired                               (cell-transduce: batch watcher fires) rt-ok  clear
+
+% =================================================================
+% SECTION 156: INTEGRATION -- cell-transduce with save/restore
+% =================================================================
+
+save
+[1 2 3] cell /src exch def
+src { 10 mul } xf-map cell-transduce /mapped exch def
+mapped cell-get [10 20 30] deep-eq        (cell-transduce: save/restore before) rt-ok
+restore
+% cells are gone after restore -- just verify no crash
+true                                      (cell-transduce: save/restore survived) rt-ok  clear
+
+% =================================================================
+% SECTION 157: FUZZ -- cell-transduce xf-drop
+% =================================================================
+
+[10 20 30 40 50] cell /src exch def
+src 2 xf-drop cell-transduce /dropped exch def
+dropped cell-get [30 40 50] deep-eq       (cell-transduce: xf-drop) rt-ok  clear
+
+% =================================================================
+% SECTION 158: FUZZ -- cell-transduce xf-flatten
+% =================================================================
+
+[[1 2] [3 4] [5]] cell /src exch def
+src xf-flatten cell-transduce /flat exch def
+flat cell-get [1 2 3 4 5] deep-eq         (cell-transduce: xf-flatten) rt-ok  clear
+
+% =================================================================
+% SECTION 159: FUZZ -- cell-transduce xf-distinct
+% =================================================================
+
+[1 2 2 3 3 3 1] cell /src exch def
+src xf-distinct cell-transduce /uniq exch def
+uniq cell-get [1 2 3 1] deep-eq           (cell-transduce: xf-distinct) rt-ok  clear
+
+% =================================================================
+% SECTION 160: vm-validate
+% =================================================================
+
+/vm-validate query-status true eq         (vm-validate: heap integrity) rt-ok  clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_reactive: ALL TESTS PASSED) =
+(__test_ok__) =

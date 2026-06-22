@@ -1,0 +1,372 @@
+% ====================================================================
+% test_save_level.trx -- save-level? and recover-save operators
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+(VM free at start: ) print /vm-free query-status =
+
+/R null def  /R2 null def
+
+% =================================================================
+% SECTION 1: save-level? returns level of a save token
+save dup save-level? 1 eq  (save-level: first save is 1) rt-ok
+restore  clear
+
+% =================================================================
+% SECTION 2: save-level? at nested levels
+save pop
+save dup save-level? 2 eq  (nested: inner is 2) rt-ok
+restore
+1 recover-save dup save-level? 1 eq  (nested: outer is 1) rt-ok
+restore  clear
+
+% =================================================================
+% SECTION 3: save-level? consumes the token (returns integer)
+save dup save-level?
+is-integer                 (consume: result is integer type) rt-ok
+restore  clear
+
+% =================================================================
+% SECTION 4: recover-save produces a save token (Integer)
+save pop
+1 recover-save is-integer  (recover: is Integer save token) rt-ok
+1 recover-save restore  clear
+
+% =================================================================
+% SECTION 5: recover-save creates usable save token for restore
+save pop
+/R 42 def
+1 recover-save restore
+R null eq                  (recover-restore: def rolled back) rt-ok  clear
+
+% =================================================================
+% SECTION 6: recover-save at any active level (not just current)
+save pop
+save pop
+1 recover-save save-level? 1 eq  (recover-any: level 1 correct) rt-ok
+2 recover-save save-level? 2 eq  (recover-any: level 2 correct) rt-ok
+2 recover-save restore
+1 recover-save restore  clear
+
+% =================================================================
+% SECTION 7: save-level? + recover-save are inverses
+save pop
+1 recover-save save-level? recover-save save-level? 1 eq
+    (roundtrip: level -> save -> level -> save -> level) rt-ok
+1 recover-save restore  clear
+
+% =================================================================
+% SECTION 8: save-level? semantics -- accepts any Integer
+% Phase C: save-level? takes an Integer (the save token), not a Save type.
+% A non-token Integer just returns its low 8 bits; only non-Integer types error.
+42 save-level? 42 eq                          (save-level? on bare 42 returns 42) rt-ok  clear
+{ (hello) save-level? } try /no-error ne      (err: string rejected) rt-ok  clear
+{ null save-level? } try /no-error ne         (err: null rejected) rt-ok  clear
+
+% =================================================================
+% SECTION 9: recover-save error -- out of range
+{ 0 recover-save } try /no-error ne           (err: level 0 rejected) rt-ok  clear
+{ -1 recover-save } try /no-error ne          (err: negative rejected) rt-ok  clear
+{ 99 recover-save } try /no-error ne          (err: too high rejected) rt-ok  clear
+
+% =================================================================
+% SECTION 10: recover-save error -- non-integer argument
+{ (hello) recover-save } try /no-error ne     (err: string rejected) rt-ok  clear
+{ true recover-save } try /no-error ne        (err: bool rejected) rt-ok  clear
+
+% =================================================================
+% SECTION 11: recover after losing save token via clear
+save
+/R 100 def
+clear  % save token is gone!
+1 recover-save restore
+R null eq                  (clear-recover: def rolled back) rt-ok  clear
+
+% =================================================================
+% SECTION 12: nested -- recover inner after losing it
+save pop
+save
+/R 200 def
+clear  % inner save token gone
+2 recover-save restore
+R null eq                  (nested-recover: inner rolled back) rt-ok
+1 recover-save restore  clear
+
+% =================================================================
+% SECTION 13: three levels deep -- recover and query each
+save pop  save pop  save pop
+3 recover-save save-level? 3 eq   (three-deep: level 3) rt-ok
+2 recover-save save-level? 2 eq   (three-deep: level 2) rt-ok
+1 recover-save save-level? 1 eq   (three-deep: level 1) rt-ok
+3 recover-save restore
+2 recover-save restore
+1 recover-save restore  clear
+
+% =================================================================
+% SECTION 14: stress -- 10 nested saves, recover and query each
+1 1 10 { pop save pop } for
+/R true def
+10 -1 1 {
+    dup recover-save save-level? ne { /R false def } if
+} for
+R                          (stress-10: all 10 levels correct) rt-ok
+% Tear down all 10 levels (cannot use for loop -- proc on exec stack
+% triggers "past save barrier" during restore)
+10 recover-save restore  9 recover-save restore
+8 recover-save restore   7 recover-save restore
+6 recover-save restore   5 recover-save restore
+4 recover-save restore   3 recover-save restore
+2 recover-save restore   1 recover-save restore
+clear
+
+% =================================================================
+% SECTION 15: recover-save -- level becomes invalid after restore
+save pop
+save pop
+2 recover-save restore
+% curr_save_level is now 1; level 2 is no longer active
+{ 2 recover-save } try /no-error ne  (stale: level 2 rejected after restore) rt-ok
+1 recover-save restore  clear
+
+% =================================================================
+% SECTION 16: recover-save with save/restore journaling
+save pop
+/R (Hello) def
+R 0 get (H)#b eq           (journal-pre: H) rt-ok
+1 recover-save restore
+R null eq                  (journal-post: R rolled back) rt-ok  clear
+
+% =================================================================
+% =================================================================
+% SECTION 17: cross-coroutine restore -- coroutine with scalar survives
+% =================================================================
+
+% Create coroutine BEFORE save; child pushes scalar AFTER save
+[ { 0 coroutine-sleep  42  coroutine-die } coroutine-launch pop
+0 coroutine-sleep       % child runs, sleeps immediately
+save pop
+0 coroutine-sleep       % child wakes, pushes 42 (scalar), dies
+1 recover-save restore  % should succeed — no live coroutines
+clear
+
+% =================================================================
+% SECTION 18: cross-coroutine restore -- coroutine with heap obj errors
+% =================================================================
+
+% Create coroutine BEFORE save; child allocates string AT RUNTIME after save.
+% ([ ... ] inside {} is scan-time; string N allocates at runtime.)
+[ { 0 coroutine-sleep  100 string  0 coroutine-sleep } coroutine-launch /R2 exch def
+0 coroutine-sleep       % child runs, sleeps immediately
+save pop
+0 coroutine-sleep       % child wakes, allocates string at runtime, sleeps
+{ 1 recover-save restore } try
+% W04: try rolls back the unconsumed Save left by the errored restore;
+% only /invalid-restore lands on top.
+/invalid-restore eq              (cross-coro: heap obj on suspended stack) rt-ok
+R2 coroutine-kill                % kill the child so cleanup restore succeeds
+1 recover-save restore  clear
+
+% =================================================================
+% SECTION 19: cross-coroutine restore -- inactive coroutine skipped
+% =================================================================
+
+% Create coroutine BEFORE save, run it, then save.  Don't resume after save.
+% Child has a runtime-allocated array on its stack (from BEFORE save), but
+% since it was not active after the save, the optimization skips scanning.
+[ { 3 array  0 coroutine-sleep } coroutine-launch pop
+0 coroutine-sleep       % child runs, creates array, sleeps
+save pop
+% Don't resume child — activation_sl < restore_level
+1 recover-save restore  % should succeed — child skipped
+clear
+
+% =================================================================
+% SECTION 20: frame-dict transparency -- fresh frame dict above the
+% save barrier no longer trips /invalid-restore.
+% Before Phase 2 the for-all body pushed a fresh |elem|#N on every
+% iteration, so save-in-iter-1 / restore-in-iter-2 failed with
+% "dict past 'save' barrier present in Dictionary Stack".
+% =================================================================
+/ssave null def
+[1 2] { |elem|#1
+    elem 1 eq { save /ssave exch store } if
+    elem 2 eq { ssave restore } if
+} for-all
+true (frame-dict: save/restore spans for-all iterations) rt-ok
+clear
+
+% =================================================================
+% SECTION 21: frame-dict transparency -- balanced save inside |locals|
+% (frame dict on stack BOTH at save time and at restore time; same slot)
+% =================================================================
+42 { |x|#1
+    save
+    /x 100 local-def
+    x 100 eq (frame-dict: def inside save visible) rt-ok
+    restore
+} exec
+true (frame-dict: save inside |locals| body completed) rt-ok
+clear
+
+% =================================================================
+% SECTION 22: frame-dict transparency -- save outside, |locals| inside
+% Frame dict allocated AFTER the save barrier; restore should compact
+% it out of the dict stack without tripping /invalid-restore.
+% =================================================================
+/ssave null def
+save /ssave exch store
+42 { |x|#1
+    /x 200 local-def
+    x 200 eq (frame-dict: post-barrier frame sees def) rt-ok
+} exec
+ssave restore
+true (frame-dict: |locals| pushed and popped between save/restore) rt-ok
+clear
+
+% =================================================================
+% SECTION 23: frame-dict transparency -- restore INSIDE |locals|,
+% with the fresh frame dict still on the dict stack.  The frame dict
+% is above-barrier AND still live; check_and_compact_dict_stack must
+% pop it.
+% =================================================================
+/ssave null def
+save /ssave exch store
+42 { |x|#1
+    ssave restore
+} exec
+true (frame-dict: restore while fresh |locals| still on stack) rt-ok
+clear
+
+% =================================================================
+% SECTION 24: frame-dict transparency -- non-frame dict above barrier
+% still errors.  <<...>> creates a regular (non-frame) dict; begin
+% pushes it on the dict stack.  Restore must still refuse.
+% =================================================================
+/ssave null def
+save /ssave exch store
+<< /y 1 >> begin
+{ ssave restore } try
+% W04: try rolls back the leftover-save residue from the failed restore;
+% only /invalid-restore lands on top.
+/invalid-restore eq (frame-dict: user dict above barrier still errors) rt-ok
+end                               % pop the user dict we pushed with begin
+ssave restore
+clear
+
+% =================================================================
+% SECTION 25: frame-dict pool prune on restore -- repeated cycles of
+% save / |locals| / restore should not corrupt the frame pool.  Each
+% cycle allocates a fresh frame dict above the barrier, end-locals
+% recycles it to the frame pool, restore prunes it out.  After many
+% cycles the pool stays healthy (no dangling chain entries).
+% =================================================================
+/ssave null def
+10 {
+    save /ssave exch store
+    42 { |x|#1 x } exec pop
+    ssave restore
+} repeat
+true (frame-dict: 10 cycles of save/|locals|/restore completed) rt-ok clear
+/vm-validate query-status true eq (frame-dict: heap integrity after 10 cycles) rt-ok clear
+
+% =================================================================
+% SECTION 26: frame-dict pool reuse -- iter-N+1 of a for-all with
+% save-in-iter-1 should pull iter-N's frame dict out of the
+% save-level-free frame pool rather than fresh-allocate.  Without
+% Phase 3 this failed hard (iter-2 fresh-alloc gave a post-barrier
+% dict, restore refused); with Phase 3 the pool bridges iterations
+% across save levels.  Observation: after the cycle the frame pool
+% is non-empty (pruned to survivors at the restore target level) and
+% heap integrity passes.
+% =================================================================
+/ssave null def
+42 { |x|#1 x } exec pop
+[1 2 3 4 5 6 7 8 9 10] { |elem|#1
+    elem 1 eq { save /ssave exch store } if
+    elem 10 eq { ssave restore } if
+} for-all
+true (frame-dict: 10-iter for-all with save/restore completed) rt-ok clear
+//:status:locals-pool-count 1 ge
+(frame-dict: frame pool non-empty after restore) rt-ok clear
+
+% =================================================================
+% SECTION 27: frame-dict with ExtValue overwrite across save/restore.
+% The value slot holds an ExtValue whose cell is above the barrier.
+% Restore must free the above-barrier ExtValue (via the journal-replay
+% maybe_free_extvalue path) and revert the entry to its pre-save value.
+% =================================================================
+100 { |x|#3
+    /s (hello) local-def
+    save
+    /s (a much longer replacement string to force a heap allocation) local-def
+    s length 59 eq (extval: mid-save length 59) rt-ok
+    restore
+    s (hello) eq (extval: post-restore s is original hello) rt-ok
+} exec
+/vm-validate query-status true eq (extval: heap integrity after overwrite) rt-ok clear
+
+% =================================================================
+% SECTION 28: frame-dict with nested saves + composite values.
+% Three nested saves, each populates the frame dict with different
+% heap types (ExtValue string, array, sub-dict, real).  A single
+% restore of the outermost save rolls all three back at once.
+% =================================================================
+100 { |x|#8
+    /a 1 local-def /b 2 local-def /c 3 local-def
+    save
+      /a (new-a-long-string) local-def
+      /d 42 local-def
+      save
+        /a [1 2 3 4 5] local-def
+        /e << /nested true >> local-def
+        save
+          /f 100 string local-def
+          /g 3.14 local-def
+        restore
+      restore
+    restore
+    a 1 eq           (nested: a reverted to 1) rt-ok
+    b 2 eq           (nested: b preserved) rt-ok
+    c 3 eq           (nested: c preserved) rt-ok
+    { d } try /undefined eq (nested: d cleared) rt-ok
+    { e } try /undefined eq (nested: e cleared) rt-ok
+    { f } try /undefined eq (nested: f cleared) rt-ok
+    { g } try /undefined eq (nested: g cleared) rt-ok
+} exec
+/vm-validate query-status true eq (nested: heap integrity after 3-deep) rt-ok clear
+
+% =================================================================
+% SECTION 29: frame-dict reused across save levels.
+% A frame dict is recycled to the pool at level 0, reused at level 1
+% with new defs, recycled back, then reused at level 0 again after
+% restore.  The Phase 3 reinit-on-recycle + journaling must ensure
+% the level-1 defs are not visible at the level-0 reuse.
+% =================================================================
+100 { |x|#3 x } exec pop
+save
+100 { |x|#3
+    /y 200 local-def
+    y 200 eq (reuse: y defined at level 1) rt-ok
+} exec
+restore
+100 { |x|#3
+    { y } try /undefined eq (reuse: y gone at level 0 reuse) rt-ok
+    x 100 eq (reuse: x preserved at level 0 reuse) rt-ok
+} exec
+/vm-validate query-status true eq (reuse: heap integrity) rt-ok clear
+
+% =================================================================
+% SECTION 30: vm-validate after frame-dict interactions
+/vm-validate query-status true eq (vm-validate: heap integrity after frame-dict) rt-ok  clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_save_level: ALL TESTS PASSED) =
+(__test_ok__) =

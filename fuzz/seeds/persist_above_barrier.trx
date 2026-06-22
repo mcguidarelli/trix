@@ -1,0 +1,4 @@
+% Persist family: write-time /above-barrier ref-check at sl>0.
+4 dict /st exch def st /slot null put save /sv exch def mark { st /slot 4 dict put-persist } try pop sv restore
+4 dict /st exch def st /counter 0 put save /sv exch def mark { st /counter { pop 4 dict } update-persist } try pop sv restore
+save /sv exch def mark { /never-defined 1 def-persist } try pop sv restore

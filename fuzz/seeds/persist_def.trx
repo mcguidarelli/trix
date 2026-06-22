@@ -1,0 +1,4 @@
+% def-persist: existing key gets a new value that survives restore.
+% New-key insertion at sl>0 raises /above-barrier.
+4 dict /env exch def env begin /counter 1 def save /sv exch def /counter 7 def-persist sv restore /counter load end
+4 dict /env exch def env begin save /sv exch def mark { /fresh 1 def-persist } try sv restore end

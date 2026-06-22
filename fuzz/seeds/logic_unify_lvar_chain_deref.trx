@@ -1,0 +1,1 @@
+logic-var /x exch def logic-var /y exch def x y unify pop 42l x unify pop logic-var /z exch def x z unify pop

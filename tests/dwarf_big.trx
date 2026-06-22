@@ -1,0 +1,27 @@
+% tests/dwarf_big.trx -- parse a DIE-heavy binary (thousands of STL DIEs) to
+% prove the lazy reader scales past the old 4096-DIE scratch ceiling (Wave 0,
+% L-1).  Binary path arrives as argv[0]; run via tests/run_dwarf_tests.sh on
+% trix.opt with a raised --vm-size (the per-read churn needs headroom).
+(lib/dwarf.trx) run
+
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+command-line-args 0 get dwarf-load /ctx exch def
+
+ctx (g_big) dwarf-lookup /info exch def
+info null eq not (big: g_big found among thousands of DIEs) rt-ok clear
+info null eq not {
+    info /address get 0ul gt (big: address nonzero) rt-ok clear
+    (g_big-address=) print info /address get = % cross-checked against nm by the runner
+    ctx info /type-offset get dwarf-layout /lay exch def
+    lay /kind get /struct eq (big: kind struct) rt-ok clear
+    lay /byte-size get 24 eq (big: byte-size 24) rt-ok clear
+    /mem-list lay /members get def
+    mem-list length 3 eq (big: 3 members) rt-ok clear
+} if
+
+(big DIE-heavy parse complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

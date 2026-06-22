@@ -1,0 +1,1130 @@
+% ======================================================================
+%  Showcase: Regex matcher -- backtracking vs. Thompson NFA
+%  ----------------------------------------------------------------------
+%  Two engines side by side over the SAME parsed regex AST:
+%
+%    1. Naive backtracker -- structurally beautiful, exponential on
+%       nested-quantifier patterns.  The cautionary tale.
+%
+%    2. Thompson construction + Pike VM -- O(n*m) worst case where n
+%       is input length and m is NFA size.  The hero.
+%
+%  Headline demo: pattern  a?{N}a{N}  against input  a^N.
+%  Naive blows up exponentially; Thompson finishes in microseconds.
+%  Both engines agree on a 25-case test corpus -- correctness parity is
+%  the load-bearing claim.
+%
+%  Reference: Russ Cox, "Regular Expression Matching Can Be Simple
+%  And Fast" (2007).  This showcase is the Trix-shaped retelling.
+%
+%  Supported regex surface (intentionally small, regular-language only):
+%
+%      literal char     a, b, c, ...
+%      .                any byte
+%      \d \w \s         digit, word, whitespace
+%      \D \W \S         negated versions
+%      \\ \. \* ...     escaped metacharacters as literals
+%      [...] [^...]     character class with ranges
+%      ?  *  +          zero-or-one, zero-or-more, one-or-more
+%      |                alternation
+%      (...)            grouping
+%      ^  $             anchors (start, end of input)
+%
+%  No backreferences, no lookaround, no lazy quantifiers, no Unicode
+%  beyond ASCII.  Equivalent power to a regular language -- which is
+%  the whole point.
+%
+%  Run:
+%      ./trix --vm-size=64M examples/regex.trx
+%  (the naive matcher's intermediate position arrays need the VM bump
+%  for the full n=2..10 ReDoS table; see README "Running the demo")
+% ======================================================================
+
+clear
+
+
+% ======================================================================
+%  1. AST constructors
+%
+%  AST nodes are Trix Tagged values.  Binary nodes (alt, cat) carry a
+%  2-element array payload [left right].  Quantifiers carry the inner
+%  AST directly.  Char classes carry a record [chars-dict negated?].
+% ======================================================================
+
+% Atomic nodes
+/mk-lit    { |c|#1     c                     /lit    tag } def    % byte -> tagged
+/mk-dot    {           null                  /dot    tag } def    %      -> tagged
+/mk-anchor { |which|#1 which                 /anchor tag } def    % /start|/end -> tagged
+/mk-class  { |chars negated|#2 [ chars negated ] /class tag } def % dict bool -> tagged
+
+% Quantifiers
+/mk-star { |inner|#1 inner /star tag } def
+/mk-plus { |inner|#1 inner /plus tag } def
+/mk-opt  { |inner|#1 inner /opt  tag } def
+
+% Binary
+/mk-cat { |l r|#2 [ l r ] /cat tag } def
+/mk-alt { |l r|#2 [ l r ] /alt tag } def
+
+
+% ======================================================================
+%  2. Parser
+%
+%  Recursive-descent over the source string directly (no token stream --
+%  regex tokens are too small and too contextual for a separate lexer).
+%
+%  Grammar (low to high precedence):
+%
+%      regex   = alt
+%      alt     = cat ('|' cat)*
+%      cat     = repeat+ | <empty>
+%      repeat  = atom ('*' | '+' | '?')?
+%      atom    = '.' | '^' | '$' | char | escape | '[' class ']' | '(' regex ')'
+%
+%  Empty 'cat' is permitted (an empty alternative matches the empty
+%  string), which is what makes  a|  legal.
+%
+%  Errors throw /regex-parse-error.
+% ======================================================================
+
+/parser-state << /src null /pos 0 /len 0 >> def
+
+/p-init {
+    % src --
+    parser-state exch /src exch put
+    parser-state /len parser-state /src get length put
+    parser-state /pos 0 put
+} def
+
+/p-eof? { parser-state /pos get parser-state /len get ge } def
+/p-peek { parser-state /src get parser-state /pos get get } def    % byte
+/p-advance { parser-state /pos parser-state /pos get 1 add put } def
+/p-take { p-peek p-advance } def
+
+/p-fail {
+    % message --
+    /regex-parse-error exch throw-with
+} def
+
+/p-expect {
+    % byte --
+    |b|#2
+    p-eof? { (unexpected EOF) p-fail } if
+    p-peek b ne {
+        256 string (expected byte {0:c} at pos {1}) mark b parser-state /pos get sprint-fmt pop p-fail
+    } if
+    p-advance
+} def
+
+
+% --- character-class helpers --------------------------------------------
+
+% Build a dict of bytes for a built-in class.
+/digit-bytes {
+    ||#3
+    16 dynamic-dict
+    /d 48 local-def
+    { d 57 le } { dup d /byte-type cast null put /d d 1 add local-def } while
+} def
+
+/word-bytes {
+    ||#3
+    128 dynamic-dict
+    /d 48 local-def { d 57  le } { dup d /byte-type cast null put /d d 1 add local-def } while
+    /d 65 local-def { d 90  le } { dup d /byte-type cast null put /d d 1 add local-def } while
+    /d 97 local-def { d 122 le } { dup d /byte-type cast null put /d d 1 add local-def } while
+    dup 95b null put
+} def
+
+/space-bytes {
+    16 dynamic-dict
+    dup 32b null put
+    dup 9b  null put
+    dup 10b null put
+    dup 13b null put
+    dup 11b null put
+    dup 12b null put
+} def
+
+
+% --- atom parsers -------------------------------------------------------
+
+% After consuming '\', interpret the next byte.
+/p-escape {
+    ||#2
+    p-eof? { (trailing backslash) p-fail } if
+    /b p-take local-def
+    b 100b eq { digit-bytes false mk-class }                          % \d
+    {
+    b 68b  eq { digit-bytes true  mk-class }                          % \D
+    {
+    b 119b eq { word-bytes  false mk-class }                          % \w
+    {
+    b 87b  eq { word-bytes  true  mk-class }                          % \W
+    {
+    b 115b eq { space-bytes false mk-class }                          % \s
+    {
+    b 83b  eq { space-bytes true  mk-class }                          % \S
+    {
+    b 110b eq { 10b mk-lit }                                          % \n
+    {
+    b 116b eq { 9b  mk-lit }                                          % \t
+    {
+    b 114b eq { 13b mk-lit }                                          % \r
+    {
+    % everything else is a literal of itself (handles \. \* etc.)
+        b mk-lit
+    } if-else } if-else } if-else } if-else } if-else
+    } if-else } if-else } if-else } if-else
+} def
+
+% Parse contents between [ and ].  '[' already consumed.  Consumes ']'.
+/p-charclass {
+    ||#8
+    /negated false local-def
+    p-eof? not { p-peek 94b eq } and?
+        { p-advance /negated true local-def }
+    if
+    /chars 32 dynamic-dict local-def
+    /first-iter true local-def
+    {
+        p-eof? { (unterminated character class) p-fail } if
+        p-peek 93b eq first-iter not and { false }
+            { true }
+        if-else
+    } {
+        /first-iter false local-def
+        /lo p-take local-def
+        % \-escape inside class
+        lo 92b eq {
+            p-eof? { (trailing \\ in class) p-fail } if
+            /lo p-take local-def
+            % handle the named class-letters specially: import their bytes
+            lo 100b eq { chars digit-bytes-merge }
+            {
+            lo 119b eq { chars word-bytes-merge }
+            {
+            lo 115b eq { chars space-bytes-merge }
+            {
+                % literal escape: lo stays as itself; range still possible
+                p-eof? not { p-peek 45b eq } and?
+                { parser-state /pos get 1 add parser-state /len get lt } and?
+                { parser-state /src get parser-state /pos get 1 add get 93b ne } and?
+                {
+                    p-advance
+                    /hi p-take local-def
+                    hi 92b eq { p-eof? { (trailing \\ in class range) p-fail } if /hi p-take local-def } if
+                    chars lo hi class-add-range
+                }
+                { chars lo null put }
+                if-else
+            } if-else } if-else } if-else
+        }
+        {
+            % plain char, possibly start of range lo-hi
+            p-eof? not { p-peek 45b eq } and?
+            { parser-state /pos get 1 add parser-state /len get lt } and?
+            { parser-state /src get parser-state /pos get 1 add get 93b ne } and?
+            {
+                p-advance
+                /hi p-take local-def
+                hi 92b eq { p-eof? { (trailing \\ in class range) p-fail } if /hi p-take local-def } if
+                chars lo hi class-add-range
+            }
+            { chars lo null put }
+            if-else
+        }
+        if-else
+    } while
+    p-advance                                                         % consume ']'
+    chars negated mk-class
+} def
+
+% Helper: merge built-in class bytes into target dict.  In-place.
+/digit-bytes-merge {
+    % target -- target
+    ||#2
+    /target exch local-def
+    digit-bytes { pop target exch null put } for-all
+    target
+} def
+/word-bytes-merge {
+    ||#2
+    /target exch local-def
+    word-bytes { pop target exch null put } for-all
+    target
+} def
+/space-bytes-merge {
+    ||#2
+    /target exch local-def
+    space-bytes { pop target exch null put } for-all
+    target
+} def
+
+/class-add-range {
+    % chars lo hi --
+    ||#4
+    /hi exch /integer-type cast local-def
+    /lo exch /integer-type cast local-def
+    { lo hi le } { dup lo /byte-type cast null put /lo lo 1 add local-def } while
+    pop
+} def
+
+
+/p-atom {
+    ||#2
+    p-eof? { (unexpected EOF in atom) p-fail } if
+    /c p-peek local-def
+    c 46b eq { p-advance mk-dot }                                     % .
+    {
+    c 94b eq { p-advance /start mk-anchor }                           % ^
+    {
+    c 36b eq { p-advance /end   mk-anchor }                           % $
+    {
+    c 92b eq { p-advance p-escape }                                   % \
+    {
+    c 91b eq { p-advance p-charclass }                                % [
+    {
+    c 40b eq { p-advance p-alt p-eof? { (missing \)) p-fail } if 41b p-expect }   % (
+    {
+    c 41b eq { (unexpected \)) p-fail null }                          % )
+    {
+    c 124b eq { (unexpected |) p-fail null }                          % |
+    {
+    c 42b eq { (unexpected *) p-fail null }
+    {
+    c 43b eq { (unexpected +) p-fail null }
+    {
+    c 63b eq { (unexpected ?) p-fail null }
+    {
+        p-advance c mk-lit
+    }
+    if-else } if-else } if-else } if-else
+    } if-else } if-else } if-else } if-else
+    } if-else } if-else } if-else
+} def
+
+/p-repeat {
+    ||#1
+    p-atom
+    p-eof? not {
+        /c p-peek local-def
+        c 42b eq { p-advance mk-star }
+        {
+        c 43b eq { p-advance mk-plus }
+        {
+        c 63b eq { p-advance mk-opt  }
+        { } if-else } if-else } if-else
+    } if
+} def
+
+% Test if the current position can start another atom.
+/p-can-start-atom {
+    ||#1
+    p-eof? { false }
+        { /c p-peek local-def
+          c 124b eq { false }
+          { c 41b eq { false } { true } if-else }
+          if-else }
+    if-else
+} def
+
+/p-cat {
+    ||#2
+    p-can-start-atom not
+        { null /eps tag }                                             % empty cat = epsilon
+        {
+            p-repeat
+            { p-can-start-atom } { p-repeat mk-cat } while
+        }
+    if-else
+} def
+
+/p-alt {
+    ||#1
+    p-cat
+    { p-eof? not { p-peek 124b eq } and? } { p-advance p-cat mk-alt } while
+} def
+
+/parse-regex {
+    % src -- ast
+    p-init
+    p-alt
+    p-eof? not { (unexpected trailing input) p-fail } if
+} def
+
+
+% ======================================================================
+%  3. AST pretty-printer (for debugging; useful through Phase 1)
+%
+%  Produces a parenthesized form so we can eyeball that the precedence
+%  parse came out right.
+% ======================================================================
+
+/print-ast {
+    |ast|#4
+    /tn ast tag-name local-def
+    tn /lit eq    { (`) print ast tag-value 1 string dup 0 4 -1 roll put print (`) print }
+    {
+    tn /dot eq    { (.) print }
+    {
+    tn /anchor eq { ast tag-value /start eq { (^) print } { ($) print } if-else }
+    {
+    tn /class eq  { ([class]) print }
+    {
+    tn /eps eq    { (<eps>) print }
+    {
+    tn /star eq   { (\() print ast tag-value print-ast (\)*) print }
+    {
+    tn /plus eq   { (\() print ast tag-value print-ast (\)+) print }
+    {
+    tn /opt eq    { (\() print ast tag-value print-ast (\)?) print }
+    {
+    tn /cat eq    {
+        /payload ast tag-value local-def
+        (\() print payload 0 get print-ast ( . ) print payload 1 get print-ast (\)) print
+    }
+    {
+    tn /alt eq    {
+        /payload ast tag-value local-def
+        (\() print payload 0 get print-ast ( | ) print payload 1 get print-ast (\)) print
+    }
+    {
+        (?) print tn print
+    } if-else
+    } if-else } if-else } if-else } if-else
+    } if-else } if-else } if-else } if-else } if-else
+} def
+
+
+% ======================================================================
+%  4. Naive backtracking matcher
+%
+%  match-at returns an ARRAY of all valid end-positions reachable by
+%  matching the AST starting at index `i`.  Empty array = no match.
+%
+%  This is the textbook list-of-positions formulation: every alternation
+%  unions, every concatenation flatmaps.  Memory is O(2^n) on
+%  pathologically-nested quantifiers -- the cost we're highlighting.
+%
+%  Why this representation: it gives EVERY potential match, in greedy
+%  order, with no continuations or closures to manage.  It exhibits
+%  the classic backtracker's exponential blow-up by explicitly
+%  materializing every path through the AST.
+%
+%  The faster Thompson engine in section 5 will compute the same set of
+%  results in O(n * m) time and O(m) space.
+% ======================================================================
+
+/array-concat {
+    % a b -- a-concat-b
+    { append } for-all
+} def
+
+/match-at {
+    % ast str i -- positions-array
+    ||#16
+    /i exch local-def
+    /str exch local-def
+    /ast exch local-def
+    /tn ast tag-name local-def
+
+    tn /lit eq {
+        i str length lt
+            { str i get ast tag-value eq
+                { [ i 1 add ] }
+                { [] }
+                if-else }
+            { [] }
+            if-else
+    }
+    {
+    tn /dot eq {
+        i str length lt
+            { [ i 1 add ] }
+            { [] }
+            if-else
+    }
+    {
+    tn /class eq {
+        i str length lt
+        {
+            /payload ast tag-value local-def
+            /chars payload 0 get local-def
+            /negated payload 1 get local-def
+            /b str i get local-def
+            chars b known? negated xor
+                { [ i 1 add ] }
+                { [] }
+                if-else
+        }
+        { [] }
+        if-else
+    }
+    {
+    tn /anchor eq {
+        ast tag-value /start eq
+            { i 0 eq { [ i ] } { [] } if-else }
+            { i str length eq { [ i ] } { [] } if-else }
+            if-else
+    }
+    {
+    tn /eps eq { [ i ] }
+    {
+    tn /cat eq {
+        /payload ast tag-value local-def
+        /l payload 0 get local-def
+        /r payload 1 get local-def
+        /lpos l str i match-at local-def
+        /result [] local-def
+        lpos { /j exch local-def
+               /rpos r str j match-at local-def
+               /result result rpos array-concat local-def
+        } for-all
+        result
+    }
+    {
+    tn /alt eq {
+        /payload ast tag-value local-def
+        /l payload 0 get local-def
+        /r payload 1 get local-def
+        l str i match-at
+        r str i match-at
+        array-concat
+    }
+    {
+    tn /opt eq {
+        /inner ast tag-value local-def
+        inner str i match-at
+        [ i ] array-concat
+    }
+    {
+    tn /star eq {
+        /inner ast tag-value local-def
+        % zero matches: position i.  Then one or more: match inner, then star.
+        /result [ i ] local-def
+        /innerpos inner str i match-at local-def
+        innerpos { /j exch local-def
+                   j i gt
+                       { /sub ast str j match-at local-def
+                         /result result sub array-concat local-def }
+                   if
+        } for-all
+        result
+    }
+    {
+    tn /plus eq {
+        /inner ast tag-value local-def
+        /innerpos inner str i match-at local-def
+        /result [] local-def
+        innerpos { /j exch local-def
+                   /starnode inner /star tag local-def
+                   /sub starnode str j match-at local-def
+                   /result result sub array-concat local-def
+        } for-all
+        result
+    }
+    {
+        (match-at: unknown tag ) print tn print nl flush
+        []
+    }
+    if-else
+    } if-else
+    } if-else
+    } if-else
+    } if-else
+    } if-else
+    } if-else
+    } if-else
+    } if-else
+    } if-else
+} def
+
+% Top-level naive matcher.  Tries each starting position, returns true
+% on the first that yields any valid end-position.  Anchors inside the
+% AST handle full-match constraints.
+/naive-match? {
+    % ast str -- bool
+    ||#8
+    /str exch local-def
+    /ast exch local-def
+    /found false local-def
+    /i 0 local-def
+    { found not i str length le and } {
+        /pos ast str i match-at local-def
+        pos length 0 gt { /found true local-def } if
+        /i i 1 add local-def
+    } while
+    found
+} def
+
+
+% ======================================================================
+%  5. Thompson NFA compiler
+%
+%  Walks the AST and emits an NFA as a flat array of state records.
+%  Each state is a 4-element array: [kind, payload, out1, out2].
+%
+%  State kinds and their payloads:
+%
+%    /char-state       byte           one out-edge taken if input matches
+%    /dot-state        null           one out-edge taken if input < length
+%    /class-state      [chars neg?]   one out-edge taken if class matches
+%    /anchor-state     /start | /end  one out-edge taken if position matches
+%    /split-state      null           epsilon-closure to BOTH out edges
+%    /match-state      null           accept; no out edges
+%
+%  Compilation produces a fragment record [start dlist] where dlist is
+%  an array of [state-id slot] dangling-out pairs that the caller must
+%  patch to point at the next state.  Standard Thompson construction
+%  (see Russ Cox's article).
+% ======================================================================
+
+/nfa << /states [] >> def
+
+/nfa-reset { nfa /states [] put } def
+
+/nfa-states-get { nfa /states get } def
+
+/nfa-state-at {
+    % id -- state-array
+    nfa /states get exch get
+} def
+
+/nfa-add-state {
+    % kind payload out1 out2 -- id
+    ||#6
+    /out2 exch local-def
+    /out1 exch local-def
+    /payload exch local-def
+    /kind exch local-def
+    /id nfa /states get length local-def
+    nfa /states nfa /states get [ kind payload out1 out2 ] append put
+    id
+} def
+
+/nfa-set-out {
+    % state-id slot target --
+    ||#4
+    /target exch local-def
+    /slot exch local-def
+    /st-id exch local-def
+    nfa /states get st-id get slot target put
+} def
+
+
+% --- fragments -----------------------------------------------------------
+
+% Fragment is a 2-element array [start-state-id dangling-list].
+% Dangling-list is an array of [state-id slot] pairs.
+/mk-frag    { |start dlist|#2 [ start dlist ] } def
+/frag-start { 0 get } def
+/frag-dlist { 1 get } def
+
+/patch-frag {
+    % frag target-id --
+    ||#2
+    /target exch local-def
+    /frag exch local-def
+    frag frag-dlist {
+        |pair|#2
+        pair 0 get pair 1 get target nfa-set-out
+    } for-all
+} def
+
+
+% --- compile-ast ---------------------------------------------------------
+
+/compile-ast {
+    % ast -- frag
+    ||#16
+    /ast exch local-def
+    /tn ast tag-name local-def
+
+    tn /lit eq {
+        /id /char-state ast tag-value -1 -1 nfa-add-state local-def
+        id [ [ id 2 ] ] mk-frag
+    }
+    {
+    tn /dot eq {
+        /id /dot-state null -1 -1 nfa-add-state local-def
+        id [ [ id 2 ] ] mk-frag
+    }
+    {
+    tn /class eq {
+        /id /class-state ast tag-value -1 -1 nfa-add-state local-def
+        id [ [ id 2 ] ] mk-frag
+    }
+    {
+    tn /anchor eq {
+        /id /anchor-state ast tag-value -1 -1 nfa-add-state local-def
+        id [ [ id 2 ] ] mk-frag
+    }
+    {
+    tn /eps eq {
+        /id /split-state null -1 -1 nfa-add-state local-def
+        id [ [ id 2 ] [ id 3 ] ] mk-frag
+    }
+    {
+    tn /cat eq {
+        /payload ast tag-value local-def
+        /lfrag payload 0 get compile-ast local-def
+        /rfrag payload 1 get compile-ast local-def
+        lfrag rfrag frag-start patch-frag
+        lfrag frag-start rfrag frag-dlist mk-frag
+    }
+    {
+    tn /alt eq {
+        /payload ast tag-value local-def
+        /lfrag payload 0 get compile-ast local-def
+        /rfrag payload 1 get compile-ast local-def
+        /id /split-state null lfrag frag-start rfrag frag-start nfa-add-state local-def
+        id lfrag frag-dlist rfrag frag-dlist array-concat mk-frag
+    }
+    {
+    tn /opt eq {
+        /ifrag ast tag-value compile-ast local-def
+        /id /split-state null ifrag frag-start -1 nfa-add-state local-def
+        id ifrag frag-dlist [ [ id 3 ] ] array-concat mk-frag
+    }
+    {
+    tn /star eq {
+        /ifrag ast tag-value compile-ast local-def
+        /id /split-state null ifrag frag-start -1 nfa-add-state local-def
+        ifrag id patch-frag
+        id [ [ id 3 ] ] mk-frag
+    }
+    {
+    tn /plus eq {
+        /ifrag ast tag-value compile-ast local-def
+        /id /split-state null ifrag frag-start -1 nfa-add-state local-def
+        ifrag id patch-frag
+        ifrag frag-start [ [ id 3 ] ] mk-frag
+    }
+    {
+        (compile-ast: unknown tag ) print tn print nl flush
+        0 [] mk-frag
+    }
+    if-else
+    } if-else
+    } if-else
+    } if-else
+    } if-else
+    } if-else
+    } if-else
+    } if-else
+    } if-else
+    } if-else
+} def
+
+
+% --- top-level build-nfa -------------------------------------------------
+
+/build-nfa {
+    % ast -- start-id
+    ||#4
+    /ast exch local-def
+    nfa-reset
+    /frag ast compile-ast local-def
+    /accept-id /match-state null -1 -1 nfa-add-state local-def
+    frag accept-id patch-frag
+    frag frag-start
+} def
+
+
+% --- NFA pretty-printer (Phase 5 -- handy throughout) -------------------
+
+/print-nfa {
+    % start-id --
+    ||#4
+    /start exch local-def
+    (NFA  start={0:d}  states={1:d}\n)
+        mark start nfa-states-get length print-fmt pop pop
+    /i 0 local-def
+    { i nfa-states-get length lt } {
+        /st i nfa-state-at local-def
+        (  {0:2d}: ) mark i print-fmt pop pop
+        st 0 get print-nfa-kind
+        ( -> ) print
+        st 2 get -1 eq { (--) print } { ({0:2d}) mark st 2 get print-fmt pop pop } if-else
+        ( ) print
+        st 3 get -1 eq { (--) print } { ({0:2d}) mark st 3 get print-fmt pop pop } if-else
+        st 0 get /char-state eq
+            { (   ') print st 1 get 1 string dup 0 4 -1 roll put print (') print } if
+        st 0 get /class-state eq   { (   class) print } if
+        st 0 get /anchor-state eq  { st 1 get /start eq { (   ^) } { (   $) } if-else print } if
+        nl flush
+        /i i 1 add local-def
+    } while
+} def
+
+/print-nfa-kind {
+    |k|#1
+    k /char-state   eq { (CHAR  ) print }
+    {
+    k /dot-state    eq { (DOT   ) print }
+    {
+    k /class-state  eq { (CLASS ) print }
+    {
+    k /anchor-state eq { (ANCH  ) print }
+    {
+    k /split-state  eq { (SPLIT ) print }
+    {
+    k /match-state  eq { (MATCH ) print }
+    { k = } if-else
+    } if-else } if-else } if-else } if-else } if-else
+} def
+
+
+% ======================================================================
+%  6. Pike VM simulator
+%
+%  Classic two-state-set NFA simulation -- the algorithm Russ Cox
+%  attributes to Ken Thompson's 1968 paper, polished by Pike in the
+%  Sam editor.  At each step:
+%
+%    cur = states the NFA could be in after consuming the prefix so far
+%    next = states reachable after consuming one more byte
+%
+%  Each state is added to a set at most once per step (via addstate's
+%  membership check), so the total work is O(states * input-length) --
+%  no exponential blow-up regardless of pattern shape.
+%
+%  Epsilon-closure is folded into addstate: split-states recursively
+%  enqueue both their out-targets; anchor-states enqueue their out
+%  iff the current position satisfies the anchor.
+%
+%  Unanchored search: at each position we also enqueue the start
+%  state.  Patterns with explicit /^ filter that out via the
+%  start-anchor check; unanchored patterns get tried at every
+%  position, all in parallel.
+% ======================================================================
+
+/pike << /str null /len 0 /start 0 >> def
+
+/addstate {
+    % set st-id pos -- set
+    ||#6
+    /pos exch local-def
+    /st-id exch local-def
+    /set exch local-def
+    set st-id set-member?
+        { set }
+        {
+            /state st-id nfa-state-at local-def
+            /kind state 0 get local-def
+            kind /split-state eq
+                {
+                    /set set state 2 get pos addstate local-def
+                    /set set state 3 get pos addstate local-def
+                    set
+                }
+                {
+                    kind /anchor-state eq
+                        {
+                            /which state 1 get local-def
+                            which /start eq pos 0 eq and
+                            which /end   eq pos pike /len get eq and
+                            or
+                                { set state 2 get pos addstate }
+                                { set }
+                                if-else
+                        }
+                        { set st-id set-add }
+                        if-else
+                }
+                if-else
+        }
+        if-else
+} def
+
+% Test if any element of `set` is a /match-state.
+/set-has-match? {
+    % set -- bool
+    ||#2
+    /found false local-def
+    {
+        /id exch local-def
+        id nfa-state-at 0 get /match-state eq { /found true local-def } if
+    } for-all
+    found
+} def
+
+/pike-match? {
+    % start-id str -- bool
+    ||#24
+    /str exch local-def
+    /start exch local-def
+    pike /str    str             put
+    pike /len    str length      put
+    pike /start  start           put
+
+    /cur 32 set start 0 addstate local-def
+    cur set-has-match? { true }
+        {
+            /found false local-def
+            /i 0 local-def
+            { found not i pike /len get lt and } {
+                /next 32 set local-def
+                /next next start i addstate local-def
+                cur {
+                    /id exch local-def
+                    /state id nfa-state-at local-def
+                    /kind state 0 get local-def
+                    /matches false local-def
+                    kind /char-state eq
+                        { state 1 get str i get eq /matches exch local-def }
+                    if
+                    kind /dot-state eq { /matches true local-def } if
+                    kind /class-state eq
+                        {
+                            /payload state 1 get local-def
+                            /chars   payload 0 get local-def
+                            /negated payload 1 get local-def
+                            chars str i get known? negated xor
+                            /matches exch local-def
+                        }
+                    if
+                    matches { /next next state 2 get i 1 add addstate local-def } if
+                } for-all
+                /cur next local-def
+                cur set-has-match? { /found true local-def } if
+                /i i 1 add local-def
+            } while
+            % Final position: enqueue start at pos=len for end-anchor checks.
+            found not
+                {
+                    /cur cur start pike /len get addstate local-def
+                    cur set-has-match?
+                }
+                { true }
+                if-else
+        }
+        if-else
+} def
+
+
+% ======================================================================
+%  Phase 1 + Phase 2 smoke tests
+% ======================================================================
+
+/test-parse {
+    |src|#2
+    (parse `) print src print (`  =>  ) print
+    src parse-regex
+    print-ast
+    nl flush
+} def
+
+/test-naive {
+    % pattern input expected --
+    |pat input expected|#8
+    pat parse-regex /ast exch local-def
+    ast input naive-match?
+    /actual exch local-def
+    actual expected eq
+        { (  ok    ) print }
+        { (  FAIL  ) print }
+        if-else
+    pat print (  on  ) print input print (  =>  ) print
+    actual    { (match) } { (no   ) } if-else print
+    (   expected ) print
+    expected  { (match) } { (no   ) } if-else print
+    nl flush
+} def
+
+(=== Phase 1: parse + AST ===\n)#= print flush
+
+<(a)>            test-parse
+<(abc)>          test-parse
+<(a|b)>          test-parse
+<(a*)>           test-parse
+<(a+b?)>         test-parse
+<((ab)*c)>       test-parse
+<(a|b|c)>        test-parse
+<(.)>            test-parse
+<(\d+)>          test-parse
+<([a-z]+)>       test-parse
+<([^0-9])>       test-parse
+<(^abc$)>        test-parse
+<(a?a?a?aaa)>    test-parse
+
+(\n=== Phase 2: naive matcher ===\n)#= print flush
+
+<(a)>            (a)         true   test-naive
+<(a)>            (b)         false  test-naive
+<(abc)>          (abc)       true   test-naive
+<(abc)>          (xabcy)     true   test-naive          % unanchored
+<(^abc$)>        (abc)       true   test-naive
+<(^abc$)>        (xabcy)     false  test-naive
+<(a|b)>          (a)         true   test-naive
+<(a|b)>          (b)         true   test-naive
+<(a|b)>          (c)         false  test-naive
+<(a*)>           ()          true   test-naive
+<(a*)>           (aaa)       true   test-naive
+<(a+)>           ()          false  test-naive
+<(a+)>           (aaa)       true   test-naive
+<(a?b)>          (b)         true   test-naive
+<(a?b)>          (ab)        true   test-naive
+<(.+)>           (xyz)       true   test-naive
+<(\d+)>          (abc123)    true   test-naive
+<(\d+)>          (abc)       false  test-naive
+<([a-z]+)>       (HELLO)     false  test-naive
+<([a-z]+)>       (hello)     true   test-naive
+<(^[^0-9]+$)>    (abc)       true   test-naive
+<(^[^0-9]+$)>    (abc1)      false  test-naive
+<((ab)+)>        (ababab)    true   test-naive
+<((ab)+c)>       (ababc)     true   test-naive
+<((ab)+c)>       (abab)      false  test-naive
+
+(\n=== Phase 3: Thompson NFA compile + dump ===\n)#= print flush
+
+/dump-compile {
+    |src|#2
+    (-- ) print src print ( --\n) print flush
+    src parse-regex build-nfa
+    print-nfa
+    nl flush
+} def
+
+<(a)>            dump-compile
+<(abc)>          dump-compile
+<(a|b)>          dump-compile
+<(^[a-z]+$)>     dump-compile
+
+(\n=== Phase 4: Pike VM agreement with naive matcher ===\n)#= print flush
+
+% Corpus tallies: the agreement corpus is the load-bearing correctness
+% gate (README: "asserts agreement"), so FAILs are counted and the run
+% exits nonzero after the corpus instead of printing-and-shrugging.
+/agree-total 0 def
+/agree-fails 0 def
+
+/test-both {
+    |pat input expected|#8
+    /agree-total agree-total 1 add def
+    pat parse-regex /ast exch local-def
+    ast input naive-match?  /naive-r exch local-def
+    ast build-nfa input pike-match? /pike-r exch local-def
+    naive-r expected eq pike-r expected eq and
+        { (  ok    ) print }
+        { (  FAIL  ) print  /agree-fails agree-fails 1 add def }
+    if-else
+    pat print (  on  ) print input print (  =>  ) print
+    naive-r { (match) } { (no   ) } if-else print
+    ( / )    print
+    pike-r  { (match) } { (no   ) } if-else print
+    (   expected ) print
+    expected { (match) } { (no   ) } if-else print
+    nl flush
+} def
+
+<(a)>            (a)         true   test-both
+<(a)>            (b)         false  test-both
+<(abc)>          (abc)       true   test-both
+<(abc)>          (xabcy)     true   test-both
+<(^abc$)>        (abc)       true   test-both
+<(^abc$)>        (xabcy)     false  test-both
+<(a|b)>          (a)         true   test-both
+<(a|b)>          (b)         true   test-both
+<(a|b)>          (c)         false  test-both
+<(a*)>           ()          true   test-both
+<(a*)>           (aaa)       true   test-both
+<(a+)>           ()          false  test-both
+<(a+)>           (aaa)       true   test-both
+<(a?b)>          (b)         true   test-both
+<(a?b)>          (ab)        true   test-both
+<(.+)>           (xyz)       true   test-both
+<(\d+)>          (abc123)    true   test-both
+<(\d+)>          (abc)       false  test-both
+<([a-z]+)>       (HELLO)     false  test-both
+<([a-z]+)>       (hello)     true   test-both
+<(^[^0-9]+$)>    (abc)       true   test-both
+<(^[^0-9]+$)>    (abc1)      false  test-both
+<((ab)+)>        (ababab)    true   test-both
+<((ab)+c)>       (ababc)     true   test-both
+<((ab)+c)>       (abab)      false  test-both
+
+% Hard gate: abort with a nonzero exit on any disagreement, BEFORE the
+% long ReDoS benchmark below, so CI can trust the process exit code.
+agree-fails 0 eq
+{
+    (\n  {0}/{1} agreement cases ok\n)
+    mark agree-total agree-fails sub agree-total print-fmt pop pop flush
+}
+{
+    (\n  {0} of {1} agreement case\(s\) FAILED\n)
+    mark agree-fails agree-total print-fmt pop pop flush
+    /regex-agreement-failed throw
+}
+if-else
+
+
+% ======================================================================
+%  Phase 6: head-to-head ReDoS demo
+%
+%  Pattern: a?{n} a{n}
+%  Input:   a^n
+%
+%  This pattern matches (with the optionals all empty + the requireds
+%  all consuming).  But the naive backtracker explores 2^n combinations
+%  of which optionals match before finding the right assignment.  The
+%  Thompson NFA explores at most O(states * input-length) configurations.
+%
+%  At small n the difference is sub-millisecond; at n>=14 the
+%  exponential gap becomes loud.
+% ======================================================================
+
+/build-redos-pat {
+    |n|#4
+    /buf 4096 string local-def
+    /pos 0 local-def
+    /i 0 local-def
+    { i n lt }
+        { buf pos 97b put /pos pos 1 add local-def
+          buf pos 63b put /pos pos 1 add local-def
+          /i i 1 add local-def }
+    while
+    /i 0 local-def
+    { i n lt }
+        { buf pos 97b put /pos pos 1 add local-def
+          /i i 1 add local-def }
+    while
+    buf 0 pos get-interval
+} def
+
+/build-aaa {
+    |n|#4
+    /buf n string local-def
+    /i 0 local-def
+    { i n lt } { buf i 97b put /i i 1 add local-def } while
+    buf
+} def
+
+/run-redos {
+    |n|#8
+    /pat n build-redos-pat local-def
+    /input n build-aaa local-def
+    /ast pat parse-regex local-def
+    /naive-time { ast input naive-match? pop } time local-def
+    /pike-time  { ast build-nfa input pike-match? pop } time local-def
+    (  {0:2d}    {1:5d}     {2:5d}     {3:8d}     {4:8d}\n)
+        mark n pat length input length naive-time pike-time print-fmt pop pop
+    flush
+} def
+
+(\n=== Phase 6: ReDoS head-to-head ===\n)#= print
+(  pattern: a?{n}a{n}   input: a^n  -- the canonical ReDoS pathology\n)#= print
+(  invoke with  --vm-size=64M  for n through 10\n)#= print
+(  release binary  benchmark/trix.rel  for clean timings\n)#= print
+(\n   n   pat-len   in-len   naive (us)    pike (us)\n)#= print
+(  ---  -------   ------   ----------    ---------\n)#= print flush
+2  run-redos
+3  run-redos
+4  run-redos
+5  run-redos
+6  run-redos
+7  run-redos
+8  run-redos
+9  run-redos
+10 run-redos

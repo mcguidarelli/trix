@@ -1,0 +1,141 @@
+% ====================================================================
+% test_match_all.trx -- match-all: the gather form of match.
+% Contract: trix-reference.md 3.35 / pattern-matching.md 5.6.
+%   value pairs-array -- result-array
+% Every test runs in pair order against a fresh value copy; each true
+% test runs its body with its own value copy; everything the bodies
+% push accumulates in arm order (collect-everything).  Zero matches
+% raise /match.  Every trigger and error name was probed live before
+% being pinned (incl. the leak-scaling control: per-call VM growth
+% equals a plain 1-element array construction byte-for-byte).
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: happy paths
+% ====================================================================
+
+5 [ { 3 gt } { pop (big) } { is-integer } { 2 mul } { pop false } { pop (never) } ] match-all
+dup length 2 eq
+exch dup 0 get (big) eq
+exch 1 get 10 eq and and
+  (ma: multiple arms collect in order) rt-ok clear
+
+2 [ { 2 eq } { 10 mul } ] match-all
+dup length 1 eq exch 0 get 20 eq and
+  (ma: single matching arm) rt-ok clear
+
+1 [ { pop true } { pop } { pop true } { pop 7 8 9 } ] match-all
+dup length 3 eq exch dup 0 get 7 eq exch 2 get 9 eq and and
+  (ma: bodies contribute zero or several results) rt-ok clear
+
+1 [ { pop true } { pop 2 [ { pop true } { 3 mul } ] match-all } ] match-all
+dup length 1 eq exch 0 get 0 get 6 eq and
+  (ma: nested match-all in a body) rt-ok clear
+
+% ExtValue / WideValue values: fresh copy per test and per body
+5000000000l [ { pop true } { 1 exch pop } { pop true } { 2 exch pop } ] match-all
+dup length 2 eq exch dup 0 get 1 eq exch 1 get 2 eq and and
+  (ma: Long value cloned per arm) rt-ok clear
+
+170141183460469231731687303715884105727q
+[ { pop true } { 170141183460469231731687303715884105727q eq } ] match-all
+0 get (ma: Int128 value round-trips into the body) rt-ok clear
+
+% global region: result array lands in global VM under ${...}
+${ 4 [ { pop true } { 2 mul } ] match-all } 0 get 8 eq
+  (ma: works inside a global-alloc scope) rt-ok clear
+
+% value untouched on the caller's side (bodies get copies)
+/v [1 2 3] def
+v [ { pop true } { 0 9 put 1 } ] match-all pop
+v 0 get 9 eq (ma: body mutations act on the shared composite) rt-ok clear
+
+% ====================================================================
+% SECTION 2: sad paths (every arm sweeps the partial results, so the
+% caller's stack depth is unchanged after a caught error)
+% ====================================================================
+
+{ 9 [ { pop false } { 1 } ] match-all } try
+/match eq (ma: zero matching arms raises match) rt-ok clear
+
+{ 9 [ ] match-all } try
+/range-check eq (ma: empty pairs rejected) rt-ok clear
+
+{ 9 [ { pop true } ] match-all } try
+/range-check eq (ma: odd pair count rejected) rt-ok clear
+
+{ 9 [ { pop 42 } { 1 } ] match-all } try
+/type-check eq (ma: non-boolean test result rejected) rt-ok clear
+
+{ 9 [ { pop true } { pop 1 } { pop 42 } { 2 } ] match-all } try
+/type-check eq (ma: non-boolean after a prior match still sweeps partials) rt-ok clear
+
+{ 3 [ { pop true } { 0 div } ] match-all } try
+/div-by-zero eq (ma: body error propagates) rt-ok clear
+
+{ 3 [ { 0 div } { 1 } ] match-all } try
+/div-by-zero eq (ma: test error propagates) rt-ok clear
+
+% exit cannot reconcile the accumulation mark: fenced as invalid-exit
+{ 1 [ { pop true } { pop exit } ] match-all } try
+/invalid-exit eq (ma: exit inside a body is fenced) rt-ok clear
+{ 1 [ { pop exit } { 1 } ] match-all } try
+/invalid-exit eq (ma: exit inside a test is fenced) rt-ok clear
+
+count 0 eq (ma: stack clean after all caught errors) rt-ok clear
+
+% exit in an OUTER loop wrapping a completed match-all is unaffected
+/n 0 def
+{ /n n 1 add def
+  n [ { pop true } { 2 mul } ] match-all pop
+  n 3 ge { exit } if
+} loop
+n 3 eq (ma: enclosing loop exit works after match-all completes) rt-ok clear
+
+% ====================================================================
+% SECTION 3: stress
+% ====================================================================
+
+% 64 runtime-built arms, all matching
+/ma-t { pop true } def
+/ma-b { pop 1 } def
+/ma-pairs mark 64 { /ma-t load /ma-b load } repeat array-from-mark def
+7 ma-pairs match-all length 64 eq
+  (ma: 64 arms all collect) rt-ok clear
+
+% deep nesting: 40 levels of match-all inside bodies
+/ma-deep {
+  |d|
+  d 0 eq { 1 } { d 1 sub [ { pop true } { ma-deep } ] match-all 0 get } if-else
+} def
+40 ma-deep 1 eq (ma: 40-deep nested trampolines) rt-ok clear
+
+% per-call VM growth equals the plain 1-element-array control
+% (probed at n=100/300/1000: linear 8 bytes/call both sides)
+save pop
+/ma-f0 /vm-free query-status def
+200 { 5000000000l [ { pop true } { 1 exch pop } ] match-all pop } repeat
+ma-f0 /vm-free query-status sub
+-1 restore
+save pop
+/ma-f1 /vm-free query-status def
+200 { 5000000000l pop mark 1 array-from-mark pop } repeat
+ma-f1 /vm-free query-status sub
+-1 restore
+sub abs 64 le
+  (ma: per-call growth matches the array-construction control) rt-ok clear
+
+(match-all tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

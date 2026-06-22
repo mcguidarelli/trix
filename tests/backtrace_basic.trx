@@ -1,0 +1,8 @@
+% backtrace_basic.trx
+% Verifies that unhandled errors print a call-chain backtrace to stderr.
+% Expected: three backtrace lines (#0 operator, #1 bar, #2 foo) followed
+% by the error message.
+
+/bar { 1 0 div } def
+/foo { bar } def
+foo

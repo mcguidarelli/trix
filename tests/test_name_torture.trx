@@ -1,0 +1,414 @@
+% ====================================================================
+% Name System Torture Test Suite
+% ====================================================================
+% Stress tests for the Name hash table: mass creation with random
+% names, hash distribution quality, duplicate detection, save/restore
+% reclamation, long name strings, lookup correctness, and binding
+% cache behavior.
+%
+% Uses a fixed random seed (42) for repeatability.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% Setup: alphabet and random name generator
+% ====================================================================
+
+(abcdefghijklmnopqrstuvwxyz0123456789) /alphabet exch def
+
+% len make-rand-name -> name
+% Creates a random alphanumeric name of the given length.
+/make-rand-name {
+    string /s exch def
+    0 1 s length 1 sub {
+        /i exch def
+        s i 36u rand-bounded-uinteger alphabet exch get put
+    } for
+    s to-name
+} def
+
+% make-uint-name -> name
+% Creates a random name from rand-uinteger formatted as decimal.
+/make-uint-name {
+    =string (u{}) mark rand-uinteger sprint-fmt pop to-name
+} def
+
+42ul rand-seed
+
+% ====================================================================
+% SECTION 1: Mass random name creation (10,000 names)
+% ====================================================================
+% Create 10,000 unique random names: 70% alphanumeric (length 4-12),
+% 30% hex-formatted. Measure name table metrics.
+
+save
+
+/name-count-before 0 def
+/name-count-after 0 def
+/name-count-before //:status:name-count def
+
+1 1 10000 {
+    pop
+    10u rand-bounded-uinteger 3u lt {
+        % 30%: hex name
+        make-uint-name pop
+    } {
+        % 70%: alphanumeric name, length 4-12
+        9u rand-bounded-uinteger 4u add make-rand-name pop
+    } if-else
+} for
+
+/name-count-after //:status:name-count def
+
+% Print the metrics
+(--- Name torture: 10,000 random names ---) =
+(  name-count before: {}) mark name-count-before print-fmt pop pop nl
+(  name-count after:  {}) mark name-count-after print-fmt pop pop nl
+(  name-vm-used:      {}) mark //:status:name-vm-used print-fmt pop pop nl
+(  name-max-chain:    {}) mark //:status:name-max-chain print-fmt pop pop nl
+(  name-avg-chain:    {}) mark //:status:name-avg-chain print-fmt pop pop nl
+
+% Verify names were actually created (at least 8000 new, allowing for
+% some random collisions in the alphanumeric pool)
+name-count-after name-count-before sub 8000 gt
+(nt: 10K creation - at least 8000 new names) rt-ok
+
+restore clear
+
+% ====================================================================
+% SECTION 2: Hash distribution quality
+% ====================================================================
+% With 10,000 names in 1031 default buckets, a good hash should have
+% max_chain well below 30 and avg_chain well below 20.
+
+save
+
+42ul rand-seed
+1 1 10000 {
+    pop
+    10u rand-bounded-uinteger 3u lt {
+        make-uint-name pop
+    } {
+        9u rand-bounded-uinteger 4u add make-rand-name pop
+    } if-else
+} for
+
+//:status:name-max-chain
+dup 30 lt
+(nt: hash max-chain < 30 for 10K names) rt-ok
+(  max-chain: {}) mark 3 -1 roll print-fmt pop pop nl
+
+//:status:name-avg-chain
+dup 20.0 lt
+(nt: hash avg-chain < 20 for 10K names) rt-ok
+(  avg-chain: {}) mark 3 -1 roll print-fmt pop pop nl
+
+restore clear
+
+% ====================================================================
+% SECTION 3: Duplicate name detection
+% ====================================================================
+% Re-creating the same names should NOT increase name-count.
+
+save
+
+% Pre-declare variable names so they don't affect name-count measurements
+/count-before 0 def
+/count-after 0 def
+
+% Create 1000 names with known seed
+42ul rand-seed
+1 1 1000 {
+    pop
+    9u rand-bounded-uinteger 4u add make-rand-name pop
+} for
+
+/count-before //:status:name-count def
+
+% Re-create the exact same 1000 names (same seed)
+42ul rand-seed
+1 1 1000 {
+    pop
+    9u rand-bounded-uinteger 4u add make-rand-name pop
+} for
+
+/count-after //:status:name-count def
+
+count-after count-before eq
+(nt: duplicate names not double-allocated) rt-ok
+
+restore clear
+
+% ====================================================================
+% SECTION 4: Save/restore reclamation
+% ====================================================================
+% Names created after save should be reclaimed on restore.
+% name-count should return to approximately the pre-save value.
+
+% Pre-declare variable names
+/base-count 0 def
+/inner-count 0 def
+/restored-count 0 def
+
+/base-count //:status:name-count def
+
+save
+
+% Use a unique seed so names don't collide with sections above
+99ul rand-seed
+1 1 2000 {
+    pop
+    9u rand-bounded-uinteger 4u add make-rand-name pop
+} for
+
+/inner-count //:status:name-count def
+inner-count base-count sub 1500 gt
+(nt: save/restore - names created inside save) rt-ok
+
+restore
+
+/restored-count //:status:name-count def
+restored-count base-count eq
+(nt: save/restore - name-count restored exactly) rt-ok
+
+clear
+
+% ====================================================================
+% SECTION 5: Save/restore with vm-used reclamation
+% ====================================================================
+% name-vm-used should return to pre-save value after restore.
+
+% Pre-declare variable names
+/vm-used-before 0 def
+/vm-used-inner 0 def
+/vm-used-after 0 def
+
+/vm-used-before //:status:name-vm-used def
+
+save
+
+77ul rand-seed
+1 1 1000 {
+    pop
+    9u rand-bounded-uinteger 4u add make-rand-name pop
+} for
+
+/vm-used-inner //:status:name-vm-used def
+vm-used-inner vm-used-before gt
+(nt: save/restore vm-used - grew inside save) rt-ok
+
+restore
+
+/vm-used-after //:status:name-vm-used def
+vm-used-after vm-used-before eq
+(nt: save/restore vm-used - reclaimed exactly) rt-ok
+
+clear
+
+% ====================================================================
+% SECTION 6: Long name strings
+% ====================================================================
+% Stress VM allocation alignment with names near MaxNameLength.
+
+save
+
+% Create names of lengths 50, 100, 127 (MaxNameLength is 127)
+50 make-rand-name /long50 exch def
+100 make-rand-name /long100 exch def
+127 make-rand-name /long127 exch def
+
+long50 type /name-type eq
+(nt: 50-char name created) rt-ok
+long100 type /name-type eq
+(nt: 100-char name created) rt-ok
+long127 type /name-type eq
+(nt: 127-char name created) rt-ok
+
+% Verify they are distinct names
+long50 long100 ne
+(nt: 50-char != 100-char) rt-ok
+long100 long127 ne
+(nt: 100-char != 127-char) rt-ok
+
+% Verify MaxNameLength+1 fails
+{ 128 make-rand-name pop } try
+/limit-check eq
+(nt: 128-char name rejected with limit-check) rt-ok
+
+restore clear
+
+% ====================================================================
+% SECTION 7: Name lookup after mass creation
+% ====================================================================
+% Create names and def them, then verify lookup finds them.
+
+save
+
+42ul rand-seed
+
+% Use a dedicated dict so we don't overflow userdict
+512 dict begin
+
+% Create 500 names and def each to its index
+1 1 500 {
+    /idx exch def
+    9u rand-bounded-uinteger 4u add make-rand-name
+    idx def
+} for
+
+% Re-seed and verify lookups: re-generate the same names, load them
+42ul rand-seed
+/lookup-ok true def
+1 1 500 {
+    /idx exch def
+    9u rand-bounded-uinteger 4u add make-rand-name
+    % this name should be defined with value idx
+    dup where {
+        exch get idx eq { } { /lookup-ok false def } if-else
+    } {
+        pop /lookup-ok false def
+    } if-else
+} for
+
+lookup-ok
+(nt: 500 name lookups correct after mass creation) rt-ok
+
+end
+restore clear
+
+% ====================================================================
+% SECTION 8: Binding cache stress
+% ====================================================================
+% def names, save, re-def them, restore — verify bindings revert.
+
+save
+
+/btest-a 100 def
+/btest-b 200 def
+/btest-c 300 def
+
+save
+
+/btest-a 999 def
+/btest-b 888 def
+/btest-c 777 def
+
+btest-a 999 eq (nt: binding cache - inner a) rt-ok
+btest-b 888 eq (nt: binding cache - inner b) rt-ok
+btest-c 777 eq (nt: binding cache - inner c) rt-ok
+
+restore
+
+btest-a 100 eq (nt: binding cache - restored a) rt-ok
+btest-b 200 eq (nt: binding cache - restored b) rt-ok
+btest-c 300 eq (nt: binding cache - restored c) rt-ok
+
+restore clear
+
+% ====================================================================
+% SECTION 9: Nested save/restore with names
+% ====================================================================
+% Three levels of nesting to stress chain truncation.
+
+% Pre-declare variable names
+/nest-base 0 def
+/nest-level1 0 def
+/nest-level2 0 def
+/nest-level3 0 def
+
+/nest-base //:status:name-count def
+
+save
+    111ul rand-seed
+    1 1 500 { pop 8 make-rand-name pop } for
+    /nest-level1 //:status:name-count def
+
+    save
+        1 1 500 { pop 8 make-rand-name pop } for
+        /nest-level2 //:status:name-count def
+
+        save
+            1 1 500 { pop 8 make-rand-name pop } for
+            /nest-level3 //:status:name-count def
+
+            nest-level3 nest-level2 gt
+            (nt: nested save level 3 grew) rt-ok
+        restore
+
+        //:status:name-count nest-level2 eq
+        (nt: nested restore to level 2) rt-ok
+    restore
+
+    //:status:name-count nest-level1 eq
+    (nt: nested restore to level 1) rt-ok
+restore
+
+//:status:name-count nest-base eq
+(nt: nested restore to base) rt-ok
+
+clear
+
+% ====================================================================
+% SECTION 10: Rapid create/lookup cycles
+% ====================================================================
+% Alternating creation and lookup to stress the hash table under
+% mixed workload.
+
+save
+
+42ul rand-seed
+
+% Phase 1: create 200 names, def each in a dedicated dict
+256 dict begin
+[1 1 200 {
+    /ni exch def
+    8 make-rand-name dup ni def
+} for] /names exch def
+
+% Phase 2: look up each name 10 times (2000 lookups total)
+/found-all true def
+0 1 names length 1 sub {
+    /ni exch def
+    names ni get /test-name exch def
+    1 1 10 {
+        pop
+        test-name where { pop } { /found-all false def } if-else
+    } for
+} for
+
+found-all
+(nt: 2000 lookups all found existing names) rt-ok
+
+end
+restore clear
+
+% ====================================================================
+% SECTION 11: status invariant check
+% ====================================================================
+
+//:status:vm-temp-used 0 eq
+(nt: vm-temp-used 0 at end) rt-ok
+
+% Pre-warm /add and /eq: prior `restore` operations cleared main's
+% per-coroutine binding cache, so their first lookup here would allocate
+% 12-byte cache entries mid-expression and drift the invariant.
+0 0 add 0 eq pop
+
+//:status:vm-temp-used
+//:status:vm-used add
+//:status:vm-global-used add
+//:status:vm-free add
+//:status:vm-total eq
+(nt: final invariant temp + used + global + free = total) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_name_torture: ALL TESTS PASSED) =
+(__test_ok__) =

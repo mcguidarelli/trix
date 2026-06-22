@@ -1,0 +1,7 @@
+% build with mixed regions, cross save/restore, then use.
+${ << /k (global-wrapper) >> } /g exch def
+save
+g /local-payload mark 1 2 3 array-from-mark put
+-1 restore
+g /k get length
+save ${ [ (a) (b) ] } -1 restore length

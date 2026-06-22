@@ -1,0 +1,3 @@
+42q is-int128 is-number is-signed
+42uq is-uint128 is-unsigned
+//:systemdict:numbers:int128-type:max

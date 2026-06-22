@@ -1,0 +1,142 @@
+% ====================================================================
+% test_screen_errors.trx -- Phase-3 P3 batch 7: ops_screen.inl sad
+% paths (creation/resize caps, coordinate and codepoint ranges, blit
+% bounds, render-to stream arms, park-cursor range).  Targets
+% enumerated from per-line gcov;
+% every trigger and error name was probed live before being pinned.
+% Contracts: trix-reference.md 3.17.1 (screen surface), terminal-io.md
+% 4.5.  All cell-buffer ops run headless; no tty needed.
+%
+% REGRESSION: the codepoint section pins engine fix 71c449a --
+% screen-put-cell / screen-fill-rect previously accepted any uint32
+% codepoint (the validation the error message promised was vacuous),
+% and surrogate halves reached the renderer as invalid UTF-8 (CESU-8).
+% Both ops now reject cp > 0x10FFFF and D800..DFFF at the put site.
+%
+% Companions: screen-render's sandbox arm lives in
+% test_raw_mode_sandbox.trx (the screen/raw host-op family).
+%
+% Accepted-uncovered arms:
+%   - screen-render / screen-park-cursor write-failed errnos (need
+%     EIO injection on STDOUT_FILENO)
+%   - screen-render-to "stream not writable" (read-only objects are
+%     gated by verify as /read-only; a closed stream hits the
+%     not-open arm first -- no user path reaches it)
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: make-screen / screen-resize caps
+% ====================================================================
+
+{ 5000 5000 make-screen } try
+/limit-check eq (make-screen: cells beyond 2^24 rejected) rt-ok clear
+{ 0x10000#u 1 make-screen } try
+/range-check eq (make-screen: dimension beyond 65535 rejected) rt-ok clear
+{ 0 5 make-screen } try
+/range-check eq (make-screen: zero dimension rejected) rt-ok clear
+
+/scr 4 3 make-screen def
+{ scr 5000 5000 screen-resize } try
+/limit-check eq (screen-resize: cells beyond 2^24 rejected) rt-ok clear
+scr 5 4 screen-resize pop
+scr screen-cols 5 eq  scr screen-rows 4 eq and
+(screen-resize: 5x4 control) rt-ok clear
+/scr 4 3 make-screen def
+
+% ====================================================================
+% SECTION 2: coordinate ranges (col/row beyond length_t as UInteger;
+% in-range-but-off-screen rows; negative forms are blocked by verify)
+% ====================================================================
+
+{ scr 10 1 65 7 0 0 screen-put-cell } try
+/range-check eq (screen-put-cell: col beyond cols rejected) rt-ok clear
+{ scr 0x10000#u 1 65 7 0 0 screen-put-cell } try
+/range-check eq (screen-put-cell: col beyond 65535 rejected) rt-ok clear
+{ scr 0x10000#u 0 (hi) 7 0 0 screen-put-string } try
+/range-check eq (screen-put-string: col beyond 65535 rejected) rt-ok clear
+{ scr 0 99 (hi) 7 0 0 screen-put-string } try
+/range-check eq (screen-put-string: row beyond rows rejected) rt-ok clear
+{ scr 0x10000#u 0 (hi) 7 0 0 screen-put-utf8-string } try
+/range-check eq (screen-put-utf8-string: col beyond 65535 rejected) rt-ok clear
+{ scr 0 99 (hi) 7 0 0 screen-put-utf8-string } try
+/range-check eq (screen-put-utf8-string: row beyond rows rejected) rt-ok clear
+{ scr -1 0 2 2 65 7 0 0 screen-fill-rect } try
+/range-check eq (screen-fill-rect: negative arg rejected) rt-ok clear
+{ scr 0 0 2 2 scr -1 0 screen-blit } try
+/range-check eq (screen-blit: negative coordinate rejected) rt-ok clear
+{ scr 0 0 70000 2 scr 0 0 screen-blit } try
+/range-check eq (screen-blit: dimension beyond 65535 rejected) rt-ok clear
+{ -1 0 screen-park-cursor } try
+/range-check eq (screen-park-cursor: negative col rejected) rt-ok clear
+
+% ====================================================================
+% SECTION 3: codepoint contract (engine fix 71c449a regressions)
+% ====================================================================
+
+{ scr 1 1 0x110000 7 0 0 screen-put-cell } try
+/range-check eq (screen-put-cell: cp beyond 0x10FFFF rejected) rt-ok clear
+{ scr 1 1 0xD800#u 7 0 0 screen-put-cell } try
+/range-check eq (screen-put-cell: surrogate cp rejected) rt-ok clear
+{ scr 0 0 2 2 0x110000 7 0 0 screen-fill-rect } try
+/range-check eq (screen-fill-rect: cp beyond 0x10FFFF rejected) rt-ok clear
+{ scr 0 0 2 2 0xDFFF#u 7 0 0 screen-fill-rect } try
+/range-check eq (screen-fill-rect: surrogate cp rejected) rt-ok clear
+scr 1 1 0x10FFFF#u 7 0 0 screen-put-cell pop
+% screen-get-cell returns the codepoint as an Integer; eq is
+% type-strict, so compare against the Integer literal form
+scr 1 1 screen-get-cell pop pop pop 0x10FFFF eq
+(screen-put-cell: max valid cp round-trips) rt-ok clear
+
+% ====================================================================
+% SECTION 4: screen-render-to stream arms
+% ====================================================================
+
+/cs 50 make-string-stream def
+cs close-stream
+{ scr cs screen-render-to } try
+/invalid-stream eq (screen-render-to: closed stream rejected) rt-ok clear
+/ms (abc) make-memory-stream def
+{ scr ms screen-render-to } try
+/read-only eq (screen-render-to: read-only stream gated by verify) rt-ok clear
+ms close-stream
+
+% control: render-to a string stream captures bytes
+/ok 4096 make-string-stream def
+scr 0 0 (hi) 7 0 0 screen-put-string
+ok screen-render-to pop
+ok get-string-stream length 0 gt  ok close-stream
+(screen-render-to: capture control) rt-ok clear
+
+% ====================================================================
+% SECTION 5: global-VM region pass
+% ====================================================================
+
+${
+    { 5000 5000 make-screen } try
+    /limit-check eq (global: make-screen cells cap) rt-ok clear
+    /gscr 4 3 make-screen def
+    { gscr 1 1 0x110000 7 0 0 screen-put-cell } try
+    /range-check eq (global: cp beyond 0x10FFFF rejected) rt-ok clear
+    gscr 0 0 65 7 0 0 screen-put-cell pop
+    gscr 0 0 screen-get-cell pop pop pop 65 eq
+    (global: put/get-cell control) rt-ok clear
+}
+
+% ====================================================================
+% Done
+% ====================================================================
+
+(Screen error tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

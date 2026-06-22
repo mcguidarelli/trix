@@ -1,0 +1,3 @@
+=string ({:d}) mark 42q sprint-fmt pop
+=string ({:x}) mark 255uq sprint-fmt pop
+(42q) to-number

@@ -1,0 +1,152 @@
+% Round-trip test for make-string-stream / get-string-stream.
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+% --- Basic round trip ---------------------------------------------------------
+
+256 make-string-stream
+/s exch def
+
+s (Hello, ) write-string
+s (world!) write-string
+
+s get-string-stream
+(Hello, world!) eq (basic round-trip) rt-ok
+
+% Peek mid-stream and continue writing.
+256 make-string-stream
+/s2 exch def
+s2 (foo) write-string
+s2 get-string-stream (foo) eq (peek-after-3-bytes) rt-ok
+s2 (bar) write-string
+s2 get-string-stream (foobar) eq (peek-after-6-bytes) rt-ok
+
+% Empty stream returns empty string.
+16 make-string-stream
+/s3 exch def
+s3 get-string-stream length 0 eq (empty-stream-empty-string) rt-ok
+
+% Many writes, then extract.
+32 make-string-stream
+/s4 exch def
+s4 (multi) write-string
+s4 ( ) write-string
+s4 (write) write-string
+s4 get-string-stream (multi write) eq (multi-write-extract) rt-ok
+
+% --- Buffer-full raises /io-write-error -------------------------------------
+% try leaves the offending operand on stack after the error name; we use
+% mark / count-to-mark to clean up between error tests.
+
+mark
+{ 4 make-string-stream
+  /s5 exch def
+  s5 (overflow!) write-string } try
+/io-write-error eq (buffer-full-raises-io-write-error) rt-ok
+clear
+
+% --- fprint-fmt round trip ---------------------------------------------------
+
+64 make-string-stream
+/s6 exch def
+s6 (row {0} col {1}\n) mark 5 12 fprint-fmt pop pop
+s6 get-string-stream (row 5 col 12\n) eq (fprint-fmt-into-string-stream) rt-ok
+
+% --- write 1 byte at a time --------------------------------------------------
+
+8 make-string-stream
+/s7 exch def
+s7 65 write
+s7 66 write
+s7 67 write
+s7 get-string-stream (ABC) eq (per-byte-write) rt-ok
+
+% --- Range/limit checks ------------------------------------------------------
+
+{ 0 make-string-stream } try
+/range-check eq (zero-capacity-raises-range-check) rt-ok
+clear
+
+{ -5 make-string-stream } try
+/range-check eq (negative-capacity-raises-range-check) rt-ok
+clear
+
+% --- get-string-stream on non-string-stream -----------------------------------
+
+{ stdout get-string-stream } try
+/invalid-stream-access eq (get-string-stream-on-stdout-rejects) rt-ok
+clear
+
+% --- clear-string-stream -----------------------------------------------------
+
+64 make-string-stream
+/sc exch def
+sc (hello) write-string
+sc get-string-stream (hello) eq (clear-precondition-content-present) rt-ok
+sc clear-string-stream
+sc get-string-stream length 0 eq (clear-empties-buffer) rt-ok
+sc (after-clear) write-string
+sc get-string-stream (after-clear) eq (writes-after-clear-start-at-zero) rt-ok
+
+% Multiple clear cycles produce no residue.
+sc clear-string-stream
+sc clear-string-stream
+sc get-string-stream length 0 eq (double-clear-is-idempotent) rt-ok
+
+% clear on non-string-stream raises invalid-stream-access.
+{ stdout clear-string-stream } try
+/invalid-stream-access eq (clear-on-stdout-rejects) rt-ok
+clear
+
+% --- set-stdout swap round-trip ----------------------------------------------
+% Tests here capture their own print output into a string-stream and then
+% restore real stdout before calling rt-ok (rt-ok itself prints).
+
+256 make-string-stream
+/cap exch def
+/prev cap set-stdout def
+(captured-line-one) print
+(captured-line-two) print
+% restore real stdout BEFORE we want visible output
+prev set-stdout pop
+cap get-string-stream (captured-line-onecaptured-line-two) eq
+        (set-stdout-captures-print-output) rt-ok
+
+% After restoration, stdout writes go to real stdout (and not to cap).
+cap clear-string-stream
+(this-must-not-be-captured) print  % visible above the summary
+cap get-string-stream length 0 eq (after-restore-no-capture) rt-ok
+
+% set-stdout returns the PREVIOUS stdout, not the new one.
+/cap2 64 make-string-stream def
+/prev2 cap2 set-stdout def           % m_stdout = cap2; prev2 = real stdout
+/prev3 prev2 set-stdout def          % m_stdout = real; prev3 = cap2
+cap2 prev3 eq (set-stdout-returns-prior-stream) rt-ok
+
+% set-stdout rejects a read-only stream.  Use the systemdict /stdin handle.
+{ stdin set-stdout } try
+/read-only eq (set-stdout-rejects-readonly-stream) rt-ok
+clear
+
+% --- Summary -----------------------------------------------------------------
+
+(\npassed: {0}/{1}) mark passed total print-fmt pop pop nl
+failed 0 eq { (ALL OK) } { (TESTS FAILED) } if-else =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

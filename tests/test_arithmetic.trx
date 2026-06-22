@@ -1,0 +1,690 @@
+% ====================================================================
+% Comprehensive arithmetic boundary, overflow, underflow, and error tests
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: add - happy path for every type
+% ====================================================================
+
+1b 2b add 3b eq               (add-byte-happy) rt-ok clear
+1 2 add 3 eq                   (add-int-happy) rt-ok clear
+1u 2u add 3u eq                (add-uint-happy) rt-ok clear
+1l 2l add 3l eq                (add-long-happy) rt-ok clear
+1ul 2ul add 3ul eq             (add-ulong-happy) rt-ok clear
+1.0 2.0 add 3.0 eq            (add-real-happy) rt-ok clear
+1.0d 2.0d add 3.0d eq         (add-double-happy) rt-ok clear
+
+% --- add: byte overflow ---
+{ 255b 1b add } try /numerical-overflow eq   (add-byte-overflow-255+1) rt-ok clear
+{ 200b 100b add } try /numerical-overflow eq (add-byte-overflow-200+100) rt-ok clear
+254b 1b add 255b eq            (add-byte-max-ok) rt-ok clear
+0b 0b add 0b eq                (add-byte-zero) rt-ok clear
+
+% --- add: integer overflow ---
+{ 2147483647 1 add } try /numerical-overflow eq     (add-int-overflow-max+1) rt-ok clear
+{ 2147483647 2147483647 add } try /numerical-overflow eq (add-int-overflow-max+max) rt-ok clear
+2147483646 1 add 2147483647 eq (add-int-near-max) rt-ok clear
+% integer underflow via add of two negatives
+{ -2147483648 -1 add } try /numerical-overflow eq   (add-int-underflow-min+-1) rt-ok clear
+
+% --- add: uinteger overflow ---
+{ 4294967295u 1u add } try /numerical-overflow eq   (add-uint-overflow-max+1) rt-ok clear
+4294967294u 1u add 4294967295u eq (add-uint-near-max) rt-ok clear
+0u 0u add 0u eq                (add-uint-zero) rt-ok clear
+
+% --- add: long overflow ---
+{ 9223372036854775807l 1l add } try /numerical-overflow eq (add-long-overflow-max+1) rt-ok clear
+{ -9223372036854775808l -1l add } try /numerical-overflow eq (add-long-underflow-min+-1) rt-ok clear
+9223372036854775806l 1l add 9223372036854775807l eq (add-long-near-max) rt-ok clear
+
+% --- add: ulong overflow ---
+{ 18446744073709551615ul 1ul add } try /numerical-overflow eq (add-ulong-overflow-max+1) rt-ok clear
+18446744073709551614ul 1ul add 18446744073709551615ul eq (add-ulong-near-max) rt-ok clear
+
+% --- add: real ---
+1.0e30 1.0e30 add 2.0e30 eq   (add-real-large) rt-ok clear
+0.0 0.0 add 0.0 eq            (add-real-zero) rt-ok clear
+-1.5 2.5 add 1.0 eq           (add-real-neg-pos) rt-ok clear
+
+% --- add: double ---
+1.0d 2.0d add 3.0d eq         (add-double-basic) rt-ok clear
+-1.5d 2.5d add 1.0d eq        (add-double-neg-pos) rt-ok clear
+
+% ====================================================================
+% SECTION 2: sub - happy path and overflow/underflow for every type
+% ====================================================================
+
+5b 3b sub 2b eq                (sub-byte-happy) rt-ok clear
+5 3 sub 2 eq                   (sub-int-happy) rt-ok clear
+5u 3u sub 2u eq                (sub-uint-happy) rt-ok clear
+5l 3l sub 2l eq                (sub-long-happy) rt-ok clear
+5ul 3ul sub 2ul eq             (sub-ulong-happy) rt-ok clear
+5.0 3.0 sub 2.0 eq            (sub-real-happy) rt-ok clear
+5.0d 3.0d sub 2.0d eq         (sub-double-happy) rt-ok clear
+
+% --- sub: byte underflow ---
+{ 0b 1b sub } try /numerical-overflow eq   (sub-byte-underflow-0-1) rt-ok clear
+{ 10b 20b sub } try /numerical-overflow eq (sub-byte-underflow-10-20) rt-ok clear
+1b 1b sub 0b eq                (sub-byte-to-zero) rt-ok clear
+
+% --- sub: integer overflow ---
+{ -2147483648 1 sub } try /numerical-overflow eq  (sub-int-underflow-min-1) rt-ok clear
+{ 2147483647 -1 sub } try /numerical-overflow eq  (sub-int-overflow-max-neg1) rt-ok clear
+-2147483647 1 sub -2147483648 eq (sub-int-near-min) rt-ok clear
+
+% --- sub: uinteger underflow ---
+{ 0u 1u sub } try /numerical-overflow eq   (sub-uint-underflow-0-1) rt-ok clear
+1u 1u sub 0u eq                (sub-uint-to-zero) rt-ok clear
+
+% --- sub: long overflow ---
+{ -9223372036854775808l 1l sub } try /numerical-overflow eq (sub-long-underflow-min-1) rt-ok clear
+{ 9223372036854775807l -1l sub } try /numerical-overflow eq (sub-long-overflow-max-neg1) rt-ok clear
+
+% --- sub: ulong underflow ---
+{ 0ul 1ul sub } try /numerical-overflow eq (sub-ulong-underflow-0-1) rt-ok clear
+1ul 1ul sub 0ul eq             (sub-ulong-to-zero) rt-ok clear
+
+% --- sub: real ---
+0.0 0.0 sub 0.0 eq            (sub-real-zero) rt-ok clear
+1.5 0.5 sub 1.0 eq            (sub-real-basic) rt-ok clear
+
+% --- sub: double ---
+1.5d 0.5d sub 1.0d eq         (sub-double-basic) rt-ok clear
+
+% ====================================================================
+% SECTION 3: mul - happy path and overflow for every type
+% ====================================================================
+
+3b 4b mul 12b eq               (mul-byte-happy) rt-ok clear
+3 4 mul 12 eq                  (mul-int-happy) rt-ok clear
+3u 4u mul 12u eq               (mul-uint-happy) rt-ok clear
+3l 4l mul 12l eq               (mul-long-happy) rt-ok clear
+3ul 4ul mul 12ul eq            (mul-ulong-happy) rt-ok clear
+3.0 4.0 mul 12.0 eq           (mul-real-happy) rt-ok clear
+3.0d 4.0d mul 12.0d eq        (mul-double-happy) rt-ok clear
+
+% --- mul: byte overflow ---
+{ 128b 2b mul } try /numerical-overflow eq (mul-byte-overflow-128*2) rt-ok clear
+{ 255b 2b mul } try /numerical-overflow eq (mul-byte-overflow-255*2) rt-ok clear
+{ 16b 16b mul } try /numerical-overflow eq (mul-byte-overflow-16*16) rt-ok clear
+15b 17b mul 255b eq            (mul-byte-max-ok) rt-ok clear
+0b 255b mul 0b eq              (mul-byte-zero) rt-ok clear
+1b 255b mul 255b eq            (mul-byte-identity) rt-ok clear
+
+% --- mul: integer overflow ---
+{ 2147483647 2 mul } try /numerical-overflow eq     (mul-int-overflow-max*2) rt-ok clear
+{ -2147483648 -1 mul } try /numerical-overflow eq   (mul-int-overflow-min*neg1) rt-ok clear
+{ -2147483648 2 mul } try /numerical-overflow eq    (mul-int-overflow-min*2) rt-ok clear
+2147483647 1 mul 2147483647 eq (mul-int-max*1) rt-ok clear
+0 2147483647 mul 0 eq          (mul-int-zero) rt-ok clear
+
+% --- mul: uinteger overflow ---
+{ 4294967295u 2u mul } try /numerical-overflow eq   (mul-uint-overflow-max*2) rt-ok clear
+4294967295u 1u mul 4294967295u eq (mul-uint-max*1) rt-ok clear
+0u 4294967295u mul 0u eq       (mul-uint-zero) rt-ok clear
+
+% --- mul: long overflow ---
+{ 9223372036854775807l 2l mul } try /numerical-overflow eq (mul-long-overflow-max*2) rt-ok clear
+{ -9223372036854775808l -1l mul } try /numerical-overflow eq (mul-long-overflow-min*neg1) rt-ok clear
+9223372036854775807l 1l mul 9223372036854775807l eq (mul-long-max*1) rt-ok clear
+
+% --- mul: ulong overflow ---
+{ 18446744073709551615ul 2ul mul } try /numerical-overflow eq (mul-ulong-overflow-max*2) rt-ok clear
+18446744073709551615ul 1ul mul 18446744073709551615ul eq (mul-ulong-max*1) rt-ok clear
+
+% --- mul: real/double ---
+1.0e10 1.0e10 mul 1.0e20 eq   (mul-real-large) rt-ok clear
+0.0 1.0e38 mul 0.0 eq         (mul-real-zero) rt-ok clear
+-2.0 3.0 mul -6.0 eq          (mul-real-neg) rt-ok clear
+-2.0d 3.0d mul -6.0d eq       (mul-double-neg) rt-ok clear
+
+% ====================================================================
+% SECTION 4: div - happy path, div-by-zero, and overflow
+% ====================================================================
+
+12b 4b div 3b eq               (div-byte-happy) rt-ok clear
+12 4 div 3 eq                  (div-int-happy) rt-ok clear
+12u 4u div 3u eq               (div-uint-happy) rt-ok clear
+12l 4l div 3l eq               (div-long-happy) rt-ok clear
+12ul 4ul div 3ul eq            (div-ulong-happy) rt-ok clear
+12.0 4.0 div 3.0 eq           (div-real-happy) rt-ok clear
+12.0d 4.0d div 3.0d eq        (div-double-happy) rt-ok clear
+
+% --- div by zero for all types ---
+{ 1b 0b div } try /div-by-zero eq   (div-byte-by-zero) rt-ok clear
+{ 1 0 div } try /div-by-zero eq     (div-int-by-zero) rt-ok clear
+{ 1u 0u div } try /div-by-zero eq   (div-uint-by-zero) rt-ok clear
+{ 1l 0l div } try /div-by-zero eq   (div-long-by-zero) rt-ok clear
+{ 1ul 0ul div } try /div-by-zero eq (div-ulong-by-zero) rt-ok clear
+{ 1.0 0.0 div } try /div-by-zero eq (div-real-by-zero) rt-ok clear
+{ 1.0d 0.0d div } try /div-by-zero eq (div-double-by-zero) rt-ok clear
+
+% --- div: signed overflow (min / -1) ---
+{ -2147483648 -1 div } try /numerical-overflow eq   (div-int-overflow-min/neg1) rt-ok clear
+{ -9223372036854775808l -1l div } try /numerical-overflow eq (div-long-overflow-min/neg1) rt-ok clear
+
+% --- div: integer truncation ---
+7 2 div 3 eq                   (div-int-truncation) rt-ok clear
+-7 2 div -3 eq                 (div-int-neg-truncation) rt-ok clear
+7 -2 div -3 eq                 (div-int-neg-divisor-truncation) rt-ok clear
+
+% --- div: byte special ---
+255b 1b div 255b eq            (div-byte-by-1) rt-ok clear
+0b 1b div 0b eq                (div-byte-zero-dividend) rt-ok clear
+
+% --- div: real/double normal ---
+1.0 3.0 div 1.0 3.0 div eq    (div-real-fraction) rt-ok clear
+-6.0d 3.0d div -2.0d eq       (div-double-neg) rt-ok clear
+
+% ====================================================================
+% SECTION 5: mod - for integer types
+% ====================================================================
+
+7b 3b mod 1b eq                (mod-byte-happy) rt-ok clear
+7 3 mod 1 eq                   (mod-int-happy) rt-ok clear
+7u 3u mod 1u eq                (mod-uint-happy) rt-ok clear
+7l 3l mod 1l eq                (mod-long-happy) rt-ok clear
+7ul 3ul mod 1ul eq             (mod-ulong-happy) rt-ok clear
+
+% --- mod by zero ---
+{ 7b 0b mod } try /div-by-zero eq   (mod-byte-by-zero) rt-ok clear
+{ 7 0 mod } try /div-by-zero eq     (mod-int-by-zero) rt-ok clear
+{ 7u 0u mod } try /div-by-zero eq   (mod-uint-by-zero) rt-ok clear
+{ 7l 0l mod } try /div-by-zero eq   (mod-long-by-zero) rt-ok clear
+{ 7ul 0ul mod } try /div-by-zero eq (mod-ulong-by-zero) rt-ok clear
+
+% --- mod: signed overflow (min % -1) ---
+{ -2147483648 -1 mod } try /numerical-overflow eq   (mod-int-overflow-min%-1) rt-ok clear
+{ -9223372036854775808l -1l mod } try /numerical-overflow eq (mod-long-overflow-min%-1) rt-ok clear
+
+% --- mod: negative arguments ---
+-7 3 mod -1 eq                 (mod-int-neg-dividend) rt-ok clear
+7 -3 mod 1 eq                  (mod-int-neg-divisor) rt-ok clear
+-7 -3 mod -1 eq                (mod-int-neg-both) rt-ok clear
+
+% --- mod: zero dividend ---
+0 3 mod 0 eq                   (mod-int-zero-dividend) rt-ok clear
+0b 5b mod 0b eq                (mod-byte-zero-dividend) rt-ok clear
+0u 5u mod 0u eq                (mod-uint-zero-dividend) rt-ok clear
+0l 5l mod 0l eq                (mod-long-zero-dividend) rt-ok clear
+0ul 5ul mod 0ul eq             (mod-ulong-zero-dividend) rt-ok clear
+
+% --- mod: divisor = 1 ---
+7 1 mod 0 eq                   (mod-int-by-1) rt-ok clear
+255b 1b mod 0b eq              (mod-byte-by-1) rt-ok clear
+
+% ====================================================================
+% SECTION 6: neg - edge cases
+% ====================================================================
+
+% --- neg: happy path ---
+-5 neg 5 eq                    (neg-int-basic) rt-ok clear
+5 neg -5 eq                    (neg-int-pos-to-neg) rt-ok clear
+0 neg 0 eq                     (neg-int-zero) rt-ok clear
+-5l neg 5l eq                  (neg-long-basic) rt-ok clear
+5l neg -5l eq                  (neg-long-pos-to-neg) rt-ok clear
+0l neg 0l eq                   (neg-long-zero) rt-ok clear
+-3.5 neg 3.5 eq                (neg-real-basic) rt-ok clear
+0.0 neg 0.0 eq                 (neg-real-zero) rt-ok clear
+-3.5d neg 3.5d eq              (neg-double-basic) rt-ok clear
+0.0d neg 0.0d eq               (neg-double-zero) rt-ok clear
+
+% --- neg: overflow at MIN ---
+{ -2147483648 neg } try /numerical-overflow eq   (neg-int-min-overflow) rt-ok clear
+{ -9223372036854775808l neg } try /numerical-overflow eq (neg-long-min-overflow) rt-ok clear
+
+% --- neg: max signed values ---
+2147483647 neg -2147483647 eq  (neg-int-max) rt-ok clear
+9223372036854775807l neg -9223372036854775807l eq (neg-long-max) rt-ok clear
+
+% --- neg: unsigned -> type-check error ---
+{ 5u neg } try /type-check eq         (neg-uint-type-check) rt-ok clear
+{ 5ul neg } try /type-check eq        (neg-ulong-type-check) rt-ok clear
+{ 5b neg } try /type-check eq         (neg-byte-type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 7: abs - edge cases
+% ====================================================================
+
+% --- abs: happy path ---
+-5 abs 5 eq                    (abs-int-basic) rt-ok clear
+5 abs 5 eq                     (abs-int-positive) rt-ok clear
+0 abs 0 eq                     (abs-int-zero) rt-ok clear
+-5l abs 5l eq                  (abs-long-basic) rt-ok clear
+5l abs 5l eq                   (abs-long-positive) rt-ok clear
+0l abs 0l eq                   (abs-long-zero) rt-ok clear
+-3.5 abs 3.5 eq                (abs-real-basic) rt-ok clear
+3.5 abs 3.5 eq                 (abs-real-positive) rt-ok clear
+0.0 abs 0.0 eq                 (abs-real-zero) rt-ok clear
+-3.5d abs 3.5d eq              (abs-double-basic) rt-ok clear
+3.5d abs 3.5d eq               (abs-double-positive) rt-ok clear
+0.0d abs 0.0d eq               (abs-double-zero) rt-ok clear
+
+% --- abs: overflow at MIN ---
+{ -2147483648 abs } try /numerical-overflow eq   (abs-int-min-overflow) rt-ok clear
+{ -9223372036854775808l abs } try /numerical-overflow eq (abs-long-min-overflow) rt-ok clear
+
+% --- abs: max signed values ---
+-2147483647 abs 2147483647 eq  (abs-int-near-min) rt-ok clear
+-9223372036854775807l abs 9223372036854775807l eq (abs-long-near-min) rt-ok clear
+
+% --- abs: unsigned -> type-check error (not signed) ---
+{ 5u abs } try /type-check eq         (abs-uint-type-check) rt-ok clear
+{ 5ul abs } try /type-check eq        (abs-ulong-type-check) rt-ok clear
+{ 5b abs } try /type-check eq         (abs-byte-type-check) rt-ok clear
+
+% --- abs: negative zero float ---
+-0.0 abs 0.0 eq                (abs-real-neg-zero) rt-ok clear
+-0.0d abs 0.0d eq              (abs-double-neg-zero) rt-ok clear
+
+% ====================================================================
+% SECTION 8: quot-rem - edge cases (signed integers only)
+% ====================================================================
+
+% --- quot-rem: happy path ---
+7 3 quot-rem 1 eq  (quot-rem-int-remainder) rt-ok
+2 eq  (quot-rem-int-quotient) rt-ok clear
+
+7l 3l quot-rem 1l eq  (quot-rem-long-remainder) rt-ok
+2l eq  (quot-rem-long-quotient) rt-ok clear
+
+% --- quot-rem: by zero ---
+{ 7 0 quot-rem } try /div-by-zero eq    (quot-rem-int-by-zero) rt-ok clear
+{ 7l 0l quot-rem } try /div-by-zero eq  (quot-rem-long-by-zero) rt-ok clear
+
+% --- quot-rem: overflow (min / -1) ---
+{ -2147483648 -1 quot-rem } try /numerical-overflow eq (quot-rem-int-overflow) rt-ok clear
+{ -9223372036854775808l -1l quot-rem } try /numerical-overflow eq (quot-rem-long-overflow) rt-ok clear
+
+% --- quot-rem: negative arguments ---
+-7 3 quot-rem -1 eq  (quot-rem-neg-dividend-rem) rt-ok
+-2 eq  (quot-rem-neg-dividend-quot) rt-ok clear
+
+7 -3 quot-rem 1 eq  (quot-rem-neg-divisor-rem) rt-ok
+-2 eq  (quot-rem-neg-divisor-quot) rt-ok clear
+
+-7 -3 quot-rem -1 eq  (quot-rem-neg-both-rem) rt-ok
+2 eq  (quot-rem-neg-both-quot) rt-ok clear
+
+% --- quot-rem: zero dividend ---
+0 5 quot-rem 0 eq  (quot-rem-zero-dividend-rem) rt-ok
+0 eq  (quot-rem-zero-dividend-quot) rt-ok clear
+
+% --- quot-rem: exact division ---
+6 3 quot-rem 0 eq  (quot-rem-exact-rem) rt-ok
+2 eq  (quot-rem-exact-quot) rt-ok clear
+
+% ====================================================================
+% SECTION 9: gcd - edge cases
+% ====================================================================
+
+12 8 gcd 4 eq                  (gcd-int-basic) rt-ok clear
+0 0 gcd 0 eq                   (gcd-int-zero-zero) rt-ok clear
+7 0 gcd 7 eq                   (gcd-int-n-zero) rt-ok clear
+0 7 gcd 7 eq                   (gcd-int-zero-n) rt-ok clear
+1 7 gcd 1 eq                   (gcd-int-one-n) rt-ok clear
+7 7 gcd 7 eq                   (gcd-int-same) rt-ok clear
+-12 8 gcd 4 eq                 (gcd-int-neg-pos) rt-ok clear
+12 -8 gcd 4 eq                 (gcd-int-pos-neg) rt-ok clear
+-12 -8 gcd 4 eq                (gcd-int-neg-neg) rt-ok clear
+
+12l 8l gcd 4l eq               (gcd-long-basic) rt-ok clear
+0l 0l gcd 0l eq                (gcd-long-zero-zero) rt-ok clear
+
+12u 8u gcd 4u eq               (gcd-uint-basic) rt-ok clear
+0u 0u gcd 0u eq                (gcd-uint-zero-zero) rt-ok clear
+
+12ul 8ul gcd 4ul eq            (gcd-ulong-basic) rt-ok clear
+
+12b 8b gcd 4b eq               (gcd-byte-basic) rt-ok clear
+0b 0b gcd 0b eq                (gcd-byte-zero-zero) rt-ok clear
+
+% --- gcd: overflow at min signed ---
+{ -2147483648 1 gcd } try /numerical-overflow eq (gcd-int-min-overflow) rt-ok clear
+{ 1 -2147483648 gcd } try /numerical-overflow eq (gcd-int-min-overflow-y) rt-ok clear
+{ -9223372036854775808l 1l gcd } try /numerical-overflow eq (gcd-long-min-overflow) rt-ok clear
+
+% ====================================================================
+% SECTION 10: lcm - edge cases
+% ====================================================================
+
+4 6 lcm 12 eq                  (lcm-int-basic) rt-ok clear
+1 7 lcm 7 eq                   (lcm-int-one-n) rt-ok clear
+7 1 lcm 7 eq                   (lcm-int-n-one) rt-ok clear
+0 7 lcm 0 eq                   (lcm-int-zero-n) rt-ok clear
+7 0 lcm 0 eq                   (lcm-int-n-zero) rt-ok clear
+0 0 lcm 0 eq                   (lcm-int-zero-zero) rt-ok clear
+
+4l 6l lcm 12l eq               (lcm-long-basic) rt-ok clear
+4u 6u lcm 12u eq               (lcm-uint-basic) rt-ok clear
+4ul 6ul lcm 12ul eq            (lcm-ulong-basic) rt-ok clear
+4b 6b lcm 12b eq               (lcm-byte-basic) rt-ok clear
+
+% --- lcm: overflow at min signed ---
+{ -2147483648 1 lcm } try /numerical-overflow eq (lcm-int-min-overflow) rt-ok clear
+{ 1 -2147483648 lcm } try /numerical-overflow eq (lcm-int-min-overflow-y) rt-ok clear
+{ -9223372036854775808l 1l lcm } try /numerical-overflow eq (lcm-long-min-overflow) rt-ok clear
+
+% ====================================================================
+% SECTION 11: min/max operators
+% ====================================================================
+
+% --- min ---
+3 5 min 3 eq                   (min-int-basic) rt-ok clear
+5 3 min 3 eq                   (min-int-reversed) rt-ok clear
+3 3 min 3 eq                   (min-int-equal) rt-ok clear
+-5 3 min -5 eq                 (min-int-neg) rt-ok clear
+3b 5b min 3b eq                (min-byte-basic) rt-ok clear
+3u 5u min 3u eq                (min-uint-basic) rt-ok clear
+3l 5l min 3l eq                (min-long-basic) rt-ok clear
+3ul 5ul min 3ul eq             (min-ulong-basic) rt-ok clear
+1.5 2.5 min 1.5 eq            (min-real-basic) rt-ok clear
+1.5d 2.5d min 1.5d eq         (min-double-basic) rt-ok clear
+
+% --- max ---
+3 5 max 5 eq                   (max-int-basic) rt-ok clear
+5 3 max 5 eq                   (max-int-reversed) rt-ok clear
+3 3 max 3 eq                   (max-int-equal) rt-ok clear
+-5 3 max 3 eq                  (max-int-neg) rt-ok clear
+3b 5b max 5b eq                (max-byte-basic) rt-ok clear
+3u 5u max 5u eq                (max-uint-basic) rt-ok clear
+3l 5l max 5l eq                (max-long-basic) rt-ok clear
+3ul 5ul max 5ul eq             (max-ulong-basic) rt-ok clear
+1.5 2.5 max 2.5 eq            (max-real-basic) rt-ok clear
+1.5d 2.5d max 2.5d eq         (max-double-basic) rt-ok clear
+
+% --- min/max boundary values ---
+2147483647 -2147483648 min -2147483648 eq (min-int-extremes) rt-ok clear
+2147483647 -2147483648 max 2147483647 eq  (max-int-extremes) rt-ok clear
+0u 4294967295u min 0u eq       (min-uint-extremes) rt-ok clear
+0u 4294967295u max 4294967295u eq (max-uint-extremes) rt-ok clear
+0b 255b min 0b eq              (min-byte-extremes) rt-ok clear
+0b 255b max 255b eq            (max-byte-extremes) rt-ok clear
+
+% ====================================================================
+% SECTION 12: Bitwise operations (and, or, xor, not)
+% ====================================================================
+
+% --- and ---
+16#FF#u 16#0F#u and 16#0F#u eq    (and-uint-basic) rt-ok clear
+16#FF#u 16#00#u and 0u eq        (and-uint-zero) rt-ok clear
+16#FF#u 16#FF#u and 16#FF#u eq   (and-uint-all-ones) rt-ok clear
+0ul 18446744073709551615ul and 0ul eq (and-ulong-zero-mask) rt-ok clear
+255b 15b and 15b eq            (and-byte-basic) rt-ok clear
+true true and true eq          (and-bool-tt) rt-ok clear
+true false and false eq        (and-bool-tf) rt-ok clear
+false true and false eq        (and-bool-ft) rt-ok clear
+false false and false eq       (and-bool-ff) rt-ok clear
+
+% --- or ---
+16#F0#u 16#0F#u or 16#FF#u eq    (or-uint-basic) rt-ok clear
+0u 0u or 0u eq                 (or-uint-zeros) rt-ok clear
+0ul 0ul or 0ul eq              (or-ulong-zeros) rt-ok clear
+240b 15b or 255b eq            (or-byte-basic) rt-ok clear
+true true or true eq           (or-bool-tt) rt-ok clear
+true false or true eq          (or-bool-tf) rt-ok clear
+false true or true eq          (or-bool-ft) rt-ok clear
+false false or false eq        (or-bool-ff) rt-ok clear
+
+% --- xor ---
+16#FF#u 16#FF#u xor 0u eq       (xor-uint-self) rt-ok clear
+16#F0#u 16#0F#u xor 16#FF#u eq   (xor-uint-basic) rt-ok clear
+0u 0u xor 0u eq                (xor-uint-zeros) rt-ok clear
+255b 255b xor 0b eq            (xor-byte-self) rt-ok clear
+true true xor false eq         (xor-bool-tt) rt-ok clear
+true false xor true eq         (xor-bool-tf) rt-ok clear
+false true xor true eq         (xor-bool-ft) rt-ok clear
+false false xor false eq       (xor-bool-ff) rt-ok clear
+
+% --- not ---
+0u not 4294967295u eq          (not-uint-zero) rt-ok clear
+4294967295u not 0u eq          (not-uint-all-ones) rt-ok clear
+0ul not 18446744073709551615ul eq (not-ulong-zero) rt-ok clear
+0b not 255b eq                 (not-byte-zero) rt-ok clear
+255b not 0b eq                 (not-byte-all-ones) rt-ok clear
+true not false eq              (not-bool-true) rt-ok clear
+false not true eq              (not-bool-false) rt-ok clear
+
+% --- type-check: signed integers not allowed for bitwise ---
+{ 5 5 and } try /type-check eq   (and-int-type-check) rt-ok clear
+{ 5l 5l and } try /type-check eq (and-long-type-check) rt-ok clear
+{ 5 not } try /type-check eq     (not-int-type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Shift and rotate operations
+% ====================================================================
+
+% --- shift-left ---
+1u 0 shift-left 1u eq          (shl-uint-by-0) rt-ok clear
+1u 1 shift-left 2u eq          (shl-uint-by-1) rt-ok clear
+1u 8 shift-left 256u eq        (shl-uint-by-8) rt-ok clear
+1u 31 shift-left 2147483648u eq (shl-uint-by-31) rt-ok clear
+1ul 0 shift-left 1ul eq        (shl-ulong-by-0) rt-ok clear
+1ul 1 shift-left 2ul eq        (shl-ulong-by-1) rt-ok clear
+1ul 63 shift-left 9223372036854775808ul eq (shl-ulong-by-63) rt-ok clear
+1b 0 shift-left 1b eq          (shl-byte-by-0) rt-ok clear
+1b 1 shift-left 2b eq          (shl-byte-by-1) rt-ok clear
+1b 7 shift-left 128b eq        (shl-byte-by-7) rt-ok clear
+
+% --- shift-left with negative count -> shift right ---
+16u -1 shift-left 8u eq        (shl-uint-neg-count) rt-ok clear
+
+% --- shift-right ---
+256u 0 shift-right 256u eq     (shr-uint-by-0) rt-ok clear
+256u 1 shift-right 128u eq     (shr-uint-by-1) rt-ok clear
+256u 8 shift-right 1u eq       (shr-uint-by-8) rt-ok clear
+128b 7 shift-right 1b eq       (shr-byte-by-7) rt-ok clear
+
+% --- shift-right with negative count -> shift left ---
+1u -1 shift-right 2u eq        (shr-uint-neg-count) rt-ok clear
+
+% --- rotate-left ---
+1u 0 rotate-left 1u eq         (rotl-uint-by-0) rt-ok clear
+1u 1 rotate-left 2u eq         (rotl-uint-by-1) rt-ok clear
+2147483648u 1 rotate-left 1u eq (rotl-uint-wrap) rt-ok clear
+
+% --- rotate-right ---
+1u 0 rotate-right 1u eq        (rotr-uint-by-0) rt-ok clear
+1u 1 rotate-right 2147483648u eq (rotr-uint-wrap) rt-ok clear
+
+% ====================================================================
+% SECTION 14: sign operator
+% ====================================================================
+
+5 sign 1 eq                    (sign-int-positive) rt-ok clear
+-5 sign -1 eq                  (sign-int-negative) rt-ok clear
+0 sign 0 eq                    (sign-int-zero) rt-ok clear
+5b sign 1 eq                   (sign-byte-positive) rt-ok clear
+0b sign 0 eq                   (sign-byte-zero) rt-ok clear
+5u sign 1 eq                   (sign-uint-positive) rt-ok clear
+0u sign 0 eq                   (sign-uint-zero) rt-ok clear
+5l sign 1 eq                   (sign-long-positive) rt-ok clear
+-5l sign -1 eq                 (sign-long-negative) rt-ok clear
+0l sign 0 eq                   (sign-long-zero) rt-ok clear
+5ul sign 1 eq                  (sign-ulong-positive) rt-ok clear
+0ul sign 0 eq                  (sign-ulong-zero) rt-ok clear
+3.5 sign 1 eq                  (sign-real-positive) rt-ok clear
+-3.5 sign -1 eq                (sign-real-negative) rt-ok clear
+0.0 sign 0 eq                  (sign-real-zero) rt-ok clear
+3.5d sign 1 eq                 (sign-double-positive) rt-ok clear
+-3.5d sign -1 eq               (sign-double-negative) rt-ok clear
+0.0d sign 0 eq                 (sign-double-zero) rt-ok clear
+
+% --- sign: extreme values ---
+2147483647 sign 1 eq           (sign-int-max) rt-ok clear
+-2147483648 sign -1 eq         (sign-int-min) rt-ok clear
+4294967295u sign 1 eq          (sign-uint-max) rt-ok clear
+9223372036854775807l sign 1 eq (sign-long-max) rt-ok clear
+-9223372036854775808l sign -1 eq (sign-long-min) rt-ok clear
+18446744073709551615ul sign 1 eq (sign-ulong-max) rt-ok clear
+
+% ====================================================================
+% SECTION 15: fmod (floating-point modulo)
+% ====================================================================
+
+7.0 3.0 fmod 1.0 eq           (fmod-real-basic) rt-ok clear
+7.0d 3.0d fmod 1.0d eq        (fmod-double-basic) rt-ok clear
+0.0 3.0 fmod 0.0 eq           (fmod-real-zero-dividend) rt-ok clear
+
+% --- fmod errors ---
+{ 1.0 0.0 fmod } try /div-by-zero eq  (fmod-real-by-zero) rt-ok clear
+{ 1.0d 0.0d fmod } try /div-by-zero eq (fmod-double-by-zero) rt-ok clear
+
+% ====================================================================
+% SECTION 16: copy-sign
+% ====================================================================
+
+3.0 -1.0 copy-sign -3.0 eq    (copysign-real-pos-neg) rt-ok clear
+-3.0 1.0 copy-sign 3.0 eq     (copysign-real-neg-pos) rt-ok clear
+3.0 1.0 copy-sign 3.0 eq      (copysign-real-pos-pos) rt-ok clear
+-3.0 -1.0 copy-sign -3.0 eq   (copysign-real-neg-neg) rt-ok clear
+3.0d -1.0d copy-sign -3.0d eq (copysign-double-pos-neg) rt-ok clear
+
+% ====================================================================
+% SECTION 17: midpoint
+% ====================================================================
+
+0 10 midpoint 5 eq             (midpoint-int-basic) rt-ok clear
+0b 10b midpoint 5b eq          (midpoint-byte-basic) rt-ok clear
+0u 10u midpoint 5u eq          (midpoint-uint-basic) rt-ok clear
+0l 10l midpoint 5l eq          (midpoint-long-basic) rt-ok clear
+0ul 10ul midpoint 5ul eq       (midpoint-ulong-basic) rt-ok clear
+0.0 10.0 midpoint 5.0 eq      (midpoint-real-basic) rt-ok clear
+0.0d 10.0d midpoint 5.0d eq   (midpoint-double-basic) rt-ok clear
+
+% midpoint at extremes (no overflow due to midpoint algorithm)
+2147483647 -2147483648 midpoint 0 eq (midpoint-int-extremes) rt-ok clear
+0u 4294967295u midpoint 2147483647u eq (midpoint-uint-extremes) rt-ok clear
+
+% negative midpoint
+-10 -20 midpoint -15 eq        (midpoint-int-neg) rt-ok clear
+
+% ====================================================================
+% SECTION 18: Address arithmetic
+% ====================================================================
+
+% --- add: Address + Integer ---
+0a 10 add 10a eq               (add-addr-int) rt-ok clear
+10a 5 add 15a eq               (add-addr-int-2) rt-ok clear
+% Integer + Address (commutative)
+10 0a add 10a eq               (add-int-addr) rt-ok clear
+
+% --- add: Address + Address -> error ---
+{ 0a 0a add } try /type-check eq (add-addr-addr-type-check) rt-ok clear
+
+% --- sub: Address - Integer ---
+10a 5 sub 5a eq                (sub-addr-int) rt-ok clear
+
+% --- sub: Address - Address -> Long ---
+10a 5a sub 5l eq               (sub-addr-addr) rt-ok clear
+5a 10a sub -5l eq              (sub-addr-addr-neg) rt-ok clear
+
+% --- sub: non-Address - Address -> error ---
+{ 5 5a sub } try /type-check eq (sub-int-addr-type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 19: Real/Double overflow producing inf
+% ====================================================================
+
+% real overflow to inf
+{ 3.4e38 3.4e38 add } try /numerical-inf eq (add-real-overflow-to-inf) rt-ok clear
+{ 3.4e38 3.4e38 mul } try /numerical-inf eq (mul-real-overflow-to-inf) rt-ok clear
+
+% double large values are fine (no overflow)
+1.0d 1.0d add 2.0d eq         (add-double-no-overflow) rt-ok clear
+
+% ====================================================================
+% SECTION 20: Mixed-type edge cases and identity operations
+% ====================================================================
+
+% mul by 1 identity for all types
+5b 1b mul 5b eq                (mul-byte-identity-1) rt-ok clear
+5 1 mul 5 eq                   (mul-int-identity-1) rt-ok clear
+5u 1u mul 5u eq                (mul-uint-identity-1) rt-ok clear
+5l 1l mul 5l eq                (mul-long-identity-1) rt-ok clear
+5ul 1ul mul 5ul eq             (mul-ulong-identity-1) rt-ok clear
+5.0 1.0 mul 5.0 eq            (mul-real-identity-1) rt-ok clear
+5.0d 1.0d mul 5.0d eq         (mul-double-identity-1) rt-ok clear
+
+% add 0 identity for all types
+5b 0b add 5b eq                (add-byte-identity-0) rt-ok clear
+5 0 add 5 eq                   (add-int-identity-0) rt-ok clear
+5u 0u add 5u eq                (add-uint-identity-0) rt-ok clear
+5l 0l add 5l eq                (add-long-identity-0) rt-ok clear
+5ul 0ul add 5ul eq             (add-ulong-identity-0) rt-ok clear
+5.0 0.0 add 5.0 eq            (add-real-identity-0) rt-ok clear
+5.0d 0.0d add 5.0d eq         (add-double-identity-0) rt-ok clear
+
+% sub 0 identity for all types
+5b 0b sub 5b eq                (sub-byte-identity-0) rt-ok clear
+5 0 sub 5 eq                   (sub-int-identity-0) rt-ok clear
+5u 0u sub 5u eq                (sub-uint-identity-0) rt-ok clear
+5l 0l sub 5l eq                (sub-long-identity-0) rt-ok clear
+5ul 0ul sub 5ul eq             (sub-ulong-identity-0) rt-ok clear
+5.0 0.0 sub 5.0 eq            (sub-real-identity-0) rt-ok clear
+5.0d 0.0d sub 5.0d eq         (sub-double-identity-0) rt-ok clear
+
+% div by 1 identity for all types
+5b 1b div 5b eq                (div-byte-identity-1) rt-ok clear
+5 1 div 5 eq                   (div-int-identity-1) rt-ok clear
+5u 1u div 5u eq                (div-uint-identity-1) rt-ok clear
+5l 1l div 5l eq                (div-long-identity-1) rt-ok clear
+5ul 1ul div 5ul eq             (div-ulong-identity-1) rt-ok clear
+5.0 1.0 div 5.0 eq            (div-real-identity-1) rt-ok clear
+5.0d 1.0d div 5.0d eq         (div-double-identity-1) rt-ok clear
+
+% ====================================================================
+% SECTION: Shift by type width (modulo semantics)
+% ====================================================================
+
+% shift-left by exactly the bit width -> modulo gives 0, so identity
+1u 32 shift-left 1u eq             (shift-left: 1u << 32 -> 1u mod32) rt-ok clear
+1ul 64 shift-left 1ul eq           (shift-left: 1ul << 64 -> 1ul mod64) rt-ok clear
+1b 8 shift-left 1b eq              (shift-left: 1b << 8 -> 1b mod8) rt-ok clear
+
+% shift by > width wraps
+1u 33 shift-left 2u eq             (shift-left: 1u << 33 -> 2u mod32=1) rt-ok clear
+1ul 65 shift-left 2ul eq           (shift-left: 1ul << 65 -> 2ul mod64=1) rt-ok clear
+1b 9 shift-left 2b eq              (shift-left: 1b << 9 -> 2b mod8=1) rt-ok clear
+
+% shift-right by type width
+1u 32 shift-right 1u eq            (shift-right: 1u >> 32 -> 1u mod32) rt-ok clear
+1ul 64 shift-right 1ul eq          (shift-right: 1ul >> 64 -> 1ul mod64) rt-ok clear
+
+% shift by 0 is identity
+42u 0 shift-left 42u eq            (shift-left: 42u << 0 -> 42u) rt-ok clear
+42u 0 shift-right 42u eq           (shift-right: 42u >> 0 -> 42u) rt-ok clear
+
+% ====================================================================
+% SECTION: NaN/Inf input rejection in arithmetic
+% ====================================================================
+
+/real-NaN  //:systemdict:numbers:real-type:quiet-NaN  def
+/real-Inf  //:systemdict:numbers:real-type:infinity    def
+
+% NaN rejected in add/sub/mul/div
+{ //real-NaN 1.0 add } try /numerical-inf eq  (nan-arith: NaN+1.0) rt-ok clear
+{ 1.0 //real-NaN add } try /numerical-inf eq  (nan-arith: 1.0+NaN) rt-ok clear
+{ //real-NaN 1.0 sub } try /numerical-inf eq  (nan-arith: NaN-1.0) rt-ok clear
+{ //real-NaN 1.0 mul } try /numerical-inf eq  (nan-arith: NaN*1.0) rt-ok clear
+{ //real-NaN 1.0 div } try /numerical-inf eq  (nan-arith: NaN/1.0) rt-ok clear
+
+% Inf rejected in add/sub/mul/div
+{ //real-Inf 1.0 add } try /numerical-inf eq  (inf-arith: Inf+1.0) rt-ok clear
+{ 1.0 //real-Inf sub } try /numerical-inf eq  (inf-arith: 1.0-Inf) rt-ok clear
+{ //real-Inf 1.0 mul } try /numerical-inf eq  (inf-arith: Inf*1.0) rt-ok clear
+{ //real-Inf 1.0 div } try /numerical-inf eq  (inf-arith: Inf/1.0) rt-ok clear
+
+(Arithmetic boundary tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

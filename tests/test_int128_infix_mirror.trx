@@ -1,0 +1,97 @@
+% ====================================================================
+% Mirror of test_infix.trx long/ulong cases for Int128/UInt128.
+%
+% Infix expressions `$( ... )` pack their tokens into an executable
+% packed array. Int128/UInt128 literals inside `$(...)` exercise the
+% PackedExt subcode path (Phase 8 of the sprint). This file mirrors
+% test_infix.trx's long/ulong coverage to keep that path honest.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Bare 128-bit literal through infix
+% ====================================================================
+
+$( 42q ) type /int128-type eq              (infix: type int128) rt-ok clear
+$( 42q ) 42q deep-eq                       (infix: value int128) rt-ok clear
+$( 42uq ) type /uint128-type eq            (infix: type uint128) rt-ok clear
+$( 42uq ) 42uq deep-eq                     (infix: value uint128) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Arithmetic inside infix
+% ====================================================================
+
+$( 42q + 1q ) 43q deep-eq                  (infix: int128 add) rt-ok clear
+$( 100q * 3q ) 300q deep-eq                (infix: int128 mul) rt-ok clear
+$( 1000000000q + 2000000000q ) 3000000000q deep-eq
+    (infix: int128 large add) rt-ok clear
+$( 100q + 200q ) 300q deep-eq              (infix: int128 mixed expr) rt-ok clear
+$( 400q - 100q ) 300q deep-eq              (infix: int128 sub) rt-ok clear
+
+$( 42uq + 8uq ) 50uq deep-eq               (infix: uint128 add) rt-ok clear
+$( 100uq + 200uq ) 300uq deep-eq           (infix: uint128 mixed expr) rt-ok clear
+$( 4000000000uq + 1uq ) 4000000001uq deep-eq
+    (infix: uint128 large add) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Precedence (multiplication before addition)
+% ====================================================================
+
+$( 42q * 2q + 100q ) 184q deep-eq          (infix: int128 precedence) rt-ok clear
+$( 100q + 42q * 2q ) 184q deep-eq          (infix: int128 precedence rev) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Cross-boundary large values
+% ====================================================================
+
+$( 999999999999q + 1q ) 1000000000000q deep-eq
+    (infix: int128 boundary 12-digit) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Ternary with 128-bit branches
+% ====================================================================
+
+$( true ? 100q : 200q ) 100q deep-eq       (infix: ternary int128 true) rt-ok clear
+$( false ? 100q : 200q ) 200q deep-eq      (infix: ternary int128 false) rt-ok clear
+$( true ? 100uq : 200uq ) 100uq deep-eq    (infix: ternary uint128 true) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Nested infix expressions
+% ====================================================================
+
+$( 1q + 2q ) $( 3q + 4q ) add
+$( 5q + 6q ) $( 7q + 8q ) add add
+$( 9q + 10q ) add 55q deep-eq              (infix: nested int128 sum) rt-ok clear
+
+% ====================================================================
+% SECTION 7: User-defined proc called with infix argument
+% ====================================================================
+
+/double-h { 2q mul } def
+$( double-h(21q) ) 42q deep-eq             (infix: proc call int128) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Infix + auto-promote ($$) to other types
+% ====================================================================
+
+$[ 42q + 1 ] 43q deep-eq                  (infix: int128 + int auto-promote) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Binary-token round-trip through make-executable
+% ====================================================================
+
+$( 100q ) dup to-binary-token make-executable exec eq
+    (infix: int128 binary-token round-trip) rt-ok clear
+
+(test_int128_infix_mirror.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

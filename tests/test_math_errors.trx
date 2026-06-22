@@ -1,0 +1,180 @@
+% ====================================================================
+% test_math_errors.trx -- Phase-3 P3 batch 4: ops_math.inl sad paths
+% (lcm/nCr/pow-mod overflow arms across the integer-type matrix,
+% promote/product element checks, float domain errors, floating-point
+% environment validation).  Targets enumerated from per-line gcov;
+% every trigger and error name
+% was probed live before being pinned.  Contracts: trix-reference.md
+% 3.2 (arithmetic), 3.5 (math functions), 3.25 (FP environment).
+%
+% REGRESSION: the pow-mod section pins engine bug #4 (commit 90d13d9):
+% pow-mod freed its operands' ExtValues before the result-overflow
+% checks, so the Long-base overflow arm left a freed Long on the stack
+% and @try-rollback double-freed it.
+%
+% Accepted-uncovered defensive arms (default cases behind exhaustive
+% VerifyIntegers switches; verify raises type-check first):
+%   factorial/prime?/isqrt "unsupported integer type" defaults,
+%   pow-mod "unsupported integer type for {}" / "unsupported result
+%   type" defaults.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: lcm overflow arms across the type matrix (shim: operands
+% must be a matched pair; Long/ULong = ExtValue, Int128/UInt128 =
+% WideValue)
+% ====================================================================
+
+{ 251b 241b lcm } try
+/numerical-overflow eq (lcm: Byte result overflow) rt-ok clear
+{ 0x7FFFFFFF 0x7FFFFFFE lcm } try
+/numerical-overflow eq (lcm: Integer result overflow) rt-ok clear
+{ 0xFFFFFFFF#u 0xFFFFFFFE#u lcm } try
+/numerical-overflow eq (lcm: UInteger result overflow) rt-ok clear
+{ 0x7FFFFFFFFFFFFFFF#l 0x7FFFFFFFFFFFFFFE#l lcm } try
+/numerical-overflow eq (lcm: Long result overflow) rt-ok clear
+{ 0xFFFFFFFFFFFFFFFF#ul 0xFFFFFFFFFFFFFFFE#ul lcm } try
+/numerical-overflow eq (lcm: ULong result overflow) rt-ok clear
+{ 0x40000000000000000000000000000000#q 3q lcm } try
+/numerical-overflow eq (lcm: Int128 result beyond INT128_MAX) rt-ok clear
+{ 0x80000000000000000000000000000000#uq 3uq lcm } try
+/numerical-overflow eq (lcm: UInt128 product beyond 128 bits) rt-ok clear
+
+% control: lcm still works after the gauntlet
+12 18 lcm 36 eq (lcm: 12,18 -> 36 control) rt-ok clear
+
+% ====================================================================
+% SECTION 2: nCr domain and overflow arms
+% ====================================================================
+
+{ -1 2 nCr } try
+/range-check eq (nCr: negative argument rejected) rt-ok clear
+{ 2 3 nCr } try
+/range-check eq (nCr: r beyond n rejected (Integer)) rt-ok clear
+{ 2b 3b nCr } try
+/range-check eq (nCr: r beyond n rejected (Byte)) rt-ok clear
+{ 2l 3l nCr } try
+/range-check eq (nCr: r beyond n rejected (Long)) rt-ok clear
+{ 2uq 3uq nCr } try
+/range-check eq (nCr: r beyond n rejected (UInt128)) rt-ok clear
+{ 60u 30u nCr } try
+/numerical-overflow eq (nCr: UInteger result overflow) rt-ok clear
+{ 200l 100l nCr } try
+/numerical-overflow eq (nCr: Long result overflow) rt-ok clear
+{ 200ul 100ul nCr } try
+/numerical-overflow eq (nCr: ULong result overflow) rt-ok clear
+{ 200q 100q nCr } try
+/numerical-overflow eq (nCr: Int128 result overflow) rt-ok clear
+
+% control
+10 3 nCr 120 eq (nCr: 10 choose 3 -> 120 control) rt-ok clear
+
+% ====================================================================
+% SECTION 3: pow-mod domain and result-type-overflow arms.  The Long
+% arm is the engine-bug-#4 regression: the raise must arrive WITHOUT a
+% double-free, and the try must roll back cleanly.
+% ====================================================================
+
+{ -1 2 5 pow-mod } try
+/range-check eq (pow-mod: negative Integer base rejected) rt-ok clear
+{ -1l 2 5 pow-mod } try
+/range-check eq (pow-mod: negative Long base rejected) rt-ok clear
+{ 2 3 0 pow-mod } try
+/range-check eq (pow-mod: zero modulus rejected) rt-ok clear
+{ 2q 3 5 pow-mod } try
+/type-check eq (pow-mod: 128-bit base rejected) rt-ok clear
+{ 2b 8 1000 pow-mod } try
+/numerical-overflow eq (pow-mod: result beyond Byte base type) rt-ok clear
+{ 2 31 0x100000001#ul pow-mod } try
+/numerical-overflow eq (pow-mod: result beyond Integer base type) rt-ok clear
+{ 2u 33 0x1000000001#ul pow-mod } try
+/numerical-overflow eq (pow-mod: result beyond UInteger base type) rt-ok clear
+
+% bug-#4 regression: Long base, result > INT64_MAX; sentinels prove the
+% rollback left the stack intact (no double-free, no corruption)
+111 222
+{ 2l 63 0xFFFFFFFFFFFFFFFF#ul pow-mod } try
+/numerical-overflow eq
+exch 222 eq and
+exch 111 eq and
+(pow-mod: Long-base overflow raises cleanly (bug-#4 regression)) rt-ok clear
+
+% control: pow-mod still works after the gauntlet
+3 5 7 pow-mod 5 eq (pow-mod: 3^5 mod 7 -> 5 control) rt-ok clear
+
+% ====================================================================
+% SECTION 4: promote / product element checks
+% ====================================================================
+
+{ [ (s) ] promote } try
+/type-check eq (promote: single-element non-numeric rejected) rt-ok clear
+{ [ 1 (s) ] promote } try
+/type-check eq (promote: non-numeric element rejected) rt-ok clear
+{ [ (x) ] product } try
+/type-check eq (product: non-numeric first element rejected) rt-ok clear
+{ [ (x) 1 ] product } try
+/type-check eq (product: non-numeric before numeric rejected) rt-ok clear
+
+% ====================================================================
+% SECTION 5: float domain arms (Real and Double shim instantiations)
+% ====================================================================
+
+{ inf 2.0 fmod } try
+/undefined-result eq (fmod: Real infinity dividend rejected) rt-ok clear
+{ inf#d 2.0d fmod } try
+/undefined-result eq (fmod: Double infinity dividend rejected) rt-ok clear
+{ inf 2.0 remainder } try
+/undefined-result eq (remainder: Real NaN result rejected) rt-ok clear
+{ inf#d 2.0d remainder } try
+/undefined-result eq (remainder: Double NaN result rejected) rt-ok clear
+{ 0.0 -1.0 pow } try
+/range-check eq (pow: Real zero base negative exponent) rt-ok clear
+{ 0.0d -1.0d pow } try
+/range-check eq (pow: Double zero base negative exponent) rt-ok clear
+
+% ====================================================================
+% SECTION 6: floating-point environment validation
+% ====================================================================
+
+{ 0x40000000#u fe-test-except } try
+/range-check eq (fe-test-except: invalid flag bits rejected) rt-ok clear
+{ /fe-bogus fe-set-round } try
+/range-check eq (fe-set-round: unknown rounding mode rejected) rt-ok clear
+{ 0x40000000#ul fe-set-env } try
+/range-check eq (fe-set-env: invalid packed flags rejected) rt-ok clear
+{ 0x40000000#ul fe-update-env } try
+/range-check eq (fe-update-env: invalid packed flags rejected) rt-ok clear
+
+% ====================================================================
+% SECTION 7: global-VM region pass -- representative arms with the
+% operands allocated in the global region
+% ====================================================================
+
+${
+    { 0x7FFFFFFFFFFFFFFF#l 0x7FFFFFFFFFFFFFFE#l lcm } try
+    /numerical-overflow eq (global: lcm Long overflow) rt-ok clear
+    { 2l 63 0xFFFFFFFFFFFFFFFF#ul pow-mod } try
+    /numerical-overflow eq (global: pow-mod Long-base overflow) rt-ok clear
+    { 200q 100q nCr } try
+    /numerical-overflow eq (global: nCr Int128 overflow) rt-ok clear
+    3 5 7 pow-mod 5 eq (global: pow-mod control) rt-ok clear
+}
+
+% ====================================================================
+% Done
+% ====================================================================
+
+(Math error tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

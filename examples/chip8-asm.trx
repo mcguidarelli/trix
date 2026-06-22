@@ -1,0 +1,420 @@
+% examples/chip8-asm.trx -- CHIP-8 + Super-CHIP assembler.
+%
+% Inverse of the disassembler in examples/chip8.trx.  Reads assembly
+% source -- one instruction per line, mnemonic + operands in the same
+% format the disassembler emits -- and writes binary bytes that load
+% directly via load-rom.
+%
+% Round-trip contract: the assembler accepts every byte sequence the
+% disassembler emits.  The optional "ADDR: HHLL " prefix is treated as
+% documentation and stripped.  `??? HHLL` lines emit the raw two bytes,
+% so sprite / data sections round-trip verbatim.
+%
+% Numeric literals are hex by default (matching the disasm format).
+%
+% Run:
+%     ./trix examples/chip8-asm.trx <input.s> <output.ch8>
+%     ./trix examples/chip8-asm.trx --self-test
+%     ./trix examples/chip8-asm.trx --help
+
+clear
+
+% --- Hex helpers ---------------------------------------------------------
+
+% hex-byte-digit-value byte -- int  (0..15, or -1 if not a hex digit)
+/hex-byte-digit-value {|b|
+    b 16#30#b ge b 16#39#b le and { b 16#30#b sub /integer-type cast } {
+    b 16#41#b ge b 16#46#b le and { b 16#41#b sub /integer-type cast 10 add } {
+    b 16#61#b ge b 16#66#b le and { b 16#61#b sub /integer-type cast 10 add } {
+                                    -1 } if-else } if-else } if-else
+} def
+
+% all-hex? str -- bool
+/all-hex? {|s|#+1
+    s length 0 eq { false } {
+        /ok true local-def
+        s { hex-byte-digit-value 0 lt { /ok false store } if } for-all
+        ok
+    } if-else
+} def
+
+% hex4? str -- bool
+/hex4? {|s| s length 4 eq { s all-hex? } { false } if-else } def
+
+% hex-to-int s -- uint  (caller verified s is valid hex)
+% Returns UInteger so the encoder bit-or composes without re-casting.
+/hex-to-int {|s|#+1
+    /n 0u local-def
+    s {
+        % for-all pushes one byte; consume into the digit value.
+        hex-byte-digit-value /uinteger-type cast        % byte -> digit
+        /n exch n 16u mul add store                     % /n, digit -> /n, n*16 + digit
+    } for-all
+    n
+} def
+
+% reg? str -- bool   (V0..VF, case-insensitive)
+/reg? {|s|
+    s length 2 eq {
+        s 0 get 16#56#b eq s 0 get 16#76#b eq or                 % 'V' or 'v'
+        s 1 get hex-byte-digit-value 0 ge and
+    } { false } if-else
+} def
+
+% reg-num str -- uint   (caller has verified reg?)
+% Returns UInteger so the encoder bit-shifts compose without re-casting.
+/reg-num {|s| s 1 get hex-byte-digit-value /uinteger-type cast } def
+
+% --- Line tokenizer ------------------------------------------------------
+
+% strip-comment line -- line'
+/strip-comment {|line|#+1
+    /idx line (%) string-index-of local-def
+    idx 0 ge { line 0 idx get-interval } { line } if-else
+    trim
+} def
+
+% Tokens: split on whitespace, commas, and parens.  Replace separators
+% with spaces, then split.  Filter out empties and the "16x16" / "default"
+% noise tokens that appear inside parens in disasm output.
+/keep-tok? {|t|
+    t length 0 eq { false } {
+        t reg? t all-hex? or
+        t (I) uppercase eq or
+        t (DT) uppercase eq or
+        t (ST) uppercase eq or
+        t (K)  uppercase eq or
+        t (F)  uppercase eq or
+        t (HF) uppercase eq or
+        t (B)  uppercase eq or
+        t (R)  uppercase eq or
+        t ([I]) eq or
+        t (???) eq or
+    } if-else
+} def
+
+% tokenize-line line -- mnemonic operands
+/tokenize-line {|line|#+8
+    /clean line strip-comment local-def
+    clean (,) ( ) replace
+          (\() ( ) replace
+          (\)) ( ) replace
+    /norm exch local-def
+    /raw norm ( ) split { length 0 gt } filter local-def
+    /toks raw local-def
+    % Strip "ADDR: HHLL" disasm prefix if present.  Accept 2-digit hex
+    % too so the .byte trailing-odd-byte directive round-trips:
+    %     "ADDR: HH    .byte HH"
+    toks length 2 ge {
+        /t0 toks 0 get local-def
+        t0 length 0 gt
+            { t0 t0 length 1 sub get 16#3A#b eq } { false } if-else
+            toks 1 get all-hex? and
+        { /toks toks 2 toks length 2 sub get-interval store } if
+    } if
+    toks length 0 eq { () [] } {
+        /m toks 0 get uppercase local-def
+        % Operands: uppercase first, then drop noise tokens that aren't a
+        % register / number / known symbol (e.g. "16x16", "default" inside
+        % parens that became standalone tokens after stripping).
+        /ops toks 1 toks length 1 sub get-interval { uppercase } map
+                  { keep-tok? } filter local-def
+        m ops
+    } if-else
+} def
+
+% --- Encoder helpers -----------------------------------------------------
+
+% emit-opcode op -- bytes  (returns 2-byte string with big-endian opcode)
+/emit-opcode {|op|#+1
+    /opu op /uinteger-type cast local-def
+    2 string
+    dup 0 opu 8 shift-right 16#FF#u and /byte-type cast put
+    dup 1 opu             16#FF#u and /byte-type cast put
+} def
+
+% asm-error msg --
+/asm-error {|msg| /syntax-error msg throw-with } def
+
+% --- Encoders per mnemonic -----------------------------------------------
+
+% encode-NULL ops -- 0
+/encode-NULL { pop 0 } def
+
+% Each encode-* takes operands array; returns 16-bit opcode integer.
+
+/encode-CLS  {|ops| 16#00E0#u } def
+/encode-RET  {|ops| 16#00EE#u } def
+/encode-SCR  {|ops| 16#00FB#u } def
+/encode-SCL  {|ops| 16#00FC#u } def
+/encode-EXIT {|ops| 16#00FD#u } def
+/encode-LOW  {|ops| 16#00FE#u } def
+/encode-HIGH {|ops| 16#00FF#u } def
+
+/encode-SCD {|ops|
+    16#00C0#u ops 0 get hex-to-int 16#F#u and or
+} def
+
+/encode-SYS {|ops|
+    ops 0 get hex-to-int 16#FFF#u and
+} def
+
+/encode-JP {|ops|
+    ops length 1 eq { ops 0 get hex-to-int 16#FFF#u and 16#1000#u or } {
+        % JP V0, NNN -- ops 0 = "V0", ops 1 = NNN
+        16#B000#u ops 1 get hex-to-int 16#FFF#u and or
+    } if-else
+} def
+
+/encode-CALL {|ops|
+    16#2000#u ops 0 get hex-to-int 16#FFF#u and or
+} def
+
+/encode-SE {|ops|#+2
+    /a ops 0 get local-def
+    /b ops 1 get local-def
+    a reg? b reg? and
+        { 16#5000#u a reg-num 8 shift-left or b reg-num 4 shift-left or }
+        { 16#3000#u a reg-num 8 shift-left or b hex-to-int 16#FF#u and or }
+    if-else
+} def
+
+/encode-SNE {|ops|#+2
+    /a ops 0 get local-def
+    /b ops 1 get local-def
+    a reg? b reg? and
+        { 16#9000#u a reg-num 8 shift-left or b reg-num 4 shift-left or }
+        { 16#4000#u a reg-num 8 shift-left or b hex-to-int 16#FF#u and or }
+    if-else
+} def
+
+/encode-LD {|ops|#+2
+    /a ops 0 get local-def
+    /b ops 1 get local-def
+    %  Vx, Vy   8xy0
+    %  Vx, NN   6xnn
+    %  Vx, DT   Fx07
+    %  Vx, K    Fx0A
+    %  Vx, [I]  Fx65
+    %  Vx, R    Fx85
+    %  I, NNN   Annn
+    %  DT, Vx   Fx15
+    %  ST, Vx   Fx18
+    %  F, Vx    Fx29
+    %  HF, Vx   Fx30
+    %  B, Vx    Fx33
+    %  [I], Vx  Fx55
+    %  R, Vx    Fx75
+    a reg? b reg? and { 16#8000#u a reg-num 8 shift-left or b reg-num 4 shift-left or } {
+    a reg? b (DT) eq and { 16#F007#u a reg-num 8 shift-left or } {
+    a reg? b (K) eq and  { 16#F00A#u a reg-num 8 shift-left or } {
+    a reg? b ([I]) eq and { 16#F065#u a reg-num 8 shift-left or } {
+    a reg? b (R) eq and  { 16#F085#u a reg-num 8 shift-left or } {
+    a reg? b all-hex? and { 16#6000#u a reg-num 8 shift-left or b hex-to-int 16#FF#u and or } {
+    a (I) eq             { 16#A000#u b hex-to-int 16#FFF#u and or } {
+    a (DT) eq            { 16#F015#u b reg-num 8 shift-left or } {
+    a (ST) eq            { 16#F018#u b reg-num 8 shift-left or } {
+    a (F) eq             { 16#F029#u b reg-num 8 shift-left or } {
+    a (HF) eq            { 16#F030#u b reg-num 8 shift-left or } {
+    a (B) eq             { 16#F033#u b reg-num 8 shift-left or } {
+    a ([I]) eq           { 16#F055#u b reg-num 8 shift-left or } {
+    a (R) eq             { 16#F075#u b reg-num 8 shift-left or } {
+        (asm: cannot encode LD) asm-error 0
+    } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else
+} def
+
+/encode-ADD {|ops|#+2
+    /a ops 0 get local-def
+    /b ops 1 get local-def
+    %  Vx, NN   7xnn
+    %  Vx, Vy   8xy4
+    %  I, Vx    Fx1E
+    a (I) eq             { 16#F01E#u b reg-num 8 shift-left or } {
+    a reg? b reg? and    { 16#8004#u a reg-num 8 shift-left or b reg-num 4 shift-left or } {
+    a reg? b all-hex? and { 16#7000#u a reg-num 8 shift-left or b hex-to-int 16#FF#u and or } {
+        (asm: cannot encode ADD) asm-error 0
+    } if-else } if-else } if-else
+} def
+
+/encode-OR  {|ops| 16#8001#u ops 0 get reg-num 8 shift-left or ops 1 get reg-num 4 shift-left or } def
+/encode-AND {|ops| 16#8002#u ops 0 get reg-num 8 shift-left or ops 1 get reg-num 4 shift-left or } def
+/encode-XOR {|ops| 16#8003#u ops 0 get reg-num 8 shift-left or ops 1 get reg-num 4 shift-left or } def
+/encode-SUB {|ops| 16#8005#u ops 0 get reg-num 8 shift-left or ops 1 get reg-num 4 shift-left or } def
+/encode-SHR {|ops| 16#8006#u ops 0 get reg-num 8 shift-left or ops 1 get reg-num 4 shift-left or } def
+/encode-SUBN {|ops| 16#8007#u ops 0 get reg-num 8 shift-left or ops 1 get reg-num 4 shift-left or } def
+/encode-SHL {|ops| 16#800E#u ops 0 get reg-num 8 shift-left or ops 1 get reg-num 4 shift-left or } def
+
+/encode-RND {|ops|
+    16#C000#u ops 0 get reg-num 8 shift-left or ops 1 get hex-to-int 16#FF#u and or
+} def
+
+/encode-DRW {|ops|
+    16#D000#u
+        ops 0 get reg-num 8 shift-left or
+        ops 1 get reg-num 4 shift-left or
+        ops 2 get hex-to-int 16#F#u and or
+} def
+
+/encode-SKP  {|ops| 16#E09E#u ops 0 get reg-num 8 shift-left or } def
+/encode-SKNP {|ops| 16#E0A1#u ops 0 get reg-num 8 shift-left or } def
+
+% Pseudo-mnemonic for raw-data round-trip.
+/encode-??? {|ops| ops 0 get hex-to-int } def
+
+% --- Mnemonic dispatch table ---------------------------------------------
+
+/asm-table <<
+    (CLS)  { encode-CLS  }
+    (RET)  { encode-RET  }
+    (SCR)  { encode-SCR  }
+    (SCL)  { encode-SCL  }
+    (EXIT) { encode-EXIT }
+    (LOW)  { encode-LOW  }
+    (HIGH) { encode-HIGH }
+    (SCD)  { encode-SCD  }
+    (SYS)  { encode-SYS  }
+    (JP)   { encode-JP   }
+    (CALL) { encode-CALL }
+    (SE)   { encode-SE   }
+    (SNE)  { encode-SNE  }
+    (LD)   { encode-LD   }
+    (ADD)  { encode-ADD  }
+    (OR)   { encode-OR   }
+    (AND)  { encode-AND  }
+    (XOR)  { encode-XOR  }
+    (SUB)  { encode-SUB  }
+    (SHR)  { encode-SHR  }
+    (SUBN) { encode-SUBN }
+    (SHL)  { encode-SHL  }
+    (RND)  { encode-RND  }
+    (DRW)  { encode-DRW  }
+    (SKP)  { encode-SKP  }
+    (SKNP) { encode-SKNP }
+    (???)  { encode-??? }
+>> def
+
+% asm-line line -- bytes-or-empty
+% Returns a 2-byte string for one instruction line, or "" for blank /
+% comment-only lines.
+/asm-line {|line|#+3
+    /m () local-def
+    /ops [] local-def
+    line tokenize-line /ops exch store /m exch store
+    m length 0 eq { () } {
+        m (.BYTE) eq {
+            % 1-byte directive (used for odd-length ROMs' trailing byte)
+            1 string dup 0 ops 0 get hex-to-int /byte-type cast put
+        } {
+            asm-table m known-get
+                { /enc exch local-def ops enc exec emit-opcode }
+                { (asm: unknown mnemonic) asm-error () } if-else
+        } if-else
+    } if-else
+} def
+
+% asm-stream src-stream dst-stream --
+% Read src line-by-line, encode, write opcode bytes to dst.
+/asm-stream {|src dst|#+3
+    /buf 256 string local-def
+    { src buf read-line } { /line exch local-def
+        /bytes line asm-line local-def
+        bytes length 0 gt { dst bytes write-string } if
+    } while
+    pop
+} def
+
+% asm-file src-path dst-path --
+/asm-file {|src-path dst-path|#+2
+    /src src-path (r)#b stream local-def
+    /dst dst-path (w)#b stream local-def
+    src dst asm-stream
+    src close-stream
+    dst close-stream
+} def
+
+% --- Self-test -----------------------------------------------------------
+
+/rt-ok {|cond label|
+    cond { (ok: ) print label print nl } { label false assert } if-else
+} def
+
+/run-asm-tests { ||#3
+    % Tokenize basics
+    (CLS) tokenize-line                                     % stack: m ops
+    /ops exch local-def /m exch local-def
+    m (CLS) eq                                              (tokenize: CLS) rt-ok
+    ops length 0 eq                                         (tokenize: CLS no operands) rt-ok
+
+    (200: 00E0  CLS) tokenize-line
+    /ops exch store /m exch store
+    m (CLS) eq                                              (tokenize: with disasm prefix) rt-ok
+
+    (LD V0, 42) tokenize-line
+    /ops exch store /m exch store
+    m (LD) eq ops length 2 eq and
+    ops 0 get (V0) eq and ops 1 get (42) eq and             (tokenize: LD V0, 42) rt-ok
+
+    (DRW V0, V1, 0 (16x16)) tokenize-line
+    /ops exch store /m exch store
+    m (DRW) eq                                              (tokenize: DRW with paren note) rt-ok
+    ops length 3 eq                                         (tokenize: DRW operands stripped of 16x16) rt-ok
+
+    % Single-line encoders
+    (CLS)              asm-line dup length 2 eq exch (\x00\xE0) eq and       (encode: CLS) rt-ok
+    (RET)              asm-line                  (\x00\xEE) eq               (encode: RET) rt-ok
+    (LD V0, 42)        asm-line                  (\x60\x42) eq               (encode: LD V0, 42) rt-ok
+    (ADD V0, 5)        asm-line                  (\x70\x05) eq               (encode: ADD V0, 5) rt-ok
+    (LD I, 22A)        asm-line                  (\xA2\x2A) eq               (encode: LD I, 22A) rt-ok
+    (JP 234)           asm-line                  (\x12\x34) eq               (encode: JP 234) rt-ok
+    (CALL 456)         asm-line                  (\x24\x56) eq               (encode: CALL 456) rt-ok
+    (SE V5, 42)        asm-line                  (\x35\x42) eq               (encode: SE V5, 42) rt-ok
+    (SE VA, VB)        asm-line                  (\x5A\xB0) eq               (encode: SE VA, VB) rt-ok
+    (LD V0, V1)        asm-line                  (\x80\x10) eq               (encode: LD V0, V1) rt-ok
+    (ADD V0, V1)       asm-line                  (\x80\x14) eq               (encode: ADD V0, V1) rt-ok
+    (DRW V0, V1, F)    asm-line                  (\xD0\x1F) eq               (encode: DRW V0, V1, F) rt-ok
+    (SKP V6)           asm-line                  (\xE6\x9E) eq               (encode: SKP V6) rt-ok
+    (LD V0, DT)        asm-line                  (\xF0\x07) eq               (encode: LD V0, DT) rt-ok
+    (LD ST, VB)        asm-line                  (\xFB\x18) eq               (encode: LD ST, VB) rt-ok
+    (LD HF, VE)        asm-line                  (\xFE\x30) eq               (encode: LD HF, VE) rt-ok
+    (LD B, V0)         asm-line                  (\xF0\x33) eq               (encode: LD B, V0) rt-ok
+    (LD [I], V1)       asm-line                  (\xF1\x55) eq               (encode: LD [I], V1) rt-ok
+    (LD V2, [I])       asm-line                  (\xF2\x65) eq               (encode: LD V2, [I]) rt-ok
+    (LD R, V3)         asm-line                  (\xF3\x75) eq               (encode: LD R, V3) rt-ok
+
+    % Round-trip via disasm prefix form
+    (200: 00E0  CLS)             asm-line  (\x00\xE0) eq  (round-trip: prefix CLS) rt-ok
+    (228: 1228  JP 228)          asm-line  (\x12\x28) eq  (round-trip: prefix JP 228) rt-ok
+    (22A: FF00  ??? FF00)        asm-line  (\xFF\x00) eq  (round-trip: ??? FF00) rt-ok
+
+    % SCHIP
+    (HIGH)             asm-line  (\x00\xFF) eq               (encode: HIGH) rt-ok
+    (LOW)              asm-line  (\x00\xFE) eq               (encode: LOW) rt-ok
+    (EXIT)             asm-line  (\x00\xFD) eq               (encode: EXIT) rt-ok
+    (SCD 5)            asm-line  (\x00\xC5) eq               (encode: SCD 5) rt-ok
+
+    (chip8-asm self-test PASSED\n) print
+    (__test_ok__) =
+} def
+
+% --- CLI -----------------------------------------------------------------
+
+/print-usage {
+    (Usage: trix examples/chip8-asm.trx <input.s> <output.ch8>\n) print
+    (       trix examples/chip8-asm.trx --self-test\n) print
+    (       trix examples/chip8-asm.trx --help\n\n) print
+    (Assembles CHIP-8 / Super-CHIP source into a binary ROM.  Accepts the\n) print
+    (disassembler's "ADDR: HHLL  MNEMONIC OPS" format directly so any\n) print
+    (file produced by `chip8.trx --disasm` round-trips byte-for-byte.\n) print
+} def
+
+/main { ||#2
+    /args command-line-args local-def
+    args length 0 eq { print-usage quit } if
+    /first args 0 get local-def
+    first (--help) eq first (-h) eq or { print-usage quit } if
+    first (--self-test) eq { run-asm-tests quit } if
+    args length 2 lt { print-usage quit } if
+    args 0 get args 1 get asm-file
+} def
+
+main

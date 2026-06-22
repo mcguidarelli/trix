@@ -1,0 +1,25 @@
+% read_key_timeout_miss.trx -- exercises atReadKeyTimeoutRetry, timer
+% fires before any byte arrives.
+%
+% read-key-byte-timeout with 200 ms.  No byte ready -> EAGAIN ->
+% coroutine_block_on_stdin pushes atReadKeyTimeoutRetry, scheduler
+% sleeps with a wake-time of now+200ms.  Timer expires; poll() returns
+% no readable fds; atReadKeyTimeoutRetry retries the read, hits EAGAIN
+% again, recognizes timer expiration, pushes false.
+%
+% Harness sends NO bytes in this scenario.
+%
+% Output:
+%   READY
+%   TIMEOUT
+
+raw-mode
+(READY\n) print flush
+
+200 read-key-byte-timeout
+{ (BYTE: ) print = }
+{ (TIMEOUT\n) print flush }
+if-else
+
+cooked-mode
+flush

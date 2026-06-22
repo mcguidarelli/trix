@@ -1,0 +1,6 @@
+% forged transducer tags: wrong payload shapes via user `tag`.
+{ [1 2 3] (notanarray) /xf-scan tag into } try clear
+{ [1 2 3] [ ] /xf-scan tag into } try clear
+{ [1 2 3] [ { 1 } ] /xf-scan tag into } try clear
+{ [1 2 3] [ 1 2 3 ] /xf-map tag into } try clear
+{ [1 2 3] [ ] /xf-filter tag into } try clear

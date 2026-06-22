@@ -1,0 +1,77 @@
+% ====================================================================
+% Mirror of test_find_all_persist.trx long/ulong cases for Int128/UInt128.
+%
+% find-all gathers every choice-point result into an array. When the
+% choices yield 128-bit values, those values must survive the
+% backtracking machinery (logic variable unification, choice-point
+% rollback, final result assembly) without corruption.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: find-all with int128 choices
+% ====================================================================
+
+[ { 9999999999q } { 1111111111q } ] find-all
+    dup 0 get 9999999999q deep-eq          (fa: int128 [0]) rt-ok
+        1 get 1111111111q deep-eq          (fa: int128 [1]) rt-ok clear
+
+[ { 42q } ] find-all
+    0 get 42q deep-eq                      (fa: single int128) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Mixed-type choices including 128-bit
+% ====================================================================
+
+[ { 42 } { true } { /foo } { 99999999999q } { 1.5 } ] find-all
+    dup 3 get 99999999999q deep-eq         (fa: mixed int128 at [3]) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 3: UInt128 max value
+% ====================================================================
+
+[ { 340282366920938463463374607431768211455uq } ] find-all
+    0 get 340282366920938463463374607431768211455uq deep-eq
+    (fa: UINT128_MAX) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Large int128 values across multiple choices
+% ====================================================================
+
+[ { 100000000000q } { 200000000000q } { 300000000000q } ] find-all
+    dup 0 get 100000000000q deep-eq        (fa: large int128 [0]) rt-ok
+    dup 1 get 200000000000q deep-eq        (fa: large int128 [1]) rt-ok
+        2 get 300000000000q deep-eq        (fa: large int128 [2]) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Mixed with 128-bit + ExtValue
+% ====================================================================
+
+[ { 111111111111q } { 3.14159d } { 16#CAFE#a } { 222222222222q } { 2.71828d } ] find-all
+    dup 0 get 111111111111q deep-eq        (fa: mixed int128 [0]) rt-ok
+    dup 3 get 222222222222q deep-eq        (fa: mixed int128 [3]) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 6: Int128 with failing choices (only successful choices kept)
+% ====================================================================
+
+[ { 10q } { false guard } { 20q } { false guard } { 30q } ] find-all
+    dup length 3 eq                        (fa: int128 + fail length) rt-ok
+    dup 0 get 10q deep-eq                  (fa: int128 + fail [0]) rt-ok
+    dup 1 get 20q deep-eq                  (fa: int128 + fail [1]) rt-ok
+        2 get 30q deep-eq                  (fa: int128 + fail [2]) rt-ok clear
+
+(test_int128_find_all_mirror.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

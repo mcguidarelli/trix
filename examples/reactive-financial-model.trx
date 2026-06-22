@@ -1,0 +1,250 @@
+% ======================================================================
+%  Reactive financial model (showcase example)
+%
+%  A four-quarter income statement built entirely from reactive
+%  cells.  Each quarter has its own revenue, COGS, and opex base
+%  cells; per-quarter computed cells derive gross margin, operating
+%  income, tax, and net income; annual-rollup computed cells sum
+%  the quarters and derive the annual margin.  Dependency edges
+%  are recorded automatically on the first cell-get -- the model
+%  code never spells out who depends on whom.
+%
+%  Demonstrates:
+%      cell, cell-computed   -- building the graph (13 base cells,
+%                               22 computed cells)
+%      cell-get, cell-set    -- reading and writing
+%      curry                 -- capturing a quarter index in a
+%                               shared computed-cell template
+%      watch                 -- zero-crossing listeners on every
+%                               quarterly and annual net-income
+%      batch                 -- coalescing multiple cell-sets so
+%                               watchers see true post-batch values
+%                               (not stale cached ones)
+%      save / restore        -- transactional what-if scenarios:
+%                               mutate freely, inspect the result,
+%                               roll the entire graph back to
+%                               baseline, repeat with a different
+%                               set of assumptions.
+%
+%  Baseline numbers depict a company that turns a mild annual
+%  profit despite running a small loss in Q2.  Three what-if
+%  scenarios explore how revenue uplift, a recession, and
+%  aggressive cost cutting reshape the quarterly and annual
+%  picture; each is fully reverted before the next.
+%
+%  Run:
+%      ./trix examples/reactive-financial-model.trx
+% ======================================================================
+
+% ----------------------------------------------------------------------
+%  Base (input) cells.  Arrays so per-quarter computed cells can
+%  index into them via curry.  tax-rate is a single cell (shared).
+% ----------------------------------------------------------------------
+/revenue [
+    250000.0d cell
+    210000.0d cell
+    270000.0d cell
+    300000.0d cell
+] def
+
+/cogs [
+    150000.0d cell
+    140000.0d cell
+    160000.0d cell
+    175000.0d cell
+] def
+
+/opex [
+     70000.0d cell
+     75000.0d cell
+     72000.0d cell
+     75000.0d cell
+] def
+
+/tax-rate 0.25d cell def
+
+% ----------------------------------------------------------------------
+%  Per-quarter computed cells.  Each helper curries its quarter
+%  index into a shared op-stack-only proc template.  Procs never
+%  use `def` in their bodies, so nested evaluations (annual reading
+%  quarterly, quarterly reading sub-quarterly) don't clobber each
+%  other's named locals.
+% ----------------------------------------------------------------------
+/gm-cell  { { dup revenue           exch get cell-get  exch cogs  exch get cell-get  sub } curry cell-computed } def
+/oi-cell  { { dup gross-margins     exch get cell-get  exch opex  exch get cell-get  sub } curry cell-computed } def
+/tax-cell { {     operating-incomes exch get cell-get 0.0d max   tax-rate cell-get   mul } curry cell-computed } def
+/ni-cell  { { dup operating-incomes exch get cell-get  exch taxes exch get cell-get  sub } curry cell-computed } def
+
+/gross-margins     [ 0 gm-cell   1 gm-cell   2 gm-cell   3 gm-cell  ] def
+/operating-incomes [ 0 oi-cell   1 oi-cell   2 oi-cell   3 oi-cell  ] def
+/taxes             [ 0 tax-cell  1 tax-cell  2 tax-cell  3 tax-cell ] def
+/net-incomes       [ 0 ni-cell   1 ni-cell   2 ni-cell   3 ni-cell  ] def
+
+% ----------------------------------------------------------------------
+%  Annual rollup cells.  The sum bodies iterate the quarterly
+%  arrays purely on the operand stack (no loop-index def).
+% ----------------------------------------------------------------------
+/annual-revenue          { 0.0d  0 1 3 { revenue     exch get cell-get add } for } cell-computed def
+/annual-cogs             { 0.0d  0 1 3 { cogs        exch get cell-get add } for } cell-computed def
+/annual-opex             { 0.0d  0 1 3 { opex        exch get cell-get add } for } cell-computed def
+/annual-tax              { 0.0d  0 1 3 { taxes       exch get cell-get add } for } cell-computed def
+/annual-net-income       { 0.0d  0 1 3 { net-incomes exch get cell-get add } for } cell-computed def
+/annual-gross-margin     { annual-revenue      cell-get  annual-cogs cell-get  sub } cell-computed def
+/annual-operating-income { annual-gross-margin cell-get  annual-opex cell-get  sub } cell-computed def
+/annual-margin-pct       { annual-net-income   cell-get  annual-revenue cell-get  div  100.0d mul } cell-computed def
+
+% ----------------------------------------------------------------------
+%  Warm every computed cell's cache so the zero-crossing watcher
+%  has a meaningful "old value" on its first firing.
+% ----------------------------------------------------------------------
+/warm-cells {
+    0 1 3 {
+        /q exch def
+        gross-margins     q get cell-get pop
+        operating-incomes q get cell-get pop
+        taxes             q get cell-get pop
+        net-incomes       q get cell-get pop
+    } for
+    annual-revenue          cell-get pop
+    annual-cogs             cell-get pop
+    annual-opex             cell-get pop
+    annual-tax              cell-get pop
+    annual-gross-margin     cell-get pop
+    annual-operating-income cell-get pop
+    annual-net-income       cell-get pop
+    annual-margin-pct       cell-get pop
+} def
+
+warm-cells
+
+% ----------------------------------------------------------------------
+%  Zero-crossing watcher: one shared proc, curried with a label
+%  per cell so the message identifies which net-income fired.
+%  Registered on every quarterly and annual net-income cell.
+% ----------------------------------------------------------------------
+/zero-cross-warn {
+    /lbl     exch def
+    /new-val exch def
+    /old-val exch def
+    old-val 0.0d ge  new-val 0.0d ge  xor
+    {
+        (  ! WARNING: {0} crossed zero (now {1:.0f})\n)
+        mark lbl new-val print-fmt pop pop flush
+    } if
+} def
+
+net-incomes 0 get  (Q1 net-income)     //zero-cross-warn curry  watch
+net-incomes 1 get  (Q2 net-income)     //zero-cross-warn curry  watch
+net-incomes 2 get  (Q3 net-income)     //zero-cross-warn curry  watch
+net-incomes 3 get  (Q4 net-income)     //zero-cross-warn curry  watch
+annual-net-income  (annual net-income) //zero-cross-warn curry  watch
+
+% ----------------------------------------------------------------------
+%  Printing.  Each row label shares a cell array + annual cell.
+%  print-cell-row handles the currency rows; print-margin-row
+%  renders the percent row.
+% ----------------------------------------------------------------------
+/print-cell-row {
+    /ann-cell exch def
+    /arr      exch def
+    /label    exch def
+    ({0:<18s}) mark label print-fmt pop pop
+    0 1 3 {
+        /col exch def
+        ({0:>10.0f}) mark arr col get cell-get print-fmt pop pop
+    } for
+    ({0:>12.0f}\n) mark ann-cell cell-get print-fmt pop pop
+} def
+
+/print-margin-row {
+    ({0:<18s}) mark (Net margin) print-fmt pop pop
+    0 1 3 {
+        /col exch def
+        /ni  net-incomes col get cell-get def
+        /rv  revenue     col get cell-get def
+        ({0:>9.1f}%) mark ni rv div 100.0d mul print-fmt pop pop
+    } for
+    ({0:>11.1f}%\n) mark annual-margin-pct cell-get print-fmt pop pop
+} def
+
+/print-statement {
+    (                  ) print
+    ({0:>10s}{1:>10s}{2:>10s}{3:>10s}{4:>12s}\n)
+    mark (Q1) (Q2) (Q3) (Q4) (Annual)
+    print-fmt pop pop
+
+    (Revenue)            revenue            annual-revenue          print-cell-row
+    (COGS)               cogs               annual-cogs             print-cell-row
+    (Gross margin)       gross-margins      annual-gross-margin     print-cell-row
+    (Opex)               opex               annual-opex             print-cell-row
+    (Operating income)   operating-incomes  annual-operating-income print-cell-row
+    (Tax)                taxes              annual-tax              print-cell-row
+    (Net income)         net-incomes        annual-net-income       print-cell-row
+    print-margin-row
+    flush
+} def
+
+% ----------------------------------------------------------------------
+%  Scenario runner.  Brackets the scenario proc in save / restore
+%  so the baseline survives every what-if untouched.  Scenario
+%  procs wrap their cell-sets in a batch; outside a batch, the
+%  non-batch watcher fire path hands downstream watchers the stale
+%  cached "new" value (the recomputation hasn't happened yet) and
+%  the zero-crossing check would miss real transitions.
+% ----------------------------------------------------------------------
+/run-scenario {
+    /proc  exch def
+    /title exch def
+    save /cp exch def
+
+    (\n=== ) print title print ( ===\n) print
+    proc
+    print-statement
+
+    cp restore
+} def
+
+% ----------------------------------------------------------------------
+%  Baseline and three what-if scenarios.
+% ----------------------------------------------------------------------
+(\n=== Baseline ===\n) print
+print-statement
+
+(What-if A: Q2 revenue +10%)
+{
+    {
+        revenue 1 get cell-get 1.10d mul
+        revenue 1 get cell-set
+    } batch
+} run-scenario
+
+(What-if B: recession -- revenue -12% and COGS +3% across all quarters)
+{
+    {
+        0 1 3 {
+            /q exch def
+            revenue q get cell-get 0.88d mul  revenue q get cell-set
+            cogs    q get cell-get 1.03d mul  cogs    q get cell-set
+        } for
+    } batch
+} run-scenario
+
+(What-if C: aggressive cost cutting -- opex -15% all quarters)
+{
+    {
+        0 1 3 {
+            /q exch def
+            opex q get cell-get 0.85d mul
+            opex q get cell-set
+        } for
+    } batch
+} run-scenario
+
+% ----------------------------------------------------------------------
+%  Final print: every scenario was rolled back via `restore`, so the
+%  baseline is back exactly.  No bookkeeping, no dependency plumbing.
+% ----------------------------------------------------------------------
+(\n=== After restore: baseline intact ===\n) print
+print-statement
+
+nl

@@ -1,0 +1,3 @@
+% Phase 10 GC: manual mark-sweep pass.  Allocates a global Array,
+% drops it, runs gc, expects > 0 bytes reclaimed.
+${ 32 array pop } vm-global-gc 0 gt

@@ -1,0 +1,1908 @@
+% lib/debugger.trx -- interactive script debugger UI (plan_debugger_tui.md
+% Phase D-MVP + Slice A).  Wraps the TRIX_DEBUGGER C++ hooks (Phase B)
+% and the introspection ops (Phase C) into an inline-callback UI.
+%
+% Public API:
+%
+%   path install-debugger --
+%       Open `path`, cache source lines, enter alt-screen + raw-mode,
+%       allocate a terminal-sized Screen, install the event callback,
+%       arm StepIn.
+%
+%   uninstall-debugger --
+%       Idempotent teardown.
+%
+% Internal helpers exposed for headless tests:
+%
+%   screen src-lines pc-line dbg-render-source --
+%   screen dbg-render-stacks --
+%   /keyname dbg-key-to-action -- /action
+%   dbg-focus-next --  -- cycle /_dbg-focus across panes
+%   dbg-current-focus -- /paneName
+%
+% Layout (terminal-width adaptive; baseline 80x24):
+%
+%   rows 0..N-7   source pane
+%   row  N-6      stack-panes header line ("op[a] exec[b] dict[c] err[d]")
+%   row  N-5..-2  op / exec / dict / err preview rows (top items, format-object)
+%   row  N-1      status bar (key hints + focused-pane indicator)
+
+(lib/keys.trx) require
+(lib/screen.trx) require
+
+% --- Color theme ------------------------------------------------------------
+%
+% Each theme entry is a 3-element packed: {fg bg attrs}.  attrs bitmask:
+%   0x01 bold   0x02 dim   0x04 italic   0x08 underline
+%   0x10 blink  0x20 reverse  0x40 strike  (0x80 reserved)
+%
+% Switch to /no-color via `set-no-color-theme` (called by install-debugger
+% if env DBG_NO_COLOR is set, or by tests).
+
+% Color tuples stored as LITERAL ARRAYS, not executable packed procs --
+% otherwise the executable lookup `tuple` inside `_dbg-color` would run
+% the proc body (pushing 3 ints) instead of returning the container.
+
+/_dbg-theme-color <<
+    /normal     [  7 0  0 ]
+    /pc         [  3 0 33 ]  % yellow + reverse + bold (PC line)
+    /bp         [  1 0  1 ]  % red + bold (breakpoint marker)
+    /focused    [ 15 0  1 ]  % bright white + bold (focused pane label)
+    /unfocused  [  7 0  2 ]  % white + dim (unfocused pane label)
+    /status     [  7 0  2 ]  % dim status text
+    /title      [  6 0  1 ]  % cyan + bold (pane title row)
+>> make-readonly def
+
+/_dbg-theme-mono <<
+    /normal     [ 7 0 0 ]
+    /pc         [ 7 0 1 ]    % bold-only PC marker for ANSI-hostile terminals
+    /bp         [ 7 0 1 ]
+    /focused    [ 7 0 1 ]
+    /unfocused  [ 7 0 0 ]
+    /status     [ 7 0 0 ]
+    /title      [ 7 0 1 ]
+>> make-readonly def
+
+/_dbg-theme _dbg-theme-color def
+
+% Color tuple lookup: /key -- fg bg attrs
+/_dbg-color {|key|
+    /tuple _dbg-theme key get def
+    tuple 0 get tuple 1 get tuple 2 get
+} def
+
+% --- Module state -----------------------------------------------------------
+% All in userdict.  Lazy-init: install-debugger overwrites, uninstall-debugger
+% wipes back to defaults.
+
+/_dbg-source-lines [] def
+/_dbg-screen       null def
+/_dbg-active       false def
+
+% Per-sid source-file cache: sid (integer) -> array-of-strings (one per
+% line, split on "\n").  Populated lazily by _dbg-load-source-for-sid.
+% The install-time path is also seeded here under its own sid.
+/_dbg-source-cache 64 dict def
+
+% Sid of the source loaded at install time -- used as the fallback when
+% stream-name can't resolve a sid (e.g. user code halts in a proc
+% defined in an already-closed `require`'d file).
+/_dbg-install-sid 0 def
+
+% /source | /op | /exec | /dict | /err -- which pane has the visual focus.
+/_dbg-focus /source def
+
+% Pane cycle order for Tab.
+/_dbg-focus-order [/source /op /exec /dict /err] make-readonly def
+
+% Command-mode line editor + last command result.
+/_dbg-cmd-mode   false def
+/_dbg-cmd-buf    () def
+/_dbg-cmd-result () def
+
+% Command history: ring of past submitted command strings, plus a
+% navigation cursor used by up/down arrows in :-mode.
+%   _dbg-cmd-history     -- chronological array, oldest first, newest last
+%   _dbg-cmd-history-max -- cap; older entries fall off when exceeded
+%   _dbg-cmd-history-idx -- -1 when not navigating (live buf); else points
+%                           into _dbg-cmd-history
+%   _dbg-cmd-buf-saved   -- live buffer stashed on first up-arrow so a
+%                           down-arrow past the newest entry restores it
+/_dbg-cmd-history     [] def
+/_dbg-cmd-history-max 32 def
+/_dbg-cmd-history-idx -1 def
+/_dbg-cmd-buf-saved   () def
+
+% Current PC line (1-based source line) captured by _dbg-on-event from
+% the event payload.  Used by _dbg-redraw to position the source pane.
+/_dbg-on-event-line 1 def
+
+% True while the current halt is an /error event (break-on-error: the
+% error is fatal and already committed).  Set per-halt in _dbg-on-event.
+/_dbg-fatal-halt false def
+
+% --- Output capture state ---------------------------------------------------
+% _dbg-capture-stream  -- writable string-stream that receives user-script
+%                         output while the user code runs (m_stdout points
+%                         at it via set-stdout).  Allocated by install,
+%                         null'd by uninstall.
+% _dbg-output-lines    -- ring of completed output lines (most-recent last);
+%                         capped at _dbg-output-max-lines entries.
+% _dbg-output-partial  -- accumulator for the in-progress line (chars
+%                         written between the most recent \n and the next
+%                         drain).
+% _dbg-output-truncated -- bool: set when the line-ring trimmed an old
+%                          entry; the output-pane header shows "(...)".
+% _dbg-capture-bytes   -- capacity of the capture string-stream.  Hitting
+%                         this limit during continue raises /io-write-error
+%                         in the user script -- pair with break-on-error
+%                         to halt instead of unwind.  Capped by the
+%                         engine's MaxStringLength = 65535.
+/_dbg-capture-stream    null def
+/_dbg-output-lines      []   def
+/_dbg-output-partial    ()   def
+/_dbg-output-truncated  false def
+/_dbg-output-max-lines  128  def
+/_dbg-capture-bytes     32768 def
+/_dbg-output-pane-rows  3    def
+/_dbg-tail-bytes        ()   def
+
+% --- Watch state ------------------------------------------------------------
+% Watches are user-supplied expressions re-evaluated at every halt event.
+% _dbg-watch-exprs    -- Array of strings, source text of each watch.
+% _dbg-watch-results  -- Array of strings, formatted result of the most
+%                        recent eval per index.  Refreshed in _dbg-on-event;
+%                        also updated when a watch is added so the pane
+%                        shows a result immediately, not after the next halt.
+% _dbg-watch-max      -- cap on watch count (8 fits comfortably in the
+%                        pane and keeps the source pane height usable).
+%
+% Watches share the :p sandbox harness (save/restore + blocklist + global-
+% VM result) -- a watch that mutates state rolls back cleanly, a watch
+% that calls a blocklisted op shows "sandbox: NAME" instead of running.
+/_dbg-watch-exprs    [] def
+/_dbg-watch-results  [] def
+/_dbg-watch-max      8  def
+
+% --- Conditional breakpoints + last-mode tracking ---------------------------
+% Each entry in _dbg-bp-conditions maps a Name (the bp name) to a
+% predicate STRING (the body of `b /name when {predicate}`).  The string
+% is copied to global VM at store time so it survives any user-script
+% save/restore.  At cb time, when a /breakpoint event fires AND the
+% pc-name has an entry, the predicate is sandbox-eval'd (same harness as
+% :p but extracts a Boolean across the restore).  Predicate false -> the
+% cb silent-skips by resuming in _dbg-last-mode.
+%
+% _dbg-last-mode tracks the user's most recent action (/step, /step-over,
+% /step-out, /continue) so silent-skip can resume in the right mode.
+% Initialized per install variant.
+/_dbg-bp-conditions  64 dict def
+/_dbg-last-mode      /step def
+
+% --- One-shot breakpoints ---------------------------------------------------
+% Names registered via `b1 /name [when {pred}]`.  When a /breakpoint event
+% fires for a one-shot name AND the halt path is taken (predicate passed),
+% _dbg-handle-oneshot clears the bp + condition + oneshot tag before the
+% user sees the halt.  Predicate-filtered silent-skips do NOT consume the
+% one-shot -- the bp keeps firing until it actually halts.
+/_dbg-bp-oneshot     32 dict def
+
+% --- Frame navigation ------------------------------------------------------
+% _dbg-frame-locs holds an Array of [sid line col name] records, one per
+% @call frame on the exec stack at the most-recent halt event.  Index 0 is
+% the topmost (deepest) frame; subsequent indices are progressively older
+% callers.  _dbg-frame-idx selects which frame the source pane is rendering
+% (0 = deepest, increments via :up, decrements via :down).  Both refreshed
+% in _dbg-on-event.
+/_dbg-frame-locs     [] def
+/_dbg-frame-idx      0  def
+
+% --- Modal pane expand ------------------------------------------------------
+% When Enter is pressed while a stack pane is focused, the entire screen
+% switches to a full-height pretty-print of that pane.  Esc returns to
+% the normal multi-pane layout.  Up/Down scroll the modal content row
+% by row when it exceeds the screen height.
+%
+% _dbg-modal-pane    -- null (inactive) or /op | /exec | /dict | /err.
+% _dbg-modal-lines   -- pre-rendered Array of strings (one per stack item).
+% _dbg-modal-scroll  -- index of the first visible line (0-based).
+%
+% State is reset at the top of _dbg-on-event so each halt opens fresh.
+/_dbg-modal-pane    null def
+/_dbg-modal-lines   []   def
+/_dbg-modal-scroll  0    def
+
+% --- Generic helpers --------------------------------------------------------
+
+% Right-align integer as 4-char string.  int -- str
+/_dbg-fmt-lineno {
+    (                    ) to-string 4 32b pad-left
+} def
+
+% Compact integer-to-string (variable width).  int -- str
+/_dbg-itos {
+    (                    ) to-string
+} def
+
+% Safe array index.  src-lines idx(1-based) -- str
+/_dbg-get-line {|lines idx|
+    /i idx 1 sub def
+    i 0 ge i lines length lt and
+    { lines i get }
+    { () }
+    if-else
+} def
+
+% Clear and write a row.  screen row str /theme-key -- screen
+/_dbg-write-row {|screen row str key|
+    screen 0 row screen screen-cols 1 32 7 0 0 screen-fill-rect
+    pop
+    screen 0 row str key _dbg-color screen-put-string
+    pop
+} def
+
+% --- Source pane ------------------------------------------------------------
+
+% Render one source row.  screen row marker lineno text --
+/_dbg-render-source-row {|screen row marker lineno text|
+    /content
+        marker lineno _dbg-fmt-lineno concat ( ) concat text concat
+    def
+    /key marker (>) eq { /pc } { /normal } if-else def
+    screen row content key _dbg-write-row
+} def
+
+% screen src-lines pc-line dbg-render-source --
+% Render the top portion of the screen: terminal height minus (stack panes +
+% output pane + status bar).
+/dbg-render-source {|screen src-lines pc-line|
+    /rows         screen screen-rows  def
+    /source-rows
+        rows 7 _dbg-output-pane-rows add _dbg-watch-pane-height add sub
+        def
+    source-rows 1 lt { /source-rows 1 def } if
+
+    /first-line   pc-line source-rows 2 div sub def
+    first-line 1 lt { /first-line 1 def } if
+
+    /screen-row 0 def
+    {
+        screen-row source-rows ge { exit } if
+        /src-line first-line screen-row add def
+        /marker   src-line pc-line eq { (>) } { ( ) } if-else def
+        /text     src-lines src-line _dbg-get-line def
+        screen screen-row marker src-line text _dbg-render-source-row
+        /screen-row screen-row 1 add def
+    } loop
+} def
+
+% --- Stack panes ------------------------------------------------------------
+
+% Build a compact preview string from a stack-snapshot array.
+% snap max-items per-item-width -- "preview"
+%
+% NOTE: working variables use `local-def`, not `def`.  Plain `def`
+% skips frame dicts and writes to userdict (per the pre-1.0 semantic
+% change); a working var whose name collides with a systemdict op
+% (`/count`, `/start`, `/drop`, etc.) would then shadow the operator
+% for ALL subsequent callers.  `|args|#+N` expands the frame to hold
+% the working slots; `local-def` writes directly into them.
+/_dbg-stack-preview {|snap max-items width|#+6
+    /len   snap length          local-def
+    /count len max-items lt { len } { max-items } if-else local-def
+    /start len count sub        local-def
+    % Walk from start..len-1, format each item, concat with single space.
+    /out () local-def
+    /i start local-def
+    {
+        i len ge { exit } if
+        /piece snap i get width format-object local-def
+        i start gt { /out out ( ) concat local-def } if
+        /out out piece concat local-def
+        /i i 1 add local-def
+    } loop
+    out
+} def
+
+% Render the header row: " op[a] exec[b] dict[c] err[d] "
+% Focused pane gets /focused color, others /unfocused.
+% screen row op-depth exec-depth dict-depth err-depth --
+/_dbg-render-stack-header {|screen row op-d exec-d dict-d err-d|
+    screen 0 row screen screen-cols 1 32 7 0 0 screen-fill-rect
+    pop
+
+    % Title row uses /title theme color uniformly -- focus highlighting
+    % happens on the per-pane preview rows below.
+    /title-text
+        (  op[) op-d _dbg-itos concat (] ) concat
+        (exec[) concat exec-d _dbg-itos concat (] ) concat
+        (dict[) concat dict-d _dbg-itos concat (] ) concat
+        (err[)  concat err-d  _dbg-itos concat (])  concat
+    def
+
+    screen 0 row title-text /title _dbg-color screen-put-string
+    pop
+} def
+
+% Compute the per-item preview width for stack panes given the screen
+% width.  Layout: `LABEL ITEM ITEM ITEM ITEM` with a 6-char label and
+% single-space separators between 4 items, so each item-slot is
+% (cols - 6 - 3) / 4 = (cols - 9) / 4 chars.  Clamped to [10, 30]: a
+% minimum for readability at 60-col screens and a cap so very-wide
+% terminals don't stretch sparse stacks into walls of trailing dots.
+% int(cols) -- int(per-item)
+/_dbg-stack-item-width {|cols|#+1
+    /w cols 9 sub 4 div local-def
+    w 10 lt { /w 10 local-def } if
+    w 30 gt { /w 30 local-def } if
+    w
+} def
+
+% Render a single stack-preview row: "label: item item ..."
+% Focused pane label uses /focused; otherwise /unfocused.
+% screen row /pane-key snap-array --
+/_dbg-render-stack-row {|screen row pane snap|
+    /label
+        pane /op   eq { ( op: ) }
+        { pane /exec eq { (exec: ) }
+        { pane /dict eq { (dict: ) }
+        { pane /err  eq { ( err: ) }
+        { ( ?  : ) }
+        if-else } if-else } if-else } if-else
+    def
+    /per-item screen screen-cols _dbg-stack-item-width def
+    /preview snap 4 per-item _dbg-stack-preview def
+    /content label preview concat def
+    /key _dbg-focus pane eq { /focused } { /unfocused } if-else def
+    screen row content key _dbg-write-row
+} def
+
+% Render all four stack panes (header + 4 rows).
+% screen dbg-render-stacks --
+%
+% Snapshot order matters: each `*-stack-snapshot` op captures the current
+% operand stack INCLUDING anything pushed by enclosing locals/temporaries.
+% Capture first into stack-local temporaries via `exch`, then bind to
+% named locals, so the captured op snapshot doesn't include the snapshot-
+% arrays we'd push for the other three.
+/dbg-render-stacks {|screen|#+4
+    op-stack-snapshot   /op-snap   exch local-def
+    exec-stack-snapshot /exec-snap exch local-def
+    dict-stack-snapshot /dict-snap exch local-def
+    err-stack-snapshot  /err-snap  exch local-def
+
+    /rows       screen screen-rows def
+    /header-row rows 6 sub def
+
+    screen header-row
+        op-snap   length
+        exec-snap length
+        dict-snap length
+        err-snap  length
+    _dbg-render-stack-header
+
+    screen header-row 1 add /op   op-snap   _dbg-render-stack-row
+    screen header-row 2 add /exec exec-snap _dbg-render-stack-row
+    screen header-row 3 add /dict dict-snap _dbg-render-stack-row
+    screen header-row 4 add /err  err-snap  _dbg-render-stack-row
+} def
+
+% --- Output pane ------------------------------------------------------------
+% Sits above the stack-panes header.  Layout (rows from terminal bottom):
+%   rows-1                        status / cmd line
+%   rows-2..rows-5                op/exec/dict/err stack rows
+%   rows-6                        stack-pane header
+%   rows-7..rows-(7+K-1)          K content rows of output pane
+%   rows-(7+K) = rows-(7+output-pane-rows)
+%                                 output-pane header
+%   0..rows-(8+output-pane-rows)  source pane
+% where K = _dbg-output-pane-rows (default 3).
+
+% Append captured `drained` to the line-ring and partial accumulator.
+% drained -- (mutates _dbg-output-lines / _dbg-output-partial / _dbg-output-truncated)
+%
+% Working vars use `local-def` so they stay in the proc's frame dict
+% instead of leaking into userdict (and potentially shadowing systemdict
+% ops like /drop).
+/_dbg-drain-into-lines {|drained|#+7
+    drained length 0 gt
+    {
+        /joined _dbg-output-partial drained concat local-def
+        /pieces joined (\n) split local-def
+        /N pieces length local-def
+        /complete-count N 1 sub local-def
+
+        /i 0 local-def
+        {
+            i complete-count ge { exit } if
+            /_dbg-output-lines _dbg-output-lines pieces i get append store
+            /i i 1 add local-def
+        } loop
+
+        /_dbg-output-partial pieces complete-count get store
+
+        /len _dbg-output-lines length local-def
+        len _dbg-output-max-lines gt
+        {
+            /drop len _dbg-output-max-lines sub local-def
+            /_dbg-output-lines
+                _dbg-output-lines drop _dbg-output-max-lines get-interval
+                store
+            /_dbg-output-truncated true store
+        } if
+    } if
+} def
+
+% Render the output pane: 1 header row + _dbg-output-pane-rows content rows.
+% Shows the most recent K lines = (completed-lines + partial-if-nonempty),
+% truncated from the front so the freshest line is always visible.
+% screen dbg-render-output --
+/dbg-render-output {|screen|
+    /rows screen screen-rows def
+    /K _dbg-output-pane-rows def
+    /header-row rows 7 K add _dbg-watch-pane-height add sub def
+
+    /header-text _dbg-output-truncated
+        { (-- output (truncated) --) }
+        { (-- output --) }
+        if-else def
+    screen header-row header-text /title _dbg-write-row
+
+    /display
+        _dbg-output-partial length 0 gt
+        { _dbg-output-lines _dbg-output-partial append }
+        { _dbg-output-lines }
+        if-else def
+
+    /n display length def
+    /start n K gt { n K sub } { 0 } if-else def
+
+    /screen-row 0 def
+    {
+        screen-row K ge { exit } if
+        /idx start screen-row add def
+        /text idx n lt { display idx get } { () } if-else def
+        screen header-row screen-row 1 add add text /normal _dbg-write-row
+        /screen-row screen-row 1 add def
+    } loop
+} def
+
+% --- Watch pane ------------------------------------------------------------
+% Sits between the output pane and the stack-pane header.  Layout (rows
+% from terminal bottom, with K = _dbg-output-pane-rows, W = total rows
+% the watch pane uses, n = watch count):
+%
+%   rows-1                              status / cmd line
+%   rows-5..rows-2                      stack rows
+%   rows-6                              stack-pane header
+%   rows-(6+W)..rows-7                  watch pane (W = 0 when n = 0,
+%                                       else 1 header + n content rows)
+%   rows-(7+W+K)..rows-(7+W)            output pane (1 header + K content)
+%   0..rows-(8+W+K)                     source pane
+%
+% When n = 0 the pane disappears entirely; source absorbs the extra rows.
+
+% Total rows the watch pane consumes.  -- int
+/_dbg-watch-pane-height { ||#1
+    /n _dbg-watch-exprs length _dbg-watch-max min local-def
+    n 0 eq { 0 } { n 1 add } if-else
+} def
+
+% Remove element at index idx from arr.  arr idx -- arr'
+/_dbg-array-remove-at {|arr idx|#+2
+    /buf [] local-def
+    /i 0 local-def
+    {
+        i arr length ge { exit } if
+        i idx eq not { /buf buf arr i get append local-def } if
+        /i i 1 add local-def
+    } loop
+    buf
+} def
+
+% Re-evaluate every watch expression and refresh _dbg-watch-results.
+% Each eval is sandboxed via _dbg-cmd-eval (save/restore + blocklist +
+% global-VM result), so side effects roll back cleanly between watches.
+% Called once per cb fire, before _dbg-redraw.  --
+/_dbg-eval-watches { ||#4
+    /n _dbg-watch-exprs length local-def
+    /results [] local-def
+    /i 0 local-def
+    {
+        i n ge { exit } if
+        /r _dbg-watch-exprs i get _dbg-cmd-eval local-def
+        /results results r append local-def
+        /i i 1 add local-def
+    } loop
+    /_dbg-watch-results results store
+} def
+
+% screen dbg-render-watches --
+% Render the watch pane (1 header row + n content rows).  Each content row
+% renders as "[I] EXPR => RESULT".  screen-put-string clips at screen
+% width so long expressions or results truncate without wrapping.
+/dbg-render-watches {|screen|#+9
+    /n _dbg-watch-exprs length _dbg-watch-max min local-def
+    n 0 gt
+    {
+        /rows screen screen-rows local-def
+        /W n 1 add local-def
+        /header-row rows 6 sub W sub local-def
+        screen header-row (-- watches --) /title _dbg-write-row
+        /i 0 local-def
+        {
+            i n ge { exit } if
+            /expr _dbg-watch-exprs i get local-def
+            /result
+                i _dbg-watch-results length lt
+                { _dbg-watch-results i get }
+                { () }
+                if-else local-def
+            /idx-str
+                ([) i (                    ) to-string concat (] ) concat
+                local-def
+            /content idx-str expr concat ( => ) concat result concat local-def
+            screen header-row i 1 add add content /normal _dbg-write-row
+            /i i 1 add local-def
+        } loop
+    } if
+} def
+
+% --- Modal pane ------------------------------------------------------------
+% Pretty-print of one stack pane filling the entire screen.  Opened via
+% Enter when a stack pane is focused; closed via Esc.  Up/Down arrows
+% scroll one line at a time; Page-Up / Page-Down move by one screen.
+
+% Snapshot the focused stack pane, pre-render each item as a line, and
+% latch the modal state.  No-op when focus is on /source.
+%
+% Stack-effect note: `op-stack-snapshot` (and the other three) captures
+% the ENTIRE coroutine operand stack, not just what's above the proc's
+% frame.  So the snapshot has to be taken FIRST -- before any helper
+% literal name (/snap, /lines, /i) is pushed onto the stack -- or the
+% snapshot would include those working values as bogus items.  --
+/dbg-modal-open { ||#5
+    _dbg-focus /source eq
+    { }
+    {
+        % Snapshot first.  Operand stack at this point holds only the
+        % caller's natural values; the if-else's bool was consumed.
+        _dbg-focus /op eq
+        { op-stack-snapshot }
+        {
+            _dbg-focus /exec eq
+            { exec-stack-snapshot }
+            {
+                _dbg-focus /dict eq
+                { dict-stack-snapshot }
+                { err-stack-snapshot }
+                if-else
+            }
+            if-else
+        }
+        if-else
+        /snap exch local-def
+
+        /_dbg-modal-pane _dbg-focus store
+        % Format width matches the screen if one's allocated (test
+        % contexts call dbg-modal-open without a screen).  Either way
+        % screen-put-string at render time clips to the actual screen
+        % width, but matching the format width avoids format-object
+        % churning on bytes that'll be clipped.
+        /w _dbg-screen null eq { 200 } { _dbg-screen screen-cols } if-else local-def
+        /lines [] local-def
+        /i 0 local-def
+        {
+            i snap length ge { exit } if
+            /line
+                ([) i (                    ) to-string concat (] ) concat
+                snap i get w format-object concat
+                local-def
+            /lines lines line append local-def
+            /i i 1 add local-def
+        } loop
+        /_dbg-modal-lines lines store
+        /_dbg-modal-scroll 0 store
+    }
+    if-else
+} def
+
+% Drop back to the normal multi-pane layout.  --
+/dbg-modal-close {
+    /_dbg-modal-pane   null store
+    /_dbg-modal-lines  []   store
+    /_dbg-modal-scroll 0    store
+} def
+
+% True iff the modal is currently active.  -- bool
+/dbg-modal-active? { _dbg-modal-pane null eq not } def
+
+% Render a full-screen pretty-print of the snapshotted pane.  Title row
+% at top, content rows in the middle, status row reserved at the bottom.
+% screen --
+/dbg-render-modal {|screen|#+7
+    /rows screen screen-rows local-def
+    /cols screen screen-cols local-def
+
+    % Title row: name of the pane + scroll position.
+    /title
+        (-- ) _dbg-modal-pane (                    ) to-string concat
+        ( stack [) concat
+        _dbg-modal-scroll (                    ) to-string concat
+        (..) concat
+        _dbg-modal-lines length (                    ) to-string concat
+        (] -- Esc to close --) concat
+        local-def
+    screen 0 title /title _dbg-write-row
+
+    /content-rows rows 2 sub local-def
+    /i 0 local-def
+    {
+        i content-rows ge { exit } if
+        /idx _dbg-modal-scroll i add local-def
+        /text idx _dbg-modal-lines length lt
+            { _dbg-modal-lines idx get }
+            { () }
+            if-else local-def
+        screen i 1 add text /normal _dbg-write-row
+        /i i 1 add local-def
+    } loop
+} def
+
+% Scroll the modal view.  delta is a positive or negative integer; the
+% scroll offset is clamped to [0, max(0, lines-length - 1)].
+% int --
+/dbg-modal-scroll {|delta|#+2
+    /new _dbg-modal-scroll delta add local-def
+    /max-scroll
+        _dbg-modal-lines length 1 sub
+        0 max
+        local-def
+    new 0 lt { /new 0 local-def } if
+    new max-scroll gt { /new max-scroll local-def } if
+    /_dbg-modal-scroll new store
+} def
+
+% --- Status bar -------------------------------------------------------------
+
+/_dbg-status-text {
+    dbg-modal-active?
+    { (  Esc=close  Up/Down=scroll  PgUp/PgDn=page  q=quit) }
+    {
+        _dbg-fatal-halt
+        { ( FATAL error -- inspect freely; any resume key ends the session \(diag + exit code\)) }
+        { ( F11=step F10=over F12=out F5=cont F9=break Tab=focus Enter=expand q=quit) }
+        if-else
+    }
+    if-else
+} def
+
+% screen dbg-render-status-bar --
+/dbg-render-status-bar {|screen|
+    /rows screen screen-rows def
+    /row  rows 1 sub def
+    screen row _dbg-status-text /status _dbg-write-row
+} def
+
+% --- Key dispatch -----------------------------------------------------------
+
+% /keyname dbg-key-to-action -- /action
+/dbg-key-to-action {
+    dup /s         eq { pop /step        } {
+    dup /n         eq { pop /step-over   } {
+    dup /o         eq { pop /step-out    } {
+    dup /c         eq { pop /continue    } {
+    dup /q         eq { pop /quit        } {
+    dup /b         eq { pop /break       } {
+    dup /tab       eq { pop /focus-next  } {
+    dup /:         eq { pop /enter-cmd   } {
+    dup /enter     eq { pop /expand      } {
+    dup /escape    eq { pop /collapse    } {
+    dup /up        eq { pop /scroll-up   } {
+    dup /down      eq { pop /scroll-down } {
+    dup /page-up   eq { pop /page-up     } {
+    dup /page-down eq { pop /page-down   } {
+    dup /f5        eq { pop /continue    } {
+    dup /f9        eq { pop /break       } {
+    dup /f10       eq { pop /step-over   } {
+    dup /f11       eq { pop /step        } {
+    dup /f12       eq { pop /step-out    } {
+                       pop /unknown
+    } if-else } if-else } if-else } if-else } if-else
+    } if-else } if-else } if-else } if-else } if-else
+    } if-else } if-else } if-else } if-else } if-else
+    } if-else } if-else } if-else } if-else
+} def
+
+% --- Focus management -------------------------------------------------------
+
+% Cycle /_dbg-focus to the next entry in /_dbg-focus-order.
+/dbg-focus-next {
+    /n _dbg-focus-order length def
+    /i 0 def
+    {
+        i n ge { exit } if
+        _dbg-focus-order i get _dbg-focus eq { exit } if
+        /i i 1 add def
+    } loop
+    /next-i i 1 add n mod def
+    /_dbg-focus _dbg-focus-order next-i get store
+} def
+
+% dbg-current-focus -- /paneName
+/dbg-current-focus { _dbg-focus } def
+
+% --- Breakpoint toggle ------------------------------------------------------
+
+% Most-recent user-script PC name carried through the cb (set at the
+% top of _dbg-on-event from the event payload's slot 3).  Used by F9/b
+% to set a breakpoint at the user's current call site.  `debug-pc`
+% would return the debugger helper's own name from inside the cb.
+/_dbg-last-pc-name null def
+
+% Set a breakpoint at the user-script's currently-executing @call name,
+% if any.  Reads /_dbg-last-pc-name (populated by _dbg-on-event from the
+% event payload), NOT `debug-pc` (which inside the cb returns the
+% debugger's own frame name).
+/_dbg-set-breakpoint-at-pc {
+    _dbg-last-pc-name
+    dup null eq { pop } { debug-break } if-else
+} def
+
+% --- Command-line editor + render ------------------------------------------
+
+% Step up to an older entry in the command history (up-arrow handler).
+% Saves the live buffer on first up so a later down-past-newest can
+% restore it.  buf -- buf' status
+/_dbg-history-up {|buf|#+1
+    /n _dbg-cmd-history length local-def
+    n 0 eq
+    { buf /editing }
+    {
+        _dbg-cmd-history-idx -1 eq
+        {
+            /_dbg-cmd-buf-saved buf store
+            /_dbg-cmd-history-idx n 1 sub store
+        }
+        {
+            _dbg-cmd-history-idx 0 gt
+            { /_dbg-cmd-history-idx _dbg-cmd-history-idx 1 sub store } if
+        }
+        if-else
+        _dbg-cmd-history _dbg-cmd-history-idx get /editing
+    }
+    if-else
+} def
+
+% Step down to a newer entry in the command history (down-arrow handler).
+% Past the newest entry, restores the live buffer and resets idx to -1.
+% buf -- buf' status
+/_dbg-history-down {|buf|#+1
+    _dbg-cmd-history-idx -1 eq
+    { buf /editing }
+    {
+        /n _dbg-cmd-history length local-def
+        _dbg-cmd-history-idx n 1 sub ge
+        {
+            /_dbg-cmd-history-idx -1 store
+            _dbg-cmd-buf-saved /editing
+        }
+        {
+            /_dbg-cmd-history-idx _dbg-cmd-history-idx 1 add store
+            _dbg-cmd-history _dbg-cmd-history-idx get /editing
+        }
+        if-else
+    }
+    if-else
+} def
+
+% Append a just-submitted command to the history ring.  Skips empty
+% buffers and adjacent duplicates; trims oldest entries past max.
+% Always resets the navigation cursor to -1.  buf --
+/_dbg-history-push {|buf|#+2
+    /n _dbg-cmd-history length local-def
+    buf length 0 gt
+    { n 0 eq { _dbg-cmd-history n 1 sub get buf eq not } or? }
+    and?
+    {
+        /_dbg-cmd-history _dbg-cmd-history buf append store
+        /n _dbg-cmd-history length store
+        n _dbg-cmd-history-max gt
+        {
+            /excess n _dbg-cmd-history-max sub local-def
+            /_dbg-cmd-history
+              _dbg-cmd-history excess n excess sub get-interval
+            store
+        } if
+    } if
+    /_dbg-cmd-history-idx -1 store
+} def
+
+% Single-key line-editor step.  Given a decoded key name and the current
+% buffer, return the updated buffer plus a status:
+%   /editing  -- continue reading keys (incl. /up, /down history nav)
+%   /done     -- enter pressed; buf holds the command to execute
+%   /cancel   -- esc pressed; discard
+% Up/Down arrows step through _dbg-cmd-history; any other key resets the
+% navigation cursor so the live buffer is decoupled from history nav.
+% Stack: key buf -- buf' status
+/_dbg-cmd-line-edit {|key buf|
+    key /up eq
+    { buf _dbg-history-up }
+    {
+        key /down eq
+        { buf _dbg-history-down }
+        {
+            % Any non-nav key snaps the cursor back to -1 so subsequent
+            % edits aren't "still navigating history".
+            /_dbg-cmd-history-idx -1 store
+            key /enter eq
+            { buf /done }
+            {
+                key /escape eq
+                { () /cancel }
+                {
+                    key /backspace eq
+                    {
+                        buf length 1 ge
+                        { buf 0 buf length 1 sub get-interval /editing }
+                        { buf /editing }
+                        if-else
+                    }
+                    {
+                        key /space eq
+                        { buf ( ) concat /editing }
+                        {
+                            % Printable single-char?  decode-key emits
+                            % 1-char names for bytes 0x21..0x7E (and /
+                            % for 32 has its own /space).  Multi-char
+                            % names (/home /f5 ...) are ignored.
+                            /text key (                    ) to-string def
+                            text length 1 eq
+                            { buf text concat /editing }
+                            { buf /editing }
+                            if-else
+                        }
+                        if-else
+                    }
+                    if-else
+                }
+                if-else
+            }
+            if-else
+        }
+        if-else
+    }
+    if-else
+} def
+
+% Render the command line on the bottom row of screen.  Shows:
+%   ": <cmd-buf>_"        when /_dbg-cmd-mode is true
+% Plus, the row above the cmd line shows /_dbg-cmd-result (the most
+% recent command's output), when non-empty.
+% screen dbg-render-cmd-line --
+/dbg-render-cmd-line {|screen|
+    /rows screen screen-rows def
+    /cmd-row rows 1 sub def
+    /content (: ) _dbg-cmd-buf concat (_) concat def
+    screen cmd-row content /normal _dbg-write-row
+} def
+
+% Render the most-recent command result (one row above the cmd line).
+% screen dbg-render-cmd-result --
+/dbg-render-cmd-result {|screen|
+    /rows screen screen-rows def
+    /res-row rows 2 sub def
+    screen res-row _dbg-cmd-result /normal _dbg-write-row
+} def
+
+% --- Command dispatcher ------------------------------------------------------
+
+% Strip a leading "/" from a name string so `b /foo` works the same as
+% `b foo`.  str -- str'
+/_dbg-strip-slash {|s|
+    s length 0 gt s 0 get 47b eq and
+    { s 1 s length 1 sub get-interval }
+    { s }
+    if-else
+} def
+
+% Load source for `sid` if not yet cached.  Uses stream-name to resolve
+% the sid -> path mapping (returns null when the stream is closed or
+% lacks a filename source).  On success the per-line array goes into
+% /_dbg-source-cache keyed by sid.  Returns the cached array (or [] on
+% failure).
+% sid -- src-lines
+/_dbg-load-source-for-sid {|sid|
+    _dbg-source-cache sid known?
+    { _dbg-source-cache sid get }
+    {
+        /path sid stream-name def
+        path null eq
+        { [] }
+        { /lines path _dbg-read-source-file def
+          _dbg-source-cache sid lines put
+          lines
+        }
+        if-else
+    }
+    if-else
+} def
+
+% Read a file path and split into lines.  path -- lines
+/_dbg-read-source-file {|path|
+    /src path 114b stream def
+    src read-all /text exch def
+    src close-stream
+    text (\n) split
+} def
+
+% Parse `name [when {pred}]` from the `b` verb's arg.  Registers the
+% bp and (optionally) stores the predicate string.  A bare `b /name`
+% with no `when` clause CLEARS any previous condition for that name.
+% Predicate strings are copied to global VM via `${ () pred concat }`
+% so they survive any user-script save/restore.
+% arg-str -- result-str
+/_dbg-cmd-set-breakpoint {|arg|#+6
+    /marker ( when {) local-def
+    /midx arg marker string-index-of local-def
+    midx 0 lt
+    {
+        % Unconditional path.
+        /name-str arg _dbg-strip-slash local-def
+        name-str to-name debug-break
+        _dbg-bp-conditions name-str to-name known?
+        { _dbg-bp-conditions name-str to-name undef } if
+        (bp set @ /) name-str concat
+    }
+    {
+        % Conditional path.  Slice out name and predicate body.
+        /name-str arg 0 midx get-interval _dbg-strip-slash local-def
+        /pred-start midx marker length add local-def
+        /pred-end arg length local-def
+        % Strip trailing `}` if present.
+        pred-end pred-start gt arg pred-end 1 sub get 125b eq and
+        { /pred-end pred-end 1 sub local-def } if
+        /pred arg pred-start pred-end pred-start sub get-interval local-def
+        name-str to-name debug-break
+        _dbg-bp-conditions name-str to-name ${ () pred concat } put
+        (bp set @ /) name-str concat ( when {) concat pred concat (}) concat
+    }
+    if-else
+} def
+
+% Clear a single breakpoint AND its condition + one-shot tag.
+% arg-str -- result-str
+/_dbg-cmd-clear-breakpoint {|arg|#+1
+    /name-str arg _dbg-strip-slash local-def
+    name-str to-name debug-unbreak
+    _dbg-bp-conditions name-str to-name known?
+    { _dbg-bp-conditions name-str to-name undef } if
+    _dbg-bp-oneshot name-str to-name known?
+    { _dbg-bp-oneshot name-str to-name undef } if
+    (bp cleared @ /) name-str concat
+} def
+
+% Like _dbg-cmd-set-breakpoint but additionally flags the name as
+% one-shot.  Reuses set-breakpoint's parsing; tags the name after the
+% bp is registered.  Result string is prefixed with "once: " so the
+% command pane confirmation distinguishes it from a permanent bp.
+% arg-str -- result-str
+/_dbg-cmd-set-oneshot-breakpoint {|arg|#+4
+    /marker ( when {) local-def
+    /midx arg marker string-index-of local-def
+    midx 0 lt
+    { /name-str arg _dbg-strip-slash local-def }
+    { /name-str arg 0 midx get-interval _dbg-strip-slash local-def }
+    if-else
+    /msg arg _dbg-cmd-set-breakpoint local-def
+    _dbg-bp-oneshot name-str to-name true put
+    (once: ) msg concat
+} def
+
+% --- Frame navigation -------------------------------------------------------
+
+% Refresh _dbg-frame-locs from frame-source-locs.  Called at each halt.  --
+/_dbg-refresh-frames {
+    /_dbg-frame-locs frame-source-locs store
+    /_dbg-frame-idx 0 store
+} def
+
+% Render the selected frame's (sid, line) into _dbg-on-event-line and
+% _dbg-source-lines.  Called at each halt AND after :up / :down.  When
+% no @call frames exist (top-level halt), preserves the cb-supplied
+% sid/line from payload[0..1] in _dbg-on-event-line.  --
+/_dbg-apply-frame-loc {
+    _dbg-frame-locs length 0 gt
+    {
+        _dbg-frame-idx _dbg-frame-locs length lt
+        {
+            /frame _dbg-frame-locs _dbg-frame-idx get def
+            /_dbg-on-event-line frame 1 get store
+            /sid frame 0 get def
+            /lines sid _dbg-load-source-for-sid def
+            lines length 0 gt
+            { /_dbg-source-lines lines store }
+            { /_dbg-source-lines _dbg-source-cache _dbg-install-sid get store }
+            if-else
+        } if
+    } if
+} def
+
+% :up -- move to an older (deeper-index) frame.  Returns status string.
+/_dbg-cmd-frame-up {
+    _dbg-frame-locs length 0 eq
+    { (no frames available) }
+    {
+        _dbg-frame-idx _dbg-frame-locs length 1 sub ge
+        { (already at oldest frame) }
+        {
+            /_dbg-frame-idx _dbg-frame-idx 1 add store
+            _dbg-apply-frame-loc
+            (frame ) _dbg-frame-idx (                    ) to-string concat (/) concat _dbg-frame-locs length (                    ) to-string concat ( @ /) concat _dbg-frame-locs _dbg-frame-idx get 3 get (                    ) to-string concat
+        }
+        if-else
+    }
+    if-else
+} def
+
+% :down -- move to a newer (shallower-index) frame.  Returns status string.
+/_dbg-cmd-frame-down {
+    _dbg-frame-locs length 0 eq
+    { (no frames available) }
+    {
+        _dbg-frame-idx 0 le
+        { (already at newest frame) }
+        {
+            /_dbg-frame-idx _dbg-frame-idx 1 sub store
+            _dbg-apply-frame-loc
+            (frame ) _dbg-frame-idx (                    ) to-string concat (/) concat _dbg-frame-locs length (                    ) to-string concat ( @ /) concat _dbg-frame-locs _dbg-frame-idx get 3 get (                    ) to-string concat
+        }
+        if-else
+    }
+    if-else
+} def
+
+% :frame N -- jump to frame N.  arg-str -- result-str
+/_dbg-cmd-frame-goto {|arg|#+3
+    arg length 0 eq
+    { (usage: frame N) }
+    {
+        arg token
+        {
+            /val exch make-literal local-def
+            /rest exch local-def
+            val type /integer-type eq
+            {
+                val 0 ge val _dbg-frame-locs length lt and
+                {
+                    /_dbg-frame-idx val store
+                    _dbg-apply-frame-loc
+                    (frame ) _dbg-frame-idx (                    ) to-string concat (/) concat _dbg-frame-locs length (                    ) to-string concat ( @ /) concat _dbg-frame-locs _dbg-frame-idx get 3 get (                    ) to-string concat
+                }
+                { (no frame at index ) arg concat }
+                if-else
+            }
+            { (no frame at index ) arg concat }
+            if-else
+        }
+        { (usage: frame N) }
+        if-else
+    }
+    if-else
+} def
+
+% :frames -- list all @call frames.  -- result-str
+/_dbg-cmd-frames-list { ||#5
+    /n _dbg-frame-locs length local-def
+    n 0 eq { (no frames) }
+    {
+        /out () local-def
+        /i 0 local-def
+        {
+            i n ge { exit } if
+            i 0 gt { /out out ( | ) concat local-def } if
+            /frame _dbg-frame-locs i get local-def
+            /marker i _dbg-frame-idx eq { (*) } { ( ) } if-else local-def
+            /out
+                out marker concat ([) concat
+                i (                    ) to-string concat
+                (] /) concat frame 3 get (                    ) to-string concat
+                (:) concat frame 1 get (                    ) to-string concat
+                local-def
+            /i i 1 add local-def
+        } loop
+        out
+    }
+    if-else
+} def
+
+% Clear the one-shot bp for _dbg-last-pc-name if it's in the oneshot
+% Dict.  Called from the cb after the predicate filter (so silent-skips
+% do NOT consume) and before the halt path renders.  No-op when the pc
+% name isn't one-shot or is null.  --
+/_dbg-handle-oneshot {
+    _dbg-last-pc-name null eq not
+    {
+        _dbg-bp-oneshot _dbg-last-pc-name known?
+        {
+            _dbg-last-pc-name debug-unbreak
+            _dbg-bp-conditions _dbg-last-pc-name known?
+            { _dbg-bp-conditions _dbg-last-pc-name undef } if
+            _dbg-bp-oneshot _dbg-last-pc-name undef
+        } if
+    } if
+} def
+
+% Walk the breakpoints set, build a multi-line preview string.  Each
+% bp renders as `/name`, optionally suffixed by ` (once)` and/or
+% ` when {predicate}`; segments are space-separated.  -- preview-str
+/_dbg-list-breakpoints { ||#5
+    /bps debug-breakpoints local-def
+    bps length 0 eq { (no breakpoints) }
+    {
+        /buf () local-def
+        /i 0 local-def
+        {
+            i bps length ge { exit } if
+            i 0 gt { /buf buf ( ) concat local-def } if
+            /name bps i get local-def
+            /buf buf (/) concat name (                    ) to-string concat local-def
+            /hits name debug-bp-hits local-def
+            /buf buf ( [) concat hits (                    ) to-string concat ( hits]) concat local-def
+            _dbg-bp-oneshot name known?
+            { /buf buf ( (once)) concat local-def }
+            if
+            _dbg-bp-conditions name known?
+            { /buf buf ( when {) concat _dbg-bp-conditions name get concat (}) concat local-def }
+            if
+            /i i 1 add local-def
+        } loop
+        buf
+    }
+    if-else
+} def
+
+% Walk the breakpoints set and clear each (and its condition + one-shot
+% entries).
+% -- count-cleared
+/_dbg-clear-all-breakpoints { ||#4
+    /bps debug-breakpoints local-def
+    /n bps length local-def
+    /i 0 local-def
+    {
+        i n ge { exit } if
+        /name bps i get local-def
+        name debug-unbreak
+        _dbg-bp-conditions name known?
+        { _dbg-bp-conditions name undef } if
+        _dbg-bp-oneshot name known?
+        { _dbg-bp-oneshot name undef } if
+        /i i 1 add local-def
+    } loop
+    n
+} def
+
+% Execute the parsed verb + arg.  Returns a one-line result string.
+% verb arg -- result-str
+/_dbg-cmd-dispatch {|verb arg|
+    verb (b)             eq { arg _dbg-cmd-set-breakpoint } {
+    verb (b1)            eq { arg _dbg-cmd-set-oneshot-breakpoint } {
+    verb (clear)         eq { arg _dbg-cmd-clear-breakpoint } {
+    verb (clear-all)     eq { _dbg-clear-all-breakpoints (cleared ) exch (                    ) to-string concat ( breakpoints) concat } {
+    verb (bp)            eq { _dbg-list-breakpoints } {
+    verb (p)             eq { arg _dbg-cmd-eval } {
+    verb (w)             eq { arg _dbg-cmd-add-watch } {
+    verb (watches)       eq { _dbg-cmd-list-watches } {
+    verb (clear-watch)   eq { arg _dbg-cmd-clear-watch } {
+    verb (clear-watches) eq { _dbg-cmd-clear-watches } {
+    verb (up)            eq { _dbg-cmd-frame-up } {
+    verb (down)          eq { _dbg-cmd-frame-down } {
+    verb (frame)         eq { arg _dbg-cmd-frame-goto } {
+    verb (frames)        eq { _dbg-cmd-frames-list } {
+    verb (help)          eq { (cmds: b NAME [when {PRED}]  b1 NAME [when {PRED}]  clear NAME  clear-all  bp  p EXPR  w EXPR  watches  clear-watch N  clear-watches  up  down  frame N  frames  help) } {
+    (unknown command: ) verb concat
+    } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else
+} def
+
+% --- Sandboxed :p eval ------------------------------------------------------
+
+% Names that cannot appear (literal or executable) inside a :p expression.
+% These either terminate the process (quit), corrupt the debugger's own
+% state (save/restore, set-stdout, debug-on-event, uninstall-debugger,
+% terminal-mode ops), persist beyond our save/restore (the -persist family
+% + set-global), or write to disk (snap-shot, filesystem mutators).  The
+% pre-scan rejects them BEFORE the eval runs, so a hostile-looking
+% expression cannot side-effect even by accident.  Save/restore wraps the
+% rest; anything the user types that's NOT blocklisted but has VM-heap
+% side effects (def, store, put, []) rolls back cleanly.
+/_dbg-cmd-blocklist 64 dict def
+[
+    /quit /save /restore /snap-shot
+    /coroutine-kill /coroutine-die /coroutine-spawn
+    /set-stdout /set-global
+    /debug-on-event /debug-break /debug-unbreak
+    /debug-step /debug-step-over /debug-step-out /debug-continue
+    /debug-break-on-error /uninstall-debugger
+    /raw-mode /cooked-mode /alt-screen-enter /alt-screen-leave
+    /cursor-hide /cursor-show
+    /breakpoint
+    /def-persist /undef-persist /put-persist /update-persist
+    /array-store-persist /set-add-persist /set-remove-persist
+    /mkdir /rmdir /delete-file /rename-file /chmod
+    /clear-string-stream
+] {
+    _dbg-cmd-blocklist exch true put
+} for-all
+
+% Tokenize EXPR; if any token is a Name in the blocklist, return its
+% string form; otherwise return null.  Stops at the first violation.
+%
+% `token` may return executable-Name values; binding one via `def` and
+% then reading it back would re-execute the underlying op (e.g., binding
+% /val to executable `add` and then reading `val` would dispatch `add`
+% and pop our scan-state operands).  `make-literal` strips the executable
+% attribute at store time so subsequent reads just push the Name Object.
+% Idempotent for non-Name types.
+%
+% expr -- null | string
+/_dbg-cmd-scan-blocklist {|expr|#+3
+    /violation null local-def
+    /rest expr local-def
+    {
+        rest token
+        {
+            % token succeeded: stack has [post val]
+            /val  exch make-literal local-def
+            /rest exch local-def
+            val type /name-type eq
+            {
+                _dbg-cmd-blocklist val known?
+                {
+                    /violation val (                                ) to-string local-def
+                    exit
+                } if
+            } if
+        }
+        { exit }   % token returned false: no more tokens
+        if-else
+    } loop
+    violation
+} def
+
+% Non-journaled save-token slot.  def-persist'd by _dbg-cmd-eval so it
+% survives the wrapping restore (the binding cell lives in userdict,
+% below every save barrier we create).
+/_dbg-cmd-save-token 0 def
+
+% Sandboxed evaluator.  Pre-scans for blocklist; if clean, wraps the
+% user expression in a save/try/restore.  The formatted result is
+% allocated in global VM via ${...}, so it survives the restore (a
+% local-VM string on the operand stack at restore time would trip
+% /invalid-restore).  All VM-heap side effects (def, store, put,
+% allocations) below the save barrier are rolled back; the blocklist
+% rejects ops that escape the sandbox via -persist / set-global /
+% non-rollback state.
+%
+% Working vars use `local-def` to stay in the proc's frame dict.  Plain
+% `def` would write to userdict; /status, /count, /start, /n in
+% particular all collide with systemdict ops and would shadow them for
+% every subsequent caller -- not just within this proc.  /violation /
+% /before / /i are not systemdict names today but still treated as
+% locals for consistency.
+%
+% expr-str -- result-str
+/_dbg-cmd-eval {|expr|#+5
+    /violation expr _dbg-cmd-scan-blocklist local-def
+    violation null eq not
+    {
+        ${ (sandbox: ) violation concat }
+    }
+    {
+        % Capture operand-stack depth BEFORE pushing the name slot for
+        % /before onto the stack (`count /before def` would have count
+        % see its own literal name and report depth+1).  Same gotcha
+        % applies to /n below; compute the int first, then label it.
+        count /before exch local-def
+        save /_dbg-cmd-save-token exch def-persist
+        { expr make-executable exec } try
+        /status exch local-def
+        count before sub /n exch local-def
+        status /no-error eq
+        {
+            n 0 eq
+            { (ok)#$ }
+            {
+                % Drop n-1 items from below the top, keeping the topmost
+                % residue for formatting.
+                /i 0 local-def
+                { i n 1 sub ge { exit } if exch pop /i i 1 add local-def } loop
+                ${ 80 format-object }
+            }
+            if-else
+        }
+        {
+            % Error path: drop all residue, format the error name with a
+            % human-readable prefix.  concat + format-object honor
+            % m_curr_alloc_global so the result is global VM, surviving
+            % the restore.
+            /i 0 local-def
+            { i n ge { exit } if pop /i i 1 add local-def } loop
+            ${ (error: ) status 80 format-object concat }
+        }
+        if-else
+        % Stack now has the result on top + the save token in the
+        % userdict slot.  Push the token, pop it via restore; the
+        % result remains on top as our return value.
+        _dbg-cmd-save-token restore
+    }
+    if-else
+} def
+
+% Sandboxed boolean evaluator for conditional-breakpoint predicates.
+% Same harness as _dbg-cmd-eval (blocklist scan + save/restore + try),
+% but returns a Boolean instead of a formatted string.  Truthiness
+% rules: null/false -> false; Boolean false -> false; everything else
+% -> true.  Blocklisted or error-throwing predicates return false (we
+% prefer "don't halt" over "halt unexpectedly" when the predicate is
+% broken).  The Boolean crosses the restore boundary safely because
+% Booleans are immediate values (no VM heap reference); local-VM
+% allocations the predicate created get rolled back.
+%
+% pred-str -- bool
+/_dbg-cmd-eval-bool {|pred|#+5
+    /violation pred _dbg-cmd-scan-blocklist local-def
+    violation null eq not
+    { false }
+    {
+        count /before exch local-def
+        save /_dbg-cmd-save-token exch def-persist
+        { pred make-executable exec } try
+        /status exch local-def
+        count before sub /n exch local-def
+        status /no-error eq
+        {
+            n 0 eq
+            { false }
+            {
+                % Drop n-1 below top, then coerce top to a clean Boolean.
+                /i 0 local-def
+                { i n 1 sub ge { exit } if exch pop /i i 1 add local-def } loop
+                % Stack: [val].  Replace with [bool] before the restore so
+                % no local-VM Object crosses the boundary.
+                dup null eq
+                { pop false }
+                {
+                    dup type /boolean-type eq
+                    { }
+                    { pop true }
+                    if-else
+                }
+                if-else
+            }
+            if-else
+        }
+        {
+            % Error path: drop residue, treat as false.
+            /i 0 local-def
+            { i n ge { exit } if pop /i i 1 add local-def } loop
+            false
+        }
+        if-else
+        _dbg-cmd-save-token restore
+    }
+    if-else
+} def
+
+% --- Watch command verbs ----------------------------------------------------
+
+% Add a watch.  expr-str -- result-str
+% Evaluates the expression once at add-time so the pane has a result to
+% show without waiting for the next halt event.  Length 0 -> usage hint.
+/_dbg-cmd-add-watch {|expr|#+3
+    expr length 0 eq
+    { (usage: w EXPR) }
+    {
+        _dbg-watch-exprs length _dbg-watch-max ge
+        {
+            (watch list full -- max ) _dbg-watch-max
+            (                    ) to-string concat
+        }
+        {
+            /idx _dbg-watch-exprs length local-def
+            /result expr _dbg-cmd-eval local-def
+            /_dbg-watch-exprs   _dbg-watch-exprs   expr   append store
+            /_dbg-watch-results _dbg-watch-results result append store
+            (watch [) idx (                    ) to-string concat (] added: ) concat expr concat
+        }
+        if-else
+    }
+    if-else
+} def
+
+% Remove a watch by integer index.  arg-str -- result-str
+/_dbg-cmd-clear-watch {|arg|#+3
+    arg length 0 eq
+    { (usage: clear-watch N) }
+    {
+        arg token
+        {
+            % `token` can return an executable Name (e.g. `foo`); bind as
+            % literal so subsequent reads don't auto-dispatch.
+            /val  exch make-literal local-def
+            /rest exch local-def
+            val type /integer-type eq
+            {
+                val 0 ge val _dbg-watch-exprs length lt and
+                {
+                    /_dbg-watch-exprs   _dbg-watch-exprs   val _dbg-array-remove-at store
+                    /_dbg-watch-results _dbg-watch-results val _dbg-array-remove-at store
+                    (watch [) val (                    ) to-string concat (] cleared) concat
+                }
+                { (no watch at index ) arg concat }
+                if-else
+            }
+            { (no watch at index ) arg concat }
+            if-else
+        }
+        { (usage: clear-watch N) }
+        if-else
+    }
+    if-else
+} def
+
+% Remove every watch.  -- result-str
+/_dbg-cmd-clear-watches { ||#1
+    /n _dbg-watch-exprs length local-def
+    /_dbg-watch-exprs   [] store
+    /_dbg-watch-results [] store
+    (cleared ) n (                    ) to-string concat ( watches) concat
+} def
+
+% List all watches as a single line "[0] expr0 | [1] expr1 | ...".
+% -- result-str
+/_dbg-cmd-list-watches { ||#3
+    /n _dbg-watch-exprs length local-def
+    n 0 eq { (no watches) }
+    {
+        /out () local-def
+        /i 0 local-def
+        {
+            i n ge { exit } if
+            i 0 gt { /out out ( | ) concat local-def } if
+            /out
+                out ([) concat
+                i (                    ) to-string concat
+                (] ) concat
+                _dbg-watch-exprs i get concat
+                local-def
+            /i i 1 add local-def
+        } loop
+        out
+    }
+    if-else
+} def
+
+% Parse `verb [SPACE arg...]` from cmd-buf and dispatch.
+% Returns the result string.
+% cmd-buf -- result-str
+/dbg-execute-command {|cmd|
+    cmd length 0 eq { () }
+    {
+        /space-idx cmd ( ) string-index-of def
+        space-idx 0 lt
+        {
+            % No space: just a verb, no arg.
+            cmd () _dbg-cmd-dispatch
+        }
+        {
+            /verb cmd 0 space-idx get-interval def
+            /arg  cmd space-idx 1 add cmd length space-idx sub 1 sub get-interval def
+            verb arg _dbg-cmd-dispatch
+        }
+        if-else
+    }
+    if-else
+} def
+
+% --- Callback ---------------------------------------------------------------
+
+% Render the full UI frame.  When the modal is active, render that
+% full-screen instead of the multi-pane layout.  Status bar / cmd
+% line still occupy the bottom row in both modes.
+/_dbg-redraw {
+    dbg-modal-active?
+    {
+        _dbg-screen dbg-render-modal
+    }
+    {
+        _dbg-screen _dbg-source-lines _dbg-on-event-line dbg-render-source
+        _dbg-screen dbg-render-output
+        _dbg-screen dbg-render-watches
+        _dbg-screen dbg-render-stacks
+        _dbg-cmd-result length 0 gt { _dbg-screen dbg-render-cmd-result } if
+    }
+    if-else
+    _dbg-cmd-mode
+    { _dbg-screen dbg-render-cmd-line }
+    { _dbg-screen dbg-render-status-bar }
+    if-else
+    % screen-render leaves the screen on the operand stack by C-side
+    % convention; drop it so we exit clean for the dispatch loop.
+    _dbg-screen screen-render pop
+} def
+
+% Sub-loop: read keys one at a time, update /_dbg-cmd-buf, redraw on
+% every keystroke.  Terminates on Enter (executes via dbg-execute-command)
+% or Esc (discards).  Leaves /_dbg-cmd-mode false and /_dbg-cmd-result
+% set to the dispatch result (or () on cancel).
+/_dbg-run-cmd-mode {
+    /_dbg-cmd-mode true store
+    /_dbg-cmd-buf  ()   store
+    _dbg-redraw
+    {
+        /key { read-key-byte } { 50 read-key-byte-timeout } decode-key def
+        key _dbg-cmd-buf _dbg-cmd-line-edit                          % -- buf' status
+        /_dbg-edit-status exch def
+        /_dbg-cmd-buf exch store
+        _dbg-edit-status /editing eq { _dbg-redraw }
+        {
+            _dbg-edit-status /done eq
+            {
+                _dbg-cmd-buf _dbg-history-push
+                /_dbg-cmd-result _dbg-cmd-buf dbg-execute-command store
+            }
+            { /_dbg-cmd-result () store }
+            if-else
+            exit
+        } if-else
+    } loop
+    /_dbg-cmd-mode false store
+} def
+
+% Resume in the user's most recently chosen mode -- used by silent-skip
+% on a conditional bp whose predicate evaluated false.  --
+/_dbg-resume-prior-mode {
+    _dbg-last-mode /step       eq { debug-step       } if
+    _dbg-last-mode /step-over  eq { debug-step-over  } if
+    _dbg-last-mode /step-out   eq { debug-step-out   } if
+    _dbg-last-mode /continue   eq { debug-continue   } if
+} def
+
+% Should this /breakpoint event silent-skip due to a false predicate?
+% -- bool
+/_dbg-should-silent-skip {
+    _dbg-last-pc-name null eq
+    { false }
+    {
+        _dbg-bp-conditions _dbg-last-pc-name known?
+        {
+            _dbg-bp-conditions _dbg-last-pc-name get
+            _dbg-cmd-eval-bool not
+        }
+        { false }
+        if-else
+    }
+    if-else
+} def
+
+/_dbg-on-event {|event|
+    /payload event tag-value def
+    /_dbg-on-event-line payload 1 get store
+
+    % /error events come from break-on-error: the error is fatal and
+    % already committed.  The flag drives the FATAL status bar and maps
+    % every resume key to "end the session, let the error finish".
+    /_dbg-fatal-halt event tag-name /error eq store
+
+    % Capture the user-script's PC name for F9/b.
+    /_dbg-last-pc-name payload 3 get store
+
+    % Each halt starts with the modal collapsed.  An open modal from a
+    % previous halt would point at stale snapshot data anyway.
+    dbg-modal-close
+
+    % Output capture: swap m_stdout from the capture stream back to the
+    % real stdout so UI rendering goes to the terminal, then drain the
+    % captured user-script output into the line ring.  `stdout` (system-
+    % dict binding) is the original real stream object regardless of the
+    % current m_stdout target.
+    _dbg-capture-stream null eq not
+    {
+        stdout set-stdout pop
+        /drained _dbg-capture-stream get-string-stream def
+        _dbg-capture-stream clear-string-stream
+        drained _dbg-drain-into-lines
+    } if
+
+    % Conditional-breakpoint filter: when a /breakpoint event fires for
+    % a name with a registered predicate, eval the predicate; if false,
+    % silent-skip in the user's prior mode without rendering or waiting.
+    event tag-name /breakpoint eq
+    { _dbg-should-silent-skip }
+    { false }
+    if-else
+    {
+        _dbg-resume-prior-mode
+    }
+    {
+        % One-shot breakpoint cleanup: if the current pc-name is a one-shot
+        % bp and we got here (predicate didn't silent-skip), clear the bp +
+        % condition + oneshot tag now so subsequent hits don't re-fire.
+        event tag-name /breakpoint eq
+        { _dbg-handle-oneshot }
+        if
+
+        % Refresh frame list (@call frames on the exec stack).  Resets the
+        % selection to the deepest frame (index 0).  :up / :down walk the
+        % list interactively.
+        _dbg-refresh-frames
+
+        % Resolve sid -> source lines (cached).  Falls back to the install-
+        % time source when stream-name can't resolve (e.g. user code halts
+        % inside a proc defined in an already-closed `require`'d file).
+        /sid payload 0 get def
+        /lines sid _dbg-load-source-for-sid def
+        lines length 0 gt
+        { /_dbg-source-lines lines store }
+        { /_dbg-source-lines _dbg-source-cache _dbg-install-sid get store }
+        if-else
+
+        % Refresh watch results before the first redraw of this halt.
+        % Each watch eval is save/restore-bracketed; the operand stack
+        % and userdict are unchanged afterwards.
+        _dbg-eval-watches
+
+        _dbg-redraw
+
+        /action /unknown def
+        {
+            % Fatal halt (break-on-error): the error has already committed,
+            % so every resume action ends the session the same way --
+            % restore the terminal and return; the queued
+            % @debug-error-resume then finishes the error (real-terminal
+            % diag + backtrace, Error-enum exit code).  Inspection actions
+            % (break/focus/expand/scroll/cmd) below stay live.
+            _dbg-fatal-halt
+            action /step eq action /step-over eq or action /step-out eq or
+            action /continue eq or action /quit eq or
+            and
+            { uninstall-debugger exit } if
+
+            action /step      eq { /_dbg-last-mode /step      store debug-step       exit } if
+            action /step-over eq { /_dbg-last-mode /step-over store debug-step-over  exit } if
+            action /step-out  eq { /_dbg-last-mode /step-out  store debug-step-out   exit } if
+            action /continue  eq { /_dbg-last-mode /continue  store debug-continue   exit } if
+            action /quit      eq { uninstall-debugger 0 quit } if
+
+            action /break eq
+            {
+                _dbg-set-breakpoint-at-pc
+                _dbg-redraw
+                /action /unknown def
+            } if
+
+            action /focus-next eq
+            {
+                dbg-modal-active? not
+                { dbg-focus-next _dbg-redraw }
+                if
+                /action /unknown def
+            } if
+
+            action /enter-cmd eq
+            {
+                dbg-modal-active? not
+                { _dbg-run-cmd-mode _dbg-redraw } if
+                /action /unknown def
+            } if
+
+            % Modal control: /expand opens on focused stack pane; /collapse
+            % closes; /scroll-* adjust the offset; page-up/down move by
+            % screen height.  All inert when the modal is already in the
+            % desired state.
+            action /expand eq
+            {
+                dbg-modal-active? not
+                { dbg-modal-open _dbg-redraw }
+                if
+                /action /unknown def
+            } if
+
+            action /collapse eq
+            {
+                dbg-modal-active?
+                { dbg-modal-close _dbg-redraw }
+                if
+                /action /unknown def
+            } if
+
+            action /scroll-up eq
+            {
+                dbg-modal-active?
+                { -1 dbg-modal-scroll _dbg-redraw }
+                if
+                /action /unknown def
+            } if
+
+            action /scroll-down eq
+            {
+                dbg-modal-active?
+                { 1 dbg-modal-scroll _dbg-redraw }
+                if
+                /action /unknown def
+            } if
+
+            action /page-up eq
+            {
+                dbg-modal-active?
+                { _dbg-screen screen-rows 2 sub neg dbg-modal-scroll _dbg-redraw }
+                if
+                /action /unknown def
+            } if
+
+            action /page-down eq
+            {
+                dbg-modal-active?
+                { _dbg-screen screen-rows 2 sub      dbg-modal-scroll _dbg-redraw }
+                if
+                /action /unknown def
+            } if
+
+            % Read next key.
+            /action
+                { read-key-byte } { 50 read-key-byte-timeout } decode-key
+                dbg-key-to-action
+            def
+        } loop
+    }
+    if-else
+
+    % Resuming user code: swap m_stdout back to the capture stream so
+    % subsequent print/write ops accumulate into our buffer instead of
+    % corrupting the alt-screen.  The /quit branch already exited via
+    % uninstall-debugger + `quit` -- it does not return here.
+    _dbg-capture-stream null eq not
+    {
+        _dbg-capture-stream set-stdout pop
+    } if
+} def
+
+% --- Public: install / uninstall --------------------------------------------
+
+% Common setup shared by install-debugger / install-debugger-on-error /
+% install-debugger-at.  Loads source, seeds cache, enters alt-screen +
+% raw-mode + Screen, installs the cb.  Does NOT arm any halt mode --
+% the wrapper picks step / on-error / breakpoint.
+% path -- (caller picks how to arm)
+/_dbg-install-common {|path|
+    /lines path _dbg-read-source-file def
+    /_dbg-source-lines lines store
+    % Seed the cache under sid 0 -- the fallback for halts whose sid can't
+    % be resolved via stream-name (e.g. closed `require`d files).
+    _dbg-source-cache 0 lines put
+    /_dbg-install-sid 0 store
+
+    % raw-mode first: if stdin isn't a tty we bail without having
+    % committed alt-screen / cursor-hide, so the caller's outer error
+    % handling sees a clean terminal.  Same pattern as lib/screen.trx
+    % with-fullscreen-screen.
+    raw-mode
+    alt-screen-enter
+    cursor-hide
+    flush
+    /_dbg-screen terminal-size make-screen store
+    /_dbg-active true store
+
+    % Output capture: allocate the buffer and route user-script stdout
+    % into it.  The cb (_dbg-on-event) drains + restores at each halt.
+    /_dbg-capture-stream _dbg-capture-bytes make-string-stream store
+    /_dbg-output-lines     [] store
+    /_dbg-output-partial   () store
+    /_dbg-output-truncated false store
+
+    { _dbg-on-event } debug-on-event
+
+    % Final step: redirect stdout into the capture buffer.  Do this AFTER
+    % debug-on-event so any debug-system bootstrap output (none today,
+    % but defensive) still reaches the real terminal during install.
+    _dbg-capture-stream set-stdout pop
+} def
+
+% path install-debugger --
+/install-debugger {
+    _dbg-install-common
+    /_dbg-last-mode /step store
+    debug-step
+} def
+
+% path install-debugger-on-error --  (Phase E --inspect-on-error variant)
+% Arms break-on-error rather than StepIn so the user script runs at
+% full speed until it throws.
+/install-debugger-on-error {
+    _dbg-install-common
+    /_dbg-last-mode /continue store
+    true debug-break-on-error
+} def
+
+% /name path install-debugger-at --  (Phase E --inspect-at variant)
+% Sets a single breakpoint at /name and resumes execution.  Halt fires
+% the first time /name is invoked.
+/install-debugger-at {|name path|
+    path _dbg-install-common
+    /_dbg-last-mode /continue store
+    name debug-break
+    debug-continue
+} def
+
+% _dbg-emit-final-output: tail --
+% Re-emit the COMPLETE captured program output to the real terminal after the
+% TUI tears down, as a normal-run-style record below the command: every
+% completed line (drained into the pane at halts) + the in-progress partial
+% line + the un-drained capture `tail`.  Emits a leading newline so the output
+% starts on a fresh column-0 line, decoupled from wherever alt-screen-leave
+% restored the cursor -- without it some terminals (VTE / GNOME Terminal) clip
+% the first line at the buffer-switch boundary.  Emits nothing when the script
+% produced no output.
+/_dbg-emit-final-output {|tail|#+1
+    /rest _dbg-output-partial tail concat local-def
+    _dbg-output-lines length 0 gt
+    rest              length 0 gt or
+    {
+        (\n) print
+        _dbg-output-truncated { ([... earlier output truncated ...]\n) print } if
+        _dbg-output-lines { print (\n) print } for-all
+        rest print
+        % Guarantee a trailing newline so the shell prompt lands on a fresh
+        % line even when the script paused mid-line (e.g. `q` from a halt
+        % before that line's newline was printed).
+        rest length 0 gt
+        { rest rest length 1 sub get (\n) 0 get eq not { (\n) print } if }
+        if
+    }
+    if
+} def
+
+% uninstall-debugger --
+/uninstall-debugger {
+    _dbg-active
+    {
+        % Restore real stdout first.  Calling stdout set-stdout when
+        % m_stdout is already the real stdout is harmless -- it just
+        % re-swaps to the same target and discards the prev.
+        stdout set-stdout pop
+
+        % Save the tail bytes from the capture buffer to print AFTER
+        % alt-screen-leave -- prints inside alt-screen would land in the
+        % alt-screen buffer (wiped on exit) and the user would never see
+        % them.  /_dbg-tail-bytes is a transient slot wiped below.
+        _dbg-capture-stream null eq not
+        {
+            /_dbg-tail-bytes _dbg-capture-stream get-string-stream store
+            /_dbg-capture-stream null store
+        }
+        { /_dbg-tail-bytes () store }
+        if-else
+
+        null debug-on-event
+        debug-continue
+        cooked-mode
+        cursor-show
+        alt-screen-leave
+        flush
+        /_dbg-screen null  store
+        /_dbg-active false store
+
+        % Now in the main (non-alt) screen.  Re-emit the complete program
+        % output as a normal-run-style record; bytes go to real-stdout's
+        % buffer and are flushed on exit by Stream::stop.
+        _dbg-tail-bytes _dbg-emit-final-output
+        /_dbg-tail-bytes () store
+    } if
+} def
+
+% --- Public: theme switcher -------------------------------------------------
+
+% Tests + --no-color flag use these to switch palettes at runtime.
+/dbg-set-color-theme { /_dbg-theme _dbg-theme-color store } def
+/dbg-set-mono-theme  { /_dbg-theme _dbg-theme-mono  store } def

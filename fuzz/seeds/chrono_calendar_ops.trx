@@ -1,0 +1,9 @@
+2026 4 30 make-date 365 date-add-days date-year
+2026 1 31 make-date 1 date-add-months date-day
+2024 2 29 make-date 1 date-add-years date-day
+2024 leap-year? 2024 2 days-in-month
+2026 4 30 make-date 2027 4 30 make-date date-diff-days
+2026 4 30 make-date day-of-year
+2026 4 30 make-date date-weekday
+0ul instant-to-date
+2026 4 30 make-date 12 30 0 0 make-instant

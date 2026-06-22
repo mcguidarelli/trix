@@ -1,0 +1,1707 @@
+% ====================================================================
+% Pipeline Tests — Phase 1 (Buffer Primitives) & Phase 2 (Construction)
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Type predicate (is-pipebuffer)
+% ====================================================================
+
+4 pipe-buffer is-pipebuffer
+    (is-pipebuffer: true for buffer) rt-ok clear
+42 is-pipebuffer not
+    (is-pipebuffer: false for integer) rt-ok clear
+(hello) is-pipebuffer not
+    (is-pipebuffer: false for string) rt-ok clear
+/foo is-pipebuffer not
+    (is-pipebuffer: false for name) rt-ok clear
+[1 2 3] is-pipebuffer not
+    (is-pipebuffer: false for array) rt-ok clear
+true is-pipebuffer not
+    (is-pipebuffer: false for boolean) rt-ok clear
+null is-pipebuffer not
+    (is-pipebuffer: false for null) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Type name
+% ====================================================================
+
+4 pipe-buffer type /pipebuffer-type eq
+    (type: pipebuffer-type) rt-ok clear
+
+% ====================================================================
+% SECTION 3: pipe-buffer allocation
+% ====================================================================
+
+1 pipe-buffer is-pipebuffer
+    (buffer: capacity 1) rt-ok clear
+16 pipe-buffer is-pipebuffer
+    (buffer: capacity 16) rt-ok clear
+1024 pipe-buffer is-pipebuffer
+    (buffer: capacity 1024) rt-ok clear
+
+% pipe-buffer with 0 raises range-check
+{ 0 pipe-buffer } try /no-error ne
+    (buffer: zero capacity raises error) rt-ok clear
+
+% pipe-buffer with negative raises error
+{ -1 pipe-buffer } try /no-error ne
+    (buffer: negative capacity raises error) rt-ok clear
+
+% pipe-buffer with non-integer raises type-check
+{ (hello) pipe-buffer } try /type-check eq
+    (buffer: non-integer raises type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 4: pipe-close (basic, no coroutines needed)
+% ====================================================================
+
+4 pipe-buffer dup pipe-close
+true
+    (close: idempotent no error) rt-ok clear
+
+% ====================================================================
+% SECTION 5: pipe-put and pipe-get with coroutines
+% ====================================================================
+
+% Basic single-item put/get
+/buf 4 pipe-buffer def
+[ buf { 42 buf pipe-put } coroutine-launch coroutine-join pop pop
+buf pipe-get
+    (put-get: flag true) rt-ok
+42 eq
+    (put-get: value is 42) rt-ok clear
+
+% Multiple items
+/buf2 4 pipe-buffer def
+[ buf2 {
+    1 buf2 pipe-put
+    2 buf2 pipe-put
+    3 buf2 pipe-put
+    buf2 pipe-close
+} coroutine-launch coroutine-join pop pop
+buf2 pipe-get pop 1 eq
+    (put-get: first is 1) rt-ok
+buf2 pipe-get pop 2 eq
+    (put-get: second is 2) rt-ok
+buf2 pipe-get pop 3 eq
+    (put-get: third is 3) rt-ok
+buf2 pipe-get not
+    (put-get: end-of-stream false) rt-ok clear
+
+% String values through buffer
+/buf3 2 pipe-buffer def
+[ buf3 {
+    (hello) buf3 pipe-put
+    (world) buf3 pipe-put
+    buf3 pipe-close
+} coroutine-launch coroutine-join pop pop
+buf3 pipe-get pop (hello) eq
+    (put-get: string hello) rt-ok
+buf3 pipe-get pop (world) eq
+    (put-get: string world) rt-ok
+buf3 pipe-get not
+    (put-get: string end-of-stream) rt-ok clear
+
+% Long values through buffer — deferred: pre-existing ExtValue free-list
+% alignment bug in save/restore (offset becomes misaligned after 32+
+% save/restore cycles; not caused by pipeline code).  Passes standalone.
+
+% ====================================================================
+% SECTION 6: Backpressure (buffer full blocks producer)
+% ====================================================================
+
+/bp-buf 2 pipe-buffer def
+/bp-done false def
+[ bp-buf {
+    1 bp-buf pipe-put
+    2 bp-buf pipe-put
+    % Buffer is full (capacity 2), next put will block
+    3 bp-buf pipe-put
+    /bp-done true def
+    bp-buf pipe-close
+} coroutine-launch pop
+% Let producer run — it should fill buffer and block on 3rd put
+0 coroutine-sleep
+bp-done not
+    (backpressure: producer blocked on full buffer) rt-ok
+% Consume one item to unblock producer
+bp-buf pipe-get pop 1 eq
+    (backpressure: first item) rt-ok
+% Let producer run to put item 3
+0 coroutine-sleep
+bp-buf pipe-get pop 2 eq
+    (backpressure: second item) rt-ok
+bp-buf pipe-get pop 3 eq
+    (backpressure: third item after unblock) rt-ok
+bp-buf pipe-get not
+    (backpressure: end-of-stream) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Consumer blocks on empty buffer
+% ====================================================================
+
+/empty-buf 4 pipe-buffer def
+/got-val false def
+% Launch consumer that blocks on empty buffer
+[ empty-buf {
+    empty-buf pipe-get pop
+    /got-val true def
+} coroutine-launch pop
+0 coroutine-sleep
+got-val not
+    (empty-block: consumer blocked on empty buffer) rt-ok
+% Now produce an item to unblock consumer
+[ empty-buf { 42 empty-buf pipe-put empty-buf pipe-close } coroutine-launch coroutine-join pop pop
+coroutine-wait-all
+got-val
+    (empty-block: consumer unblocked after put) rt-ok clear
+
+% ====================================================================
+% SECTION 8: pipe-error-close and error propagation
+% ====================================================================
+
+% pipe-error-close: error code 5 = DivByZero (arbitrary choice for testing)
+/err-buf 4 pipe-buffer def
+[ err-buf {
+    1 err-buf pipe-put
+    5 err-buf pipe-error-close
+} coroutine-launch coroutine-join pop pop
+err-buf pipe-get pop 1 eq
+    (error-close: item before error) rt-ok
+{ err-buf pipe-get } try /div-by-zero eq
+    (error-close: get re-raises stored error) rt-ok clear
+
+% ====================================================================
+% SECTION 9: pipe-put on closed buffer raises invalid-access
+% ====================================================================
+
+/closed-buf 4 pipe-buffer def
+[ closed-buf {
+    closed-buf pipe-close
+    { 42 closed-buf pipe-put } try /invalid-access eq
+        (closed-put: raises invalid-access) rt-ok
+} coroutine-launch coroutine-join pop pop
+clear
+
+% ====================================================================
+% SECTION 10: SPSC enforcement
+% ====================================================================
+
+% Two producers on same buffer should raise invalid-access
+/spsc-buf 4 pipe-buffer def
+[ spsc-buf { 1 spsc-buf pipe-put } coroutine-launch pop
+0 coroutine-sleep
+% First producer has bound m_producer
+% Now second producer tries
+[ spsc-buf { { 2 spsc-buf pipe-put } try /invalid-access eq
+    (spsc: second producer rejected) rt-ok clear
+} coroutine-launch pop
+coroutine-wait-all
+clear
+
+% Two consumers on same buffer should raise invalid-access
+/spsc-buf2 4 pipe-buffer def
+% Launch producer
+[ spsc-buf2 { 1 spsc-buf2 pipe-put 2 spsc-buf2 pipe-put spsc-buf2 pipe-close } coroutine-launch pop
+0 coroutine-sleep
+% First consumer binds
+spsc-buf2 pipe-get pop pop
+% Second consumer in a coroutine
+[ spsc-buf2 { { spsc-buf2 pipe-get } try /invalid-access eq
+    (spsc: second consumer rejected) rt-ok
+} coroutine-launch pop
+coroutine-wait-all
+clear
+
+% ====================================================================
+% SECTION 11: Pipeline construction operators
+% ====================================================================
+
+% pipe-map creates a dict descriptor
+[1 2 3] { 1 add } pipe-map is-dict
+    (pipe-map: returns dict) rt-ok clear
+
+% pipe-filter creates a dict descriptor
+[1 2 3] { 2 gt } pipe-filter is-dict
+    (pipe-filter: returns dict) rt-ok clear
+
+% pipe-flat-map creates a dict descriptor
+[1 2 3] { 1 array } pipe-flat-map is-dict
+    (pipe-flat-map: returns dict) rt-ok clear
+
+% pipe-batch creates a dict descriptor
+[1 2 3 4 5] 3 pipe-batch is-dict
+    (pipe-batch: returns dict) rt-ok clear
+
+% pipe-tap creates a dict descriptor
+[1 2 3] { pop } pipe-tap is-dict
+    (pipe-tap: returns dict) rt-ok clear
+
+% pipe-map descriptor has correct /type
+[1 2 3] { 1 add } pipe-map /type known-get pop /pipe-map eq
+    (pipe-map: type is /pipe-map) rt-ok clear
+
+% pipe-filter descriptor has correct /type
+[1 2 3] { 2 gt } pipe-filter /type known-get pop /pipe-filter eq
+    (pipe-filter: type is /pipe-filter) rt-ok clear
+
+% pipe-batch descriptor has /n field
+[1 2 3 4 5] 3 pipe-batch /n known-get pop 3 eq
+    (pipe-batch: n is 3) rt-ok clear
+
+% Chained descriptors: outer type is pipe-filter, inner source is a dict (pipe-map)
+[1 2 3] { 1 add } pipe-map { 3 gt } pipe-filter
+dup /type known-get pop /pipe-filter eq
+    (chain: outer is pipe-filter) rt-ok
+/source known-get pop is-dict
+    (chain: source is dict) rt-ok clear
+
+% pipe-map requires executable proc
+{ [1 2 3] /foo pipe-map } try /type-check eq
+    (pipe-map: rejects non-proc) rt-ok clear
+
+% pipe-batch requires positive n
+{ [1 2 3] 0 pipe-batch } try /range-check eq
+    (pipe-batch: rejects zero) rt-ok clear
+
+{ [1 2 3] -1 pipe-batch } try /range-check eq
+    (pipe-batch: rejects negative) rt-ok clear
+
+% ====================================================================
+% SECTION 12: Capacity 1 buffer (edge case)
+% ====================================================================
+
+/tiny-buf 1 pipe-buffer def
+[ tiny-buf {
+    10 tiny-buf pipe-put
+    20 tiny-buf pipe-put
+    30 tiny-buf pipe-put
+    tiny-buf pipe-close
+} coroutine-launch pop
+tiny-buf pipe-get pop 10 eq
+    (tiny: first item) rt-ok
+tiny-buf pipe-get pop 20 eq
+    (tiny: second item) rt-ok
+tiny-buf pipe-get pop 30 eq
+    (tiny: third item) rt-ok
+tiny-buf pipe-get not
+    (tiny: end-of-stream) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Many items through small buffer (stress)
+% ====================================================================
+
+/stress-buf 4 pipe-buffer def
+/stress-count 0 def
+[ stress-buf {
+    0 1 99 { stress-buf pipe-put } for
+    stress-buf pipe-close
+} coroutine-launch pop
+{ stress-buf pipe-get { /stress-count stress-count 1 add def } { exit } if-else } loop
+stress-count 100 eq
+    (stress: 100 items through cap-4 buffer) rt-ok clear
+
+% ====================================================================
+% SECTION 14: pipe-run (basic map pipeline)
+% ====================================================================
+
+/run-sum 0 def
+[1 2 3 4 5] { 10 mul } pipe-map 4 { /run-sum exch run-sum add def } pipe-run
+run-sum 150 eq
+    (pipe-run: map 1-5 * 10 = 150) rt-ok clear
+
+% ====================================================================
+% SECTION 15: pipe-collect (basic)
+% ====================================================================
+
+[10 20 30] { 1 add } pipe-map 4 pipe-collect
+dup length 3 eq
+    (pipe-collect: length 3) rt-ok
+dup 0 get 11 eq
+    (pipe-collect: first is 11) rt-ok
+dup 1 get 21 eq
+    (pipe-collect: second is 21) rt-ok
+2 get 31 eq
+    (pipe-collect: third is 31) rt-ok clear
+
+% ====================================================================
+% SECTION 16: pipe-reduce (sum)
+% ====================================================================
+
+[1 2 3 4 5] { 1 add } pipe-map 4 0 { add } pipe-reduce
+20 eq
+    (pipe-reduce: sum of [2 3 4 5 6] = 20) rt-ok clear
+
+% ====================================================================
+% SECTION 17: pipe-filter
+% ====================================================================
+
+[1 2 3 4 5 6 7 8 9 10] { 2 mod 0 eq } pipe-filter 4 pipe-collect
+dup length 5 eq
+    (pipe-filter: 5 even numbers) rt-ok
+dup 0 get 2 eq
+    (pipe-filter: first even is 2) rt-ok
+4 get 10 eq
+    (pipe-filter: last even is 10) rt-ok clear
+
+% ====================================================================
+% SECTION 18: pipe-flat-map
+% ====================================================================
+
+[1 2 3] { dup mark exch dup array-from-mark } pipe-flat-map 4 pipe-collect
+dup length 6 eq
+    (pipe-flat-map: 3 items doubled = 6) rt-ok
+dup 0 get 1 eq
+    (pipe-flat-map: first is 1) rt-ok
+dup 1 get 1 eq
+    (pipe-flat-map: second is 1) rt-ok
+2 get 2 eq
+    (pipe-flat-map: third is 2) rt-ok clear
+
+% ====================================================================
+% SECTION 19: pipe-tap (side effect, passthrough)
+% ====================================================================
+
+/tap-count 0 def
+[1 2 3] { /tap-count tap-count 1 add def } pipe-tap 4 pipe-collect
+tap-count 3 eq
+    (pipe-tap: side effect ran 3 times) rt-ok
+dup length 3 eq
+    (pipe-tap: passthrough preserved length) rt-ok
+dup 0 get 1 eq
+    (pipe-tap: values unchanged) rt-ok clear
+
+% ====================================================================
+% SECTION 20: pipe-batch
+% ====================================================================
+
+[1 2 3 4 5 6 7] 3 pipe-batch 4 pipe-collect
+dup length 3 eq
+    (pipe-batch: 7 items / 3 = 3 batches) rt-ok
+dup 0 get length 3 eq
+    (pipe-batch: first batch has 3) rt-ok
+dup 1 get length 3 eq
+    (pipe-batch: second batch has 3) rt-ok
+2 get length 1 eq
+    (pipe-batch: last batch has 1 remainder) rt-ok clear
+
+% ====================================================================
+% SECTION 21: multi-stage pipeline
+% ====================================================================
+
+[1 2 3 4 5 6 7 8 9 10]
+    { 2 mul } pipe-map
+    { 10 gt } pipe-filter
+    4 pipe-collect
+dup length 5 eq
+    (multi-stage: 5 items pass filter) rt-ok
+dup 0 get 12 eq
+    (multi-stage: first is 12) rt-ok
+4 get 20 eq
+    (multi-stage: last is 20) rt-ok clear
+
+% ====================================================================
+% SECTION 22: empty source
+% ====================================================================
+
+[] { 1 add } pipe-map 4 pipe-collect
+length 0 eq
+    (empty-source: collect returns empty array) rt-ok clear
+
+% ====================================================================
+% SECTION 23: single item
+% ====================================================================
+
+[42] 4 pipe-collect
+dup length 1 eq
+    (single-item: length 1) rt-ok
+0 get 42 eq
+    (single-item: value is 42) rt-ok clear
+
+% ====================================================================
+% SECTION 24: stress — 1000 items through 3-stage pipeline
+% ====================================================================
+
+/stress-result 0 def
+[ 0 1 999 { } for ]
+    { 1 add } pipe-map
+    { 2 mod 0 eq } pipe-filter
+    8 0 { add } pipe-reduce
+/stress-result exch def
+stress-result 250500 eq
+    (stress: 1000 items through 3 stages) rt-ok clear
+
+% ====================================================================
+% SECTION 25: error propagation from mid-stage
+% ====================================================================
+
+{ [1 2 3 4 5]
+    { dup 3 eq { /div-by-zero throw } if } pipe-map
+    4 pipe-collect
+} try /div-by-zero eq
+    (error-prop: mid-stage error reaches caller) rt-ok clear
+
+% ====================================================================
+% SECTION 26: Error propagation from source stage
+% ====================================================================
+
+{ [1 2 3]
+    { dup 2 eq { /range-check throw } if } pipe-map
+    4 pipe-collect
+} try /range-check eq
+    (error-src: source-triggered error reaches caller) rt-ok clear
+
+% ====================================================================
+% SECTION 27: Error cascade through multiple stages
+% ====================================================================
+
+{ [1 2 3 4 5]
+    { 1 add } pipe-map
+    { dup 4 eq { /undefined-result throw } if } pipe-map
+    { 10 mul } pipe-map
+    4 pipe-collect
+} try /undefined-result eq
+    (error-cascade: error cascades through 3 stages) rt-ok clear
+
+% ====================================================================
+% SECTION 28: Terminal operator argument validation
+% ====================================================================
+
+% pipe-run: non-proc
+{ [1 2 3] 4 42 pipe-run } try /type-check eq
+    (term-arg: pipe-run rejects non-proc) rt-ok clear
+
+% pipe-run: non-integer capacity
+{ [1 2 3] (four) { pop } pipe-run } try /type-check eq
+    (term-arg: pipe-run rejects non-integer capacity) rt-ok clear
+
+% pipe-run: zero capacity
+{ [1 2 3] 0 { pop } pipe-run } try /range-check eq
+    (term-arg: pipe-run rejects zero capacity) rt-ok clear
+
+% pipe-run: negative capacity
+{ [1 2 3] -1 { pop } pipe-run } try /range-check eq
+    (term-arg: pipe-run rejects negative capacity) rt-ok clear
+
+% pipe-collect: non-integer capacity
+{ [1 2 3] (four) pipe-collect } try /type-check eq
+    (term-arg: pipe-collect rejects non-integer cap) rt-ok clear
+
+% pipe-collect: zero capacity
+{ [1 2 3] 0 pipe-collect } try /range-check eq
+    (term-arg: pipe-collect rejects zero cap) rt-ok clear
+
+% pipe-reduce: non-proc
+{ [1 2 3] 4 0 42 pipe-reduce } try /type-check eq
+    (term-arg: pipe-reduce rejects non-proc) rt-ok clear
+
+% pipe-reduce: zero capacity
+{ [1 2 3] 0 0 { add } pipe-reduce } try /range-check eq
+    (term-arg: pipe-reduce rejects zero cap) rt-ok clear
+
+% ====================================================================
+% SECTION 29: Invalid source type
+% ====================================================================
+
+{ 42 4 pipe-collect } try /type-check eq
+    (bad-source: integer rejected) rt-ok clear
+
+{ (hello) { 1 add } pipe-map 4 pipe-collect } try /type-check eq
+    (bad-source: string rejected) rt-ok clear
+
+% ====================================================================
+% SECTION 30: Batch edge cases
+% ====================================================================
+
+% Exact multiple: 6 items / batch 3 = 2 full batches, no remainder
+[1 2 3 4 5 6] 3 pipe-batch 4 pipe-collect
+dup length 2 eq
+    (batch-edge: exact multiple gives 2 batches) rt-ok
+dup 0 get length 3 eq
+    (batch-edge: first batch full) rt-ok
+1 get length 3 eq
+    (batch-edge: second batch full) rt-ok clear
+
+% Batch size 1: each item is its own batch
+[10 20 30] 1 pipe-batch 4 pipe-collect
+dup length 3 eq
+    (batch-edge: size 1 gives 3 batches) rt-ok
+dup 0 get 0 get 10 eq
+    (batch-edge: size-1 first batch) rt-ok
+2 get 0 get 30 eq
+    (batch-edge: size-1 last batch) rt-ok clear
+
+% Batch size > item count: single partial batch
+[1 2] 10 pipe-batch 4 pipe-collect
+dup length 1 eq
+    (batch-edge: oversized gives 1 batch) rt-ok
+0 get length 2 eq
+    (batch-edge: partial batch has 2) rt-ok clear
+
+% Batch with empty source
+[] 3 pipe-batch 4 pipe-collect
+length 0 eq
+    (batch-edge: empty source gives empty result) rt-ok clear
+
+% ====================================================================
+% SECTION 31: Filter edge cases
+% ====================================================================
+
+% Filter ALL (nothing passes)
+[1 2 3 4 5] { 100 gt } pipe-filter 4 pipe-collect
+length 0 eq
+    (filter-edge: all filtered gives empty) rt-ok clear
+
+% Filter NONE (everything passes)
+[1 2 3 4 5] { 0 gt } pipe-filter 4 pipe-collect
+dup length 5 eq
+    (filter-edge: none filtered gives all 5) rt-ok
+dup 0 get 1 eq
+    (filter-edge: first is 1) rt-ok
+4 get 5 eq
+    (filter-edge: last is 5) rt-ok clear
+
+% ====================================================================
+% SECTION 32: Reduce edge cases
+% ====================================================================
+
+% Reduce with empty source: returns init unchanged
+[] 4 99 { add } pipe-reduce
+99 eq
+    (reduce-edge: empty source returns init) rt-ok clear
+
+% Reduce with single item: init + one fold
+[7] 4 100 { add } pipe-reduce
+107 eq
+    (reduce-edge: single item folds once) rt-ok clear
+
+% Reduce with string accumulation
+[1 2 3] { 10 mul } pipe-map 4 0 { add } pipe-reduce
+60 eq
+    (reduce-edge: map then reduce) rt-ok clear
+
+% ====================================================================
+% SECTION 33: Flat-map edge cases
+% ====================================================================
+
+% Flat-map where proc returns empty array (0 items emitted)
+[1 2 3] { pop mark array-from-mark } pipe-flat-map 4 pipe-collect
+length 0 eq
+    (flatmap-edge: empty arrays produce nothing) rt-ok clear
+
+% Flat-map with single-element arrays (identity-like)
+[10 20 30] { mark exch array-from-mark } pipe-flat-map 4 pipe-collect
+dup length 3 eq
+    (flatmap-edge: single-elem passthrough length) rt-ok
+dup 0 get 10 eq
+    (flatmap-edge: first is 10) rt-ok
+2 get 30 eq
+    (flatmap-edge: last is 30) rt-ok clear
+
+% Flat-map producing variable-length results
+[1 2 3] { dup 1 eq { pop mark 10 array-from-mark }
+          { dup 2 eq { pop mark 20 21 array-from-mark }
+            { pop mark 30 31 32 array-from-mark } if-else } if-else
+        } pipe-flat-map 4 pipe-collect
+dup length 6 eq
+    (flatmap-edge: variable lengths total 6) rt-ok
+dup 0 get 10 eq
+    (flatmap-edge: item 0 is 10) rt-ok
+dup 1 get 20 eq
+    (flatmap-edge: item 1 is 20) rt-ok
+5 get 32 eq
+    (flatmap-edge: item 5 is 32) rt-ok clear
+
+% ====================================================================
+% SECTION 34: Mixed value types through pipeline
+% ====================================================================
+
+/mix-source mark 42 (hello) true /foo array-from-mark def
+mix-source 4 pipe-collect
+dup length 4 eq
+    (mixed-types: length preserved) rt-ok
+dup 0 get 42 eq
+    (mixed-types: integer preserved) rt-ok
+dup 1 get (hello) eq
+    (mixed-types: string preserved) rt-ok
+dup 2 get true eq
+    (mixed-types: boolean preserved) rt-ok
+3 get /foo eq
+    (mixed-types: name preserved) rt-ok clear
+
+% ====================================================================
+% SECTION 35: Direct source (no mid-stages)
+% ====================================================================
+
+% Array source directly to pipe-collect (no pipe-map etc.)
+[10 20 30] 4 pipe-collect
+dup length 3 eq
+    (direct: array source length) rt-ok
+dup 0 get 10 eq
+    (direct: first is 10) rt-ok
+2 get 30 eq
+    (direct: last is 30) rt-ok clear
+
+% Array source directly to pipe-run
+/direct-sum 0 def
+[1 2 3] 4 { /direct-sum exch direct-sum add def } pipe-run
+direct-sum 6 eq
+    (direct: pipe-run sum = 6) rt-ok clear
+
+% Array source directly to pipe-reduce
+[1 2 3 4 5] 4 0 { add } pipe-reduce
+15 eq
+    (direct: pipe-reduce sum = 15) rt-ok clear
+
+% ====================================================================
+% SECTION 36: Deep pipeline chain (5 stages)
+% ====================================================================
+
+[1 2 3 4 5 6 7 8 9 10]
+    { 1 add } pipe-map            % +1: [2..11]
+    { 2 mul } pipe-map            % *2: [4..22]
+    { 10 gt } pipe-filter         % >10: [12 14 16 18 20 22]
+    { 1 sub } pipe-map            % -1: [11 13 15 17 19 21]
+    { 2 mod 1 eq } pipe-filter    % odd: [11 13 15 17 19 21] (all odd)
+    4 pipe-collect
+dup length 6 eq
+    (deep-chain: 5 stages, 6 items pass) rt-ok
+dup 0 get 11 eq
+    (deep-chain: first is 11) rt-ok
+5 get 21 eq
+    (deep-chain: last is 21) rt-ok clear
+
+% ====================================================================
+% SECTION 37: Lazy-seq source
+% ====================================================================
+
+% Build a finite lazy-seq [1 2 3 4 5] using lazy-iterate + lazy-take
+1 { 1 add } lazy-iterate 5 lazy-take
+    { 10 mul } pipe-map
+    4 pipe-collect
+dup length 5 eq
+    (lazy-source: length 5) rt-ok
+dup 0 get 10 eq
+    (lazy-source: first is 10) rt-ok
+4 get 50 eq
+    (lazy-source: last is 50) rt-ok clear
+
+% Lazy-seq source with filter
+1 { 1 add } lazy-iterate 10 lazy-take
+    { 2 mod 0 eq } pipe-filter
+    4 pipe-collect
+dup length 5 eq
+    (lazy-filter: 5 even numbers) rt-ok
+dup 0 get 2 eq
+    (lazy-filter: first even is 2) rt-ok
+4 get 10 eq
+    (lazy-filter: last even is 10) rt-ok clear
+
+% Lazy-seq source to pipe-reduce
+1 { 1 add } lazy-iterate 5 lazy-take
+    4 0 { add } pipe-reduce
+15 eq
+    (lazy-reduce: sum 1..5 = 15) rt-ok clear
+
+% Empty lazy-seq (null)
+null 4 pipe-collect
+length 0 eq
+    (lazy-empty: null lazy-seq gives empty) rt-ok clear
+
+% ====================================================================
+% SECTION 38: Pipe-run with empty source
+% ====================================================================
+
+/empty-run false def
+[] 4 { pop /empty-run true def } pipe-run
+empty-run not
+    (empty-run: proc never called) rt-ok clear
+
+% ====================================================================
+% SECTION 39: Buffer type diversity (non-integer values through raw buffer)
+% ====================================================================
+
+/div-buf 4 pipe-buffer def
+[ div-buf {
+    (hello) div-buf pipe-put
+    true div-buf pipe-put
+    /foo div-buf pipe-put
+    null div-buf pipe-put
+    div-buf pipe-close
+} coroutine-launch coroutine-join pop pop
+div-buf pipe-get pop (hello) eq
+    (buf-types: string through buffer) rt-ok
+div-buf pipe-get pop true eq
+    (buf-types: boolean through buffer) rt-ok
+div-buf pipe-get pop /foo eq
+    (buf-types: name through buffer) rt-ok
+div-buf pipe-get pop null eq
+    (buf-types: null through buffer) rt-ok
+div-buf pipe-get not
+    (buf-types: end-of-stream) rt-ok clear
+
+% ====================================================================
+% SECTION 40: Stress — batch through backpressure
+% ====================================================================
+
+[ 0 1 99 { } for ]
+    5 pipe-batch
+    2 pipe-collect
+dup length 20 eq
+    (batch-stress: 100 items / 5 = 20 batches) rt-ok
+dup 0 get length 5 eq
+    (batch-stress: first batch full) rt-ok
+19 get length 5 eq
+    (batch-stress: last batch full) rt-ok clear
+
+% ====================================================================
+% SECTION 41: pipe-take — basic (first 3 of 5)
+% ====================================================================
+
+[1 2 3 4 5] 3 pipe-take 2 pipe-collect
+dup length 3 eq
+    (take: length = 3) rt-ok
+dup 0 get 1 eq
+    (take: first item = 1) rt-ok
+dup 1 get 2 eq
+    (take: second item = 2) rt-ok
+2 get 3 eq
+    (take: third item = 3) rt-ok
+
+% ====================================================================
+% SECTION 42: pipe-take — N > source length (passes all)
+% ====================================================================
+
+[10 20 30] 100 pipe-take 2 pipe-collect
+dup length 3 eq
+    (take-short: all 3 items passed) rt-ok
+dup 0 get 10 eq
+    (take-short: first = 10) rt-ok
+2 get 30 eq
+    (take-short: last = 30) rt-ok
+
+% ====================================================================
+% SECTION 43: pipe-take — N = 1
+% ====================================================================
+
+[7 8 9] 1 pipe-take 2 pipe-collect
+dup length 1 eq
+    (take-one: length = 1) rt-ok
+0 get 7 eq
+    (take-one: value = 7) rt-ok
+
+% ====================================================================
+% SECTION 44: pipe-take — chained with pipe-map
+% ====================================================================
+
+[1 2 3 4 5] { 10 mul } pipe-map 3 pipe-take 2 pipe-collect
+dup length 3 eq
+    (take-map: length = 3) rt-ok
+dup 0 get 10 eq
+    (take-map: first = 10) rt-ok
+dup 1 get 20 eq
+    (take-map: second = 20) rt-ok
+2 get 30 eq
+    (take-map: third = 30) rt-ok
+
+% ====================================================================
+% SECTION 45: pipe-take — with lazy-seq source
+% ====================================================================
+
+1 { 1 add } lazy-iterate 5 pipe-take 2 pipe-collect
+dup length 5 eq
+    (take-lazy: length = 5) rt-ok
+dup 0 get 1 eq
+    (take-lazy: first = 1) rt-ok
+4 get 5 eq
+    (take-lazy: last = 5) rt-ok
+
+% ====================================================================
+% SECTION 46: pipe-take — with pipe-filter
+% ====================================================================
+
+[1 2 3 4 5 6 7 8 9 10] { 2 mod 0 eq } pipe-filter 3 pipe-take 2 pipe-collect
+dup length 3 eq
+    (take-filter: length = 3) rt-ok
+dup 0 get 2 eq
+    (take-filter: first even = 2) rt-ok
+dup 1 get 4 eq
+    (take-filter: second even = 4) rt-ok
+2 get 6 eq
+    (take-filter: third even = 6) rt-ok
+
+% ====================================================================
+% SECTION 47: pipe-take — pipe-reduce terminal
+% ====================================================================
+
+[1 2 3 4 5] 3 pipe-take 2 0 { add } pipe-reduce
+6 eq
+    (take-reduce: sum of first 3 = 6) rt-ok
+
+% ====================================================================
+% SECTION 48: pipe-take — pipe-run terminal
+% ====================================================================
+
+/take-run-count 0 def
+[1 2 3 4 5] 3 pipe-take 2 { pop /take-run-count take-run-count 1 add def } pipe-run
+take-run-count 3 eq
+    (take-run: visited 3 items) rt-ok
+
+% ====================================================================
+% SECTION 49: SAD — pipe-take type errors
+% ====================================================================
+
+{ [1 2 3] (hello) pipe-take } try /type-check eq
+    (take-sad: string count error) rt-ok  clear
+{ [1 2 3] 0 pipe-take } try /range-check eq
+    (take-sad: zero count error) rt-ok  clear
+{ [1 2 3] -5 pipe-take } try /range-check eq
+    (take-sad: negative count error) rt-ok  clear
+
+% ====================================================================
+% SECTION 50: STRESS — pipe-take from large source
+% ====================================================================
+
+[ 0 1 999 { } for ] 10 pipe-take 4 pipe-collect
+dup length 10 eq
+    (take-stress: 10 from 1000) rt-ok
+dup 0 get 0 eq
+    (take-stress: first = 0) rt-ok
+9 get 9 eq
+    (take-stress: last = 9) rt-ok
+
+% ====================================================================
+% SECTION 51: pipe-take — chained takes
+% ====================================================================
+
+[1 2 3 4 5 6 7 8 9 10] 7 pipe-take 3 pipe-take 2 pipe-collect
+dup length 3 eq
+    (take-chain: length = 3) rt-ok
+dup 0 get 1 eq
+    (take-chain: first = 1) rt-ok
+2 get 3 eq
+    (take-chain: third = 3) rt-ok
+
+% ====================================================================
+% SECTION 52: pipe-take with pipe-batch
+% ====================================================================
+
+[1 2 3 4 5 6 7 8 9 10] 6 pipe-take 3 pipe-batch 2 pipe-collect
+dup length 2 eq
+    (take-batch: 2 batches) rt-ok
+dup 0 get [1 2 3] deep-eq
+    (take-batch: first batch) rt-ok
+1 get [4 5 6] deep-eq
+    (take-batch: second batch) rt-ok
+
+% ====================================================================
+% SECTION 53: BOUNDARY — empty source with take
+% ====================================================================
+
+[] 5 pipe-take 2 pipe-collect
+length 0 eq
+    (take-empty: empty source gives empty) rt-ok clear
+
+% ====================================================================
+% SECTION 54: FUZZ — ExtValue items through take (Long, Double)
+% ====================================================================
+
+[9999999999l 1234567890123l 7777777777l] 2 pipe-take 2 pipe-collect
+dup length 2 eq
+    (take-ext: length = 2) rt-ok
+dup 0 get 9999999999l eq
+    (take-ext: long value preserved) rt-ok
+1 get 1234567890123l eq
+    (take-ext: second long preserved) rt-ok clear
+
+% ====================================================================
+% SECTION 55: BOUNDARY — single-item source, take 1
+% ====================================================================
+
+[99] 1 pipe-take 2 pipe-collect
+dup length 1 eq
+    (take-single: length = 1) rt-ok
+0 get 99 eq
+    (take-single: value = 99) rt-ok
+
+% ====================================================================
+% SECTION 56: STRESS — take with capacity-1 buffer (max backpressure)
+% ====================================================================
+
+[10 20 30 40 50] 3 pipe-take 1 pipe-collect
+dup length 3 eq
+    (take-cap1: length = 3) rt-ok
+dup 0 get 10 eq
+    (take-cap1: first = 10) rt-ok
+2 get 30 eq
+    (take-cap1: last = 30) rt-ok
+
+% ====================================================================
+% SECTION 57: take as mid-chain stage (map → take → filter)
+% ====================================================================
+
+[1 2 3 4 5 6 7 8 9 10]
+    { 10 mul } pipe-map
+    5 pipe-take
+    { 30 gt } pipe-filter
+    2 pipe-collect
+dup length 2 eq
+    (take-mid: 2 items pass filter) rt-ok
+dup 0 get 40 eq
+    (take-mid: first = 40) rt-ok
+1 get 50 eq
+    (take-mid: second = 50) rt-ok
+
+% ====================================================================
+% SECTION 58: take inside a spawned coroutine
+% ====================================================================
+
+mark {
+    [1 2 3 4 5] 3 pipe-take 2 pipe-collect
+    dup length 3 eq                         (take-coro: length = 3) rt-ok
+    dup 0 get 1 eq                          (take-coro: first = 1) rt-ok
+    2 get 3 eq                              (take-coro: last = 3) rt-ok
+} actor-spawn coroutine-join pop clear
+
+% ====================================================================
+% SECTION 59: pipe-drop basic (skip first 3 of 5)
+% ====================================================================
+
+[1 2 3 4 5] 3 pipe-drop 2 pipe-collect
+dup length 2 eq
+    (drop: length = 2) rt-ok
+dup 0 get 4 eq
+    (drop: first = 4) rt-ok
+1 get 5 eq
+    (drop: second = 5) rt-ok
+
+% ====================================================================
+% SECTION 60: pipe-drop skips all (n = length)
+% ====================================================================
+
+[1 2 3] 3 pipe-drop 2 pipe-collect
+length 0 eq
+    (drop-all: empty result) rt-ok
+
+% ====================================================================
+% SECTION 61: pipe-drop skips more than available (n > length)
+% ====================================================================
+
+[1 2 3] 10 pipe-drop 2 pipe-collect
+length 0 eq
+    (drop-exceed: empty result) rt-ok
+
+% ====================================================================
+% SECTION 62: pipe-drop with map (map then drop)
+% ====================================================================
+
+[1 2 3 4 5] { 10 mul } pipe-map 2 pipe-drop 2 pipe-collect
+dup length 3 eq
+    (drop-map: length = 3) rt-ok
+dup 0 get 30 eq
+    (drop-map: first = 30) rt-ok
+dup 1 get 40 eq
+    (drop-map: second = 40) rt-ok
+2 get 50 eq
+    (drop-map: third = 50) rt-ok
+
+% ====================================================================
+% SECTION 63: pipe-drop with filter
+% ====================================================================
+
+[1 2 3 4 5 6 7 8 9 10] { 2 mod 0 eq } pipe-filter 2 pipe-drop 2 pipe-collect
+dup length 3 eq
+    (drop-filter: length = 3) rt-ok
+dup 0 get 6 eq
+    (drop-filter: first = 6) rt-ok
+dup 1 get 8 eq
+    (drop-filter: second = 8) rt-ok
+2 get 10 eq
+    (drop-filter: third = 10) rt-ok
+
+% ====================================================================
+% SECTION 64: pipe-drop + pipe-take (drop 2, take 3 = middle slice)
+% ====================================================================
+
+[1 2 3 4 5 6 7 8 9 10] 2 pipe-drop 3 pipe-take 2 pipe-collect
+dup length 3 eq
+    (drop-take: length = 3) rt-ok
+dup 0 get 3 eq
+    (drop-take: first = 3) rt-ok
+dup 1 get 4 eq
+    (drop-take: second = 4) rt-ok
+2 get 5 eq
+    (drop-take: third = 5) rt-ok
+
+% ====================================================================
+% SECTION 65: pipe-drop + pipe-batch
+% ====================================================================
+
+[1 2 3 4 5 6 7 8 9 10] 4 pipe-drop 3 pipe-batch 2 pipe-collect
+dup length 2 eq
+    (drop-batch: 2 batches) rt-ok
+dup 0 get length 3 eq
+    (drop-batch: batch 0 has 3 items) rt-ok
+0 get 0 get 5 eq
+    (drop-batch: batch 0 first = 5) rt-ok
+
+% ====================================================================
+% SECTION 66: pipe-drop error cases
+% ====================================================================
+
+{ [1 2 3] (hello) pipe-drop } try /type-check eq
+    (drop-sad: string count error) rt-ok
+{ [1 2 3] 0 pipe-drop } try /range-check eq
+    (drop-sad: zero count error) rt-ok
+{ [1 2 3] -5 pipe-drop } try /range-check eq
+    (drop-sad: negative count error) rt-ok
+clear
+
+% ====================================================================
+% SECTION 67: pipe-drop chained (drop 2 then drop 3 = drop 5 total)
+% ====================================================================
+
+[1 2 3 4 5 6 7 8 9 10] 2 pipe-drop 3 pipe-drop 2 pipe-collect
+dup length 5 eq
+    (drop-chain: length = 5) rt-ok
+dup 0 get 6 eq
+    (drop-chain: first = 6) rt-ok
+4 get 10 eq
+    (drop-chain: last = 10) rt-ok
+
+% ====================================================================
+% SECTION 68: pipe-drop with large N (stress)
+% ====================================================================
+
+% Build array [0..99], drop first 97, should get [97 98 99]
+mark 0 1 99 { } for array-from-mark
+97 pipe-drop 2 pipe-collect
+dup length 3 eq
+    (drop-stress: length = 3) rt-ok
+dup 0 get 97 eq
+    (drop-stress: first = 97) rt-ok
+2 get 99 eq
+    (drop-stress: last = 99) rt-ok
+
+% ====================================================================
+% SECTION 69: pipe-drop inside a spawned coroutine
+% ====================================================================
+
+mark {
+    [1 2 3 4 5] 2 pipe-drop 2 pipe-collect
+    dup length 3 eq                         (drop-coro: length = 3) rt-ok
+    dup 0 get 3 eq                          (drop-coro: first = 3) rt-ok
+    2 get 5 eq                              (drop-coro: last = 5) rt-ok
+} actor-spawn coroutine-join pop clear
+
+% ====================================================================
+% SECTION 70: pipe-scan basic (running sum)
+% ====================================================================
+
+[1 2 3 4 5] 0 { add } pipe-scan 2 pipe-collect
+dup length 5 eq
+    (scan: length = 5) rt-ok
+dup 0 get 1 eq
+    (scan: first = 1) rt-ok
+dup 1 get 3 eq
+    (scan: second = 1+2 = 3) rt-ok
+dup 2 get 6 eq
+    (scan: third = 3+3 = 6) rt-ok
+dup 3 get 10 eq
+    (scan: fourth = 6+4 = 10) rt-ok
+4 get 15 eq
+    (scan: fifth = 10+5 = 15) rt-ok
+
+% ====================================================================
+% SECTION 71: pipe-scan with non-zero init
+% ====================================================================
+
+[1 2 3] 100 { add } pipe-scan 2 pipe-collect
+dup length 3 eq
+    (scan-init: length = 3) rt-ok
+dup 0 get 101 eq
+    (scan-init: first = 100+1 = 101) rt-ok
+dup 1 get 103 eq
+    (scan-init: second = 101+2 = 103) rt-ok
+2 get 106 eq
+    (scan-init: third = 103+3 = 106) rt-ok
+
+% ====================================================================
+% SECTION 72: pipe-scan empty source
+% ====================================================================
+
+[] 0 { add } pipe-scan 2 pipe-collect
+length 0 eq
+    (scan-empty: no output from empty source) rt-ok
+
+% ====================================================================
+% SECTION 73: pipe-scan single element
+% ====================================================================
+
+[42] 0 { add } pipe-scan 2 pipe-collect
+dup length 1 eq
+    (scan-single: length = 1) rt-ok
+0 get 42 eq
+    (scan-single: value = 0+42 = 42) rt-ok
+
+% ====================================================================
+% SECTION 74: pipe-scan with non-commutative op (running product)
+% ====================================================================
+
+[2 3 4] 1 { mul } pipe-scan 2 pipe-collect
+dup length 3 eq
+    (scan-mul: length = 3) rt-ok
+dup 0 get 2 eq
+    (scan-mul: first = 1*2 = 2) rt-ok
+dup 1 get 6 eq
+    (scan-mul: second = 2*3 = 6) rt-ok
+2 get 24 eq
+    (scan-mul: third = 6*4 = 24) rt-ok
+
+% ====================================================================
+% SECTION 75: pipe-scan with map (map then scan)
+% ====================================================================
+
+[1 2 3 4 5] { 2 mul } pipe-map 0 { add } pipe-scan 2 pipe-collect
+dup length 5 eq
+    (scan-map: length = 5) rt-ok
+dup 0 get 2 eq
+    (scan-map: first = 0+2 = 2) rt-ok
+dup 1 get 6 eq
+    (scan-map: second = 2+4 = 6) rt-ok
+4 get 30 eq
+    (scan-map: fifth = 2+4+6+8+10 = 30) rt-ok
+
+% ====================================================================
+% SECTION 76: pipe-scan then take (running sum, take first 3)
+% ====================================================================
+
+[1 2 3 4 5] 0 { add } pipe-scan 3 pipe-take 2 pipe-collect
+dup length 3 eq
+    (scan-take: length = 3) rt-ok
+dup 0 get 1 eq
+    (scan-take: first = 1) rt-ok
+dup 1 get 3 eq
+    (scan-take: second = 3) rt-ok
+2 get 6 eq
+    (scan-take: third = 6) rt-ok
+
+% ====================================================================
+% SECTION 77: pipe-scan then filter
+% ====================================================================
+
+[1 2 3 4 5] 0 { add } pipe-scan { 5 gt } pipe-filter 2 pipe-collect
+dup length 3 eq
+    (scan-filter: length = 3) rt-ok
+dup 0 get 6 eq
+    (scan-filter: first = 6) rt-ok
+dup 1 get 10 eq
+    (scan-filter: second = 10) rt-ok
+2 get 15 eq
+    (scan-filter: third = 15) rt-ok
+
+% ====================================================================
+% SECTION 78: pipe-scan with string accumulation
+% ====================================================================
+
+[(a) (b) (c)] () { concat } pipe-scan 2 pipe-collect
+dup length 3 eq
+    (scan-str: length = 3) rt-ok
+dup 0 get (a) eq
+    (scan-str: first = a) rt-ok
+dup 1 get (ab) eq
+    (scan-str: second = ab) rt-ok
+2 get (abc) eq
+    (scan-str: third = abc) rt-ok
+
+% ====================================================================
+% SECTION 79: pipe-scan error cases
+% ====================================================================
+
+{ [1 2 3] 0 42 pipe-scan } try /type-check eq
+    (scan-sad: non-proc error) rt-ok
+clear
+
+% ====================================================================
+% SECTION 80: pipe-scan then drop (scan then skip first 2)
+% ====================================================================
+
+[1 2 3 4 5] 0 { add } pipe-scan 2 pipe-drop 2 pipe-collect
+dup length 3 eq
+    (scan-drop: length = 3) rt-ok
+dup 0 get 6 eq
+    (scan-drop: first = 6) rt-ok
+dup 1 get 10 eq
+    (scan-drop: second = 10) rt-ok
+2 get 15 eq
+    (scan-drop: third = 15) rt-ok
+
+% ====================================================================
+% SECTION 81: pipe-scan stress (100 elements, running sum)
+% ====================================================================
+
+mark 1 1 100 { } for array-from-mark
+0 { add } pipe-scan 2 pipe-collect
+dup length 100 eq
+    (scan-stress: length = 100) rt-ok
+dup 0 get 1 eq
+    (scan-stress: first = 1) rt-ok
+dup 99 get 5050 eq
+    (scan-stress: last = 5050) rt-ok
+49 get 1275 eq
+    (scan-stress: middle = sum(1..50) = 1275) rt-ok
+
+% ====================================================================
+% SECTION 82: pipe-scan with pipe-reduce (scan -> reduce)
+% ====================================================================
+
+% scan outputs [1,3,6,10,15], reduce sums them = 35
+[1 2 3 4 5] 0 { add } pipe-scan 2 0 { add } pipe-reduce
+35 eq
+    (scan-reduce: sum of running sums = 35) rt-ok
+
+% ====================================================================
+% SECTION 83: pipe-drop then pipe-scan
+% ====================================================================
+
+[1 2 3 4 5] 2 pipe-drop 0 { add } pipe-scan 2 pipe-collect
+dup length 3 eq
+    (drop-scan: length = 3) rt-ok
+dup 0 get 3 eq
+    (drop-scan: first = 0+3 = 3) rt-ok
+dup 1 get 7 eq
+    (drop-scan: second = 3+4 = 7) rt-ok
+2 get 12 eq
+    (drop-scan: third = 7+5 = 12) rt-ok
+
+% ====================================================================
+% SECTION 84: pipe-scan inside a spawned coroutine
+% ====================================================================
+
+mark {
+    [1 2 3] 0 { add } pipe-scan 2 pipe-collect
+    dup length 3 eq                         (scan-coro: length = 3) rt-ok
+    dup 0 get 1 eq                          (scan-coro: first = 1) rt-ok
+    2 get 6 eq                              (scan-coro: last = 6) rt-ok
+} actor-spawn coroutine-join pop clear
+
+% ====================================================================
+% SECTION 85: pipe-distinct basic
+% ====================================================================
+
+[1 2 3 2 1 4 3 5] pipe-distinct 2 pipe-collect
+dup length 5 eq
+    (distinct: length = 5) rt-ok
+dup 0 get 1 eq
+    (distinct: first = 1) rt-ok
+dup 1 get 2 eq
+    (distinct: second = 2) rt-ok
+dup 2 get 3 eq
+    (distinct: third = 3) rt-ok
+dup 3 get 4 eq
+    (distinct: fourth = 4) rt-ok
+4 get 5 eq
+    (distinct: fifth = 5) rt-ok
+
+% ====================================================================
+% SECTION 86: pipe-distinct all unique (passthrough)
+% ====================================================================
+
+[10 20 30 40] pipe-distinct 2 pipe-collect
+dup length 4 eq
+    (distinct-unique: length = 4) rt-ok
+0 get 10 eq
+    (distinct-unique: first = 10) rt-ok
+
+% ====================================================================
+% SECTION 87: pipe-distinct all duplicates
+% ====================================================================
+
+[7 7 7 7 7] pipe-distinct 2 pipe-collect
+dup length 1 eq
+    (distinct-dup: length = 1) rt-ok
+0 get 7 eq
+    (distinct-dup: value = 7) rt-ok
+
+% ====================================================================
+% SECTION 88: pipe-distinct with map
+% ====================================================================
+
+[1 2 3 1 2 3] { 10 mul } pipe-map pipe-distinct 2 pipe-collect
+dup length 3 eq
+    (distinct-map: length = 3) rt-ok
+dup 0 get 10 eq
+    (distinct-map: first = 10) rt-ok
+2 get 30 eq
+    (distinct-map: third = 30) rt-ok
+
+% ====================================================================
+% SECTION 89: pipe-distinct with filter
+% ====================================================================
+
+[1 2 3 2 4 3 5 4] { 2 mod 0 eq } pipe-filter pipe-distinct 2 pipe-collect
+dup length 2 eq
+    (distinct-filter: length = 2) rt-ok
+dup 0 get 2 eq
+    (distinct-filter: first = 2) rt-ok
+1 get 4 eq
+    (distinct-filter: second = 4) rt-ok
+
+% ====================================================================
+% SECTION 90: pipe-distinct empty source
+% ====================================================================
+
+[] pipe-distinct 2 pipe-collect
+length 0 eq
+    (distinct-empty: no output) rt-ok
+
+% ====================================================================
+% SECTION 91: pipe-distinct with take
+% ====================================================================
+
+[1 2 1 3 2 4 1 5] pipe-distinct 3 pipe-take 2 pipe-collect
+dup length 3 eq
+    (distinct-take: length = 3) rt-ok
+dup 0 get 1 eq
+    (distinct-take: first = 1) rt-ok
+dup 1 get 2 eq
+    (distinct-take: second = 2) rt-ok
+2 get 3 eq
+    (distinct-take: third = 3) rt-ok
+
+% ====================================================================
+% SECTION 92: pipe-window basic (window of 3)
+% ====================================================================
+
+[1 2 3 4 5] 3 pipe-window 2 pipe-collect
+dup length 3 eq
+    (window: 3 windows from 5 items) rt-ok
+dup 0 get dup length 3 eq (window: w0 length = 3) rt-ok
+                dup 0 get 1 eq (window: w0[0] = 1) rt-ok
+                dup 1 get 2 eq (window: w0[1] = 2) rt-ok
+                2 get 3 eq (window: w0[2] = 3) rt-ok
+dup 1 get 0 get 2 eq (window: w1[0] = 2) rt-ok
+2 get 0 get 3 eq (window: w2[0] = 3) rt-ok
+
+% ====================================================================
+% SECTION 93: pipe-window — window equals source length
+% ====================================================================
+
+[10 20 30] 3 pipe-window 2 pipe-collect
+dup length 1 eq
+    (window-exact: 1 window) rt-ok
+0 get dup 0 get 10 eq (window-exact: [0]=10) rt-ok
+      dup 1 get 20 eq (window-exact: [1]=20) rt-ok
+      2 get 30 eq (window-exact: [2]=30) rt-ok
+
+% ====================================================================
+% SECTION 94: pipe-window — source shorter than window
+% ====================================================================
+
+[1 2] 5 pipe-window 2 pipe-collect
+length 0 eq
+    (window-short: no output) rt-ok
+
+% ====================================================================
+% SECTION 95: pipe-window — window of 1 (passthrough as arrays)
+% ====================================================================
+
+[10 20 30] 1 pipe-window 2 pipe-collect
+dup length 3 eq
+    (window-1: 3 windows) rt-ok
+dup 0 get 0 get 10 eq
+    (window-1: first = [10]) rt-ok
+2 get 0 get 30 eq
+    (window-1: last = [30]) rt-ok
+
+% ====================================================================
+% SECTION 96: pipe-window error cases
+% ====================================================================
+
+{ [1 2 3] 0 pipe-window } try /range-check eq
+    (window-err: zero size) rt-ok clear
+{ [1 2 3] -1 pipe-window } try /range-check eq
+    (window-err: negative size) rt-ok clear
+
+% ====================================================================
+% SECTION 97: pipe-window with map
+% ====================================================================
+
+[1 2 3 4 5] { 10 mul } pipe-map 2 pipe-window 2 pipe-collect
+dup length 4 eq
+    (window-map: 4 windows) rt-ok
+dup 0 get dup 0 get 10 eq (window-map: w0[0]=10) rt-ok
+               1 get 20 eq (window-map: w0[1]=20) rt-ok
+3 get dup 0 get 40 eq (window-map: w3[0]=40) rt-ok
+           1 get 50 eq (window-map: w3[1]=50) rt-ok
+
+% ====================================================================
+% SECTION 98: pipe-distinct + pipe-window combo
+% ====================================================================
+
+[1 2 1 3 2 4] pipe-distinct 2 pipe-window 2 pipe-collect
+% distinct gives [1 2 3 4], window(2) gives [1,2] [2,3] [3,4]
+dup length 3 eq
+    (distinct-window: 3 windows) rt-ok
+dup 0 get 0 get 1 eq
+    (distinct-window: w0[0]=1) rt-ok
+2 get 1 get 4 eq
+    (distinct-window: w2[1]=4) rt-ok
+
+% ====================================================================
+% SECTION 99: pipe-merge — two arrays
+% ====================================================================
+
+[[1 2 3] [10 20 30]] pipe-merge 8 pipe-collect
+dup length 6 eq                           (merge-2: length = 6) rt-ok
+% Round-robin order: 1 10 2 20 3 30
+dup 0 get 1 eq                            (merge-2: item 0 = 1) rt-ok
+dup 1 get 10 eq                           (merge-2: item 1 = 10) rt-ok
+dup 2 get 2 eq                            (merge-2: item 2 = 2) rt-ok
+dup 3 get 20 eq                           (merge-2: item 3 = 20) rt-ok
+dup 4 get 3 eq                            (merge-2: item 4 = 3) rt-ok
+5 get 30 eq                               (merge-2: item 5 = 30) rt-ok  clear
+
+% ====================================================================
+% SECTION 100: pipe-merge — three sources
+% ====================================================================
+
+[[1 2] [10 20] [100 200]] pipe-merge 8 pipe-collect
+dup length 6 eq                           (merge-3: length = 6) rt-ok
+% Round-robin: 1 10 100 2 20 200
+dup 0 get 1 eq                            (merge-3: item 0 = 1) rt-ok
+dup 1 get 10 eq                           (merge-3: item 1 = 10) rt-ok
+dup 2 get 100 eq                          (merge-3: item 2 = 100) rt-ok
+5 get 200 eq                              (merge-3: item 5 = 200) rt-ok  clear
+
+% ====================================================================
+% SECTION 101: pipe-merge — different lengths
+% ====================================================================
+
+[[1] [10 20 30]] pipe-merge 8 pipe-collect
+dup length 4 eq                           (merge-diff: length = 4) rt-ok
+% 1 10 20 30 (source 0 drains after 1 item, source 1 continues)
+0 get 1 eq                                (merge-diff: first item = 1) rt-ok  clear
+
+% ====================================================================
+% SECTION 102: pipe-merge — with downstream map
+% ====================================================================
+
+[[1 2 3] [10 20 30]] pipe-merge { 2 mul } pipe-map 8 pipe-collect
+dup length 6 eq                           (merge-map: length = 6) rt-ok
+dup 0 get 2 eq                            (merge-map: 1*2 = 2) rt-ok
+1 get 20 eq                               (merge-map: 10*2 = 20) rt-ok  clear
+
+% ====================================================================
+% SECTION 103: pipe-merge — with pipeline source
+% ====================================================================
+
+[ [1 2 3] { 10 mul } pipe-map  [4 5 6] ] pipe-merge 8 pipe-collect
+dup length 6 eq                           (merge-pipe: length = 6) rt-ok
+% Source 0 is [1 2 3] mapped *10: [10 20 30]. Source 1 is [4 5 6].
+dup 0 get 10 eq                           (merge-pipe: 1*10 = 10) rt-ok
+1 get 4 eq                                (merge-pipe: src1[0] = 4) rt-ok  clear
+
+% ====================================================================
+% SECTION 104: pipe-merge — error cases
+% ====================================================================
+
+{ [[1 2 3]] pipe-merge } try
+/range-check eq                           (merge-err: single source) rt-ok  clear
+
+{ (bad) pipe-merge } try
+/type-check eq                            (merge-err: not array) rt-ok  clear
+
+% ====================================================================
+% SECTION 105: pipe-zip — two arrays
+% ====================================================================
+
+[[1 2 3] [10 20 30]] pipe-zip 8 pipe-collect
+dup length 3 eq                           (zip-2: length = 3) rt-ok
+dup 0 get dup 0 get 1 eq                  (zip-2: t0[0] = 1) rt-ok
+                    1 get 10 eq           (zip-2: t0[1] = 10) rt-ok
+dup 1 get dup 0 get 2 eq                  (zip-2: t1[0] = 2) rt-ok
+                    1 get 20 eq           (zip-2: t1[1] = 20) rt-ok
+2 get dup 0 get 3 eq                      (zip-2: t2[0] = 3) rt-ok
+          1 get 30 eq                     (zip-2: t2[1] = 30) rt-ok  clear
+
+% ====================================================================
+% SECTION 106: pipe-zip — unequal lengths (shortest wins)
+% ====================================================================
+
+[[1 2 3] [10 20]] pipe-zip 8 pipe-collect
+dup length 2 eq                           (zip-short: length = 2) rt-ok
+1 get 1 get 20 eq                         (zip-short: last[1] = 20) rt-ok  clear
+
+% ====================================================================
+% SECTION 107: pipe-zip — three sources
+% ====================================================================
+
+[[1 2] [10 20] [100 200]] pipe-zip 8 pipe-collect
+dup length 2 eq                           (zip-3: length = 2) rt-ok
+dup 0 get dup length 3 eq                 (zip-3: tuple width = 3) rt-ok
+dup 0 get 1 eq                            (zip-3: t0[0] = 1) rt-ok
+dup 1 get 10 eq                           (zip-3: t0[1] = 10) rt-ok
+    2 get 100 eq                          (zip-3: t0[2] = 100) rt-ok
+1 get dup 0 get 2 eq                      (zip-3: t1[0] = 2) rt-ok
+      dup 1 get 20 eq                     (zip-3: t1[1] = 20) rt-ok
+          2 get 200 eq                    (zip-3: t1[2] = 200) rt-ok  clear
+
+% ====================================================================
+% SECTION 108: pipe-zip — with downstream map
+% ====================================================================
+
+[[1 2 3] [10 20 30]] pipe-zip { dup 0 get exch 1 get add } pipe-map 8 pipe-collect
+dup length 3 eq                           (zip-map: length = 3) rt-ok
+dup 0 get 11 eq                           (zip-map: 1+10 = 11) rt-ok
+dup 1 get 22 eq                           (zip-map: 2+20 = 22) rt-ok
+2 get 33 eq                               (zip-map: 3+30 = 33) rt-ok  clear
+
+% ====================================================================
+% SECTION 109: pipe-zip — one empty source
+% ====================================================================
+
+[[ ] [1 2 3]] pipe-zip 8 pipe-collect
+length 0 eq                               (zip-empty: empty result) rt-ok  clear
+
+% ====================================================================
+% SECTION 110: pipe-zip — error cases
+% ====================================================================
+
+{ [[1 2 3]] pipe-zip } try
+/range-check eq                           (zip-err: single source) rt-ok  clear
+
+{ (bad) pipe-zip } try
+/type-check eq                            (zip-err: not array) rt-ok  clear
+
+% ====================================================================
+% SECTION 111: pipe-merge — boundary: both sources empty
+% ====================================================================
+
+[[ ] [ ]] pipe-merge 8 pipe-collect
+length 0 eq                               (merge-empty: both empty) rt-ok  clear
+
+% ====================================================================
+% SECTION 112: pipe-merge — boundary: single-element sources
+% ====================================================================
+
+[[1] [10]] pipe-merge 8 pipe-collect
+dup length 2 eq                           (merge-single: length = 2) rt-ok
+dup 0 get 1 eq                            (merge-single: item 0 = 1) rt-ok
+1 get 10 eq                               (merge-single: item 1 = 10) rt-ok  clear
+
+% ====================================================================
+% SECTION 113: pipe-merge — fuzz: merge + filter downstream
+% ====================================================================
+
+[[1 2 3 4] [10 20 30 40]] pipe-merge { 2 mod 0 eq } pipe-filter 8 pipe-collect
+% Round-robin: 1 10 2 20 3 30 4 40 — evens: 10 2 20 30 4 40
+dup length 6 eq                           (merge-filter: 6 evens) rt-ok
+dup 0 get 10 eq                           (merge-filter: first even = 10) rt-ok
+dup 1 get 2 eq                            (merge-filter: second even = 2) rt-ok
+5 get 40 eq                               (merge-filter: last even = 40) rt-ok  clear
+
+% ====================================================================
+% SECTION 114: pipe-merge — stress: 5 sources
+% ====================================================================
+
+[[1 2] [10 20] [100 200] [1000 2000] [10000 20000]] pipe-merge 16 pipe-collect
+dup length 10 eq                          (merge-5: length = 10) rt-ok
+% Round-robin: 1 10 100 1000 10000 2 20 200 2000 20000
+dup 0 get 1 eq                            (merge-5: item 0) rt-ok
+dup 4 get 10000 eq                        (merge-5: item 4) rt-ok
+9 get 20000 eq                            (merge-5: item 9) rt-ok  clear
+
+% ====================================================================
+% SECTION 115: pipe-merge — boundary: one empty, one non-empty
+% ====================================================================
+
+[[ ] [1 2 3]] pipe-merge 8 pipe-collect
+dup length 3 eq                           (merge-one-empty: length = 3) rt-ok
+0 get 1 eq                                (merge-one-empty: first = 1) rt-ok  clear
+
+% ====================================================================
+% SECTION 116: pipe-merge — stress: large sources (50 each)
+% ====================================================================
+
+% Build two 25-element arrays
+[ 25 range  25 50 range-from ] pipe-merge 64 pipe-collect
+length 50 eq                              (merge-large: 25+25 = 50) rt-ok  clear
+
+% ====================================================================
+% SECTION 117: pipe-zip — boundary: all sources empty
+% ====================================================================
+
+[[ ] [ ]] pipe-zip 8 pipe-collect
+length 0 eq                               (zip-all-empty: empty result) rt-ok  clear
+
+% ====================================================================
+% SECTION 118: pipe-zip — boundary: single-element sources
+% ====================================================================
+
+[[1] [10]] pipe-zip 8 pipe-collect
+dup length 1 eq                           (zip-single: one tuple) rt-ok
+0 get dup 0 get 1 eq                      (zip-single: t0[0]=1) rt-ok
+          1 get 10 eq                     (zip-single: t0[1]=10) rt-ok  clear
+
+% ====================================================================
+% SECTION 119: pipe-zip — fuzz: zip + distinct downstream
+% ====================================================================
+
+% Zip + filter: keep only tuples where sum > 15
+[[1 2 3] [10 20 30]] pipe-zip { dup 0 get exch 1 get add 15 gt } pipe-filter 8 pipe-collect
+dup length 2 eq                           (zip-filter: 2 tuples with sum>15) rt-ok
+0 get 0 get 2 eq                          (zip-filter: first kept tuple[0]=2) rt-ok  clear
+
+% ====================================================================
+% SECTION 120: pipe-zip — fuzz: mixed types across sources
+% ====================================================================
+
+[[(a) (b) (c)] [1 2 3]] pipe-zip 8 pipe-collect
+dup length 3 eq                           (zip-mixed: 3 tuples) rt-ok
+0 get dup 0 get (a) eq                    (zip-mixed: t0[0]=a) rt-ok
+          1 get 1 eq                      (zip-mixed: t0[1]=1) rt-ok  clear
+
+% ====================================================================
+% SECTION 121: pipe-zip — stress: 5 sources
+% ====================================================================
+
+[[1 2] [10 20] [100 200] [1000 2000] [10000 20000]] pipe-zip 8 pipe-collect
+dup length 2 eq                           (zip-5: 2 tuples) rt-ok
+0 get dup length 5 eq                     (zip-5: tuple width = 5) rt-ok
+dup 0 get 1 eq                            (zip-5: t0[0]=1) rt-ok
+dup 1 get 10 eq                           (zip-5: t0[1]=10) rt-ok
+    4 get 10000 eq                        (zip-5: t0[4]=10000) rt-ok  clear
+
+% ====================================================================
+% SECTION 122: pipe-distinct — sad: non-hashable triggers error
+% ====================================================================
+
+% pipe-distinct uses set membership; all Trix types are hashable, so test
+% integer/string/name mixing works without error.
+[1 (hello) /name 1 (hello) /name] pipe-distinct 8 pipe-collect
+length 3 eq                               (distinct-mixed: 3 distinct types) rt-ok  clear
+
+% ====================================================================
+% SECTION 123: pipe-distinct — stress: large dedup (50 items, half dupes)
+% ====================================================================
+
+% 25 range produces [0..24]; flatten [[0..24] [0..24]] to get 50 with 25 dupes
+[ 25 range 25 range ] flatten pipe-distinct 64 pipe-collect
+length 25 eq                              (distinct-stress: 50 in, 25 out) rt-ok  clear
+
+% ====================================================================
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_pipeline: ALL TESTS PASSED) =
+(__test_ok__) =

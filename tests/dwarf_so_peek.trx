@@ -1,0 +1,53 @@
+% tests/dwarf_so_peek.trx -- L-21 shared-object live introspection.  The .so
+% (tests/dwarf_l21_probe.cpp) is LD_PRELOADed into THIS trix process by
+% run_dwarf_tests.sh; its path is passed as the script argument.  We load the
+% .so's OWN DWARF by that path and read its globals from live process memory via
+% dwarf-peek-live -- which must relocate the link-time DWARF address by the
+% .so's load bias (module-load-bias-for), NOT the main executable's.  The live
+% value is cross-checked against the static (file-image) read of the same symbol.
+(lib/dwarf.trx) run
+
+% rt-ok: restore-immune failure counter; the file THROWS at EOF so a print-only
+% failure cannot slip the runner's verdict.   bool (label) rt-ok --
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% The .so path is argv[0] (everything after the script filename).
+command-line-args /argv exch def
+argv length 0 gt (so: a .so path was passed on the command line) rt-ok clear
+argv length 0 gt {
+    argv 0 get dwarf-load /ctx exch def
+
+    % --- live peek of the scalar global: relocated against the .so's base. ---
+    ctx (g_l21_scalar) dwarf-peek-live /sv exch def
+    sv null eq not (so: dwarf-peek-live resolves g_l21_scalar) rt-ok clear
+    sv null eq not { sv 314159 eq (so: live g_l21_scalar == 314159) rt-ok clear } if
+
+    % --- live peek of the struct global -> a Record decoded from live memory. ---
+    % L21Probe = { magic 0xBADF00Du, scale 2.5, count -7, tag 9 }.
+    ctx (g_l21_probe) dwarf-peek-live /lv exch def
+    lv is-record (so: dwarf-peek-live returns a Record for g_l21_probe) rt-ok clear
+    lv null eq not {
+        lv /magic get 195948557u eq (so: live magic == 0xBADF00Du) rt-ok clear
+        lv /scale get 2.5d eq (so: live scale == 2.5d) rt-ok clear
+        lv /count get -7 eq (so: live count == -7 signed) rt-ok clear
+        lv /tag get 9b eq (so: live tag == 9b) rt-ok clear
+    } if
+
+    % --- static peek of the struct: the file-image initializer must agree with
+    % --- the live value (the .so globals are never mutated). ---
+    ctx (g_l21_probe) dwarf-peek /stv exch def
+    stv null eq not (so: dwarf-peek (static) also resolves g_l21_probe) rt-ok clear
+    stv null eq not  lv null eq not  and {
+        lv /magic get stv /magic get eq (so: live magic == static magic) rt-ok clear
+        lv /count get stv /count get eq (so: live count == static count) rt-ok clear
+        lv /scale get stv /scale get eq (so: live scale == static scale) rt-ok clear
+    } if
+
+    ctx dwarf-close
+} if
+
+(dwarf .so-peek tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

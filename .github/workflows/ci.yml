@@ -1,0 +1,160 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Cancel any in-flight run for the same branch/PR when a new push arrives.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.compiler }} / ${{ matrix.build_type }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc-15, clang-20]
+        build_type: [Debug, Release]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install gcc-15 (toolchain PPA)
+        if: matrix.compiler == 'gcc-15'
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install -y gcc-15 g++-15
+
+      - name: Install clang-20 (LLVM apt; ubuntu-24.04 ships only clang-18)
+        if: matrix.compiler == 'clang-20'
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" | \
+            sudo tee /etc/apt/sources.list.d/llvm-20.list
+          sudo apt-get update
+          sudo apt-get install -y clang-20
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libreadline-dev zlib1g-dev \
+            cmake ninja-build
+
+      - name: Configure
+        env:
+          CC:  ${{ matrix.compiler == 'gcc-15' && 'gcc-15' || 'clang-20' }}
+          CXX: ${{ matrix.compiler == 'gcc-15' && 'g++-15' || 'clang++-20' }}
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Stage binary at repo root (runtests.sh expects ./trix)
+        run: cp build/trix trix
+
+      - name: Set timezone to America/New_York (host zone for test_chrono_local)
+        # Trix has no bundled tzdb: the instant-*-local ops delegate to
+        # std::chrono::current_zone(), which reads /etc/localtime and IGNORES
+        # the TZ env var. test_chrono_local asserts NYC EST/EDT values, so the
+        # runner's local zone -- not TZ -- must be America/New_York.
+        run: sudo ln -sf /usr/share/zoneinfo/America/New_York /etc/localtime
+
+      - name: Run full test suite
+        run: ./runtests.sh
+
+      - name: Verify README examples still execute
+        run: ./tests/check_readme_examples.py
+
+      - name: Verify doc links and anchors resolve
+        run: ./tests/check_doc_links.py
+
+      - name: Verify operator counts in docs match the dispatch table
+        run: ./tests/check_operator_count.py
+
+      - name: Verify error codes in docs match the Error enum
+        run: ./tests/check_error_codes.py
+
+      - name: Verify per-operator throws docs match the source annotations
+        run: ./tests/check_operator_throws.py
+
+      - name: Verify showcase examples have no operator redefinitions
+        run: ./tests/check_operator_shadows.py --quiet examples/*.trx
+
+      - name: Verify documentation examples execute without error
+        run: ./tools/check_doc_examples.py
+
+      - name: Verify scanner suffix/infix grammar matches the parser
+        run: ./tools/check_scanner_grammar.py
+
+      - name: Verify type-system facts match the implementation
+        run: ./tools/check_type_facts.py
+
+      - name: Verify collection facts match the implementation
+        run: ./tools/check_collection_facts.py
+
+      - name: Verify reference/cheatsheet facts match the implementation
+        run: ./tools/check_reference_facts.py
+
+  clang-format:
+    name: clang-format check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install clang-format
+        run: |
+          # The repo's .clang-format was modernized for v20 (commit 7e93be7).
+          # Use llvm.org's apt repo to install clang-format-20 on ubuntu-24.04
+          # (which only ships clang-format-18 in its default archive).
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" | \
+            sudo tee /etc/apt/sources.list.d/llvm-20.list
+          sudo apt-get update
+          sudo apt-get install -y clang-format-20
+
+      - name: Check formatting
+        run: |
+          # Call clang-format-20 explicitly: the ubuntu-24.04 runner preinstalls
+          # an older clang-format, and the unversioned `clang-format` resolves to
+          # it (not the v20 installed above), rejecting newer .clang-format keys
+          # such as KeepEmptyLines.
+          find src trix.h trix.cpp -type f \
+            \( -name '*.inl' -o -name '*.h' -o -name '*.cpp' \) \
+            -print0 | xargs -0 clang-format-20 --style=file --dry-run --Werror
+
+      - name: Check C++ house-style rules (parens + void-casts)
+        run: ./tools/cpp_style.py --check
+
+      - name: Check blank line after precondition asserts
+        run: ./tools/assert_blank_line.py --check
+
+  signed-char:
+    name: signed-char sign-conversion gate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install clang-20 (LLVM apt; ubuntu-24.04 ships only clang-18)
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" | \
+            sudo tee /etc/apt/sources.list.d/llvm-20.list
+          sudo apt-get update
+          sudo apt-get install -y clang-20
+
+      - name: Install header dependencies (readline/zlib headers for the syntax-only check)
+        run: sudo apt-get install -y libreadline-dev zlib1g-dev
+
+      - name: Check char<->vm_t sign conversions under signed char (clang -fsigned-char)
+        # Runs the FULL feature set (-DTRIX_DEBUGGER -DTRIX_HEAP_TRACKING), so it
+        # also type-checks the debugger / heap-tracking code the CMake build legs
+        # never compile (they define only TRX_DEBUG).
+        run: ./tools/check_signed_char.py --check

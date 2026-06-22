@@ -1,0 +1,135 @@
+% ====================================================================
+% test_followon_b6_lazy_sibling_gc.trx -- B6 lazy-sibling GC-rooting sweep
+% ====================================================================
+% B6's lazy:2-1/3-3 noted that the "unrooted in-flight chain link across a
+% global alloc" pattern recurs across the lazy builders not individually
+% cited.  This sweep rooted the curry/compose tail-proc chains in
+% lazy-range, lazy-iterate, lazy-unfold, lazy-filter-map, lazy-flat-map,
+% lazy-map-indexed, lazy-scan, lazy-dedupe, lazy-step-by, lazy-zip-with,
+% lazy-chain, lazy-interleave, and the lazy-chunked/lazy-windowed @-collect
+% / @-build resume ops -- using the established rooted helpers
+% (curry_pair_rooted / compose_pair_rooted / lazy_thunk_rooted /
+% lazy_node_rooted / lazy_node_from_proc) plus op-stack temp roots.
+%
+% Verification strategy: run each op INSIDE ${...} (m_curr_alloc_global =
+% true -> the rooted global code path), firing vm-global-gc during the
+% computation, and deep-eq the result against the SAME computation in the
+% local region (ground truth).  Equality proves the rooted path is
+% stack-balanced and produces correct results; ASan/UBSan in the debug
+% build guard the stack discipline.  (The mid-C++-chain-build auto-GC
+% window is not deterministically reachable from script -- chain builds are
+% atomic within an op -- so it stays code-inspection-covered, as the B6
+% review classified these "not-unit-testable"; this test covers the rooted
+% path's correctness + built-chain GC survival.)
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- lazy-range (pure curry chain, no proc) ---
+${ 0 10 2 lazy-range vm-global-gc pop lazy-to-array }
+0 10 2 lazy-range lazy-to-array
+deep-eq (lazy-range: ${}+GC == local) rt-ok clear
+
+% --- lazy-iterate (embedded clones) ---
+${ 1 { vm-global-gc pop 2 mul } lazy-iterate 5 lazy-take lazy-to-array }
+1 { 2 mul } lazy-iterate 5 lazy-take lazy-to-array
+deep-eq (lazy-iterate: ${}+GC == local) rt-ok clear
+
+% --- lazy-unfold (@-build, popped proc) ---
+${ 1 { vm-global-gc pop dup 5 gt { pop null } { dup 1 add mark 3 1 roll array-from-mark } if-else } lazy-unfold lazy-to-array }
+1 { dup 5 gt { pop null } { dup 1 add mark 3 1 roll array-from-mark } if-else } lazy-unfold lazy-to-array
+deep-eq (lazy-unfold: ${}+GC == local) rt-ok clear
+
+% --- lazy-filter-map (compose+curry, @-test) ---
+${ [1 2 3 4 5] lazy-seq { vm-global-gc pop dup 2 mod 0 eq { 2 mul } { pop null } if-else } lazy-filter-map lazy-to-array }
+[1 2 3 4 5] lazy-seq { dup 2 mod 0 eq { 2 mul } { pop null } if-else } lazy-filter-map lazy-to-array
+deep-eq (lazy-filter-map: ${}+GC == local) rt-ok clear
+
+% --- lazy-flat-map (@-build + @-resume) ---
+${ [1 2 3] lazy-seq { vm-global-gc pop dup mark 3 1 roll array-from-mark lazy-seq } lazy-flat-map lazy-to-array }
+[1 2 3] lazy-seq { dup mark 3 1 roll array-from-mark lazy-seq } lazy-flat-map lazy-to-array
+deep-eq (lazy-flat-map: ${}+GC == local) rt-ok clear
+
+% --- lazy-map-indexed (@-build phase 2) ---
+${ [10 20 30] lazy-seq { vm-global-gc pop add } lazy-map-indexed lazy-to-array }
+[10 20 30] lazy-seq { add } lazy-map-indexed lazy-to-array
+deep-eq (lazy-map-indexed: ${}+GC == local) rt-ok clear
+
+% --- lazy-scan (op + @-build) ---
+${ [1 2 3 4 5] lazy-seq 0 { vm-global-gc pop add } lazy-scan lazy-to-array }
+[1 2 3 4 5] lazy-seq 0 { add } lazy-scan lazy-to-array
+deep-eq (lazy-scan: ${}+GC == local) rt-ok clear
+
+% --- lazy-dedupe (compose+curry, eq-pred clone) ---
+${ [1 1 2 2 2 3 3 1] lazy-seq lazy-dedupe vm-global-gc pop lazy-to-array }
+[1 1 2 2 2 3 3 1] lazy-seq lazy-dedupe lazy-to-array
+deep-eq (lazy-dedupe: ${}+GC == local) rt-ok clear
+
+% --- lazy-step-by (two chain branches) ---
+${ 1 lazy-from 3 lazy-step-by 4 lazy-take vm-global-gc pop lazy-to-array }
+1 lazy-from 3 lazy-step-by 4 lazy-take lazy-to-array
+deep-eq (lazy-step-by: ${}+GC == local) rt-ok clear
+
+% step of 1 hits the n==1 branch
+${ 1 lazy-from 1 lazy-step-by 4 lazy-take vm-global-gc pop lazy-to-array }
+1 lazy-from 1 lazy-step-by 4 lazy-take lazy-to-array
+deep-eq (lazy-step-by n=1: ${}+GC == local) rt-ok clear
+
+% --- lazy-zip-with (@-build, 3 popped operands) ---
+${ [1 2 3] lazy-seq [10 20 30] lazy-seq { vm-global-gc pop add } lazy-zip-with lazy-to-array }
+[1 2 3] lazy-seq [10 20 30] lazy-seq { add } lazy-zip-with lazy-to-array
+deep-eq (lazy-zip-with: ${}+GC == local) rt-ok clear
+
+% --- lazy-chain ---
+${ [1 2 3] lazy-seq [4 5 6] lazy-seq lazy-chain vm-global-gc pop lazy-to-array }
+[1 2 3] lazy-seq [4 5 6] lazy-seq lazy-chain lazy-to-array
+deep-eq (lazy-chain: ${}+GC == local) rt-ok clear
+
+% --- lazy-interleave ---
+${ [1 3 5] lazy-seq [2 4 6] lazy-seq lazy-interleave vm-global-gc pop lazy-to-array }
+[1 3 5] lazy-seq [2 4 6] lazy-seq lazy-interleave lazy-to-array
+deep-eq (lazy-interleave: ${}+GC == local) rt-ok clear
+
+% --- lazy-chunked (@-collect, accumulator array) ---
+${ 1 lazy-from 9 lazy-take 3 lazy-chunked vm-global-gc pop lazy-to-array }
+1 lazy-from 9 lazy-take 3 lazy-chunked lazy-to-array
+deep-eq (lazy-chunked: ${}+GC == local) rt-ok clear
+
+% partial trailing chunk (source exhausted mid-chunk)
+${ 1 lazy-from 8 lazy-take 3 lazy-chunked vm-global-gc pop lazy-to-array }
+1 lazy-from 8 lazy-take 3 lazy-chunked lazy-to-array
+deep-eq (lazy-chunked partial: ${}+GC == local) rt-ok clear
+
+% --- lazy-windowed (window array via @LazyMapBuild) ---
+${ [1 2 3 4 5] lazy-seq 3 lazy-windowed vm-global-gc pop lazy-to-array }
+[1 2 3 4 5] lazy-seq 3 lazy-windowed lazy-to-array
+deep-eq (lazy-windowed: ${}+GC == local) rt-ok clear
+
+% --- lazy-pairwise (delegates to lazy-windowed n=2) ---
+${ [1 2 3 4] lazy-seq lazy-pairwise vm-global-gc pop lazy-to-array }
+[1 2 3 4] lazy-seq lazy-pairwise lazy-to-array
+deep-eq (lazy-pairwise: ${}+GC == local) rt-ok clear
+
+% ====================================================================
+% GC-stress: a long realization inside ${...} with a full GC per element.
+% Each forced thunk re-enters the rooted @-build path; the partially-built
+% result array (rooted by lazy-to-array) and every published node must
+% survive every sweep.  Sum is order-independent so the check is robust.
+% ====================================================================
+${
+    1 lazy-from { vm-global-gc pop add } lazy-map-indexed 20 lazy-take
+    0 { add } lazy-fold
+}
+1 lazy-from { add } lazy-map-indexed 20 lazy-take 0 { add } lazy-fold
+eq (lazy GC stress: map-indexed*20 fold == local) rt-ok clear
+
+(test_followon_b6_lazy_sibling_gc.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

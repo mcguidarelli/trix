@@ -1,0 +1,7 @@
+mark 1 2 (>hh) pack (>hh) unpack pop pop pop
+mark 300 70000 (<iI) pack (<iI) unpack pop pop pop
+mark 3.5d (>d) pack (>d) unpack pop pop
+mark 9 (>q) pack (>q) unpack pop pop
+mark (ok) (2s) pack pop
+(>3h) pack-size =
+(2x) pack-size =

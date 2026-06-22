@@ -1,0 +1,540 @@
+% ====================================================================
+% test_effects.trx -- algebraic effects tests
+% ====================================================================
+% Comprehensive test suite for handle-effect/perform operators,
+% effect handler nesting, continuation resume, and error integration.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: HAPPY PATH -- basic handle-effect / perform
+% ====================================================================
+
+% handler ignores K, returns constant
+<< /ask { pop 42 } >>
+{ /ask perform } handle-effect
+42 eq (basic: handler ignores K, returns constant) rt-ok clear
+
+% handler resumes K with a value
+<< /ask { 99 exch exec } >>
+{ /ask perform 1 add } handle-effect
+100 eq (basic: handler resumes K with value) rt-ok clear
+
+% handler resumes K, then continues with handler code
+<< /ask { 42 exch exec 100 add } >>
+{ /ask perform 10 add } handle-effect
+152 eq (basic: handler continues after K resume) rt-ok clear
+
+% body performs, handler resumes, body uses resume value
+<< /get-name { (Alice) exch exec } >>
+{ /get-name perform length } handle-effect
+5 eq (basic: resume value flows to body) rt-ok clear
+
+% body does not perform -- normal completion
+<< /ask { pop 99 } >>
+{ 42 } handle-effect
+42 eq (basic: no perform, normal completion) rt-ok clear
+
+% multiple effects in one handler-dict
+<< /inc { 1 exch exec } /dec { -1 exch exec } >>
+{ /inc perform /dec perform add } handle-effect
+0 eq (basic: multiple effects in one dict) rt-ok clear
+
+% handler aborts (drops K), body continuation never runs
+<< /abort { pop 42 } >>
+{ /abort perform 999 add } handle-effect
+42 eq (basic: handler aborts, body never completes) rt-ok clear
+
+% handler stores K in variable, invokes later
+<< /yield { } >>
+{ /yield perform 10 add } handle-effect
+/k exch def
+5 /k load exec
+15 eq (basic: K from perform stored, invoked later) rt-ok clear
+
+% ====================================================================
+% SECTION 2: NESTED HANDLERS
+% ====================================================================
+
+% inner handler shadows outer for same effect
+<< /ask { pop (outer) } >>
+{
+    << /ask { pop (inner) } >>
+    { /ask perform } handle-effect
+} handle-effect
+(inner) eq (nest: inner handler shadows outer) rt-ok clear
+
+% inner handler delegates unknown effect to outer
+<< /log { pop (logged) } >>
+{
+    << /ask { pop (answered) } >>
+    { /log perform } handle-effect
+} handle-effect
+(logged) eq (nest: inner delegates unknown to outer) rt-ok clear
+
+% three levels of nesting, innermost handles
+<< /a { pop 1 } >>
+{
+    << /b { pop 2 } >>
+    {
+        << /c { pop 3 } >>
+        { /c perform } handle-effect
+    } handle-effect
+} handle-effect
+3 eq (nest: three levels, innermost handles) rt-ok clear
+
+% three levels, middle handles
+<< /a { pop 1 } >>
+{
+    << /b { pop 2 } >>
+    {
+        << /c { pop 3 } >>
+        { /b perform } handle-effect
+    } handle-effect
+} handle-effect
+2 eq (nest: three levels, middle handles) rt-ok clear
+
+% three levels, outermost handles
+<< /a { pop 1 } >>
+{
+    << /b { pop 2 } >>
+    {
+        << /c { pop 3 } >>
+        { /a perform } handle-effect
+    } handle-effect
+} handle-effect
+1 eq (nest: three levels, outermost handles) rt-ok clear
+
+% inner handler resumes, continuation performs outer effect
+<< /log { (logged) exch exec } >>
+{
+    << /get { (value) exch exec } >>
+    {
+        /get perform pop  % get value, discard it
+        /log perform      % log something
+    } handle-effect
+} handle-effect
+(logged) eq (nest: inner resumes, continuation performs outer) rt-ok clear
+
+% ====================================================================
+% SECTION 3: ARGS ON STACK
+% ====================================================================
+
+% handler sees args below K
+<< /add { /k exch def add /k load exec } >>
+{ 10 20 /add perform } handle-effect
+30 eq (args: handler sees args below K) rt-ok clear
+
+% handler transforms args before resume
+<< /double { /k exch def 2 mul /k load exec } >>
+{ 21 /double perform } handle-effect
+42 eq (args: handler transforms arg) rt-ok clear
+
+% ====================================================================
+% SECTION 4: INTERACTION WITH TRY-CATCH
+% ====================================================================
+
+% error in body propagates past effect barrier to try
+{
+    << /ask { pop 42 } >>
+    { 1 0 div } handle-effect
+} try
+/div-by-zero eq (err: body error propagates past effect barrier) rt-ok clear
+
+% error before perform propagates
+{
+    << /ask { pop 42 } >>
+    { 1 0 div /ask perform } handle-effect
+} try
+/div-by-zero eq (err: error before perform propagates) rt-ok clear
+
+% error in handler propagates
+{
+    << /ask { pop 1 0 div } >>
+    { /ask perform } handle-effect
+} try
+/div-by-zero eq (err: handler error propagates) rt-ok clear
+
+% try-catch inside body works normally
+<< /ask { pop 42 } >>
+{
+    { 1 0 div } try /div-by-zero eq
+} handle-effect
+true eq (err: try-catch inside body works) rt-ok clear
+
+% error in resumed body propagates past fresh delimiter
+{
+    << /ask { 42 exch exec } >>
+    { /ask perform 1 0 div } handle-effect
+} try
+/div-by-zero eq (err: resumed body error propagates) rt-ok clear
+
+% ====================================================================
+% SECTION 5: SAD PATH (error cases)
+% ====================================================================
+
+% perform with no enclosing handle-effect
+{ /ask perform } try
+/effect-not-handled eq (sad: perform without handle-effect) rt-ok clear
+
+% perform for unhandled effect name
+{
+    << /ask { pop 42 } >>
+    { /other perform } handle-effect
+} try
+/effect-not-handled eq (sad: effect not in handler-dict) rt-ok clear
+
+% non-dict handler argument
+{ 42 { } handle-effect } try
+/type-check eq (sad: non-dict handler arg) rt-ok clear
+
+% non-callable body argument
+{ << >> 42 handle-effect } try
+/type-check eq (sad: non-callable body arg) rt-ok clear
+
+% non-name effect argument
+{ << >> { 42 perform } handle-effect } try
+/type-check eq (sad: non-name effect arg) rt-ok clear
+
+% one-shot: execute K twice
+{
+    << /ask { dup exch exec exec } >>
+    { /ask perform } handle-effect
+} try
+/invalid-access eq (sad: one-shot K, double exec) rt-ok clear
+
+% ====================================================================
+% SECTION 6: STRESS TESTS
+% ====================================================================
+
+% 10 sequential performs with resume
+/acc 0 def
+<< /tick { /acc acc 1 add def null exch exec } >>
+{
+    /tick perform pop
+    /tick perform pop
+    /tick perform pop
+    /tick perform pop
+    /tick perform pop
+    /tick perform pop
+    /tick perform pop
+    /tick perform pop
+    /tick perform pop
+    /tick perform pop
+} handle-effect
+acc 10 eq (stress: 10 sequential performs) rt-ok
+/acc 0 def
+clear
+
+% K stored in array, retrieved and invoked
+<< /yield { } >>
+{ /yield perform 10 mul } handle-effect
+[ exch ]
+0 get
+5 exch exec
+50 eq (stress: K in array, retrieved, invoked) rt-ok clear
+
+% K as curry value
+<< /yield { } >>
+{ /yield perform 10 mul } handle-effect
+5 exch curry
+exec
+50 eq (stress: K in curry, invoked) rt-ok clear
+
+% multiple live K from separate handle-effect scopes
+<< /yield { } >>
+{ /yield perform 1 add } handle-effect
+/k1 exch def
+<< /yield { } >>
+{ /yield perform 2 mul } handle-effect
+/k2 exch def
+10 /k1 load exec
+20 /k2 load exec
+40 eq exch 11 eq and (stress: two live K simultaneous) rt-ok clear
+
+% handler resumes with handler-dict as value (composability)
+<< /get-handler { << /inner true >> exch exec } >>
+{ /get-handler perform /inner get } handle-effect
+true eq (stress: resume with dict value) rt-ok clear
+
+% ====================================================================
+% SECTION 7: FUZZ / BOUNDARY TESTS
+% ====================================================================
+
+% empty body (handler never called, normal completion)
+<< /ask { pop 42 } >>
+{ } handle-effect
+clear  % stack should be clean
+true (fuzz: empty body, clean completion) rt-ok clear
+
+% perform as last operation in body (zero pending ops in K)
+<< /ask { 77 exch exec } >>
+{ /ask perform } handle-effect
+77 eq (fuzz: zero-element capture from perform) rt-ok clear
+
+% single pending op in captured segment
+<< /ask { 3 exch exec } >>
+{ /ask perform 1 add } handle-effect
+4 eq (fuzz: single-element capture) rt-ok clear
+
+% try-catch inside captured segment (error stack companion)
+<< /go { } >>
+{ /go perform { 42 } try } handle-effect
+/k exch def
+99 /k load exec
+/no-error eq exch 42 eq and (fuzz: try-catch inside captured segment) rt-ok clear
+
+% delimit inside captured segment
+<< /go { } >>
+{ /go perform { 99 } delimit add } handle-effect
+/k exch def
+1 /k load exec
+100 eq (fuzz: delimit inside captured segment) rt-ok clear
+
+% nested handle-effect inside captured segment
+<< /outer { } >>
+{
+    /outer perform
+    << /inner { pop 99 } >>
+    { /inner perform } handle-effect
+    add
+} handle-effect
+/k exch def
+1 /k load exec
+100 eq (fuzz: nested handle-effect inside captured segment) rt-ok clear
+
+% perform inside delimit body (perform scans past delimit-barrier)
+<< /ask { pop 42 } >>
+{
+    { /ask perform } delimit
+} handle-effect
+42 eq (fuzz: perform scans past delimit-barrier) rt-ok clear
+
+% handle-effect inside delimit body
+{
+    << /ask { pop 42 } >>
+    { /ask perform } handle-effect
+} delimit
+42 eq (fuzz: handle-effect inside delimit) rt-ok clear
+
+% capture inside handle-effect body
+<< /ask { pop 42 } >>
+{
+    { { pop 99 } capture } delimit
+} handle-effect
+99 eq (fuzz: capture inside handle-effect body) rt-ok clear
+
+% empty handler-dict (all effects delegate outward)
+<< /ask { pop 42 } >>
+{
+    << >>
+    { /ask perform } handle-effect
+} handle-effect
+42 eq (fuzz: empty inner dict delegates to outer) rt-ok clear
+
+% ====================================================================
+% SECTION 8: PERFORM ACROSS |locals|
+% ====================================================================
+% `perform` captures a deep-handler continuation that may span one or
+% more |locals| boundaries.  The locals dicts are saved and restored
+% just like the capture/delimit case.  Tests use `put` into userdict
+% (not `def`) to avoid filling the fixed-capacity locals dict.
+
+userdict /result 0 put
+
+% perform inside |x| body: handler resumes with constant; body reads x after resume
+<< /ask { 1 exch exec } >>
+{
+    99 {
+        |x|
+        /ask perform x add        % perform -> 1, then x (99) add -> 100
+        userdict exch /result exch put
+    } exec
+} handle-effect
+result 100 eq (locals: perform inside |x|, body sees x on resume) rt-ok
+userdict /result 0 put
+clear
+
+% handler runs outside the locals scope, aborts (does not resume K)
+<< /ask { pop 77 } >>
+{
+    99 {
+        |x|
+        /ask perform              % never returns -- handler aborts
+    } exec
+} handle-effect
+77 eq (locals: handler aborts outside |x| scope) rt-ok clear
+
+% 3-deep |locals|: all frames restored on handler resume
+<< /sum { 0 exch exec } >>
+{
+    1 2 3 {
+        |a|
+        {
+            |b|
+            {
+                |c|
+                /sum perform pop        % resume value unused
+                userdict /result a b c add add put
+            } exec
+        } exec
+    } exec
+} handle-effect
+result 6 eq (locals: 3-deep |a|/|b|/|c| restored across perform) rt-ok
+userdict /result 0 put
+clear
+
+% nested handle-effect inside |locals| -- inner handler wins
+<< /ask { pop 11 } >>
+{
+    42 {
+        |x|
+        << /ask { pop 22 } >>
+        { /ask perform } handle-effect
+    } exec
+} handle-effect
+22 eq (locals: nested handle-effect inside locals, inner wins) rt-ok clear
+
+% inner handle-effect delegates unhandled effect outward across |locals|
+<< /reply { pop 100 } >>
+{
+    42 {
+        |x|
+        << /other { pop 200 } >>
+        { /reply perform } handle-effect
+    } exec
+} handle-effect
+100 eq (locals: delegation across locals boundary) rt-ok clear
+
+% error-surfacing idiom: effect carries an err-msg arg, handler aborts with it
+<< /scheme-error { pop } >>
+{
+    42 {
+        |x|
+        (oops) /scheme-error perform    % handler pops K, leaves (oops) as result
+    } exec
+} handle-effect
+(oops) eq (locals: error-surfacing idiom across |locals|) rt-ok clear
+
+% ====================================================================
+% SECTION 9: COVERAGE-GAP TESTS (added 2026-05-12 review)
+% ====================================================================
+
+% --- 9.1: coroutine isolation -------------------------------------
+%   Handlers installed in coroutine A must be invisible to coroutine B.
+%   Cor B performs /shared-effect with no handler installed in its own
+%   scope -- B dies with /effect-not-handled.  coroutine-join reports
+%   the failure as flag=false; we assert that.  Conversely, if the
+%   handler leaked across coroutines, B would return (from-A) and
+%   flag=true.
+<< /shared-effect { pop (from-A) } >>
+{
+    [ {
+        /shared-effect perform     % B has no handler -- dies with /effect-not-handled
+    } coroutine-launch coroutine-join
+    exch pop                        % drop the null return value, keep the flag
+} handle-effect
+false eq
+    (cor: handler in A invisible to coroutine B) rt-ok clear
+
+% --- 9.2: save/restore across handle-effect ---------------------
+%   K captured inside body, body's save scope restored, then resume K.
+%   The K's stamped save_level > current → /invalid-restore on exec.
+{
+    save /S exch def
+    << /ask { } >> { /ask perform } handle-effect
+    /saved-k exch def
+    S restore
+    saved-k exec
+} /invalid-restore { pop } try
+clear   % drop the residual save token / state from try frame
+true (sr: K stale after restore raises /invalid-restore) rt-ok clear
+
+% --- 9.3: op-stack omission verified explicitly ------------------
+%   perform captures with op_count=0 -- meaning it does NOT snapshot
+%   the operand stack.  When K is resumed, the body's continuation runs
+%   on whatever the live op-stack is at the resume site.  Pre-perform
+%   args stay on the live op-stack across the perform→handler→resume
+%   transition because they were never popped by perform; the handler
+%   sees them below K and either consumes or leaves them.
+%
+%   Test: body has 100, 200 below perform.  Handler stores K, executes
+%   to verify stack at resume site is the live stack, not a snapshot.
+<< /probe { /k exch def /k load exec } >>     % store K, resume immediately
+{
+    100 200 /probe perform              % body: [100 200], perform pushes K → [100 200 K]
+    count                                % count items remaining on op-stack
+} handle-effect
+% Trace:
+%   Before perform: [100 200].  Perform pops effect-name, captures, pushes K.
+%   Handler entry stack: [100 200 K].  /k exch def consumes K → [100 200].
+%   /k load exec resumes K.  Captured body-continuation = `count`.
+%   At resume, op-stack is [100 200] (whatever handler left).
+%   count pushes the size: [100 200 2].
+2 eq    (op: count after resume reports live stack size 2) rt-ok
+200 eq  (op: pre-perform value 200 alive after resume) rt-ok
+100 eq  (op: pre-perform value 100 alive after resume) rt-ok clear
+
+% --- 9.4: chained effects (handler performs another effect) ----------
+%   /outer handler invokes /inner perform; /inner is handled by outer scope.
+<< /inner { (inner-result) exch exec } >>
+{
+    << /outer {
+        /k exch def
+        /inner perform        % delegated up to /inner handler
+        /k load exec          % resume original K with /inner's resume value
+    } >>
+    {
+        /outer perform        % body performs /outer
+        (got: ) exch concat
+    } handle-effect
+} handle-effect
+(got: inner-result) eq
+    (chain: handler performs delegated effect) rt-ok clear
+
+% --- 9.5: GC-of-stored-K (K survives a gc-vm-global run) ------------
+%   K stored in a global container; trigger a GC pass; resume K afterwards.
+%   The Continuation Object lives in VM; gc-vm-global walks global region.
+%   The capture lives in LOCAL VM by default, but the storing CONTAINER
+%   is global -- exercises the "global container references local-VM K"
+%   path that plan_gc_walks_local_containers.md hardened.
+<< /yield { } >>
+{ /yield perform 100 add } handle-effect
+${ [ exch ] /global-k-holder exch def }   % global array holding K
+vm-global-gc pop                            % run GC pass
+global-k-holder 0 get                       % retrieve K
+1 exch exec                                 % resume K with value 1
+101 eq
+    (gc: stored-K survives vm-global-gc and resumes correctly) rt-ok clear
+
+% --- 9.6: /effect-not-handled raised inside a handler propagates ----
+%   Handler perform's an effect NOT in any handler-dict.
+{
+    << /ask { /unknown perform } >>     % handler tries to perform unknown
+    { /ask perform }
+    handle-effect
+} /effect-not-handled { pop } try
+clear   % drop residual state
+true (chain: unhandled effect inside handler propagates) rt-ok clear
+
+% --- 9.7: perform scans past @end-in-global -------------------------
+%   ${ ... } pushes @end-in-global on exec with a saved-Boolean companion
+%   on the err stack.  A perform inside the ${ } body that resolves to an
+%   OUTER handler must --err_scan past the @end-in-global; else it reads
+%   the Boolean companion as a handler-dict and aborts on the dict_value
+%   assertion.  Regression for crash-ba21e8cf601f6a1306df5653445dc5511b8f1571.
+<< /ping { 42 exch exec } >>
+{ ${ /ping perform 1 add } }
+handle-effect
+43 eq (perform: scans past @end-in-global without dict-assert) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

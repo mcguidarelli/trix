@@ -1,0 +1,2 @@
+{ 1 { { 10 exch exec } capture } delimit 5 mul } delimit
+{ 1 { { pop 42 } capture } delimit 5 mul } delimit

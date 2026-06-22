@@ -1,0 +1,3 @@
+10 cell /c exch def
+{ 1 c cell-set 2 c cell-set 3 c cell-set } batch
+c cell-get

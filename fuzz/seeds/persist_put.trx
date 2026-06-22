@@ -1,0 +1,3 @@
+% put-persist: non-journaled put, polymorphic over dict / array.
+4 dict /st exch def st /count 0 put save /sv exch def st /count 7 put-persist sv restore st /count get
+[1 2 3 4] /a exch def save /sv exch def a 0 99 put-persist sv restore a 0 get

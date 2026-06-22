@@ -1,0 +1,212 @@
+% lib/keys.trx -- Terminal escape-sequence decoder for Trix.
+%
+% Provides:
+%   decode-key      block-src poll-src -- key-name
+%   with-raw-mode   proc --
+%
+% Both block-src and poll-src are procs with stack effect ( -- byte true | false ).
+% Real use:
+%   { read-key-byte } { 50 read-key-byte-timeout } decode-key
+% Tests:
+%   pass an array-yielding proc for both arguments.
+%
+% Returned key names:
+%   /a /A /1 /! ...           printable ASCII bytes 0x21..0x7E (the byte literally)
+%   /space                    0x20 (spelled out, not the literal " " name)
+%   /ctrl-a .. /ctrl-z        control bytes 0x01..0x1A (excluding the four below)
+%   /tab                      0x09
+%   /enter                    0x0A or 0x0D
+%   /backspace                0x7F
+%   /escape                   bare ESC (timed-out continuation)
+%   /up /down /left /right    arrow keys (CSI A/B/C/D)
+%   /home /end                CSI H/F or 1~/4~
+%   /insert /delete           CSI 2~/3~
+%   /page-up /page-down       CSI 5~/6~
+%   /f1 .. /f4                SS3 P/Q/R/S
+%   /f5 .. /f12               CSI 15~/17~/18~/19~/20~/21~/23~/24~
+%   /eof                      block-src returned false
+%   /unknown                  unrecognized byte / sequence
+%
+% Implementation note: the source procs are made literal as they enter
+% decode-key (so that locals-binding and stack-passing don't auto-execute
+% them on lookup).  The single `_read-byte` helper restores the executable
+% attribute just before exec'ing the proc, then the result drops back into
+% literal-on-stack discipline.
+
+% --- Lookup tables (ReadOnly) -------------------------------------------------
+
+/_keys-single <<
+    9   /tab
+    10  /enter
+    13  /enter
+    32  /space                                 % spelled out so consumers can write `key /space eq` without a 1-char-name literal
+    127 /backspace
+>> def
+/_keys-single _keys-single make-readonly def
+
+% CSI single-letter terminators (ESC [ <X>)
+/_keys-csi-letter <<
+    65 /up        66 /down      67 /right     68 /left
+    72 /home      70 /end
+>> def
+/_keys-csi-letter _keys-csi-letter make-readonly def
+
+% CSI tilde codes (ESC [ <N> ~)
+/_keys-csi-tilde <<
+    1 /home    2 /insert    3 /delete    4 /end
+    5 /page-up 6 /page-down
+    15 /f5    17 /f6    18 /f7    19 /f8
+    20 /f9    21 /f10   23 /f11   24 /f12
+>> def
+/_keys-csi-tilde _keys-csi-tilde make-readonly def
+
+% SS3 codes (ESC O <X>) -- function keys F1..F4
+/_keys-ss3 <<
+    80 /f1   81 /f2   82 /f3   83 /f4
+>> def
+/_keys-ss3 _keys-ss3 make-readonly def
+
+% --- Helpers ------------------------------------------------------------------
+
+% Build a 1-char Name from a byte: 0x71 -> /q
+/_byte-to-name {|b|
+    1 string dup 0 b /byte-type cast put to-name
+} def
+
+% Build /ctrl-x for a control byte (1..26).  Map to lowercase letter (b+96).
+/_ctrl-name {|b|
+    1 string dup 0 b 96 add /byte-type cast put
+    (ctrl-) exch concat
+    to-name
+} def
+
+% Read one byte from the source proc and cast to integer.  Returns -1 on
+% EOF/timeout instead of leaving `false` on the stack.  src is held literal
+% in the local (so name lookup pushes the proc rather than running it); we
+% restore the executable attribute just for the exec call.
+/_read-byte {|src|
+    src make-executable exec
+    { /integer-type cast } { -1 } if-else
+} def
+
+% --- Sub-decoders -------------------------------------------------------------
+
+% After ESC O, read one more byte; map via _keys-ss3.
+% Argument poll is a literal proc (must remain literal as it passes through).
+/_decode-ss3 {|poll|
+    poll _read-byte
+    dup -1 eq { pop /unknown }
+    { _keys-ss3 exch /unknown get-default } if-else
+} def
+
+% After ESC [, parse the CSI body.  Recognized:
+%   <letter>          single-char CSI (A B C D H F)
+%   <digit> ~          1-digit tilde code
+%   <digit><digit> ~  2-digit tilde code
+% Anything else returns /unknown.
+/_decode-csi {|poll|
+    poll _read-byte                            % b1
+    dup -1 eq { pop /unknown }
+    {
+        % single-letter CSI?
+        dup _keys-csi-letter exch known?
+        { _keys-csi-letter exch /unknown get-default }
+        {
+            % digit?
+            dup 48 ge over 57 le and
+            {
+                48 sub                         % d1 (0..9)
+                poll _read-byte                % d1 b2
+                dup -1 eq { pop pop /unknown }
+                {
+                    dup 126 eq                 % b2 == '~' (1-digit code)?
+                    {
+                        pop                    % drop ~
+                        _keys-csi-tilde exch /unknown get-default
+                    }
+                    {
+                        dup 48 ge over 57 le and  % b2 is digit (2-digit code)?
+                        {
+                            48 sub             % d1 d2
+                            exch 10 mul add    % d1*10 + d2
+                            poll _read-byte    % code b3
+                            126 eq             % b3 == '~'?
+                            { _keys-csi-tilde exch /unknown get-default }
+                            { pop /unknown } if-else
+                        }
+                        { pop pop /unknown } if-else
+                    } if-else
+                } if-else
+            }
+            { pop /unknown } if-else
+        } if-else
+    } if-else
+} def
+
+% After ESC, decide whether a sequence follows.  poll-src returning -1 means
+% the user pressed bare ESC.
+/_decode-after-esc {|poll|
+    poll _read-byte                            % b
+    dup -1 eq { pop /escape }
+    {
+        dup 91 eq                              % '['?
+        { pop poll _decode-csi }
+        {
+            dup 79 eq                          % 'O'?
+            { pop poll _decode-ss3 }
+            { pop /unknown } if-else
+        } if-else
+    } if-else
+} def
+
+% --- Public API ---------------------------------------------------------------
+
+% decode-key block-src poll-src -- key-name
+% Read one keystroke worth of input via the two source procs and classify it.
+% block-src is used for the FIRST byte (we want to block until a key is pressed).
+% poll-src is used for any continuation bytes (so a bare ESC eventually times
+% out and resolves to /escape rather than hanging on the user's release).
+%
+% The two procs are made literal at the entry boundary so they survive
+% pass-through-locals without being auto-executed by name lookup.
+/decode-key {
+    make-literal exch make-literal exch
+    _decode-key-inner
+} def
+
+/_decode-key-inner {|block-src poll-src|
+    block-src _read-byte                       % b
+    dup -1 eq { pop /eof }
+    {
+        % Single-byte well-known table first (tab, enter, backspace).
+        dup _keys-single exch known?
+        { _keys-single exch /unknown get-default }
+        {
+            dup 27 eq                          % ESC?
+            { pop poll-src _decode-after-esc }
+            {
+                dup 32 ge over 127 lt and      % printable?
+                { _byte-to-name }
+                {
+                    dup 1 ge over 26 le and    % control letter?
+                    { _ctrl-name }
+                    { pop /unknown } if-else
+                } if-else
+            } if-else
+        } if-else
+    } if-else
+} def
+
+% with-raw-mode proc --
+% Run proc with the controlling tty in raw mode.  Restore cooked mode on every
+% exit path -- normal completion, caught error, uncaught error.  The error
+% (if any) is rethrown after restore so the caller's outer handler can react.
+/with-raw-mode {
+    raw-mode
+    { exec } try                               % proc -- /no-error or /errname
+    cooked-mode
+    dup /no-error eq
+    { pop }
+    { rethrow }
+    if-else
+} def

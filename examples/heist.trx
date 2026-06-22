@@ -1,0 +1,891 @@
+% ======================================================================
+%  Showcase: Heist set-cover planner
+%  ----------------------------------------------------------------------
+%  Recommended invocations:
+%
+%      ./trix --vm-size=4M examples/heist.trx                         # default casino vault
+%      ./trix --vm-size=4M examples/heist.trx --job gallery           # The Nightfall Gallery
+%      ./trix --vm-size=4M examples/heist.trx --job crown             # The Coronet Vault
+%      ./trix --vm-size=4M examples/heist.trx --all-jobs              # all three, side by side
+%      ./trix --vm-size=4M examples/heist.trx --budget 18             # budget-limited optimal
+%      ./trix --vm-size=4M examples/heist.trx --no-pair Rourke,Rye    % antipathy constraint
+%      ./trix --vm-size=4M examples/heist.trx --analyze Fitch         % per-suspect analysis
+%      ./trix --vm-size=4M examples/heist.trx --extra-roster          % adds Zane (12 suspects)
+%
+%  ----------------------------------------------------------------------
+%  Demonstrates Trix's set primitives in their natural use cases:
+%
+%      {{...}}                           Set literal (heterogeneous keys)
+%      {{...}}#=                         Eq-set scratch storage (top level only)
+%      set / set-add / set-remove        Dynamic set
+%      set-member?                       Membership test
+%      set-union                         Team-skill accumulator
+%      set-intersection                  Coverage scoring; redundancy analysis
+%      set-difference                    Remaining update; uniqueness analysis
+%      symmetric-difference              Greedy-vs-optimal punchline; substitutability
+%      subset?                           Cover-complete termination + antipathy
+%      set-filter                        Budget filtering
+%      members                           Iteration to array
+%      set-from-array                    Build set from CLI arg list
+%      length / for-all                  Polymorphic over Set
+%      tag / tag-match                   /anchor /specialist /redundant classification
+%      def-persist                       Branch counter across save/restore
+%
+%  Sister showcase: examples/sudoku.trx solves backtracking constraints
+%  via logic-vars + choice points; this script solves a different problem
+%  -- minimum subset selection -- where backtracking is overkill but set
+%  algebra is the natural fit.  The two together cover the constraint
+%  surface from both sides.
+%
+%  ----------------------------------------------------------------------
+%  THE PROBLEM
+%
+%  A "job" is a heist with a required skill set.  An "operative" has a
+%  skill set, a fee, an enemies set, and a one-line bio.  A "team" is a
+%  subset of operatives whose union of skills covers the required set.
+%  We want a MINIMUM team -- by member count or by total fee, and
+%  optionally subject to budget and antipathy constraints.
+%
+%  This is the classic NP-hard SET COVER problem.  We solve it three
+%  ways and compare:
+%
+%      1. Greedy:           pick the operative whose skills ∩ remaining
+%                           is largest at each round (tiebreak: lower
+%                           fee, then alphabetical).  Fast O(rounds × N)
+%                           but not always optimal.
+%
+%      2. Optimal-by-size:  enumerate all 2^N subsets; keep the smallest
+%                           that covers required (tiebreak: lower total
+%                           fee).
+%
+%      3. Optimal-by-fee:   same enumeration; keep the cover with lowest
+%                           total fee, regardless of size.
+%
+%  When greedy and optimal-by-fee differ, the symmetric-difference of
+%  their team sets shows EXACTLY where greedy strayed -- the demo's
+%  punchline.  Greedy + optimal-by-size usually agree on this roster.
+%
+%  ----------------------------------------------------------------------
+%  HETEROGENEOUS SKILL KEYS
+%
+%  Most languages' sets require a single key type.  Trix sets accept
+%  mixed types in one container: a single skill set may contain Names
+%  (abstract skill classes like /lockpick), Strings (specific tools or
+%  identities like (cardistry), (silver-tongue)), and other hashable
+%  scalars when the domain calls for them.
+%
+%  Each type compares structurally for set membership, so:
+%
+%      {{ /lockpick (cardistry) /charm }} {{ (cardistry) /charm /demo }}
+%      set-intersection
+%        =>  {{ (cardistry) /charm }}
+%
+%  This script leans into the feature: skills mix Names (skill classes)
+%  and Strings (specific named tools / identities / capabilities).  The
+%  required-skill set for each job uses the same vocabulary.  No
+%  polymorphic wrapper required on Trix's side.
+%
+%  ----------------------------------------------------------------------
+%  THE ROSTER (heist-genre archetypes; original names)
+%
+%      Dane        leadership, charm, distraction, planning      $5
+%      Nadia       planning, casino-floor, (silver-tongue)        $3
+%      Fitch       pickpocket, lockpick                           $2
+%      Wynn        lockpick, acrobatics, climbing                 $3
+%      Pia         distraction, charm                             $2
+%      Bram        demolitions, electronics                       $4
+%      Hux         hacker, electronics, (retina-spoof-card)       $4
+%      Marlowe     (cardistry), distraction, casino-floor         $9
+%      Iggy        (cardistry)                                    $1
+%      Rye         transportation, mechanic   [enemies: Rourke]   $2
+%      Rourke      transportation, mechanic   [enemies: Rye]      $2
+%
+%      [--extra-roster adds:]
+%      Zane        leadership, financing, casino-floor            $7
+%
+%  ======================================================================
+
+% ----------------------------------------------------------------------
+%  SECTION 1: Suspect roster
+% ----------------------------------------------------------------------
+%  Each suspect is a dict with /name, /skills, /fee, /enemies, /bio.
+%  Skill sets are heterogeneous: Names (skill classes) and Strings
+%  (specific tools / capabilities).  Enemies are Names (other suspects'
+%  /name fields).  Order in the array determines greedy alphabetical
+%  tiebreak (we keep the array alphabetized by name).
+% ----------------------------------------------------------------------
+
+/default-roster [
+    << /name /Bram
+       /skills {{ /demolitions /electronics }}
+       /fee     4
+       /enemies {{ }}
+       /bio     (Once dropped a parking deck with a doorbell, allegedly.) >>
+    << /name /Dane
+       /skills {{ /leadership /charm /distraction /planning }}
+       /fee     5
+       /enemies {{ }}
+       /bio     (Plans three jobs ahead; naps through the actual one.) >>
+    << /name /Fitch
+       /skills {{ /pickpocket /lockpick }}
+       /fee     2
+       /enemies {{ }}
+       /bio     (Lifts your watch and gives it back, just to make a point.) >>
+    << /name /Hux
+       /skills {{ /hacker /electronics (retina-spoof-card) }}
+       /fee     4
+       /enemies {{ }}
+       /bio     (Talks to keypads; they usually answer.) >>
+    << /name /Iggy
+       /skills {{ (cardistry) }}
+       /fee     1
+       /enemies {{ }}
+       /bio     (Sleight-of-hand prodigy; deals seconds for sport.) >>
+    << /name /Marlowe
+       /skills {{ (cardistry) /distraction /casino-floor }}
+       /fee     9
+       /enemies {{ }}
+       /bio     (Owns any room he enters; refuses to work before dark.) >>
+    << /name /Nadia
+       /skills {{ /planning /casino-floor (silver-tongue) }}
+       /fee     3
+       /enemies {{ }}
+       /bio     (Reads the whole room before she reaches the bar.) >>
+    << /name /Pia
+       /skills {{ /distraction /charm }}
+       /fee     2
+       /enemies {{ }}
+       /bio     (Can talk a guard into holding the door open.) >>
+    << /name /Rourke
+       /skills {{ /transportation /mechanic }}
+       /fee     2
+       /enemies {{ /Rye }}
+       /bio     (Won't drive if his brother controls the radio.) >>
+    << /name /Rye
+       /skills {{ /transportation /mechanic }}
+       /fee     2
+       /enemies {{ /Rourke }}
+       /bio     (The other brother.  Same argument, every job.) >>
+    << /name /Wynn
+       /skills {{ /lockpick /acrobatics /climbing }}
+       /fee     3
+       /enemies {{ }}
+       /bio     (Fits through gaps a cat would think twice about.) >>
+] def
+
+% Zane is the optional --extra-roster addition.  His high fee and
+% leadership/casino-floor coverage opens up additional optimal trade-offs.
+/extra-roster [
+    << /name /Zane
+       /skills {{ /leadership /financing /casino-floor }}
+       /fee     7
+       /enemies {{ }}
+       /bio     (Bankrolls the whole thing; never sets foot on site.) >>
+] def
+
+% Detect --extra-roster flag, build the active roster.
+/use-extra false def
+command-line-args { /arg exch def
+    arg (--extra-roster) eq { /use-extra true store } if
+} for-all
+
+/suspects use-extra
+    { [ default-roster extra-roster ] flatten }
+    { default-roster }
+    if-else def
+
+% ----------------------------------------------------------------------
+%  SECTION 2: Job catalog
+% ----------------------------------------------------------------------
+%  Three jobs.  /required is the skill set the team's union must cover.
+%  /budget is the default fee cap when --budget is not specified
+%  explicitly (it's used by the constrained-optimal mode).
+% ----------------------------------------------------------------------
+
+/jobs <<
+    /vault     << /name     (The Aurora Casino Vault)
+                  /required {{ /leadership /lockpick /hacker /demolitions
+                               /distraction /casino-floor (cardistry)
+                               /transportation }}
+                  /budget   24 >>
+    /gallery   << /name     (The Nightfall Gallery)
+                  /required {{ /leadership /lockpick /acrobatics /climbing
+                               /hacker (retina-spoof-card)
+                               /transportation }}
+                  /budget   20 >>
+    /crown     << /name     (The Coronet Vault)
+                  /required {{ /leadership /lockpick /climbing /demolitions
+                               /distraction /transportation /hacker }}
+                  /budget   22 >>
+>> def
+
+% ----------------------------------------------------------------------
+%  SECTION 3: Helpers
+%
+%  Small set-flavored utilities used by every solver and printer.  None
+%  of them mutate global state -- they take inputs, return outputs, and
+%  let the caller decide where the result lives.
+% ----------------------------------------------------------------------
+
+% suspect-by-name: name -- record (or null if not found)
+%
+% Frame slots: target (arg) + found + s (loop var) = 3.
+/suspect-by-name { |target|#+2
+    /found null local-def
+    suspects { /s exch local-def
+        s /name get target eq { /found s store } if
+    } for-all
+    found
+} def
+
+% team-skills: team(Set<Name>) -- skills(Set<heterogeneous>)
+%
+% Builds the union of every team member's skill set.  This is the
+% headline use of `set-union`: each team member contributes their
+% skills, the running accumulator is union-folded across the team.
+% Frame slots: team (arg) + accum + n (loop var) = 3.
+/team-skills { |team|#+2
+    /accum {{ }} local-def
+    team members { /n exch local-def
+        /accum accum n suspect-by-name /skills get set-union local-def
+    } for-all
+    accum
+} def
+
+% team-fee: team(Set<Name>) -- total(Integer)
+% Frame slots: team (arg) + total + n (loop var) = 3.
+/team-fee { |team|#+2
+    /total 0 local-def
+    team members { /n exch local-def
+        /total total n suspect-by-name /fee get add local-def
+    } for-all
+    total
+} def
+
+% covers?: team(Set<Name>) required(Set) -- bool
+%
+% Required is a subset of the team's combined skills iff the team
+% covers the job.  `subset?  set1 set2 -- bool` reads "is set1 a subset
+% of set2", so we order it `required team-skills subset?`.
+/covers? { |team required|
+    required team team-skills subset?
+} def
+
+% remaining-after: team(Set<Name>) required(Set) -- remaining(Set)
+%
+% Skills still needed: required minus what the team already covers.
+/remaining-after { |team required|
+    required team team-skills set-difference
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 4: Greedy set-cover
+% ----------------------------------------------------------------------
+%  At each round, pick the suspect whose skills cover the most of the
+%  still-needed `remaining` set.  Tiebreak by lower fee; final tiebreak
+%  by alphabetical position in `suspects` (which we keep sorted).
+%
+%  This is O(rounds × |suspects|) and yields a log(|required|)-
+%  approximation in the worst case.  On this 11-suspect roster it
+%  agrees with optimal-by-size; the comparison with optimal-by-fee is
+%  where the divergence shows up.
+% ----------------------------------------------------------------------
+
+% greedy-cover: required(Set) -- team(Set<Name>)
+/greedy-cover { |required|#+8
+    /team 16 set local-def
+    /remaining required local-def
+    { remaining length 0 gt } {
+        /best-name  null   local-def
+        /best-score 0      local-def
+        /best-fee   999999 local-def
+        suspects { /s exch local-def
+            team s /name get set-member? not {
+                /score s /skills get remaining set-intersection length local-def
+                score 0 gt {
+                    score best-score gt
+                    score best-score eq s /fee get best-fee lt and
+                    or
+                    {
+                        /best-name  s /name get store
+                        /best-score score      store
+                        /best-fee   s /fee get store
+                    } if
+                } if
+            } if
+        } for-all
+        best-name null eq {
+            (greedy: no suspect covers remaining ) print remaining == exit
+        } if
+        /team team best-name set-add local-def
+        /remaining remaining best-name suspect-by-name /skills get set-difference local-def
+    } while
+    team
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 5: Optimal set-cover (exhaustive)
+% ----------------------------------------------------------------------
+%  Enumerate every 2^N subset of suspects and keep the best.  "Best"
+%  has two definitions, each handled by a sibling proc:
+%
+%      optimal-cover-by-size  -- minimize team size (tiebreak: fee)
+%      optimal-cover-by-fee   -- minimize total fee (tiebreak: size)
+%
+%  Each iteration is wrapped in `save`/`restore` so the per-mask
+%  candidate-set allocations don't pile up.  The carry-over scalars
+%  (best-mask, best-size, best-fee) live in userdict and are written
+%  via `def-persist` so they survive each iteration's `restore`.
+%
+%  N=11 yields 2048 subsets; N=12 (--extra-roster) yields 4096.  Both
+%  trivial.  The branch counter `opt-attempts` reports the actual
+%  number visited, which is the same as 2^N here -- but with budget
+%  or antipathy filters added, prunes show up in the count.
+% ----------------------------------------------------------------------
+
+% Userdict-backed carry-over slots for the optimal solver.  Pre-defined
+% so def-persist has a binding to overwrite (def-persist requires the
+% name to already exist; it bypasses the save journal but doesn't
+% create new bindings).
+/opt-best-mask -1     def
+/opt-best-size 999    def
+/opt-best-fee  999999 def
+/opt-attempts  0      def
+
+% mask-to-team: mask(UInteger or -1 sentinel) -- team(Set<Name>)
+% Returns an empty set when mask == -1 (the "no solution found" sentinel
+% the optimal solvers leave in opt-best-mask if no candidate covered
+% required under the active constraints).
+/mask-to-team { |mask|#+3
+    /team 16 set local-def
+    mask type /uinteger-type eq
+    {
+        0 1 suspects length 1 sub { /i exch local-def
+            mask 1u i shift-left and 0u ne {
+                /team team suspects i get /name get set-add local-def
+            } if
+        } for
+    } if
+    team
+} def
+
+% optimal-cover-core: required(Set) better?(proc) -- best-mask(Integer)
+%
+% Inner enumeration loop shared by both objective functions.  `better?`
+% is a proc that takes the candidate's `(team-len, fee)` (passed as
+% scalars) and returns true iff the candidate beats the best-so-far.
+/optimal-cover-core { |required better?|#+8
+    % Reset carry-over slots before the loop.  These are top-level
+    % userdict bindings, written via `def` (skips frames).  Inside the
+    % save/restore loop below we switch to `def-persist` so updates
+    % survive each iteration's rollback.
+    /opt-best-mask -1     def
+    /opt-best-size 999    def
+    /opt-best-fee  999999 def
+    /opt-attempts  0      def
+    /n             suspects length local-def
+    /total-subsets 1u n shift-left local-def    % 2^N (UInteger for shift-left)
+    0u 1u total-subsets 1u sub { /mask exch local-def
+        save /opt-save exch local-def
+        /candidate mask mask-to-team local-def
+        candidate required covers? {
+            /sz candidate length local-def
+            /fe candidate team-fee local-def
+            sz fe better? exec
+            {
+                /opt-best-mask mask def-persist
+                /opt-best-size sz   def-persist
+                /opt-best-fee  fe   def-persist
+            } if
+        } if
+        /opt-attempts opt-attempts 1 add def-persist
+        opt-save restore
+    } for
+    opt-best-mask
+} def
+
+% optimal-cover-by-size: required -- team
+%
+% Better? predicate: smaller size, tiebreak smaller fee.
+/optimal-cover-by-size { |required|#+1
+    required {
+        |sz fe|
+        sz opt-best-size lt
+        sz opt-best-size eq fe opt-best-fee lt and
+        or
+    } optimal-cover-core
+    mask-to-team
+} def
+
+% optimal-cover-by-fee: required -- team
+%
+% Better? predicate: smaller fee, tiebreak smaller size.
+/optimal-cover-by-fee { |required|#+1
+    required {
+        |sz fe|
+        fe opt-best-fee lt
+        fe opt-best-fee eq sz opt-best-size lt and
+        or
+    } optimal-cover-core
+    mask-to-team
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 6: Constraint variants
+% ----------------------------------------------------------------------
+%  Budget and antipathy ride on top of optimal-cover-core's structure
+%  by adding a `valid?` filter alongside the existing `better?`
+%  comparator.  Both are passed as procs so the kernel doesn't have to
+%  know about budget / antipathy specifically -- it just calls the
+%  predicates.
+% ----------------------------------------------------------------------
+
+% optimal-cover-core (parameterized): required valid? better? -- best-mask
+%
+% valid?:  team(Set<Name>) -- bool   "is this candidate allowed?"
+% better?: sz fe -- bool             "does (sz, fe) beat the running best?"
+%
+% Each candidate is built once, fed to covers? + valid?, and (if both
+% pass) compared via better? to the running best.  /opt-attempts counts
+% every mask visited (including those rejected by valid?).
+/optimal-cover-core { |required valid? better?|#+8
+    /opt-best-mask -1     def
+    /opt-best-size 999    def
+    /opt-best-fee  999999 def
+    /opt-attempts  0      def
+    /n             suspects length local-def
+    /total-subsets 1u n shift-left local-def    % 2^N
+    0u 1u total-subsets 1u sub { /mask exch local-def
+        save /opt-save exch local-def
+        /candidate mask mask-to-team local-def
+        candidate required covers?
+        candidate valid? exec
+        and
+        {
+            /sz candidate length local-def
+            /fe candidate team-fee local-def
+            sz fe better? exec
+            {
+                /opt-best-mask mask def-persist
+                /opt-best-size sz   def-persist
+                /opt-best-fee  fe   def-persist
+            } if
+        } if
+        /opt-attempts opt-attempts 1 add def-persist
+        opt-save restore
+    } for
+    opt-best-mask
+} def
+
+% Trivial valid? -- "every candidate is allowed".  Used by the
+% unconstrained -by-size / -by-fee solvers.
+/always-valid { pop true } def
+
+% optimal-cover-by-size: required -- team
+% Better? predicate: smaller size, tiebreak smaller fee.
+/optimal-cover-by-size { |required|#+1
+    required
+    { always-valid }
+    {
+        |sz fe|
+        sz opt-best-size lt
+        sz opt-best-size eq fe opt-best-fee lt and
+        or
+    }
+    optimal-cover-core
+    mask-to-team
+} def
+
+% optimal-cover-by-fee: required -- team
+% Better? predicate: smaller fee, tiebreak smaller size.
+/optimal-cover-by-fee { |required|#+1
+    required
+    { always-valid }
+    {
+        |sz fe|
+        fe opt-best-fee lt
+        fe opt-best-fee eq sz opt-best-size lt and
+        or
+    }
+    optimal-cover-core
+    mask-to-team
+} def
+
+% --- Budget constraint -----------------------------------------------
+%
+% optimal-cover-with-budget: required budget -- team
+% Min-fee cover whose total fee is also <= budget (the budget acts as
+% a hard cap; without it min-fee already wants the cheapest, but the
+% budget can rule out covers that include high-fee specialists like
+% Marlowe).
+/heist-budget 999999 def     % set per call by the wrapper below
+
+/optimal-cover-with-budget { |required budget|#+1
+    /heist-budget budget def
+    required
+    { /t exch def t team-fee heist-budget le }
+    {
+        |sz fe|
+        fe opt-best-fee lt
+        fe opt-best-fee eq sz opt-best-size lt and
+        or
+    }
+    optimal-cover-core
+    mask-to-team
+} def
+
+% --- Antipathy constraint --------------------------------------------
+%
+% optimal-cover-with-no-pair: required pair-set -- team
+% pair-set is a Set<Name> with exactly two members; the constraint
+% says NEVER both on the same team.  Implemented as `pair team subset?
+% not` -- the pair is forbidden iff it is fully contained in the team
+% (i.e. both feuding members made it on).  `disjoint?` would be too
+% strict here: it would also rule out teams with just ONE of the pair,
+% which is allowed.  Generalizes to N pairs by caller folding /\.
+/heist-no-pair {{ }} def     % set per call
+
+/optimal-cover-with-no-pair { |required pair|#+1
+    /heist-no-pair pair def
+    required
+    % "not both X and Y on the team" -- i.e. pair is NOT a subset of team.
+    { /t exch def heist-no-pair t subset? not }
+    {
+        |sz fe|
+        sz opt-best-size lt
+        sz opt-best-size eq fe opt-best-fee lt and
+        or
+    }
+    optimal-cover-core
+    mask-to-team
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 7: Analyze a single suspect
+% ----------------------------------------------------------------------
+%  Five questions answered per target:
+%
+%      bio / skills / fee / enemies   -- the raw record
+%      closest substitute             -- min |skills ⊖ X.skills| over X != target
+%      most redundant teammate        -- max |skills ∩ X.skills| over X != target
+%      unique skills                  -- skills − union(other.skills)
+%
+%  This is where symmetric-difference earns its keep: substitutability
+%  is the cost of swapping target for X, and the smaller that swap-set,
+%  the closer the substitute.
+% ----------------------------------------------------------------------
+
+% analyze-suspect: target(Name) --
+/analyze-suspect { |target|#+10
+    /t target suspect-by-name local-def
+    t null eq
+    { (analyze: unknown suspect {0}\n) mark target print-fmt pop pop }
+    { target analyze-suspect-found } if-else
+} def
+
+/analyze-suspect-found { |target|#+10
+    /t target suspect-by-name local-def
+    nl
+    (==== {0:11} ) mark target print-fmt pop pop
+    50 target name-length sub repeat-dash nl
+    (  bio        : {0}\n) mark t /bio get print-fmt pop pop
+    (  fee        : ${0}\n) mark t /fee get print-fmt pop pop
+    (  skills     : ) print t /skills get ==
+    (  enemies    : ) print
+    t /enemies get length 0 eq
+        { (none\n) print }
+        { t /enemies get == }
+        if-else
+    nl
+    % Build "everyone else" union for unique-skill analysis.
+    /others-skills {{ }} local-def
+    suspects { /s exch local-def
+        s /name get target ne {
+            /others-skills others-skills s /skills get set-union local-def
+        } if
+    } for-all
+    /unique t /skills get others-skills set-difference local-def
+    (  unique to {0}: ) mark target print-fmt pop pop unique ==
+    nl
+    % Closest substitute (smallest symmetric-difference).
+    /best-sub null local-def
+    /best-sd 999 local-def
+    suspects { /s exch local-def
+        s /name get target ne {
+            /sd t /skills get s /skills get symmetric-difference length local-def
+            sd best-sd lt {
+                /best-sub s /name get store
+                /best-sd  sd          store
+            } if
+        } if
+    } for-all
+    (  closest substitute     : {0} (swap-cost = {1} skills)\n)
+        mark best-sub best-sd print-fmt pop pop
+    (    swap-set : ) print
+    t /skills get best-sub suspect-by-name /skills get symmetric-difference ==
+    nl
+    % Most redundant teammate (biggest intersection).
+    /best-red null local-def
+    /best-int 0 local-def
+    suspects { /s exch local-def
+        s /name get target ne {
+            /isz t /skills get s /skills get set-intersection length local-def
+            isz best-int gt {
+                /best-red s /name get store
+                /best-int isz         store
+            } if
+        } if
+    } for-all
+    best-int 0 gt
+    {
+        (  most redundant with   : {0} (shares {1} skills)\n)
+            mark best-red best-int print-fmt pop pop
+        (    shared : ) print
+        t /skills get best-red suspect-by-name /skills get set-intersection ==
+    }
+    {
+        (  most redundant with   : (no other suspect shares skills)\n) print
+    }
+    if-else
+    nl
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 8: Output formatting
+% ----------------------------------------------------------------------
+%  Mission-briefing style.  classify-suspect tags each team member with
+%  /anchor / /specialist / /redundant; tag-match dispatches the per-row
+%  printer.
+% ----------------------------------------------------------------------
+
+% Print a name with no /-prefix (uses print-fmt's {0:O} for Names).
+/print-name { |n|
+    ({0}) mark n print-fmt pop pop
+} def
+
+% name-padded: render a Name as the bare (no-/) form, padded to width 11.
+% The width comfortably fits every roster name.  Pop drops sprint-fmt's
+% trailing bool; the str (= buf, length-truncated) is what's left.
+/name-padded { |n|#+1
+    /buf 16 string local-def
+    buf ({0:11}) mark n sprint-fmt pop
+} def
+
+% name-length: char count of the name's printable (no-/) form.
+/name-length { |n|#+1
+    /buf 16 string local-def
+    buf ({0}) mark n sprint-fmt pop
+    length
+} def
+
+/repeat-dash { |k|#+1
+    k 0 gt { 0 1 k 1 sub { pop (-) print } for } if
+} def
+
+% Print one team member's row, classified.
+%
+% classify-suspect: team(Set<Name>) suspect(Name) required(Set) -- tagged
+%
+% Tagged values produced:
+%   /anchor      payload = covered-skills (Set)        ; |covered| >= 3
+%   /specialist  payload = unique-skills (Set)         ; |unique| == 1
+%   /redundant   payload = covered-skills (Set)        ; otherwise
+%
+% Anchor wins over specialist when |covered| >= 3 even if |unique| == 1.
+/classify-suspect { |team suspect required|#+8
+    /t suspect suspect-by-name local-def
+    /covered t /skills get required set-intersection local-def
+    /others-skills {{ }} local-def
+    team members { /n exch local-def
+        n suspect ne {
+            /others-skills others-skills n suspect-by-name /skills get set-union local-def
+        } if
+    } for-all
+    /unique t /skills get others-skills set-difference required set-intersection local-def
+    covered length 3 ge
+    { covered /anchor tag }
+    {
+        unique length 1 eq
+        { unique /specialist tag }
+        { covered /redundant tag }
+        if-else
+    }
+    if-else
+} def
+
+% Print one row of a team listing: classification + name + fee + skills.
+%
+% print-team-row: team(Set<Name>) suspect(Name) required(Set) --
+/print-team-row { |team suspect required|#+2
+    /tag-result team suspect required classify-suspect local-def
+    (  ) print
+    tag-result <<
+        /anchor      { pop (anchor      ) print }
+        /specialist  { pop (specialist  ) print }
+        /redundant   { pop (redundant   ) print }
+    >> tag-match
+    suspect name-padded print
+    (  $) print suspect suspect-by-name /fee get =
+    (    ) print suspect suspect-by-name /skills get ==
+} def
+
+% Print the (size N, fee $X): tally line and then every team member's row.
+%
+% print-team-roster: team(Set<Name>) required(Set) --
+/print-team-roster { |team required|#+2
+    (    (size {0}, fee ${1}):\n)
+        mark team length team team-fee print-fmt pop pop
+    team members { /n exch local-def
+        team n required print-team-row
+    } for-all
+} def
+
+/print-banner { |job|#+1
+    nl
+    (=========================================================\n) print
+    (   {0}\n) mark job /name get print-fmt pop pop
+    (=========================================================\n) print
+    (Required: ) print job /required get ==
+    (Roster:   {0} operatives\n) mark suspects length print-fmt pop pop
+    nl
+} def
+
+% ----------------------------------------------------------------------
+%  SECTION 9: CLI parsing + demo orchestration
+% ----------------------------------------------------------------------
+
+/job-name      /vault def
+/all-jobs      false     def
+/budget-flag   -1        def
+/no-pair-flag  null      def
+/analyze-flag  null      def
+
+/parse-args {
+    /args command-line-args def
+    /i 0 def
+    { i args length lt } {
+        /a args i get def
+        a (--job) eq
+            { /i i 1 add def /job-name args i get to-name def }
+        {
+        a (--all-jobs) eq
+            { /all-jobs true def }
+        {
+        a (--budget) eq
+            { /i i 1 add def /budget-flag args i get to-number def }
+        {
+        a (--no-pair) eq
+            {
+                /i i 1 add def
+                /raw args i get def
+                /np {{ }} def
+                /tok 0 def
+                0 1 raw length 1 sub {
+                    /j exch def
+                    raw j get 16#2C#b eq
+                    {
+                        /np np raw tok j tok sub get-interval to-name set-add def
+                        /tok j 1 add def
+                    } if
+                } for
+                /np np raw tok raw length tok sub get-interval to-name set-add def
+                /no-pair-flag np def
+            }
+        {
+        a (--analyze) eq
+            { /i i 1 add def /analyze-flag args i get to-name def }
+        {
+        a (--extra-roster) eq
+            % already handled at scan time -- accept and ignore
+            { }
+        {
+            (heist: unknown flag ) print a print nl
+        }
+        if-else } if-else } if-else } if-else } if-else } if-else
+        /i i 1 add def
+    } while
+} def
+
+parse-args
+
+% Print "visited 2^N = N subsets" using opt-attempts.
+/print-visited {
+    (    visited 2^N = {0} subsets\n)
+        mark opt-attempts print-fmt pop pop
+} def
+
+% Run the full demo for one job: greedy + optimal-by-size + optimal-by-fee
+% + symmetric-diff comparison.  budget and no-pair are layered on if set.
+/run-job { |job-key|#+10
+    /job jobs job-key get local-def
+    /required job /required get local-def
+    job print-banner
+
+    /g required greedy-cover local-def
+    (---- GREEDY (min team size)         ----\n) print
+    g required print-team-roster
+    nl
+
+    /os required optimal-cover-by-size local-def
+    (---- OPTIMAL (min team size)        ----\n) print
+    os required print-team-roster
+    print-visited
+    nl
+
+    /of required optimal-cover-by-fee local-def
+    (---- OPTIMAL (min total fee)        ----\n) print
+    of required print-team-roster
+    print-visited
+    nl
+
+    (---- DIFFERENCES (greedy vs min-fee) ----\n) print
+    (    greedy − optimal-fee : ) print g of set-difference ==
+    (    optimal-fee − greedy : ) print of g set-difference ==
+    (    symmetric-difference : ) print g of symmetric-difference ==
+    nl
+
+    budget-flag 0 ge
+    {
+        /b required budget-flag optimal-cover-with-budget local-def
+        (---- OPTIMAL UNDER BUDGET ${0}        ----\n)
+            mark budget-flag print-fmt pop pop
+        b length 0 eq
+        { (    no team can cover the job under this budget.\n) print }
+        { b required print-team-roster  print-visited }
+        if-else
+        nl
+    } if
+
+    no-pair-flag null ne
+    {
+        /np required no-pair-flag optimal-cover-with-no-pair local-def
+        (---- OPTIMAL WITH NO-PAIR ) print no-pair-flag ==
+        np length 0 eq
+        { (    no team can cover the job with this antipathy.\n) print }
+        { np required print-team-roster  print-visited }
+        if-else
+        nl
+    } if
+} def
+
+% --- Top-level routing -----------------------------------------------
+
+analyze-flag null ne
+{
+    analyze-flag analyze-suspect
+}
+{
+    all-jobs
+    {
+        [ /vault /gallery /crown ] { /j exch def j run-job } for-all
+    }
+    {
+        job-name run-job
+        nl
+        (Try `--analyze Fitch` to see substitutability / redundancy / uniqueness;\n) print
+        (    `--budget 18` for a fee-capped optimal; `--no-pair Rourke,Rye`\n) print
+        (    for an antipathy-constrained optimal; `--all-jobs` for a sweep.\n) print
+    }
+    if-else
+}
+if-else

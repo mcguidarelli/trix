@@ -1,0 +1,4 @@
+(hello)#$$ pop
+(world)#$$r pop
+(text)#$$w pop
+${ (transient)#$$ pop }

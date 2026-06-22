@@ -1,0 +1,83 @@
+% ====================================================================
+% test_memory_stream_snapshot.trx -- phase 1 of the memory-stream snap-
+% shot / thaw round-trip.
+% ====================================================================
+%
+% Verifies that a Stream produced by `make-memory-stream` (which borrows
+% the source string's VM-heap bytes via the Stream::IsBorrowed flag)
+% snapshots correctly: the post-thaw stream must continue reading from
+% where the pre-snapshot read left off, and the bytes returned must
+% match the original payload.
+%
+% The thaw path materialises the unread tail into a freshly malloc'd
+% buffer and clears IsBorrowed -- without that flag-clear the snapshot
+% leaks the malloc'd block on close (since IsBorrowed suppresses the
+% std::free).  This phase reads a known prefix, snapshots, and exits;
+% phase 2 (memory_stream_snapshot_thaw.trx) re-reads the tail and
+% checks for byte-exact equality with the expected suffix.
+%
+% Run via tests/run_snapshot_tests.sh -- not standalone-runnable (it
+% exits via snap-shot before reaching the post-snap-shot assertions).
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- Build a payload of every byte 0x00..0xFF + a recognizable header.
+%     Total length 256 bytes -- well past the 15-char SSO threshold and
+%     more than one fill() chunk to guarantee the stream has BOTH some
+%     bytes already drained into its VM-heap buffer AND some unread
+%     bytes still in m_ext_base / m_ext_remaining at snapshot time.
+/payload 256 string def
+0 1 255 {|i| payload i  i /byte-type cast  put} for
+
+/mms payload make-memory-stream def
+
+% --- Pre-snapshot: drain the first 64 bytes through the regular read
+%     path so m_rptr advances inside the stream's VM-heap buffer.  The
+%     remaining 192 bytes stay in the borrowed ext region.
+/prefix 64 string def
+mms prefix read-string  /pmore exch def  /prefix-read exch def
+
+prefix-read length 64 eq                 (s: prefix length is 64)            rt-ok
+pmore                                    (s: more bytes after prefix)        rt-ok
+
+% Verify prefix-read matches payload[0..63].
+/prefix-expected payload 0 64 get-interval def
+prefix-read prefix-expected eq           (s: prefix bytes match)             rt-ok
+
+% Stash the offset where reading should resume after thaw, plus the
+% expected tail bytes, into the global dict so phase 2 can compare.
+/expected-tail payload 64 192 get-interval def
+/expected-tail-len 192 def
+
+% --- Snapshot.  The stream is at the current save level so it gets
+%     serialized; expected-tail and rt-ok also persist into the image.
+(tests/memory_stream_snapshot.img) snap-shot
+
+% --- Post-snapshot section runs in BOTH phases.  Drain the tail and
+%     verify it matches the expected 192 bytes.  Then probe one more
+%     byte to confirm EOF (read-string only sets bool=false when it
+%     hits EOFc *during* the read; a buffer filled exactly to its
+%     length still returns bool=true even though no bytes remain).
+/tail expected-tail-len string def
+mms tail read-string  pop  /tail-read exch def
+
+tail-read length expected-tail-len eq    (s: tail length matches)            rt-ok
+tail-read expected-tail eq               (s: tail bytes match payload)       rt-ok
+
+/probe 1 string def
+mms probe read-string  /probe-more exch def  pop
+probe-more not                           (s: stream is exhausted)            rt-ok
+
+mms close-stream
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_memory_stream_snapshot: ALL TESTS PASSED) =
+(__test_ok__) =

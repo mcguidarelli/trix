@@ -1,0 +1,4 @@
+<<
+  /strategy /one-for-one /intensity 5 /period 30000
+  /children [ << /id /w /start { actor-recv loop } /restart /permanent >> ]
+>> supervisor

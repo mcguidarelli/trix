@@ -1,0 +1,51 @@
+% ====================================================================
+% test_dict_expand_max.trx -- Phase-3 P3 batch 6 (standalone): the
+% dynamic dict/set expansion-at-maximum arms.  Expansion doubles but
+% clamps at MaxDictLength (65,535 = length_t max, a load-bearing cap);
+% once maxlength sits AT the cap, the next put/set-add that needs a
+% free entry raises dict-full ("too large to expand").
+%
+% Needs --vm-size=8M (run_all.sh SPECIAL_ARGS): the 65,535-entry fill
+% plus expansion pool blocks exceed the default VM.  Standalone-only --
+% NOT in test_all.trx's wrapped list (the in-process suite runs at 2M).
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% dict: fill to the cap, verify the clamp, then one more put
+% sl=0 degrade control: standalone runs really are at save level 0
+% (test_dict_errors.trx can't pin this -- the in-process run-test
+% wrapper holds a save), so def-persist binds like def here
+/pk0 41 def-persist
+pk0 41 eq (def-persist: sl=0 degrades to def) rt-ok clear
+/ud0 4 dict def
+ud0 /k 1 put
+{ ud0 /missing { pop 2 } update-persist } try
+/undefined eq (update-persist: sl=0 missing key raises undefined) rt-ok clear
+
+/big 60000 dynamic-dict def
+{ 0 1 70000 { /i exch def big i i put } for } try
+/dict-full eq (dict: expansion at 65535 raises dict-full) rt-ok clear
+big max-length 65535 eq (dict: maxlength clamped at 65535) rt-ok clear
+big length 65535 eq (dict: filled to exactly 65535 entries) rt-ok clear
+big 12345 get 12345 eq (dict: entries intact after failed expand) rt-ok clear
+
+% set: same shape
+/bigset 60000 set def
+{ 0 1 70000 { /i exch def bigset i set-add pop } for } try
+/dict-full eq (set: expansion at 65535 raises dict-full) rt-ok clear
+bigset length 65535 eq (set: filled to exactly 65535 elements) rt-ok clear
+bigset 12345 set-member? (set: membership intact after failed expand) rt-ok clear
+
+(Dict expansion-max tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

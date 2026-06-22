@@ -1,0 +1,219 @@
+% ====================================================================
+% Unicode Escape Sequences (\u and \U) in Text Strings
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: \u — ASCII range (1-byte UTF-8)
+% ====================================================================
+
+(\u0041) (A) eq                (\\u ASCII: U+0041 = A) rt-ok clear
+(\u0061) (a) eq                (\\u ASCII: U+0061 = a) rt-ok clear
+(\u0030) (0) eq                (\\u ASCII: U+0030 = 0) rt-ok clear
+(\u0020) ( ) eq                (\\u ASCII: U+0020 = space) rt-ok clear
+(\u007E) (~) eq                (\\u ASCII: U+007E = tilde) rt-ok clear
+(\u0000) length 1 eq           (\\u NUL: length 1) rt-ok clear
+(\u0000) 0 get 0b eq           (\\u NUL: byte is 0) rt-ok clear
+(\u007F) 0 get 127b eq         (\\u ASCII: U+007F = DEL byte) rt-ok clear
+
+% ====================================================================
+% SECTION 2: \u — 2-byte UTF-8 (U+0080..U+07FF)
+% ====================================================================
+
+% U+00E9 = e with acute (UTF-8: C3 A9)
+(\u00E9) length 2 eq           (\\u 2-byte: U+00E9 length) rt-ok clear
+(\u00E9) 0 get 16#C3#b eq      (\\u 2-byte: U+00E9 byte 0) rt-ok clear
+(\u00E9) 1 get 16#A9#b eq      (\\u 2-byte: U+00E9 byte 1) rt-ok clear
+
+% U+0080 = first 2-byte codepoint (UTF-8: C2 80)
+(\u0080) length 2 eq           (\\u 2-byte: U+0080 length) rt-ok clear
+(\u0080) 0 get 16#C2#b eq      (\\u 2-byte: U+0080 byte 0) rt-ok clear
+(\u0080) 1 get 16#80#b eq      (\\u 2-byte: U+0080 byte 1) rt-ok clear
+
+% U+07FF = last 2-byte codepoint (UTF-8: DF BF)
+(\u07FF) length 2 eq           (\\u 2-byte: U+07FF length) rt-ok clear
+(\u07FF) 0 get 16#DF#b eq      (\\u 2-byte: U+07FF byte 0) rt-ok clear
+(\u07FF) 1 get 16#BF#b eq      (\\u 2-byte: U+07FF byte 1) rt-ok clear
+
+% ====================================================================
+% SECTION 3: \u — 3-byte UTF-8 (U+0800..U+FFFF)
+% ====================================================================
+
+% U+0800 = first 3-byte codepoint (UTF-8: E0 A0 80)
+(\u0800) length 3 eq           (\\u 3-byte: U+0800 length) rt-ok clear
+(\u0800) 0 get 16#E0#b eq      (\\u 3-byte: U+0800 byte 0) rt-ok clear
+(\u0800) 1 get 16#A0#b eq      (\\u 3-byte: U+0800 byte 1) rt-ok clear
+(\u0800) 2 get 16#80#b eq      (\\u 3-byte: U+0800 byte 2) rt-ok clear
+
+% U+4E16 = CJK character (UTF-8: E4 B8 96)
+(\u4E16) length 3 eq           (\\u 3-byte: U+4E16 length) rt-ok clear
+(\u4E16) 0 get 16#E4#b eq      (\\u 3-byte: U+4E16 byte 0) rt-ok clear
+(\u4E16) 1 get 16#B8#b eq      (\\u 3-byte: U+4E16 byte 1) rt-ok clear
+(\u4E16) 2 get 16#96#b eq      (\\u 3-byte: U+4E16 byte 2) rt-ok clear
+
+% U+FFFD = replacement character (UTF-8: EF BF BD)
+(\uFFFD) length 3 eq           (\\u 3-byte: U+FFFD length) rt-ok clear
+(\uFFFD) 0 get 16#EF#b eq      (\\u 3-byte: U+FFFD byte 0) rt-ok clear
+(\uFFFD) 1 get 16#BF#b eq      (\\u 3-byte: U+FFFD byte 1) rt-ok clear
+(\uFFFD) 2 get 16#BD#b eq      (\\u 3-byte: U+FFFD byte 2) rt-ok clear
+
+% U+FFFF = last BMP codepoint (UTF-8: EF BF BF)
+(\uFFFF) length 3 eq           (\\u 3-byte: U+FFFF length) rt-ok clear
+(\uFFFF) 0 get 16#EF#b eq      (\\u 3-byte: U+FFFF byte 0) rt-ok clear
+
+% ====================================================================
+% SECTION 4: \U — 4-byte UTF-8 (U+10000..U+10FFFF)
+% ====================================================================
+
+% U+10000 = first supplementary codepoint (UTF-8: F0 90 80 80)
+(\U00010000) length 4 eq       (\\U 4-byte: U+10000 length) rt-ok clear
+(\U00010000) 0 get 16#F0#b eq  (\\U 4-byte: U+10000 byte 0) rt-ok clear
+(\U00010000) 1 get 16#90#b eq  (\\U 4-byte: U+10000 byte 1) rt-ok clear
+(\U00010000) 2 get 16#80#b eq  (\\U 4-byte: U+10000 byte 2) rt-ok clear
+(\U00010000) 3 get 16#80#b eq  (\\U 4-byte: U+10000 byte 3) rt-ok clear
+
+% U+1F600 = grinning face emoji (UTF-8: F0 9F 98 80)
+(\U0001F600) length 4 eq       (\\U 4-byte: U+1F600 length) rt-ok clear
+(\U0001F600) 0 get 16#F0#b eq  (\\U 4-byte: U+1F600 byte 0) rt-ok clear
+(\U0001F600) 1 get 16#9F#b eq  (\\U 4-byte: U+1F600 byte 1) rt-ok clear
+(\U0001F600) 2 get 16#98#b eq  (\\U 4-byte: U+1F600 byte 2) rt-ok clear
+(\U0001F600) 3 get 16#80#b eq  (\\U 4-byte: U+1F600 byte 3) rt-ok clear
+
+% U+10FFFF = maximum valid codepoint (UTF-8: F4 8F BF BF)
+(\U0010FFFF) length 4 eq       (\\U 4-byte: U+10FFFF length) rt-ok clear
+(\U0010FFFF) 0 get 16#F4#b eq  (\\U 4-byte: U+10FFFF byte 0) rt-ok clear
+(\U0010FFFF) 1 get 16#8F#b eq  (\\U 4-byte: U+10FFFF byte 1) rt-ok clear
+(\U0010FFFF) 2 get 16#BF#b eq  (\\U 4-byte: U+10FFFF byte 2) rt-ok clear
+(\U0010FFFF) 3 get 16#BF#b eq  (\\U 4-byte: U+10FFFF byte 3) rt-ok clear
+
+% ====================================================================
+% SECTION 5: \U — ASCII and BMP range (also works with 8-digit form)
+% ====================================================================
+
+(\U00000041) (A) eq            (\\U ASCII: U+00000041 = A) rt-ok clear
+(\U000000E9) (\u00E9) eq       (\\U 2-byte: matches \\u form) rt-ok clear
+(\U00004E16) (\u4E16) eq       (\\U 3-byte: matches \\u form) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Mixed escapes in same string
+% ====================================================================
+
+(\u0048\u0065\u006C\u006C\u006F) (Hello) eq  (\\u: Hello spelled out) rt-ok clear
+(A\u0042C) (ABC) eq            (\\u mixed: A + \\u0042 + C) rt-ok clear
+(\n\u0041\t) length 3 eq       (\\u mixed with \\n \\t: length) rt-ok clear
+(\n\u0041\t) 1 get 65b eq      (\\u mixed: middle byte is A) rt-ok clear
+
+% Multiple Unicode escapes concatenated
+(\u00E9\u00E8) length 4 eq     (\\u multi: two 2-byte chars = 4 bytes) rt-ok clear
+(\U0001F600\u0041) length 5 eq (\\U+\\u: emoji + A = 5 bytes) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Case insensitivity of hex digits
+% ====================================================================
+
+(\u00e9) (\u00E9) eq           (\\u case: lowercase hex = uppercase) rt-ok clear
+(\u00Ff) (\u00FF) eq           (\\u case: mixed case) rt-ok clear
+(\U0001f600) (\U0001F600) eq   (\\U case: lowercase = uppercase) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Boundary values
+% ====================================================================
+
+% UTF-8 encoding boundaries
+(\u0001) length 1 eq           (\\u boundary: U+0001 = 1 byte) rt-ok clear
+(\u007F) length 1 eq           (\\u boundary: U+007F = 1 byte) rt-ok clear
+(\u0080) length 2 eq           (\\u boundary: U+0080 = 2 bytes) rt-ok clear
+(\u07FF) length 2 eq           (\\u boundary: U+07FF = 2 bytes) rt-ok clear
+(\u0800) length 3 eq           (\\u boundary: U+0800 = 3 bytes) rt-ok clear
+(\uFFFF) length 3 eq           (\\u boundary: U+FFFF = 3 bytes) rt-ok clear
+(\U00010000) length 4 eq       (\\U boundary: U+10000 = 4 bytes) rt-ok clear
+(\U0010FFFF) length 4 eq       (\\U boundary: U+10FFFF = 4 bytes) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Equivalence with \x for Latin-1 range
+% ====================================================================
+
+(\u0041) (\x41) eq             (\\u vs \\x: U+0041 = \\x41) rt-ok clear
+(\u0000) (\0) eq               (\\u vs octal: U+0000 = \\0) rt-ok clear
+(\u000A) (\n) eq               (\\u vs \\n: U+000A = newline) rt-ok clear
+(\u0009) (\t) eq               (\\u vs \\t: U+0009 = tab) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Error cases — surrogates rejected
+% Scanner errors inside { } occur at compile time, so we use executable
+% strings (#x) with exec to defer scanning to runtime where try can catch.
+% ====================================================================
+
+% High surrogate U+D800
+{ <((\uD800))>#x exec } try /syntax-error eq  (\\u error: high surrogate U+D800) rt-ok clear
+
+% Low surrogate U+DFFF
+{ <((\uDFFF))>#x exec } try /syntax-error eq  (\\u error: low surrogate U+DFFF) rt-ok clear
+
+% Mid-range surrogate U+DB00
+{ <((\uDB00))>#x exec } try /syntax-error eq  (\\u error: surrogate U+DB00) rt-ok clear
+
+% \U form surrogates also rejected
+{ <((\U0000D800))>#x exec } try /syntax-error eq  (\\U error: surrogate via 8-digit) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Error cases — too few hex digits
+% ====================================================================
+
+% \u with fewer than 4 hex digits (hits non-hex char)
+{ <((\u004G))>#x exec } try /syntax-error eq   (\\u error: non-hex digit) rt-ok clear
+{ <((\u00))>#x exec } try /syntax-error eq     (\\u error: only 2 digits before close paren) rt-ok clear
+
+% \U with fewer than 8 hex digits
+{ <((\U0001F60))>#x exec } try /syntax-error eq (\\U error: only 7 hex digits before close paren) rt-ok clear
+
+% ====================================================================
+% SECTION 12: Error cases — codepoint out of range
+% ====================================================================
+
+% \U with codepoint > U+10FFFF
+{ <((\U00110000))>#x exec } try /syntax-error eq  (\\U error: U+110000 > max) rt-ok clear
+{ <((\UFFFFFFFF))>#x exec } try /syntax-error eq  (\\U error: U+FFFFFFFF > max) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Raw strings unaffected
+% ====================================================================
+
+% \u and \U are literal in raw strings (no escape processing)
+<(\u0041)> length 6 eq         (raw string: \\u0041 is 6 literal chars) rt-ok clear
+<(\u0041)> 0 get 92b eq        (raw string: first byte is backslash) rt-ok clear
+<(\u0041)> 1 get 117b eq       (raw string: second byte is u) rt-ok clear
+
+<(\U00010000)> length 10 eq    (raw string: \\U00010000 is 10 literal chars) rt-ok clear
+
+% ====================================================================
+% SECTION 14: String suffixes work with Unicode escapes
+% ====================================================================
+
+(\u0041)#r 0 get 65b eq        (\\u with #r suffix: readable) rt-ok clear
+(\u0041\u0042\u0043)#r (ABC) eq  (\\u with #r: ABC read-only) rt-ok clear
+
+% ====================================================================
+% SECTION 15: Stress — long string of Unicode escapes
+% ====================================================================
+
+% 20 ASCII characters via \u
+(\u0030\u0031\u0032\u0033\u0034\u0035\u0036\u0037\u0038\u0039\u0030\u0031\u0032\u0033\u0034\u0035\u0036\u0037\u0038\u0039)
+(01234567890123456789) eq      (\\u stress: 20 ASCII chars) rt-ok clear
+
+% Mixed multi-byte: 5 emoji = 20 bytes
+(\U0001F600\U0001F601\U0001F602\U0001F603\U0001F604)
+length 20 eq                   (\\U stress: 5 emoji = 20 bytes) rt-ok clear
+
+(test_unicode_escape: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

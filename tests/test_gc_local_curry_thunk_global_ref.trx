@@ -1,0 +1,127 @@
+% ====================================================================
+% test_gc_local_curry_thunk_global_ref.trx -- Phase 2 regression
+% ====================================================================
+% Phase 2 of plan_alloc_walker_audit.md (2026-05-09).  gc_mark_object's
+% local-VM dispatch silent-skipped Curry and Thunk before Phase 2 (the
+% comment at gc.inl:409 read "Curry / Thunk are not yet handled").
+% A LOCAL Curry / Thunk holding a reference to a GLOBAL container was
+% therefore a GC blind spot:
+%
+%     dict-root -> /local-curry (LOCAL Curry block)
+%                       -> storage[0] = global-arr (GLOBAL Array)
+%
+% Without Phase 2 the local Curry isn't walked, the global Array is
+% unmarked + swept on the first vm-global-gc pass.
+%
+% Detection strategy: assert on `vm-global-info /by-kind /array /count`
+% directly (a semantic invariant) rather than on dereferenced contents
+% (which depend on the allocator's reissue behaviour and pass vacuously when
+% the freed slot is not reused).
+%
+% Phase 2 adds is_curry() and is_thunk() to the local-VM needs_walk
+% set + decode-loop branches that mark each Object slot.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% Read the global /array kind count.
+/array-count {
+    vm-global-info /by-kind get /array get /count get
+} def
+
+% --------------------------------------------------------------------
+% SECTION 1: local Curry holding global Array reference
+% --------------------------------------------------------------------
+% Build a global Array, hide the only reachable path behind a local
+% Curry, drop the direct binding, run vm-global-gc.  WITH Phase 2 the
+% Array's count stays >= 1 (curry walker keeps it alive).  WITHOUT
+% Phase 2 the count drops to 0 (curry silent-skipped, Array swept).
+
+% Snapshot pre-existing globals so we can isolate THIS section's delta.
+array-count /pre-1 exch def
+
+[ 101 102 103 104 105 ]#$ /g-arr-1 exch def
+g-arr-1 { 0 get } curry /local-curry-1 exch def
+userdict /g-arr-1 undef                       % drop direct binding
+
+% Confirm curry resolves correctly pre-GC.
+local-curry-1                                 (1: pre-gc curry exec) pop
+101 eq                                        (1: pre-gc curry [0]=101) rt-ok
+
+vm-global-gc pop
+
+% Phase 2 invariant: the global Array we allocated is still live.
+% (Could be MORE than +1 if other globals incidentally allocated, but
+% never less than +1 with Phase 2.)
+array-count pre-1 sub 1 ge                    (1: array survives via local Curry) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 2: local Thunk -> local Packed -> global Array (chain)
+% --------------------------------------------------------------------
+% A scan-time `[ ... ]#$` literal nested inside a `{ ... }` proc body
+% creates a global Array Object whose handle is embedded directly in
+% the proc's Packed bytes.  When the proc itself is at sl=0 outside
+% any ${...}, the Packed is LOCAL.  Wrap that proc in a thunk and the
+% only path from the dict-stack root to the global Array is:
+%
+%   userdict -> /local-thunk-2 -> Thunk (local) -> storage[ThunkStorageProc]
+%               -> Packed (local) -> embedded global Array literal
+%
+% Pre-Phase-2 the Thunk walk silent-skipped, the chain breaks at
+% step 2, and the global Array gets swept on the first GC.
+
+array-count /pre-2 exch def
+
+{ [ 401 402 403 ]#$ 0 get } thunk /local-thunk-2 exch def
+
+local-thunk-2 force                           (2: pre-gc thunk eval) pop
+401 eq                                        (2: pre-gc thunk [0]=401) rt-ok
+
+local-thunk-2 thunk-reset
+
+vm-global-gc pop
+
+array-count pre-2 sub 1 ge                    (2: array survives via local Thunk) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 3: chained local Curry -> local Curry -> global ref
+% --------------------------------------------------------------------
+% Two levels of local Curry: the outer Curry's value slot holds an
+% inner Curry whose value slot holds a global Array.  GC must descend
+% through both Curry blocks (visited-set cycle break shared).
+
+array-count /pre-3 exch def
+
+% Critical subtlety: name lookup of a Curry EXECUTES it.  To capture
+% the inner Curry as an Object on the operand stack (without executing
+% it), retrieve via `userdict /inner-curry-3 get` instead of bare
+% `inner-curry-3`.  Then it can be passed to the outer `curry` op as
+% a literal value, and the outer Curry's storage[0] holds the inner
+% Curry Object handle.
+[ 201 202 203 ]#$ /g-arr-3 exch def
+g-arr-3 { 0 get } curry /inner-curry-3 exch def
+userdict /inner-curry-3 get { exec } curry /outer-curry-3 exch def
+userdict /g-arr-3 undef                       % drop direct paths
+userdict /inner-curry-3 undef
+
+vm-global-gc pop
+
+array-count pre-3 sub 1 ge                    (3: array survives via Curry-Curry chain) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 4: probe sees retained globals
+% --------------------------------------------------------------------
+vm-global-gc-probe /probe-final exch def
+probe-final /live get 0 gt                    (4: probe sees >0 live retained) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_gc_local_curry_thunk_global_ref: ALL TESTS PASSED) =
+(__test_ok__) =

@@ -1,0 +1,2 @@
+(/tmp/__chrono_seed.txt) (w)#b stream dup ({0:D%Y-%m-%d}\n) mark 2026 4 30 make-date fprint-fmt pop pop close-stream
+(/tmp/__chrono_seed.txt) (r)#b stream dup ({0:D%Y-%m-%d}) mark 0u fscan-fmt

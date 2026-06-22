@@ -1,0 +1,699 @@
+% examples/raycaster.trx -- ray-cast 3D ASCII dungeon.
+%
+% Per-column DDA grid traversal yields a perpendicular-distance to the
+% nearest wall; perspective-correct vertical strip rendering paints the
+% corridor view into a Screen.  Player on a 32x32 tile map at
+% (x, y, theta).  WASD walk, A/D strafe, Q/E turn, ESC/q to quit.
+%
+% Run:
+%   ./trix examples/raycaster.trx                % play interactively
+%   ./trix examples/raycaster.trx --flythrough   % scripted demo path
+%   ./trix examples/raycaster.trx --help
+
+(lib/screen.trx) require
+(lib/keys.trx) require
+
+% --- Map ----------------------------------------------------------------------
+%
+% 32x32 grid of tile bytes.  '#' = stone, 'H' = brick, '=' = panel,
+% '+' = pillar, ' ' = empty.  Player coordinates are (x, y) with
+% x = column, y = row, both Real-typed.  tile-at floors them and reads
+% map[y-row][x-col].
+
+/world-map [
+    (################################)
+    (#                              #)
+    (#  ##############              #)
+    (#  #            #              #)
+    (#  #  ########  #              #)
+    (#  #  #      #  #              #)
+    (#  #  #  ##  #  #     ###      #)
+    (#  #  #  ##  #  #     # #      #)
+    (#  #  #      #  #     ###      #)
+    (#  #  ########  #              #)
+    (#  #            #              #)
+    (#  ##############              #)
+    (#                              #)
+    (#         ===                  #)
+    (#         = =                  #)
+    (#         ===                  #)
+    (#                              #)
+    (#                              #)
+    (#  +++++           HHHHHH      #)
+    (#  +   +           H    H      #)
+    (#  +   +           H    H      #)
+    (#  +++++           HHHHHH      #)
+    (#                              #)
+    (#                              #)
+    (#                              #)
+    (#                              #)
+    (#                              #)
+    (#                              #)
+    (#                              #)
+    (#                              #)
+    (#                              #)
+    (################################)
+] def
+/world-map world-map make-readonly def
+
+/map-w 32 def
+/map-h 32 def
+
+% Floor a Real to Integer (floor + cast).  Defends against negative
+% values where C-style truncation would round toward zero.
+/floor-int { floor /integer-type cast } def
+
+% tile-byte y x -- byte
+% Read map[y-row][x-col] where x,y may be Real.  Returns the raw tile
+% byte ((space)#b for empty, '#' '+' '=' 'H' for walls).
+/tile-byte {|y x|
+    world-map y floor-int get x floor-int get
+} def
+
+% wall? y x -- bool
+% Any non-space tile is a wall.
+/wall? {|y x|
+    y x tile-byte ( )#b ne
+} def
+
+% --- Player state -------------------------------------------------------------
+%
+% Lode-Vandevenne raycaster representation: position (x, y), facing
+% direction (dx, dy), camera plane (px, py).  The plane is perpendicular
+% to dir with length tan(fov/2); we use ~66 degrees fov so |plane| ~ 0.66.
+%
+% Stored as a mutable dict so per-frame updates are in-place puts (cheap,
+% no record allocation per turn).
+
+/make-player {|x y dx dy px py|
+    << /x x  /y y  /dx dx  /dy dy  /px px  /py py >>
+} def
+
+% Build a player facing the angle theta (radians, 0 = +x).
+/player-from-angle {|x y theta|#6
+    /c theta cos local-def
+    /s theta sin local-def
+    /fov-half-tan 0.66 local-def           % ~66 degree horizontal fov
+    x y c s
+    fov-half-tan s mul neg
+    fov-half-tan c mul
+    make-player
+} def
+
+% Rotate player's (dx, dy) and (px, py) by `radians` in place.
+% Standard 2D rotation matrix:
+%   x' = x cos - y sin
+%   y' = x sin + y cos
+/turn {|player radians|#8
+    /c radians cos local-def
+    /s radians sin local-def
+    /dx player.dx local-def
+    /dy player.dy local-def
+    /px player.px local-def
+    /py player.py local-def
+    player /dx dx c mul dy s mul sub put
+    player /dy dx s mul dy c mul add put
+    player /px px c mul py s mul sub put
+    player /py px s mul py c mul add put
+} def
+
+% Move player along a (vx, vy) direction by `dist` if the destination is
+% empty.  Used by W/S (vx=dx, vy=dy) and A/D strafe (vx=dy, vy=-dx).
+% Wall-collision handled per-axis so the player slides along walls
+% rather than sticking on diagonal approaches.
+/move {|player vx vy dist|#6
+    /nx player.x vx dist mul add local-def
+    /ny player.y vy dist mul add local-def
+    ny player.x wall? not { player /x nx put } if
+    nx player.y wall? not { player /y ny put } if
+} def
+
+% --- DDA ray cast -------------------------------------------------------------
+%
+% Standard Lode-Vandevenne digital differential analyser: from the player's
+% (pos-x, pos-y) along ray direction (ray-dx, ray-dy), step grid cells one
+% at a time, always crossing the nearest grid line first.  Stop on the first
+% non-empty tile.  perp-dist is the perpendicular-to-camera-plane distance
+% (NOT euclidean) -- using euclidean here is what causes the classic
+% fish-eye distortion that perpendicular-distance sidesteps.
+%
+% Inputs:
+%   player    -- state dict
+%   camera-x  -- screen column re-mapped to [-1, 1] (-1 = left edge,
+%                +1 = right edge)
+% Outputs:
+%   perp-dist  -- Real, perpendicular distance to wall hit
+%   side       -- 0 = E/W wall (x-axis grid line), 1 = N/S wall (y-axis)
+%   hit-byte   -- tile byte at hit cell
+
+/cast-ray {|player camera-x|#24
+    /pos-x player.x local-def
+    /pos-y player.y local-def
+    /ray-dx player.dx player.px camera-x mul add local-def
+    /ray-dy player.dy player.py camera-x mul add local-def
+
+    /map-x pos-x floor-int local-def
+    /map-y pos-y floor-int local-def
+
+    % delta-dx / delta-dy: how far along the ray we travel for one full
+    % grid-unit step in x / y.  abs(1/d) is the standard formula.
+    /delta-dx ray-dx 0.0 eq
+        { 1.0e30 } { 1.0 ray-dx div abs }
+    if-else local-def
+    /delta-dy ray-dy 0.0 eq
+        { 1.0e30 } { 1.0 ray-dy div abs }
+    if-else local-def
+
+    /step-x 0 local-def
+    /step-y 0 local-def
+    /side-dx 0.0 local-def
+    /side-dy 0.0 local-def
+
+    ray-dx 0.0 lt
+        {
+            /step-x -1 local-def
+            /side-dx pos-x map-x /real-type cast sub delta-dx mul local-def
+        }
+        {
+            /step-x 1 local-def
+            /side-dx map-x 1 add /real-type cast pos-x sub delta-dx mul local-def
+        }
+    if-else
+    ray-dy 0.0 lt
+        {
+            /step-y -1 local-def
+            /side-dy pos-y map-y /real-type cast sub delta-dy mul local-def
+        }
+        {
+            /step-y 1 local-def
+            /side-dy map-y 1 add /real-type cast pos-y sub delta-dy mul local-def
+        }
+    if-else
+
+    /side 0 local-def
+    /hit-byte (#)#b local-def
+
+    % Bounded by map dimensions (worst case: corner-to-corner = 64 steps).
+    64 {
+        side-dx side-dy lt
+            {
+                /side-dx side-dx delta-dx add local-def
+                /map-x map-x step-x add local-def
+                /side 0 local-def
+            }
+            {
+                /side-dy side-dy delta-dy add local-def
+                /map-y map-y step-y add local-def
+                /side 1 local-def
+            }
+        if-else
+        % Out-of-map: treat as wall (defensive; map borders are walls).
+        map-x 0 lt map-x map-w ge or
+        map-y 0 lt or map-y map-h ge or
+            { exit }
+        if
+        /tb world-map map-y get map-x get local-def
+        tb ( )#b ne
+            { /hit-byte tb local-def exit }
+        if
+    } repeat
+
+    /perp-dist
+        side 0 eq
+            { side-dx delta-dx sub }
+            { side-dy delta-dy sub }
+        if-else
+    local-def
+
+    % Guard divide-by-near-zero in strip-height calc.
+    perp-dist 0.0001 lt { /perp-dist 0.0001 local-def } if
+
+    perp-dist side hit-byte
+} def
+
+% --- Renderer -----------------------------------------------------------------
+%
+% For each screen column, cast one ray, paint a ceiling/wall/floor strip.
+% Wall character chosen by tile texture + (E/W vs N/S) side; brightness
+% steps with distance.  Floor gets `.`, ceiling stays empty (' ').
+
+% --- Tile sets ----------------------------------------------------------------
+%
+% Each wall texture has a 5-glyph brightness ramp, brightest first.
+% E/W walls (rays that crossed an X-grid line) start at offset 0; N/S
+% walls (Y-grid line) start at offset 1 -- a one-step-lighter glyph,
+% which suggests a fixed light direction.  In default shading mode that
+% is the entire offset.  With --distance-shading (or runtime `t`), a
+% bucketed perp-distance also shifts the offset so far walls dim toward
+% the floor and finally vanish at offset 4.
+%
+% Three tile sets switch the *visual surface* without touching the DDA:
+%   /ascii      pure printable ASCII (current default; works in any
+%               terminal regardless of UTF-8 / font)
+%   /blocks     Unicode shade blocks (U+2588 .. U+2591) so walls render
+%               as actual filled surfaces.  Same renderer as /ascii.
+%   /halfblock  Each terminal cell uses U+2580 (upper half block) with
+%               FG = top sub-pixel colour and BG = bottom sub-pixel
+%               colour.  Effective vertical resolution doubles to
+%               2 * screen-rows.  256-palette colours pick texture
+%               (gray stone, red brick, blue panel, yellow pillar).
+
+% ASCII: ramp is per-texture (no two textures share a glyph at the same
+% offset, so the texture identity survives at far distances).
+/wall-ramp-ascii <<
+    (#)#b  [ (#)#b (=)#b (-)#b (.)#b ( )#b ]
+    (H)#b  [ (H)#b (+)#b (-)#b (.)#b ( )#b ]
+    (=)#b  [ (=)#b (-)#b (.)#b ( )#b ( )#b ]
+    (+)#b  [ (+)#b (.)#b ( )#b ( )#b ( )#b ]
+>> def
+/wall-ramp-ascii-default [ (?)#b (?)#b (.)#b ( )#b ( )#b ] def
+
+% Blocks: shared shade ramp; texture identity is communicated by FG
+% colour instead of glyph.  Codepoints are U+2588 (full), U+2593 (dark),
+% U+2592 (medium), U+2591 (light), 0x20 (space).
+/wall-ramp-blocks      [ 0x2588 0x2593 0x2592 0x2591 0x20 ] def
+/wall-color-blocks <<
+    (#)#b 251           % stone -- light gray
+    (H)#b 160           % brick -- red
+    (=)#b 110           % panel -- cyan
+    (+)#b 220           % pillar -- yellow
+>> def
+/wall-color-blocks-default 7 def
+
+% Half-block: per-texture 256-colour ramp, parallel structure to ASCII.
+% Each ramp goes brightest-to-darkest in 5 steps; offset = side + dist
+% as for the glyph ramps.
+/wall-color-ramp <<
+    (#)#b  [ 251 248 244 240 236 ]   % stone   -- gray steps
+    (H)#b  [ 196 160 124  88  52 ]   % brick   -- red steps
+    (=)#b  [ 117  74  31  24  17 ]   % panel   -- cyan/blue steps
+    (+)#b  [ 226 220 178 136  94 ]   % pillar  -- yellow steps
+>> def
+/wall-color-ramp-default [ 247 244 240 236 232 ] def
+/halfblock-ceil-color  232 def       % near-black for the sky
+/halfblock-floor-color 235 def       % deep gray for the floor
+
+% Initial values; toggleable at runtime ('t' for shading, 'y' for tiles).
+/shading-mode /none  def
+/tile-set     /ascii def
+
+% dist -- bucket (0..3)
+/dist-bucket {
+    [
+        { 3.0  lt }  { pop 0 }
+        { 6.0  lt }  { pop 1 }
+        { 12.0 lt }  { pop 2 }
+        { pop true } { pop 3 }
+    ] match
+} def
+
+% Internal helper: combined offset = side(0|1) + dist-bucket(0..3) when
+% distance-shading is on, clamped to 4.
+/wall-offset {|dist side|#6
+    /side-off side 0 eq { 0 } { 1 } if-else local-def
+    /dist-off shading-mode /distance eq { dist dist-bucket } { 0 } if-else local-def
+    /off side-off dist-off add local-def
+    off 4 gt { /off 4 local-def } if
+    off
+} def
+
+% dist side hit-byte -- codepoint
+% Returns the wall *glyph* for the current tile-set.  The /halfblock
+% renderer doesn't call wall-char (it uses solid blocks + colour) but
+% would degrade gracefully here too.
+/wall-char {|dist side hit-byte|#5
+    /off dist side wall-offset local-def
+    tile-set /blocks eq
+        { wall-ramp-blocks off get }
+        {
+            /ramp wall-ramp-ascii hit-byte wall-ramp-ascii-default get-default local-def
+            ramp off get
+        }
+    if-else
+} def
+
+% dist side hit-byte -- fg-color
+% Pick the FG colour for a wall pixel.  /blocks uses a single per-texture
+% colour at all distances (the glyph already encodes brightness).
+% /halfblock uses a per-texture distance ramp.  /ascii returns gray-7
+% for E/W walls and gray-8 for N/S to mirror the original look.
+/wall-color {|dist side hit-byte|#7
+    tile-set [
+        { /halfblock eq } { pop
+            /off dist side wall-offset local-def
+            /ramp wall-color-ramp hit-byte wall-color-ramp-default
+                get-default local-def
+            ramp off get
+        }
+        { /blocks eq } { pop
+            wall-color-blocks hit-byte wall-color-blocks-default
+                get-default
+        }
+        { pop true } { pop side 0 eq { 7 } { 8 } if-else }
+    ] match
+} def
+
+% Render a single column's ceiling/wall/floor strip into the screen buffer.
+%
+%   scr           -- target Screen
+%   col           -- screen column (0-based)
+%   screen-h      -- screen height in rows
+%   dist side hit -- cast-ray output for this column
+%
+% No return value beyond `scr` left on the stack.
+/draw-strip-glyph {|scr col screen-h dist side hit|#22
+    /line-h $[ screen-h / dist ] /integer-type cast local-def
+    /half line-h 2 div local-def
+    /center screen-h 2 div local-def
+    /draw-start center half sub local-def
+    /draw-end   center half add local-def
+    draw-start 0 lt           { /draw-start 0 local-def } if
+    draw-end   screen-h ge    { /draw-end screen-h 1 sub local-def } if
+
+    /ch dist side hit wall-char local-def
+    /floor-ch (.)#b local-def
+    /ceil-ch ( )#b local-def
+
+    /fg-wall  dist side hit wall-color local-def
+    /fg-floor 240 local-def              % dim floor
+    /attrs 0 local-def
+    /bg 0 local-def
+
+    % Ceiling rows [0 .. draw-start-1]
+    0 1 draw-start 1 sub {
+        /r exch local-def
+        scr col r ceil-ch fg-floor bg attrs screen-put-cell pop
+    } for
+    % Wall rows [draw-start .. draw-end]
+    draw-start 1 draw-end {
+        /r exch local-def
+        scr col r ch fg-wall bg attrs screen-put-cell pop
+    } for
+    % Floor rows [draw-end+1 .. screen-h-1]
+    draw-end 1 add 1 screen-h 1 sub {
+        /r exch local-def
+        scr col r floor-ch fg-floor bg attrs screen-put-cell pop
+    } for
+} def
+
+% Half-block strip: render at twice the vertical resolution by treating
+% each terminal cell as a 2-pixel stack.  The cell glyph is U+2580
+% (upper half block); FG paints the upper sub-pixel, BG paints the
+% lower.  Both sub-pixels for a given cell are independently classified
+% as ceiling, wall, or floor based on the (doubled) strip extent.
+/draw-strip-half {|scr col screen-h dist side hit|#24
+    /tall-h $[ screen-h * 2 ] local-def
+    /line-h $[ tall-h / dist ] /integer-type cast local-def
+    /half line-h 2 div local-def
+    /center tall-h 2 div local-def
+    /tall-start center half sub local-def
+    /tall-end   center half add local-def
+    tall-start 0 lt        { /tall-start 0 local-def } if
+    tall-end   tall-h ge   { /tall-end tall-h 1 sub local-def } if
+
+    /col-wall  dist side hit wall-color local-def
+    /col-floor halfblock-floor-color local-def
+    /col-ceil  halfblock-ceil-color local-def
+    /half-block 0x2580 local-def
+    /attrs 0 local-def
+
+    0 1 screen-h 1 sub {
+        /r exch local-def
+        /py-top r 2 mul local-def
+        /py-bot py-top 1 add local-def
+        /c-top
+            py-top tall-start lt
+                { col-ceil }
+                { py-top tall-end gt { col-floor } { col-wall } if-else }
+            if-else
+        local-def
+        /c-bot
+            py-bot tall-start lt
+                { col-ceil }
+                { py-bot tall-end gt { col-floor } { col-wall } if-else }
+            if-else
+        local-def
+        scr col r half-block c-top c-bot attrs screen-put-cell pop
+    } for
+} def
+
+% Dispatcher: pick the right per-column draw strategy.
+/draw-strip {|scr col screen-h dist side hit|#7
+    tile-set /halfblock eq
+        { scr col screen-h dist side hit draw-strip-half }
+        { scr col screen-h dist side hit draw-strip-glyph }
+    if-else
+} def
+
+% --- Mini-map overlay --------------------------------------------------------
+%
+% Drop an 8x8 ASCII mini-map into the top-right of the screen.  Cells show
+% the tile character around the player; the player's own cell is replaced
+% with an arrow indicating facing (^ v < > by max-component of dir).
+
+/mini-map-size 9 def
+
+% scr player --
+/draw-mini-map {|scr player|#24
+    /scr-w scr screen-cols local-def
+    /mm-x scr-w mini-map-size sub local-def
+    /mm-y 0 local-def
+    /pcol player.x floor-int local-def
+    /prow player.y floor-int local-def
+    /off-x pcol mini-map-size 2 div sub local-def
+    /off-y prow mini-map-size 2 div sub local-def
+    /fg-wall 7 local-def                     % light gray
+    /fg-floor 8 local-def                    % dark gray
+    /fg-player 11 local-def                  % bright yellow
+    /bg 0 local-def
+
+    0 1 mini-map-size 1 sub {
+        /jy exch local-def
+        0 1 mini-map-size 1 sub {
+            /jx exch local-def
+            /mx off-x jx add local-def
+            /my off-y jy add local-def
+            mx 0 ge mx map-w lt and my 0 ge and my map-h lt and
+                {
+                    /tb world-map my get mx get local-def
+                    /ch tb ( )#b eq { (.)#b } { tb } if-else local-def
+                    /fg tb ( )#b eq { fg-floor } { fg-wall } if-else local-def
+                    scr mm-x jx add mm-y jy add ch fg bg 0 screen-put-cell pop
+                }
+                {
+                    scr mm-x jx add mm-y jy add (#)#b fg-wall bg 0 screen-put-cell pop
+                }
+            if-else
+        } for
+    } for
+
+    /pa
+        player.dx abs player.dy abs gt
+            { player.dx 0.0 lt { (<)#b } { (>)#b } if-else }
+            { player.dy 0.0 lt { (^)#b } { (v)#b } if-else }
+        if-else
+    local-def
+    scr
+        mm-x mini-map-size 2 div add
+        mm-y mini-map-size 2 div add
+        pa fg-player bg 0 screen-put-cell pop
+} def
+
+% Render the full first-person view of `player` into `scr`.
+/render-view {|scr player|#10
+    /screen-w scr screen-cols local-def
+    /screen-h scr screen-rows local-def
+    0 1 screen-w 1 sub {
+        /col exch local-def
+        /cx $[ col / (screen-w / 2.0) - 1.0 ] local-def
+        player cx cast-ray                       % stack: dist side hit
+        /hit  exch local-def
+        /side exch local-def
+        /dist exch local-def
+        scr col screen-h dist side hit draw-strip
+    } for
+    scr player draw-mini-map
+    scr
+} def
+
+% --- Game loop ----------------------------------------------------------------
+%
+% Drive the player on a 30 fps tick: drain pending keys, update state,
+% render.  Walking speed and turn rate are tuned so that the visual
+% framerate stays smooth without keypresses queueing up perceptibly.
+
+/walk-speed 0.10 def                             % tiles per tick
+/turn-speed 0.06 def                             % radians per tick
+/tick-ms    33 def                               % ~30 fps
+
+% key player -- continue?
+% Apply one input event to the player.  Returns false if the player asked
+% to quit (ESC or q), true otherwise.  Strafing uses the perpendicular of
+% the facing direction; left strafe is (dy, -dx), right is (-dy, dx).
+/apply-key {|key player|#5
+    key /escape eq { false }
+    {
+        key [
+            { /w eq } { pop player player.dx player.dy walk-speed move true }
+            { /s eq } { pop player player.dx player.dy walk-speed neg move true }
+            { /a eq } { pop player player.dy player.dx neg walk-speed move true }
+            { /d eq } { pop player player.dy neg player.dx walk-speed move true }
+            { /q eq } { pop player turn-speed neg turn true }
+            { /e eq } { pop player turn-speed turn true }
+            { /left eq }  { pop player turn-speed neg turn true }
+            { /right eq } { pop player turn-speed turn true }
+            { /up eq }    { pop player player.dx player.dy walk-speed move true }
+            { /down eq }  { pop player player.dx player.dy walk-speed neg move true }
+            { /t eq }     { pop
+                              shading-mode /none eq
+                                  { /shading-mode /distance def }
+                                  { /shading-mode /none def }
+                              if-else
+                              true
+                          }
+            { /y eq }     { pop
+                              tile-set [
+                                  { /ascii eq }     { pop /tile-set /blocks    def }
+                                  { /blocks eq }    { pop /tile-set /halfblock def }
+                                  { pop true }      { pop /tile-set /ascii     def }
+                              ] match
+                              true
+                          }
+            { pop true }  { pop true }
+        ] match
+    }
+    if-else
+} def
+
+% Drain all input that's queued and apply it to player.  Returns false
+% when the player requested quit, true otherwise.
+/drain-keys {|player|#3
+    /running true local-def
+    {
+        key-ready? not { exit } if
+        { read-key-byte } { 0 read-key-byte-timeout } decode-key
+        player apply-key not { /running false local-def exit } if
+    } loop
+    running
+} def
+
+% scr player -- continue?
+% One game-loop iteration: render, present, wait one tick, drain queued keys.
+% Returns false when the player asks to quit, true otherwise.  Sleep is
+% done via coroutine-sleep so kernel-buffered keys aren't consumed by the
+% sleep itself -- they stay queued for drain-keys.
+/game-tick {|scr player|#3
+    scr player render-view pop
+    scr screen-render pop
+    tick-ms coroutine-sleep
+    player drain-keys
+} def
+
+/play-loop {|scr player|#3
+    {
+        scr player game-tick not { exit } if
+    } loop
+} def
+
+% --- Main launcher ------------------------------------------------------------
+
+/help-text (Usage: ./trix examples/raycaster.trx [OPTIONS]
+
+A first-person 3D dungeon renderer.  WASD or arrow keys walk forward/
+back and strafe left/right; Q/E turn left/right; T toggles distance
+shading; Y cycles tile sets (ascii -> blocks -> halfblock); ESC quits.
+
+Options:
+  --flythrough               run a non-interactive scripted demo
+  --distance-shading         start with distance-based wall shading enabled
+  --tiles=ascii              pure-ASCII glyph ramp (default; widest compat)
+  --tiles=blocks             Unicode shade blocks (U+2588 .. U+2591) plus
+                             per-texture 256-colour fg
+  --tiles=halfblock          U+2580 half-block + dual fg/bg colour;
+                             effective 2x vertical resolution
+  --help                     print this message and exit
+) def
+
+/flythrough? false def
+
+/parse-args {
+    command-line-args {
+        |arg|#1
+        arg (--help) eq { help-text print quit } if
+        arg (--flythrough) eq { /flythrough? true def } if
+        arg (--distance-shading) eq { /shading-mode /distance def } if
+        arg (--tiles=ascii)     eq { /tile-set /ascii     def } if
+        arg (--tiles=blocks)    eq { /tile-set /blocks    def } if
+        arg (--tiles=halfblock) eq { /tile-set /halfblock def } if
+    } for-all
+} def
+
+/play-interactive {
+    {|scr|#2
+        % Start in the southern courtyard, facing the inner-room block to
+        % the north -- gives an immediately interesting view with depth
+        % and a near landmark.  theta = 3*pi/2 = north.
+        /player 16.5 26.5 4.7124 player-from-angle local-def
+        scr player play-loop
+    } with-fullscreen-screen
+} def
+
+% --- Scripted flythrough ------------------------------------------------------
+%
+% Fixed keystroke sequence used by --flythrough.  Each entry is a key name
+% accepted by apply-key (/w /a /s /d /q /e or arrow keys).  The script
+% drives the player through three full corridor passes plus a turn at each
+% end, then ends -- ~6 seconds at 80ms/step.
+
+/flythrough-script [
+    /w /w /w /w /w /w /w /w /w /w /w /w        % walk north toward inner room
+    /e /e /e /e /e /e /e /e /e /e               % turn 60 deg right (~ pi/3 radians)
+    /w /w /w /w /w /w /w /w /w /w /w /w
+    /e /e /e /e /e /e /e /e /e /e
+    /w /w /w /w /w /w /w /w /w /w /w /w
+    /e /e /e /e /e /e /e /e /e /e
+    /w /w /w /w /w /w /w /w /w /w /w /w
+    /q /q /q /q /q /q /q /q /q /q
+    /w /w /w /w /w /w /w /w /w /w /w /w
+] def
+
+/flythrough-tick-ms 80 def
+
+/run-flythrough {
+    % Manual setup: alt-screen + hidden cursor so we can render frames
+    % without trashing the user's scrollback, but skip raw-mode (the
+    % flythrough reads no keys, so it works fine on non-tty stdouts too).
+    alt-screen-enter
+    cursor-hide
+    flush
+    {
+        % terminal-size only works on a tty; fall back to 80x30 otherwise.
+        { terminal-size } try
+        dup /no-error eq
+            { pop }
+            { pop 80 30 }
+        if-else
+        make-screen
+        {|scr|#5
+            /player 16.5 26.5 4.7124 player-from-angle local-def
+            /idx 0 local-def
+            /n flythrough-script length local-def
+            {
+                scr player render-view pop
+                scr screen-render pop
+                idx n ge { exit } if
+                flythrough-script idx get player apply-key pop
+                /idx idx 1 add local-def
+                flythrough-tick-ms coroutine-sleep
+            } loop
+            1500 coroutine-sleep
+        } exec
+    } try
+    cursor-show
+    alt-screen-leave
+    flush
+    dup /no-error eq { pop } { rethrow } if-else
+} def
+
+parse-args
+flythrough? { run-flythrough } { play-interactive } if-else

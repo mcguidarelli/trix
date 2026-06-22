@@ -1,0 +1,132 @@
+% ====================================================================
+% test_untested_ops.trx -- Phase-3 P2: operators the coverage gap
+% report found with ZERO
+% executions across the full battery.  Each section names the op and
+% the trigger; signatures verified against docs/trix-reference.md
+% before authoring (s2 temp containers, s3.10-3.12 collectors,
+% s3.15 control flow, s3.31 aggregate).
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: from-mark collector variants (eq-storage + readonly)
+% Note eq-container one-shot semantics: each #=-kind value is used
+% immediately, before the next collector of the same kind reuses the
+% buffer (s2 Temporary Containers).
+% ====================================================================
+
+mark /a 1 /b 2 =dict-from-mark
+dup /a get 1 eq exch /b get 2 eq and (=dict-from-mark: builds eq-dict) rt-ok clear
+
+mark 1 2 3 =set-from-mark
+dup 2 set-member? exch length 3 eq and (=set-from-mark: builds eq-set) rt-ok clear
+
+mark 1 2 3 set-from-mark
+dup 3 set-member? exch length 3 eq and (set-from-mark: builds set) rt-ok clear
+
+mark 1 2 readonly-=array-from-mark /roa exch def
+roa 1 get 2 eq (readonly-=array-from-mark: contents) rt-ok clear
+{ roa 0 9 put } try /read-only eq (readonly-=array-from-mark: mutation raises) rt-ok clear
+
+mark /k 7 readonly-=dict-from-mark /rod exch def
+rod /k get 7 eq (readonly-=dict-from-mark: contents) rt-ok clear
+{ rod /k 9 put } try /read-only eq (readonly-=dict-from-mark: mutation raises) rt-ok clear
+
+mark 5 readonly-=set-from-mark /ros exch def
+ros 5 set-member? (readonly-=set-from-mark: contents) rt-ok clear
+{ ros 6 set-add } try /read-only eq (readonly-=set-from-mark: mutation raises) rt-ok clear
+
+mark 5 readonly-set-from-mark /ros2 exch def
+ros2 5 set-member? (readonly-set-from-mark: contents) rt-ok clear
+{ ros2 6 set-add } try /read-only eq (readonly-set-from-mark: mutation raises) rt-ok clear
+
+% ====================================================================
+% SECTION 2: l2-interrupt -- default Level-2 interrupt handler is a
+% documented no-op (redefine in userdict to customize); direct call
+% must leave the stack untouched.
+% ====================================================================
+
+0 l2-interrupt 0 eq (l2-interrupt: default handler is a no-op) rt-ok clear
+
+% ====================================================================
+% SECTION 3: @ulong-repeat / @address-for loop continuations
+% ====================================================================
+
+% repeat normalizes any count that fits uint32 into the @uinteger-repeat
+% path (repeat_op), so @ulong-repeat needs a count > 4294967295.  Draining
+% one naturally is minutes of wall clock; `exit` after the first iteration
+% covers the decrement arm (the natural-zero arm stays uncovered by
+% design -- it needs 2^32 iterations).
+0 3ul { 1 add } repeat 3 eq (repeat: small ULong count normalizes to uinteger path) rt-ok clear
+0 0ul { 1 add } repeat 0 eq (repeat: zero ULong count never runs body) rt-ok clear
+0 4294967296ul { 1 add exit } repeat 1 eq (repeat: >32-bit count drives @ulong-repeat) rt-ok clear
+
+% exit-unwind hygiene: the loop families that keep ExtValue companions on
+% the exec stack (ULong count; Long/ULong/Double/Address control+limit)
+% must free them when `exit` discards the frame.  Probe procs are def'd
+% BEFORE the baseline is read: scanning a proc literal allocates its
+% embedded ExtValue constants, which would otherwise pollute the delta.
+/uw-ulrep { 4294967296ul { exit } repeat } def
+/uw-lfor  { 1l 1l 10l { pop exit } for } def
+/uw-afor  { 1a 1 10a { pop exit } for } def
+/uw-dfor  { 1.0d 1.0d 10.0d { pop exit } for } def
+//:status:extvalue-active /uw-base exch def
+0 1 24 { pop uw-ulrep uw-lfor uw-afor uw-dfor } for
+//:status:extvalue-active uw-base eq (exit unwind frees loop-frame ExtValues) rt-ok clear
+
+% for with Address bounds takes an INTEGER increment (byte units --
+% pointer arithmetic); the counter arrives as an Address each iteration.
+0 0a 1 2a { pop 1 add } for 3 eq (for: address bounds drive @address-for) rt-ok clear
+0a 1 2a { } for
+2a eq exch 1a eq and exch 0a eq and (for: address counters pushed in order) rt-ok clear
+% Wraparound regressions: a step past the address-space edge ends the
+% loop after the final counter.  Descending through 0 used to clamp
+% limit to MAX+1 (== 0) and loop forever; ascending through the max
+% address had the mirror-image hole.
+0 2a -1 0a { pop 1 add } for 3 eq (for: descending address bounds through 0) rt-ok clear
+0 0xFFFFFFFFFFFFFFFE#a 1 0xFFFFFFFFFFFFFFFF#a { pop 1 add } for
+2 eq (for: ascending address bounds through max) rt-ok clear
+0 3a -2 0a { pop 1 add } for 2 eq (for: descending stride-2 wrap ends loop) rt-ok clear
+
+% ====================================================================
+% SECTION 4: match-all -- implemented (gather form of match); the full
+% behavioral matrix lives in tests/test_match_all.trx.  Keep one smoke
+% assert here so this file's inventory stays complete.
+% ====================================================================
+
+5 [ { 3 gt } { 2 mul } ] match-all dup length 1 eq exch 0 get 10 eq and
+  (match-all: gather form collects matching arm results) rt-ok clear
+
+% ====================================================================
+% SECTION 5: @aggregate-reduce-fail -- the error-unwind arm for
+% phase 2 of aggregate (reducer raised).  Routed via the descriptor
+% table when an error crosses @aggregate-reduce-barrier: restore,
+% clean up, re-raise.  Both a real error and a logic fail.
+% ====================================================================
+
+{ 0 { 1 0 div } [ { 5 } ] aggregate } try
+/div-by-zero eq (aggregate: reducer error re-raises through reduce-fail) rt-ok clear
+
+{ 0 { fail } [ { 5 } ] aggregate } try
+/fail eq (aggregate: reducer fail re-raises through reduce-fail) rt-ok clear
+
+% control: aggregate still works after the failed attempts
+0 { add } [ { 1 } { 2 } { 3 } ] aggregate 6 eq (aggregate: clean run after failures) rt-ok clear
+
+% ====================================================================
+% Done
+% ====================================================================
+
+(Untested-ops tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

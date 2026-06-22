@@ -1,0 +1,12 @@
+% perform inside ${...} reaching an outer handle-effect.
+% Regression for crash-ba21e8cf601f6a1306df5653445dc5511b8f1571:
+% perform's reverse exec walk must --err_scan past @end-in-global,
+% otherwise it dereferences the saved-Boolean companion as a dict.
+<< /ping { 42 exch exec } >>
+{ ${ /ping perform 1 add } }
+handle-effect
+
+% $${...} (force-local) uses the same closer.
+<< /ping { 7 exch exec } >>
+{ $${ /ping perform 1 add } }
+handle-effect

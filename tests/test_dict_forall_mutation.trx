@@ -1,0 +1,38 @@
+% ====================================================================
+% test_dict_forall_mutation.trx -- regression for the @dict-for-all
+% frame off-by-one in dict_forall_clear / dict_forall_update.
+% ====================================================================
+%
+% The @dict-for-all exec-stack frame is 6 slots:
+%   ptr[0] @dict-for-all  ptr[-1] saved_depth  ptr[-2] offset
+%   ptr[-3] bucket_idx     ptr[-4] dict          ptr[-5] proc
+% When a dict is mutated WHILE a for-all over it is in flight, the
+% engine fixes up the in-flight cursor via dict_forall_clear /
+% dict_forall_update (ops_dict.inl).  Those helpers used to compute the
+% offset slot as ptr[-1] and the dict slot as ptr[-3] -- the stale
+% 5-slot layout from before the saved_depth slot was added -- so they
+% read bucket_idx (an Integer) as a Dict.  In a debug build that fires
+% assert(is_dict()) in Object::dict_value; in release it is an
+% out-of-bounds read that silently corrupts the iteration cursor.
+%
+% This test mutates a dict during its own for-all.  It must complete
+% without aborting.  Throws (file-level failure) on any mismatch.
+% ====================================================================
+
+% Case 1: clear the dict mid-iteration -> dict_forall_clear.
+% clear-object is `any :- any`, so the body pops the dict it leaves to
+% keep the per-iteration stack effect at `key value --`.
+/d1 << /a 1 /b 2 /c 3 /d 4 >> def
+d1 { pop pop d1 clear-object pop } for-all
+d1 length 0 ne { /dict-forall-clear-regression-failed throw } if
+
+% Case 2: undef the current key mid-iteration -> dict_forall_update.
+% Mutating a dict during iteration may not visit every key (a known hazard),
+% but it must not crash and must remove exactly the keys it visits -- i.e.
+% remaining + visited == original count (no corruption, no double-visit).
+/d2 << /a 1 /b 2 /c 3 /d 4 /e 5 >> def
+/visited 0 def
+d2 { pop /visited visited 1 add def d2 exch undef } for-all
+d2 length visited add 5 ne { /dict-forall-update-regression-failed throw } if
+
+(__test_ok__) =

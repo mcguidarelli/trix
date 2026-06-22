@@ -1,0 +1,2 @@
+[1 2 3] lazy-seq [10 20 30] lazy-seq lazy-zip lazy-to-array
+[1 2] lazy-seq [3 4] lazy-seq lazy-chain lazy-to-array

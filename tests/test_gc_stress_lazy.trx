@@ -1,0 +1,331 @@
+% ====================================================================
+% test_gc_stress_lazy.trx -- deterministic GC-stress for the lazy builders
+% ====================================================================
+% Debug-only (needs the vm-gc-stress operator, TRIX_DEBUGGER).  Run via
+% tests/run_gc_stress_tests.sh; run_all.sh skips it (it is the stress
+% phase of that runner, and the operator is absent from release builds).
+%
+% `vm-gc-stress` makes gvm_alloc fire a full vm_global_gc before EVERY
+% global user allocation.  Run inside ${...} (m_curr_alloc_global = true ->
+% the global alloc path) every make_curry / make_lazy / make_clone in a
+% builder's chain is therefore preceded by a sweep, so any in-flight node
+% held only in a C local across the next allocation -- a dropped GC root --
+% is collected right before the allocation that depends on it.  A broken
+% rooting site surfaces as an ASan use-after-free at the exact site (the
+% primary signal); the deep-eq against the SAME computation in the local
+% region (unstressed ground truth) is the secondary correctness check.
+%
+% This is the window the B6 sibling-gc test could not reach from script
+% (chain builds are atomic per op); the stress hook makes it deterministic.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+true vm-gc-stress
+
+% ---------------------------------------------------------------- builders
+% --- lazy-from (+ lazy-take) ---
+${ 5 lazy-from 6 lazy-take lazy-to-array }
+5 lazy-from 6 lazy-take lazy-to-array
+deep-eq (lazy-from) rt-ok clear
+
+% --- lazy-repeat / lazy-repeat-n ---
+${ 7 lazy-repeat 4 lazy-take lazy-to-array }
+7 lazy-repeat 4 lazy-take lazy-to-array
+deep-eq (lazy-repeat) rt-ok clear
+
+${ 9 5 lazy-repeat-n lazy-to-array }
+9 5 lazy-repeat-n lazy-to-array
+deep-eq (lazy-repeat-n) rt-ok clear
+
+${ 9 1 lazy-repeat-n lazy-to-array }
+9 1 lazy-repeat-n lazy-to-array
+deep-eq (lazy-repeat-n n=1) rt-ok clear
+
+% --- lazy-map / lazy-filter / lazy-filter-not ---
+${ [1 2 3 4 5] lazy-seq { 10 mul } lazy-map lazy-to-array }
+[1 2 3 4 5] lazy-seq { 10 mul } lazy-map lazy-to-array
+deep-eq (lazy-map) rt-ok clear
+
+${ [1 2 3 4 5 6] lazy-seq { 2 mod 0 eq } lazy-filter lazy-to-array }
+[1 2 3 4 5 6] lazy-seq { 2 mod 0 eq } lazy-filter lazy-to-array
+deep-eq (lazy-filter) rt-ok clear
+
+${ [1 2 3 4 5 6] lazy-seq { 2 mod 0 eq } lazy-filter-not lazy-to-array }
+[1 2 3 4 5 6] lazy-seq { 2 mod 0 eq } lazy-filter-not lazy-to-array
+deep-eq (lazy-filter-not) rt-ok clear
+
+% --- lazy-take / lazy-take-while / lazy-drop / lazy-drop-while ---
+${ 1 lazy-from 1 lazy-take lazy-to-array }
+1 lazy-from 1 lazy-take lazy-to-array
+deep-eq (lazy-take n=1) rt-ok clear
+
+${ 1 lazy-from { 5 lt } lazy-take-while lazy-to-array }
+1 lazy-from { 5 lt } lazy-take-while lazy-to-array
+deep-eq (lazy-take-while) rt-ok clear
+
+${ [1 2 3 4 5] lazy-seq 2 lazy-drop lazy-to-array }
+[1 2 3 4 5] lazy-seq 2 lazy-drop lazy-to-array
+deep-eq (lazy-drop) rt-ok clear
+
+${ [1 2 3 4 5] lazy-seq { 3 lt } lazy-drop-while lazy-to-array }
+[1 2 3 4 5] lazy-seq { 3 lt } lazy-drop-while lazy-to-array
+deep-eq (lazy-drop-while) rt-ok clear
+
+% --- lazy-seq / lazy-range / lazy-iterate / lazy-cycle ---
+${ [10 20 30 40] lazy-seq lazy-to-array }
+[10 20 30 40] lazy-seq lazy-to-array
+deep-eq (lazy-seq) rt-ok clear
+
+${ 0 10 2 lazy-range lazy-to-array }
+0 10 2 lazy-range lazy-to-array
+deep-eq (lazy-range) rt-ok clear
+
+${ 1 { 2 mul } lazy-iterate 6 lazy-take lazy-to-array }
+1 { 2 mul } lazy-iterate 6 lazy-take lazy-to-array
+deep-eq (lazy-iterate) rt-ok clear
+
+${ [1 2 3] lazy-cycle 8 lazy-take lazy-to-array }
+[1 2 3] lazy-cycle 8 lazy-take lazy-to-array
+deep-eq (lazy-cycle) rt-ok clear
+
+% --- lazy-unfold / lazy-filter-map / lazy-flat-map / lazy-flatten ---
+${ 1 { dup 6 gt { pop null } { dup 1 add mark 3 1 roll array-from-mark } if-else } lazy-unfold lazy-to-array }
+1 { dup 6 gt { pop null } { dup 1 add mark 3 1 roll array-from-mark } if-else } lazy-unfold lazy-to-array
+deep-eq (lazy-unfold) rt-ok clear
+
+${ [1 2 3 4 5] lazy-seq { dup 2 mod 0 eq { 2 mul } { pop null } if-else } lazy-filter-map lazy-to-array }
+[1 2 3 4 5] lazy-seq { dup 2 mod 0 eq { 2 mul } { pop null } if-else } lazy-filter-map lazy-to-array
+deep-eq (lazy-filter-map) rt-ok clear
+
+${ [1 2 3] lazy-seq { dup mark 3 1 roll array-from-mark lazy-seq } lazy-flat-map lazy-to-array }
+[1 2 3] lazy-seq { dup mark 3 1 roll array-from-mark lazy-seq } lazy-flat-map lazy-to-array
+deep-eq (lazy-flat-map) rt-ok clear
+
+${ [[1 2] [3 4] [5]] lazy-seq { lazy-seq } lazy-map lazy-flatten lazy-to-array }
+[[1 2] [3 4] [5]] lazy-seq { lazy-seq } lazy-map lazy-flatten lazy-to-array
+deep-eq (lazy-flatten) rt-ok clear
+
+% --- lazy-map-indexed / lazy-scan / lazy-dedupe ---
+${ [10 20 30 40] lazy-seq { add } lazy-map-indexed lazy-to-array }
+[10 20 30 40] lazy-seq { add } lazy-map-indexed lazy-to-array
+deep-eq (lazy-map-indexed) rt-ok clear
+
+${ [1 2 3 4 5] lazy-seq 0 { add } lazy-scan lazy-to-array }
+[1 2 3 4 5] lazy-seq 0 { add } lazy-scan lazy-to-array
+deep-eq (lazy-scan) rt-ok clear
+
+${ [1 1 2 3 3 3 1] lazy-seq lazy-dedupe lazy-to-array }
+[1 1 2 3 3 3 1] lazy-seq lazy-dedupe lazy-to-array
+deep-eq (lazy-dedupe) rt-ok clear
+
+% --- lazy-intersperse (both sync branches) ---
+${ [1 2 3 4] lazy-seq 0 lazy-intersperse lazy-to-array }
+[1 2 3 4] lazy-seq 0 lazy-intersperse lazy-to-array
+deep-eq (lazy-intersperse) rt-ok clear
+
+% --- lazy-step-by (n>1 and n=1) ---
+${ 1 lazy-from 3 lazy-step-by 5 lazy-take lazy-to-array }
+1 lazy-from 3 lazy-step-by 5 lazy-take lazy-to-array
+deep-eq (lazy-step-by) rt-ok clear
+
+${ 1 lazy-from 1 lazy-step-by 5 lazy-take lazy-to-array }
+1 lazy-from 1 lazy-step-by 5 lazy-take lazy-to-array
+deep-eq (lazy-step-by n=1) rt-ok clear
+
+% --- lazy-zip / lazy-zip-with ---
+${ [1 2 3] lazy-seq [10 20 30] lazy-seq lazy-zip lazy-to-array }
+[1 2 3] lazy-seq [10 20 30] lazy-seq lazy-zip lazy-to-array
+deep-eq (lazy-zip) rt-ok clear
+
+${ [1 2 3] lazy-seq [10 20 30] lazy-seq { add } lazy-zip-with lazy-to-array }
+[1 2 3] lazy-seq [10 20 30] lazy-seq { add } lazy-zip-with lazy-to-array
+deep-eq (lazy-zip-with) rt-ok clear
+
+% --- lazy-chain / lazy-interleave / lazy-enumerate ---
+${ [1 2 3] lazy-seq [4 5 6] lazy-seq lazy-chain lazy-to-array }
+[1 2 3] lazy-seq [4 5 6] lazy-seq lazy-chain lazy-to-array
+deep-eq (lazy-chain) rt-ok clear
+
+${ [1 3 5] lazy-seq [2 4 6] lazy-seq lazy-interleave lazy-to-array }
+[1 3 5] lazy-seq [2 4 6] lazy-seq lazy-interleave lazy-to-array
+deep-eq (lazy-interleave) rt-ok clear
+
+${ [7 8 9] lazy-seq lazy-enumerate lazy-to-array }
+[7 8 9] lazy-seq lazy-enumerate lazy-to-array
+deep-eq (lazy-enumerate) rt-ok clear
+
+% --- lazy-chunked (full + partial) / lazy-windowed / lazy-pairwise ---
+${ 1 lazy-from 9 lazy-take 3 lazy-chunked lazy-to-array }
+1 lazy-from 9 lazy-take 3 lazy-chunked lazy-to-array
+deep-eq (lazy-chunked) rt-ok clear
+
+${ 1 lazy-from 8 lazy-take 3 lazy-chunked lazy-to-array }
+1 lazy-from 8 lazy-take 3 lazy-chunked lazy-to-array
+deep-eq (lazy-chunked partial) rt-ok clear
+
+${ [1 2 3 4 5] lazy-seq 3 lazy-windowed lazy-to-array }
+[1 2 3 4 5] lazy-seq 3 lazy-windowed lazy-to-array
+deep-eq (lazy-windowed) rt-ok clear
+
+${ [1 2 3 4] lazy-seq lazy-pairwise lazy-to-array }
+[1 2 3 4] lazy-seq lazy-pairwise lazy-to-array
+deep-eq (lazy-pairwise) rt-ok clear
+
+% --------------------------------------------------------------- consumers
+% Forcing under stress re-enters the @-build / @-step ops globally, so the
+% drive loops and the partially-built result arrays are exercised too.
+${ [3 1 4 1 5 9 2 6] lazy-seq 0 { add } lazy-fold }
+[3 1 4 1 5 9 2 6] lazy-seq 0 { add } lazy-fold
+eq (lazy-fold) rt-ok clear
+
+${ [1 2 3 4 5] lazy-seq { 4 gt } lazy-any }
+[1 2 3 4 5] lazy-seq { 4 gt } lazy-any
+eq (lazy-any) rt-ok clear
+
+${ [1 2 3 4 5] lazy-seq { 0 gt } lazy-all }
+[1 2 3 4 5] lazy-seq { 0 gt } lazy-all
+eq (lazy-all) rt-ok clear
+
+${ 1 lazy-from { 7 eq } lazy-find }
+1 lazy-from { 7 eq } lazy-find
+eq (lazy-find) rt-ok clear
+
+${ 1 lazy-from { 7 eq } lazy-find-index }
+1 lazy-from { 7 eq } lazy-find-index
+eq (lazy-find-index) rt-ok clear
+
+${ 1 lazy-from 12 lazy-nth }
+1 lazy-from 12 lazy-nth
+eq (lazy-nth) rt-ok clear
+
+${ [1 2 3 4 5 6 7] lazy-seq lazy-count }
+[1 2 3 4 5 6 7] lazy-seq lazy-count
+eq (lazy-count) rt-ok clear
+
+${ [1 2 3 4 5] lazy-seq lazy-sum }
+[1 2 3 4 5] lazy-seq lazy-sum
+eq (lazy-sum) rt-ok clear
+
+${ [10 20 30] lazy-seq { = } lazy-for-each }
+(for-each side-effect ran) =
+
+% ====================================================== ExtValue (Long) elements
+% Bignum (`Nl`) elements make lazy_uncons's HEAD clone actually allocate, so the
+% force-continue / consumer ops that hold popped state (proc / acc / pred / the
+% seq itself) across that uncons get exercised -- the CLASS-2b window the integer
+% cases above cannot reach (integer / proc / thunk clones never allocate, so no GC
+% fires mid-uncons there).  Each pipeline is run stressed-in-${} vs the same
+% computation unstressed in local VM (ground truth).
+
+% --- builders that uncons (head-clone path) ---
+${ [1l 2l 3l] lazy-seq { 2l mul } lazy-map lazy-to-array }
+[1l 2l 3l] lazy-seq { 2l mul } lazy-map lazy-to-array
+deep-eq (ext: lazy-map) rt-ok clear
+
+${ [1l 2l 3l 4l] lazy-seq { 2l gt } lazy-filter lazy-to-array }
+[1l 2l 3l 4l] lazy-seq { 2l gt } lazy-filter lazy-to-array
+deep-eq (ext: lazy-filter) rt-ok clear
+
+${ [1l 2l 3l 4l] lazy-seq { 3l lt } lazy-take-while lazy-to-array }
+[1l 2l 3l 4l] lazy-seq { 3l lt } lazy-take-while lazy-to-array
+deep-eq (ext: lazy-take-while) rt-ok clear
+
+${ [1l 2l 3l 4l 5l] lazy-seq { 3l lt } lazy-drop-while lazy-to-array }
+[1l 2l 3l 4l 5l] lazy-seq { 3l lt } lazy-drop-while lazy-to-array
+deep-eq (ext: lazy-drop-while) rt-ok clear
+
+${ [1l 2l 3l 4l] lazy-seq { dup 2l gt { } { pop null } if-else } lazy-filter-map lazy-to-array }
+[1l 2l 3l 4l] lazy-seq { dup 2l gt { } { pop null } if-else } lazy-filter-map lazy-to-array
+deep-eq (ext: lazy-filter-map) rt-ok clear
+
+${ [1l 2l 3l] lazy-seq { dup mark 3 1 roll array-from-mark lazy-seq } lazy-flat-map lazy-to-array }
+[1l 2l 3l] lazy-seq { dup mark 3 1 roll array-from-mark lazy-seq } lazy-flat-map lazy-to-array
+deep-eq (ext: lazy-flat-map) rt-ok clear
+
+${ [1l 1l 2l 3l 3l 3l] lazy-seq lazy-dedupe lazy-to-array }
+[1l 1l 2l 3l 3l 3l] lazy-seq lazy-dedupe lazy-to-array
+deep-eq (ext: lazy-dedupe) rt-ok clear
+
+${ [1l 2l 3l] lazy-seq 0l lazy-intersperse lazy-to-array }
+[1l 2l 3l] lazy-seq 0l lazy-intersperse lazy-to-array
+deep-eq (ext: lazy-intersperse) rt-ok clear
+
+% proc gets (element index): index is a plain Integer, element is Long, so drop
+% the index and scale the Long element (avoids an Integer/Long add type-mismatch).
+${ [10l 20l 30l 40l] lazy-seq { pop 2l mul } lazy-map-indexed lazy-to-array }
+[10l 20l 30l 40l] lazy-seq { pop 2l mul } lazy-map-indexed lazy-to-array
+deep-eq (ext: lazy-map-indexed) rt-ok clear
+
+${ [1l 2l 3l 4l] lazy-seq 0l { add } lazy-scan lazy-to-array }
+[1l 2l 3l 4l] lazy-seq 0l { add } lazy-scan lazy-to-array
+deep-eq (ext: lazy-scan) rt-ok clear
+
+% --- binary builders (clone heads + tails) ---
+${ [1l 2l] lazy-seq [3l 4l] lazy-seq lazy-chain lazy-to-array }
+[1l 2l] lazy-seq [3l 4l] lazy-seq lazy-chain lazy-to-array
+deep-eq (ext: lazy-chain) rt-ok clear
+
+${ [1l 3l] lazy-seq [2l 4l] lazy-seq lazy-interleave lazy-to-array }
+[1l 3l] lazy-seq [2l 4l] lazy-seq lazy-interleave lazy-to-array
+deep-eq (ext: lazy-interleave) rt-ok clear
+
+${ [1l 2l 3l] lazy-seq [10l 20l 30l] lazy-seq lazy-zip lazy-to-array }
+[1l 2l 3l] lazy-seq [10l 20l 30l] lazy-seq lazy-zip lazy-to-array
+deep-eq (ext: lazy-zip) rt-ok clear
+
+${ [1l 2l 3l] lazy-seq [10l 20l 30l] lazy-seq { add } lazy-zip-with lazy-to-array }
+[1l 2l 3l] lazy-seq [10l 20l 30l] lazy-seq { add } lazy-zip-with lazy-to-array
+deep-eq (ext: lazy-zip-with) rt-ok clear
+
+% --- consumers (proc/acc/pred + the seq held across uncons) ---
+${ [1l 2l 3l 4l 5l] lazy-seq 0l { add } lazy-fold }
+[1l 2l 3l 4l 5l] lazy-seq 0l { add } lazy-fold
+eq (ext: lazy-fold) rt-ok clear
+
+% (lazy-sum is integer-accumulator only -- 0 + Long mismatches; covered by the
+%  integer lazy-sum case above.  The fold case exercises the same consumer path.)
+
+${ [1l 2l 3l 4l] lazy-seq { 3l gt } lazy-any }
+[1l 2l 3l 4l] lazy-seq { 3l gt } lazy-any
+eq (ext: lazy-any) rt-ok clear
+
+${ [1l 2l 3l 4l] lazy-seq { 0l gt } lazy-all }
+[1l 2l 3l 4l] lazy-seq { 0l gt } lazy-all
+eq (ext: lazy-all) rt-ok clear
+
+${ [1l 2l 3l 4l] lazy-seq { 2l gt } lazy-find }
+[1l 2l 3l 4l] lazy-seq { 2l gt } lazy-find
+eq (ext: lazy-find) rt-ok clear
+
+${ [1l 2l 3l 4l] lazy-seq { 2l gt } lazy-find-index }
+[1l 2l 3l 4l] lazy-seq { 2l gt } lazy-find-index
+eq (ext: lazy-find-index) rt-ok clear
+
+${ [100l 200l 300l] lazy-seq { = } lazy-for-each }
+(ext: for-each side-effect ran) =
+
+% ==================================================================== heavy
+% A long realization wholly inside ${...}: a full GC fires before every
+% global alloc across map+filter+scan+take, so every published node and the
+% growing result array must survive every sweep.
+${
+    1 lazy-from { dup mul } lazy-map { 2 mod 0 eq } lazy-filter
+    0 { add } lazy-scan 12 lazy-take lazy-to-array
+}
+1 lazy-from { dup mul } lazy-map { 2 mod 0 eq } lazy-filter
+0 { add } lazy-scan 12 lazy-take lazy-to-array
+deep-eq (heavy pipeline under per-alloc GC) rt-ok clear
+
+false vm-gc-stress
+
+(test_gc_stress_lazy.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

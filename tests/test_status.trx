@@ -1,0 +1,704 @@
+% ====================================================================
+% test_status.trx -- //:status: introspection system tests
+% ====================================================================
+% Validates all //:status: keys return correct types and values,
+% and that dynamic keys track VM state changes accurately.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: VM memory keys — type and range checks
+% ====================================================================
+
+//:status:vm-used type /integer-type eq         (st: vm-used is integer) rt-ok clear
+//:status:vm-temp-used type /integer-type eq    (st: vm-temp-used is integer) rt-ok clear
+//:status:vm-free type /integer-type eq         (st: vm-free is integer) rt-ok clear
+//:status:vm-total type /integer-type eq        (st: vm-total is integer) rt-ok clear
+//:status:vm-global-used type /integer-type eq  (st: vm-global-used is integer) rt-ok clear
+
+//:status:vm-used 0 gt                          (st: vm-used > 0) rt-ok clear
+//:status:vm-total 0 gt                         (st: vm-total > 0) rt-ok clear
+//:status:vm-free 0 gt                          (st: vm-free > 0) rt-ok clear
+//:status:vm-temp-used 0 eq                     (st: vm-temp-used = 0 at baseline) rt-ok clear
+% Post main-context-local (2026-05-09): main coroutine is in LOCAL VM,
+% the binding cache is lazy-allocated on first spawn (single-coroutine
+% mode skips it), and the GC scratch is lazy-allocated on first user
+% gvm_alloc.  THIS test performs no global allocs, so vm-global-used must
+% not grow while it runs.  Delta-based (not == 0) so the assert also holds
+% in-process under test_all.trx, where earlier tests' restore-immune global
+% allocations legitimately persist.
+/st-global-baseline //:status:vm-global-used def
+//:status:vm-global-used st-global-baseline eq  (st: vm-global-used unchanged -- main is local-VM, this test allocates no globals) rt-ok clear
+
+% Invariant: used + temp + global + free = total (when persist idle).
+//:status:vm-used //:status:vm-temp-used add //:status:vm-global-used add //:status:vm-free add
+//:status:vm-total eq                           (st: used+temp+global+free=total) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Stack depth keys — track push/pop
+% ====================================================================
+
+//:status:op-depth /od exch def
+1 2 3
+//:status:op-depth od 3 add eq                  (st: op-depth tracks push) rt-ok
+pop pop pop
+//:status:op-depth od eq                        (st: op-depth tracks pop) rt-ok
+clear
+
+//:status:exec-depth type /integer-type eq      (st: exec-depth is integer) rt-ok clear
+//:status:dict-depth type /integer-type eq      (st: dict-depth is integer) rt-ok clear
+//:status:error-depth type /integer-type eq     (st: error-depth is integer) rt-ok clear
+
+% Dict depth tracks begin/end
+//:status:dict-depth /dd exch def
+1 dict begin
+//:status:dict-depth dd 1 add eq                (st: dict-depth tracks begin) rt-ok
+end
+//:status:dict-depth dd eq                      (st: dict-depth tracks end) rt-ok
+clear
+
+% ====================================================================
+% SECTION 3: Stack limit keys — match expected defaults
+% ====================================================================
+
+//:status:max-op-depth 0 gt                     (st: max-op-depth > 0) rt-ok clear
+//:status:max-exec-depth 0 gt                   (st: max-exec-depth > 0) rt-ok clear
+//:status:max-dict-depth 0 gt                   (st: max-dict-depth > 0) rt-ok clear
+//:status:max-error-depth 0 gt                  (st: max-error-depth > 0) rt-ok clear
+//:status:max-save-depth 0 gt                   (st: max-save-depth > 0) rt-ok clear
+
+% Verify depths are within limits
+//:status:op-depth //:status:max-op-depth le    (st: op-depth <= max) rt-ok clear
+//:status:exec-depth //:status:max-exec-depth le (st: exec-depth <= max) rt-ok clear
+//:status:dict-depth //:status:max-dict-depth le (st: dict-depth <= max) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Save system keys
+% ====================================================================
+
+% Capture baseline save-level (may be > 0 when run inside test_all.trx)
+/save-level-base //:status:save-level def
+
+//:status:save-level save-level-base eq         (st: save-level = baseline) rt-ok clear
+
+save
+//:status:save-level save-level-base 1 add eq   (st: save-level = baseline+1 after save) rt-ok
+save
+//:status:save-level save-level-base 2 add eq   (st: save-level = baseline+2 nested) rt-ok
+restore
+//:status:save-level save-level-base 1 add eq   (st: save-level = baseline+1 after inner restore) rt-ok
+restore
+//:status:save-level save-level-base eq         (st: save-level = baseline after outer restore) rt-ok
+clear
+
+% save-journal-entries at our level should be 0
+% (inside test_all.trx save, the run-test defs create journal entries at the outer level,
+%  but at our current level no modifications have been journaled yet)
+//:status:save-journal-entries /journal-base exch def
+
+% save-journal-entries grows when variables are modified inside save
+save
+/a 1 def
+/a 2 def
+//:status:save-journal-entries 0 gt             (st: journal > 0 after def inside save) rt-ok
+restore clear
+
+% save-vm-barrier: capture baseline, verify it increases inside save
+/vm-barrier-base //:status:save-vm-barrier def
+save
+//:status:save-vm-barrier vm-barrier-base gt    (st: vm-barrier > baseline inside save) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 5: Exec stack inspection keys
+% ====================================================================
+
+//:status:exec-top-is-call type /boolean-type eq  (st: exec-top-is-call is bool) rt-ok clear
+//:status:exec-top-is-barrier type /boolean-type eq (st: exec-top-is-barrier is bool) rt-ok clear
+//:status:exec-top-type type /name-type eq      (st: exec-top-type is name) rt-ok clear
+
+% ====================================================================
+% SECTION 6: ExtValue and locals pool keys
+% ====================================================================
+
+//:status:extvalue-free type /integer-type eq   (st: extvalue-free is integer) rt-ok clear
+//:status:extvalue-free 0 ge                    (st: extvalue-free >= 0) rt-ok clear
+
+//:status:locals-pool-count type /integer-type eq (st: locals-pool-count is integer) rt-ok clear
+//:status:locals-pool-count 0 ge                (st: locals-pool-count >= 0) rt-ok clear
+
+//:status:locals-overflow-count type /integer-type eq (st: locals-overflow-count is integer) rt-ok clear
+//:status:locals-overflow-count 0 ge            (st: locals-overflow-count >= 0) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Stream keys
+% ====================================================================
+
+//:status:stream-inuse type /integer-type eq    (st: stream-inuse is integer) rt-ok clear
+//:status:stream-free type /integer-type eq     (st: stream-free is integer) rt-ok clear
+//:status:stream-inuse 0 gt                     (st: stream-inuse > 0) rt-ok clear
+//:status:stream-count //:status:stream-inuse //:status:stream-free add eq
+                                                (st: count = inuse + free) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Name table keys
+% ====================================================================
+
+//:status:name-count type /integer-type eq      (st: name-count is integer) rt-ok clear
+//:status:name-vm-used type /integer-type eq    (st: name-vm-used is integer) rt-ok clear
+//:status:name-max-chain type /integer-type eq  (st: name-max-chain is integer) rt-ok clear
+//:status:name-avg-chain type /real-type eq     (st: name-avg-chain is real) rt-ok clear
+//:status:name-bucket-count type /integer-type eq (st: name-bucket-count is integer) rt-ok clear
+
+//:status:name-count 0 gt                       (st: name-count > 0) rt-ok clear
+//:status:name-vm-used 0 gt                     (st: name-vm-used > 0) rt-ok clear
+//:status:name-bucket-count 0 gt                (st: name-bucket-count > 0) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Dictionary keys
+% ====================================================================
+
+//:status:userdict-length type /integer-type eq (st: userdict-length is integer) rt-ok clear
+//:status:userdict-maxlength type /integer-type eq (st: userdict-maxlength is integer) rt-ok clear
+//:status:userdict-length 0 gt                  (st: userdict-length > 0) rt-ok clear
+//:status:userdict-length //:status:userdict-maxlength le
+                                                (st: userdict-length <= maxlength) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Configuration keys
+% ====================================================================
+
+//:status:eqstring-length type /integer-type eq (st: eqstring-length is integer) rt-ok clear
+//:status:eqarray-length type /integer-type eq  (st: eqarray-length is integer) rt-ok clear
+//:status:eqproc-length type /integer-type eq   (st: eqproc-length is integer) rt-ok clear
+//:status:stream-buffer-size type /integer-type eq (st: stream-buffer-size is integer) rt-ok clear
+//:status:interrupt-level type /integer-type eq (st: interrupt-level is integer) rt-ok clear
+
+//:status:eqstring-length 0 gt                  (st: eqstring-length > 0) rt-ok clear
+//:status:eqarray-length 0 gt                   (st: eqarray-length > 0) rt-ok clear
+//:status:eqproc-length 0 gt                    (st: eqproc-length > 0) rt-ok clear
+
+//:status:interrupt-mask type /integer-type eq   (st: interrupt-mask is integer) rt-ok clear
+//:status:last-scan-line type /integer-type eq   (st: last-scan-line is integer) rt-ok clear
+//:status:last-scan-col type /integer-type eq    (st: last-scan-col is integer) rt-ok clear
+//:status:last-scan-sid type /integer-type eq    (st: last-scan-sid is integer) rt-ok clear
+//:status:vm-alloc-active type /boolean-type eq  (st: vm-alloc-active is boolean) rt-ok clear
+//:status:last-error type /name-type eq          (st: last-error is name) rt-ok clear
+
+% vm-alloc-active should be false at rest
+//:status:vm-alloc-active false eq               (st: vm-alloc-active false at rest) rt-ok clear
+
+% last-error tracks most recent error (may not be no-error under test_all.trx)
+//:status:last-error type /name-type eq          (st: last-error is name type) rt-ok clear
+{ 1 0 div } try pop
+/last-error query-status /div-by-zero eq         (st: last-error = div-by-zero after caught) rt-ok clear
+
+% last-scan-line is positive (we're inside a script)
+//:status:last-scan-line 0 gt                    (st: last-scan-line > 0) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Exec-top keys at top level
+% ====================================================================
+% Note: //:status:exec-top-* use // immediate lookup, so they resolve
+% at scan time. Inside procs, the value is baked at definition time.
+% These keys are tested at top level where the scan-time context is
+% the top-level @run frame.
+
+% At top level during stream execution, exec-top is an operator (@run)
+//:status:exec-top-type /operator-type eq       (st: exec-top-type at top level) rt-ok clear
+
+% ====================================================================
+% SECTION 12: query-status runtime operator
+% ====================================================================
+% query-status resolves //:status: keys at execution time (not scan
+% time), enabling exec stack inspection inside procs.
+% As of 2026-03-28, query-status takes a name (not a string).
+
+/vm-used query-status type /integer-type eq     (st: query-status vm-used type) rt-ok clear
+/save-level query-status save-level-base eq     (st: query-status save-level at base) rt-ok clear
+/name-count query-status 0 gt                   (st: query-status name-count > 0) rt-ok clear
+/name-avg-chain query-status type /real-type eq (st: query-status name-avg-chain type) rt-ok clear
+
+% exec-top-is-call: true in tail position of a named function
+/qs-tail-check {
+    dup 0 le { pop /exec-top-is-call query-status } { 1 sub qs-tail-check } if-else
+} def
+
+1000 qs-tail-check true eq                     (st: query-status exec-top-is-call in tail) rt-ok clear
+
+% exec-top-is-call: false when NOT in tail position
+/qs-nontail-check {
+    /exec-top-is-call query-status
+    (dummy) pop
+} def
+
+qs-nontail-check false eq                      (st: query-status exec-top-is-call non-tail) rt-ok clear
+
+% invalid key gives undefined error
+{ /nonexistent-key query-status } try
+/undefined eq                                   (st: query-status invalid key = undefined) rt-ok clear
+
+% query-status matches // immediate for non-exec-sensitive keys
+//:status:vm-total /vm-total query-status eq    (st: query-status matches immediate) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Save system runtime verification via query-status
+% ====================================================================
+
+% save-journal-entries tracks modifications inside save at runtime
+/journal-test {
+    save
+    /jt-a 1 def
+    /jt-a 2 def
+    /jt-a 3 def
+    /save-journal-entries query-status
+    exch restore
+} def
+
+journal-test 0 gt                              (st: qs journal > 0 after defs in save) rt-ok clear
+
+% Repeated call still shows journal growth inside save
+journal-test 0 gt                              (st: qs journal > 0 on second call too) rt-ok clear
+
+% save-level tracks nested saves at runtime
+/nested-save-test {
+    /save-level query-status /lv0 exch def
+    /s1 save def
+    /save-level query-status lv0 1 add eq       % bool1 on stack
+    /s2 save def
+    /save-level query-status lv0 2 add eq       % bool1 bool2 on stack
+    s2 restore s1 restore
+    and
+} def
+
+nested-save-test true eq                        (st: qs save-level tracks nesting) rt-ok clear
+
+% save-vm-barrier grows with allocation inside save
+/barrier-alloc-test {
+    save
+    /save-vm-barrier query-status /b1 exch def
+    [1 2 3 4 5] pop    % allocate some VM space
+    /save-vm-barrier query-status /b2 exch def
+    % barrier itself should not change (it records the save point),
+    % but vm-used should have grown
+    b2 b1 eq
+    exch restore
+} def
+
+barrier-alloc-test true eq                      (st: qs vm-barrier stable inside save) rt-ok clear
+
+% ====================================================================
+% SECTION 14: Error stack depth via query-status
+% ====================================================================
+
+% error-depth at our level (may be > 0 under test_all.trx try wrapper)
+/error-depth-base /error-depth query-status def
+
+% error-depth grows inside try-catch (handler pushed on error stack)
+/try-catch-depth-test {
+    /error-depth query-status /ed0 exch def
+    << >>
+    { /error-depth query-status ed0 gt }
+    try-catch
+} def
+
+try-catch-depth-test true eq                    (st: qs error-depth > 0 inside try-catch) rt-ok clear
+
+% error-depth returns to baseline after try-catch completes
+/error-depth query-status error-depth-base eq   (st: qs error-depth = baseline after try-catch) rt-ok clear
+
+% error-depth grows with nested try-catch
+/nested-try-catch-depth {
+    /error-depth query-status /ed0 exch def
+    << >>
+    {
+        /error-depth query-status /ed1 exch def
+        << >>
+        {
+            /error-depth query-status /ed2 exch def
+            ed2 ed1 gt ed1 ed0 gt and
+        }
+        try-catch
+    }
+    try-catch
+} def
+
+nested-try-catch-depth true eq                  (st: qs error-depth grows with nested try-catch) rt-ok clear
+
+% error-depth restored after caught error
+/error-catch-depth {
+    /error-depth query-status /ed-before exch def
+    << /div-by-zero { pop } >>
+    { 1 0 div }
+    try-catch
+    /error-depth query-status ed-before eq
+} def
+
+error-catch-depth true eq                       (st: qs error-depth restored after caught error) rt-ok clear
+
+% max-error-depth is queryable and positive
+/max-error-depth query-status 0 gt              (st: qs max-error-depth > 0) rt-ok clear
+
+% ====================================================================
+% SECTION: op-count — interpreter step counter
+% ====================================================================
+
+//:status:op-count type /ulong-type eq           (st: op-count is ulong) rt-ok clear
+//:status:op-count 0ul gt                        (st: op-count > 0) rt-ok clear
+
+% op-count increases monotonically
+/oc-before /op-count query-status def
+1 1 add pop
+/op-count query-status oc-before gt               (st: op-count increases after work) rt-ok clear
+
+% op-count via query-status also works and returns ulong
+/op-count query-status type /ulong-type eq        (st: qs op-count returns ulong) rt-ok clear
+
+% ====================================================================
+% SECTION: extvalue-active — active ExtValue count
+% ====================================================================
+
+//:status:extvalue-active type /integer-type eq  (st: extvalue-active is integer) rt-ok clear
+//:status:extvalue-active 0 ge                   (st: extvalue-active >= 0) rt-ok clear
+
+% Creating a Long increments active count
+/ev-before /extvalue-active query-status def
+42l
+/extvalue-active query-status ev-before gt        (st: extvalue-active grows after Long alloc) rt-ok
+% Popping the Long decrements it
+pop
+/extvalue-active query-status ev-before eq        (st: extvalue-active restored after Long freed) rt-ok clear
+
+% Double same pattern
+/ev-before /extvalue-active query-status def
+3.14d
+/extvalue-active query-status ev-before gt        (st: extvalue-active grows after Double alloc) rt-ok
+pop
+/extvalue-active query-status ev-before eq        (st: extvalue-active restored after Double freed) rt-ok clear
+
+% Curry with ExtValue — delta of 1 (the Long inside the curry)
+/ev-before /extvalue-active query-status def
+42l { add } curry
+/extvalue-active query-status ev-before 1 add eq  (st: extvalue-active +1 for Long curry) rt-ok
+pop
+% After pop, the curry is gone but its internal Long ExtValue is not freed
+% (it's in VM, not on the stack). ExtValue is reclaimed by save/restore.
+clear
+
+% save/restore correctly resets extvalue-active count
+/ev-before /extvalue-active query-status def
+/ev-sv save def
+    42l pop 100l pop 3.14d pop   % allocate and free 3 ExtValues
+    42l /keep-long exch def      % allocate 1 Long, keep it alive
+    /extvalue-active query-status ev-before 1 add eq
+    (st: extvalue-active +1 inside save) rt-ok clear
+ev-sv restore
+/extvalue-active query-status ev-before eq
+    (st: extvalue-active restored after save/restore) rt-ok clear
+
+% ====================================================================
+% SECTION: vm-alloc-since-save — bytes allocated since save
+% ====================================================================
+
+//:status:vm-alloc-since-save type /integer-type eq (st: vm-alloc-since-save is integer) rt-ok clear
+
+% After save, vm-alloc-since-save tracks only bytes since that save point.
+% Wrap in a proc that returns: val-before val-after on the operand stack.
+% Use def inside save to force journaled VM allocation at runtime.
+/alloc-test {
+    /alloc-sv save def
+    /vm-alloc-since-save query-status           % val before
+    /alloc-x1 1 def /alloc-x2 2 def /alloc-x3 3 def  % journal entries grow alloc
+    /vm-alloc-since-save query-status           % val before, val after
+    alloc-sv restore
+} def
+
+alloc-test
+% stack: val-before val-after (both measured inside save scope)
+lt                                    (st: vm-alloc-since-save grows with defs in save) rt-ok clear
+
+% ====================================================================
+% SECTION: call-depth — count of @call frames on exec stack
+% ====================================================================
+
+//:status:call-depth type /integer-type eq        (st: call-depth is integer) rt-ok clear
+
+% At top level (stream execution), call-depth may be 0 or more
+//:status:call-depth 0 ge                         (st: call-depth >= 0) rt-ok clear
+
+% call-depth via query-status
+/call-depth query-status //:status:call-depth eq   (st: qs call-depth matches path) rt-ok clear
+
+% Inside a named proc, call-depth should be >= 1
+/check-call-depth { /call-depth query-status 0 gt } def
+check-call-depth                                  (st: call-depth > 0 inside named proc) rt-ok clear
+
+% TCO proof: call-depth stays constant during tail recursion
+/tco-call-depth null def
+/tco-check {
+    dup 0 le { pop } {
+        tco-call-depth null eq {
+            /tco-call-depth /call-depth query-status def
+        } {
+            /call-depth query-status tco-call-depth eq { } {
+                (FAILED: call-depth changed during TCO) =
+            } if-else
+        } if-else
+        1 sub tco-check
+    } if-else
+} def
+100 tco-check
+/tco-call-depth null ne                           (st: tco-check ran and captured call-depth) rt-ok clear
+/tco-call-depth null def  % reset for next run
+
+% ====================================================================
+% SECTION 19: ExtValue free-list validation
+% ====================================================================
+
+//:status:extvalue-validate                      (st: extvalue-validate true) rt-ok clear
+/extvalue-validate query-status                  (st: query-status extvalue-validate) rt-ok clear
+
+% validate after ExtValue churn
+save
+[1l 2l 3l 4l 5l] { 1l add } map pop
+//:status:extvalue-validate                      (st: extvalue-validate after map Long) rt-ok
+restore clear
+
+save
+[1.0d 2.0d 3.0d] { 10.0d mul } map pop
+[100l 200l 300l] { 150l gt } filter pop
+//:status:extvalue-validate                      (st: extvalue-validate after map+filter) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 20: VM heap validation
+% ====================================================================
+
+//:status:vm-validate                            (st: vm-validate true) rt-ok clear
+/vm-validate query-status                        (st: query-status vm-validate) rt-ok clear
+
+% validate after save/restore with ExtValue churn
+save
+[1l 2l 3l 4l 5l] { 2l mul } map pop
+[1.0d 2.0d 3.0d] { 1.5d gt } filter pop
+//:status:vm-validate                            (st: vm-validate inside save) rt-ok
+restore clear
+
+//:status:vm-validate                            (st: vm-validate after restore) rt-ok clear
+
+% validate after dict operations
+save
+3 dict dup begin /a 42l def /b 99.9d def end pop
+//:status:vm-validate                            (st: vm-validate after dict+Long+Double) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 21: Save journal validation
+% ====================================================================
+
+//:status:save-journal-validate                  (st: journal-validate at base) rt-ok clear
+/save-journal-validate query-status              (st: query-status journal-validate) rt-ok clear
+
+% validate inside save with array, dict, and ExtValue mutations
+save
+[1 2 3] /arr exch def
+arr 0 99 put
+/x 42l def
+3 dict dup begin /a 1 def /b 2l def end pop
+//:status:save-journal-validate                  (st: journal-validate inside save with mutations) rt-ok
+//:status:save-journal-entries 0 gt              (st: journal has entries after mutations) rt-ok
+restore clear
+
+//:status:save-journal-validate                  (st: journal-validate after restore) rt-ok clear
+
+% validate with nested saves
+save
+/x 1l def
+save
+/y 2l def
+//:status:save-journal-validate                  (st: journal-validate nested save) rt-ok
+restore
+//:status:save-journal-validate                  (st: journal-validate after inner restore) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 22: Exec stack frame validation
+% ====================================================================
+
+//:status:exec-validate                          (st: exec-validate at top level) rt-ok clear
+/exec-validate query-status                      (st: query-status exec-validate) rt-ok clear
+
+% validate inside a named call (@call frame present)
+/exec-check { //:status:exec-validate } def
+exec-check                                       (st: exec-validate inside named call) rt-ok clear
+
+% validate inside nested named calls
+/outer-check { exec-check } def
+outer-check                                      (st: exec-validate nested named calls) rt-ok clear
+
+% validate inside loop (control op frame present)
+/loop-valid true def
+3 { //:status:exec-validate not { /loop-valid false def } if } repeat
+loop-valid                                       (st: exec-validate inside repeat loop) rt-ok clear
+
+% validate inside for loop
+/for-valid true def
+1 1 3 { pop //:status:exec-validate not { /for-valid false def } if } for
+for-valid                                        (st: exec-validate inside for loop) rt-ok clear
+
+% validate inside try (barrier frame present)
+{ //:status:exec-validate } try /no-error eq
+exch                                             (st: exec-validate inside try) rt-ok
+pop clear
+
+% ====================================================================
+% SECTION 23: stack-probe — /stack-name index stack-probe
+%             op-stack, exec-stack, dict-stack, error-stack (0-indexed from top)
+% ====================================================================
+
+% --- Operand stack probing ---
+clear
+42 99 (hello)
+/op-stack 0 stack-probe (hello) eq        (st: op-stack 0 is top) rt-ok
+/op-stack 1 stack-probe 99 eq             (st: op-stack 1 is second) rt-ok
+/op-stack 2 stack-probe 42 eq             (st: op-stack 2 is third) rt-ok
+clear
+
+% --- Type preservation across op-stack probe ---
+true /op-stack 0 stack-probe type /boolean-type eq    (st: op-stack 0 bool type) rt-ok clear
+3.14 /op-stack 0 stack-probe type /real-type eq       (st: op-stack 0 real type) rt-ok clear
+/myname /op-stack 0 stack-probe type /name-type eq    (st: op-stack 0 name type) rt-ok clear
+[1 2 3] /op-stack 0 stack-probe type /array-type eq   (st: op-stack 0 array type) rt-ok clear
+
+% --- ExtValue types via stack-probe ---
+123456789l /op-stack 0 stack-probe 123456789l eq      (st: op-stack 0 Long value) rt-ok clear
+3.14d /op-stack 0 stack-probe 3.14d eq                (st: op-stack 0 Double value) rt-ok clear
+
+% --- ExtValue leak test: stack-probe (clone must be freed, no leak) ---
+clear
+/ev-before /extvalue-active query-status def
+123456789l /op-stack 0 stack-probe    % clone created -> +2 active (original + clone)
+pop pop                               % free both -> back to baseline
+/extvalue-active query-status ev-before eq
+                                       (st: op-stack Long no extvalue leak via stack-probe) rt-ok clear
+
+clear
+/ev-before /extvalue-active query-status def
+3.14d /op-stack 0 stack-probe
+pop pop
+/extvalue-active query-status ev-before eq
+                                       (st: op-stack Double no extvalue leak via stack-probe) rt-ok clear
+
+% --- ExtValue leak test: multiple probes of same Long ---
+clear
+/ev-before /extvalue-active query-status def
+42l
+/op-stack 0 stack-probe pop           % probe 1: clone + free
+/op-stack 0 stack-probe pop           % probe 2: clone + free
+/op-stack 0 stack-probe pop           % probe 3: clone + free
+pop                                   % free original
+/extvalue-active query-status ev-before eq
+                                       (st: op-stack repeated Long probe no leak) rt-ok clear
+
+% --- ExtValue leak test: validate free-list integrity after probes ---
+/extvalue-validate query-status        (st: extvalue-validate after probes) rt-ok clear
+
+% --- op-stack out-of-range errors ---
+clear
+{ /op-stack 0 stack-probe } try /range-check eq       (st: op-stack 0 empty = range-check) rt-ok clear
+42 { /op-stack 1 stack-probe } try /range-check eq    (st: op-stack 1 depth=1 = range-check) rt-ok clear
+
+% --- Negative index gives type-check (VerifyNotNegative) ---
+42 { /op-stack 0 1 sub stack-probe } try /range-check eq    (st: op-stack -1 = range-check) rt-ok clear
+
+% --- Unknown stack name gives undefined ---
+{ /bogus-stack 0 stack-probe } try /undefined eq      (st: bogus-stack = undefined) rt-ok clear
+
+% --- Consistency: op-stack 0 equals dup ---
+42 dup /op-stack 0 stack-probe eq                      (st: op-stack 0 equals dup) rt-ok clear
+
+% --- Consistency: op-depth matches max valid index ---
+1 2 3
+/op-stack 0 stack-probe 3 eq                           (st: depth consistency: top) rt-ok
+/op-stack 2 stack-probe 1 eq                           (st: depth consistency: bottom) rt-ok
+{ /op-stack 3 stack-probe } try /range-check eq        (st: depth consistency: N=depth errors) rt-ok
+clear
+
+% --- Dict stack probing ---
+% Default state: dict-stack 0 = userdict, 1 = protocoldict, 2 = systemdict
+/dict-stack 0 stack-probe //userdict eq                (st: dict-stack 0 is userdict) rt-ok clear
+/dict-stack 1 stack-probe //:systemdict:protocoldict eq (st: dict-stack 1 is protocoldict) rt-ok clear
+/dict-stack 2 stack-probe //systemdict eq              (st: dict-stack 2 is systemdict) rt-ok clear
+
+% After begin: new dict on top
+<< >> begin
+/dict-stack 0 stack-probe //userdict ne                (st: dict-stack 0 after begin is new dict) rt-ok
+/dict-stack 1 stack-probe //userdict eq                (st: dict-stack 1 after begin is userdict) rt-ok
+end clear
+
+% dict-stack out-of-range
+{ /dict-stack 99 stack-probe } try /range-check eq     (st: dict-stack 99 = range-check) rt-ok clear
+
+% dict-stack type check
+/dict-stack 0 stack-probe type /dict-type eq
+                                                       (st: dict-stack 0 is a dict) rt-ok clear
+<< >> begin /dict-stack 0 stack-probe type /dict-type eq end
+                                                       (st: dict-stack 0 in begin is dict) rt-ok clear
+
+% --- Error stack probing ---
+% Error stack is populated inside try/try-catch.  The try-catch barrier
+% pushes the handler dict onto the error stack, so error-stack 0 inside
+% a try-catch body should be readable.
+/err-depth-inside null def
+<< /type-check { pop } >> {
+    /error-depth query-status /err-depth-inside exch def
+    1 length
+} try-catch
+err-depth-inside 0 gt                                  (st: error-depth > 0 inside try-catch) rt-ok clear
+
+% error-stack out-of-range at top level (error stack is empty)
+{ /error-stack 0 stack-probe } try /range-check eq     (st: error-stack 0 empty = range-check) rt-ok clear
+
+% error-stack inside try-catch body is the handler dict
+<< /div-by-zero { } >>
+{ /error-stack 0 stack-probe type /dict-type eq } try-catch
+                                                       (st: error-stack 0 in try-catch = dict) rt-ok clear
+
+% --- Exec stack probing ---
+% Exec stack inspection: stack-probe sees the current continuation.
+/exec-stack 0 stack-probe null ne                      (st: exec-stack 0 is non-null) rt-ok clear
+
+% exec-stack inside a proc
+{ /exec-stack 0 stack-probe null ne } exec
+                                                       (st: exec-stack 0 in proc is non-null) rt-ok clear
+
+% exec-stack-0 inside a proc is the remaining continuation (packed-type)
+{ /exec-stack 0 stack-probe type /packed-type eq } exec
+                                                       (st: exec-stack 0 in proc = packed) rt-ok clear
+
+% exec-stack out-of-range
+{ /exec-stack 9999 stack-probe } try /range-check eq   (st: exec-stack 9999 = range-check) rt-ok clear
+
+% --- For-loop iteration over dict-stack using stack-probe ---
+% dict-stack is cleaner for iteration (no loop vars on the dict stack)
+/probe-n /dict-depth query-status def
+/probe-all-dicts true def
+probe-n 1 sub 0 exch 1 {
+    /dict-stack exch stack-probe type /dict-type ne {
+        /probe-all-dicts false def
+    } if
+} for
+probe-all-dicts                                        (st: for-loop over dict-stack all dicts) rt-ok
+clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_status: ALL TESTS PASSED) =
+(__test_ok__) =

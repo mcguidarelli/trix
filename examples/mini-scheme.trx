@@ -1,0 +1,1628 @@
+% ======================================================================
+%  Mini-Scheme (showcase example)
+%
+%  A small R7RS-subset Scheme interpreter, written in Trix, exercising
+%  features that do not appear in the other four showcases:
+%
+%      tagged values   discriminated unions for every Scheme value and
+%                      every AST node.  /number /boolean /string /atom
+%                      /nil /pair /lambda /primitive -- one tag per
+%                      Scheme kind, payload carries the data.
+%
+%      records         the Scheme environment is a Trix record with two
+%                      fields (/vars and /parent), so a lexical frame is
+%                      named, immutable at the record level, and walks
+%                      up the parent chain for variable lookup.
+%
+%      cross-recursion eval and apply call each other for every form
+%                      and every procedure invocation.  Local bindings
+%                      in every recursive proc use the `{ |a b c|#N ... }`
+%                      shorthand so parameter scopes nest properly --
+%                      recursive calls do not stomp the caller's
+%                      expr/env/etc.  (Plain `/x exch def` would put
+%                      locals in userdict and get clobbered on recursion.)
+%
+%  Scope (deliberately small to fit the showcase budget):
+%      Integer arithmetic only (fixnums); no floats.
+%      No macros, no hygienic transformation, no quasiquote.
+%      Special forms: quote if define set! lambda let begin.
+%      ~25 primitives.
+%      Programs are embedded as multi-line Trix strings; no I/O.
+%
+%  call/cc is implemented directly on Trix's delimit / capture.  The
+%  `call/cc` primitive captures the exec segment between itself and the
+%  enclosing `delimit` (installed by run-one) as a /continuation-tagged
+%  Scheme value, then calls the receiver with that K.  Two resume
+%  semantics are available on Trix Continuations:
+%
+%      exec        -- splice (handler's pending frames unwind below K)
+%      abort-exec  -- abort (handler's pending frames discarded first)
+%
+%  call/cc invokes K via `abort-exec` so the classic abort-style
+%  pattern works.  Three Trix-level fixes make this possible:
+%      memory/plan_capture_across_locals.md (capture across |locals|)
+%      memory/plan_op_stack_capture.md (op-stack capture on capture)
+%      memory/plan_abort_on_resume.md (abort-exec vs exec)
+%
+%  To run:
+%      ./trix examples/mini-scheme.trx
+% ======================================================================
+
+
+% ======================================================================
+%  1. Tagged-value constructors and accessors.
+%
+%  Every Scheme value is a Trix Tagged object: a (name, payload) pair.
+%  Keeping all values shaped the same way makes evaluator dispatch a
+%  single `tag-name` lookup instead of a pyramid of type predicates.
+% ======================================================================
+
+/scheme-nil    null  /nil     tag  def
+/scheme-true   true  /boolean tag  def
+/scheme-false  false /boolean tag  def
+
+/mk-number { /number tag }#e def                                            % int -- scheme-num
+/mk-bool   { { scheme-true } { scheme-false } if-else }#e def               % bool -- scheme-bool
+/mk-string { /string tag }#e def                                            % str -- scheme-str
+/mk-atom   { /atom   tag }#e def                                            % name -- scheme-atom
+
+/scheme-cons {
+    |car cdr|#16
+    % car cdr -- pair
+    [ car cdr ] /pair tag
+}#e def
+
+/scheme-car { tag-value 0 get }#e def
+/scheme-cdr { tag-value 1 get }#e def
+
+% Predicates guard is-tagged: env parent can be either a /nil Scheme
+% value (top frame) or a non-Scheme env Record (nested frame), and
+% scheme-nil? must return false (not crash) on the Record case.
+/scheme-nil?  { dup is-tagged { tag-name /nil     eq } { pop false } if-else }#e def
+/scheme-pair? { dup is-tagged { tag-name /pair    eq } { pop false } if-else }#e def
+/scheme-atom? { dup is-tagged { tag-name /atom    eq } { pop false } if-else }#e def
+/scheme-num?  { dup is-tagged { tag-name /number  eq } { pop false } if-else }#e def
+/scheme-bool? { dup is-tagged { tag-name /boolean eq } { pop false } if-else }#e def
+/scheme-str?  { dup is-tagged { tag-name /string  eq } { pop false } if-else }#e def
+/scheme-proc? {
+    dup tag-name /lambda       eq
+    1 index tag-name /primitive eq or
+    exch pop
+}#e def
+
+
+% ======================================================================
+%  2. Environment -- a record with a mutable vars dict and a parent
+%  pointer (/nil for the top frame, another env record otherwise).
+%  env-lookup walks the chain; env-define always writes to the current
+%  frame; env-set! walks until it finds the binding, then writes.
+% ======================================================================
+
+/env-record [ /vars /parent ] record-type def
+
+/make-env {
+    |p|#16
+    % parent -- env
+    % dynamic-dict so top-level envs can hold all 25+ primitives plus
+    % user-defined names without a static capacity estimate
+    8 dynamic-dict p env-record
+}#e def
+
+/env-lookup {
+    |nm e|#16
+    % name env -- value
+    e /vars get nm known?
+    { e /vars get nm get }
+    {
+        e /parent get scheme-nil?
+        {
+            nm /unbound-variable /scheme-error perform
+            pop scheme-nil          % handler aborts; value never used
+        }
+        { nm e /parent get env-lookup } if-else
+    } if-else
+}#e def
+
+/env-define {
+    |nm v e|#16
+    % name value env --
+    e /vars get nm v put
+}#e def
+
+/env-set! {
+    |nm v e|#16
+    % name value env --
+    e /vars get nm known?
+    { e /vars get nm v put }
+    {
+        e /parent get scheme-nil?
+        { nm /set!-unbound /scheme-error perform pop }
+        { nm v e /parent get env-set! } if-else
+    } if-else
+}#e def
+
+
+% ======================================================================
+%  3. Tokenizer.  Hand-rolled, byte-level.  Handles comments (`;` to
+%  end of line), atoms, integer literals (with leading minus), strings,
+%  #t/#f booleans, quote sugar, and parens.  Output is a Trix array of
+%  tagged tokens.
+% ======================================================================
+
+/lparen-tok  null /lparen tag def
+/rparen-tok  null /rparen tag def
+/quote-tok   null /quote  tag def
+
+/is-atom-char {
+    |ch|#16
+    % byte -- bool
+    ch alpha? ch digit? or
+    ch 33b eq or      % !
+    ch 36b eq or      % $
+    ch 37b eq or      % %
+    ch 38b eq or      % &
+    ch 42b eq or      % *
+    ch 43b eq or      % +
+    ch 45b eq or      % -
+    ch 46b eq or      % .
+    ch 47b eq or      % /
+    ch 58b eq or      % :
+    ch 60b eq or      % <
+    ch 61b eq or      % =
+    ch 62b eq or      % >
+    ch 63b eq or      % ?
+    ch 95b eq or      % _
+} def
+
+/tokenize {
+    |src|#16
+    % source -- tokens
+    /len src length local-def
+    /i 0 local-def
+    /toks [] local-def
+    { i len lt } {
+        /ch src i get local-def
+        ch space? {
+            /i i 1 add local-def
+        }
+        {
+            ch 59b eq {      % ';' comment
+                { i len lt src i get 10b ne and } { /i i 1 add local-def } while
+            }
+            { ch 40b eq {    % '('
+                /toks toks lparen-tok append local-def
+                /i i 1 add local-def
+            }
+            { ch 41b eq {    % ')'
+                /toks toks rparen-tok append local-def
+                /i i 1 add local-def
+            }
+            { ch 39b eq {    % '''
+                /toks toks quote-tok append local-def
+                /i i 1 add local-def
+            }
+            { ch 34b eq {    % '"' string
+                /i i 1 add local-def
+                /start i local-def
+                { i len lt src i get 34b ne and } { /i i 1 add local-def } while
+                /body src start i start sub get-interval local-def
+                /toks toks body mk-string append local-def
+                /i i 1 add local-def
+            }
+            { ch 35b eq {    % '#' boolean
+                /i i 1 add local-def
+                src i get 116b eq
+                    { /toks toks scheme-true  append local-def }
+                    { /toks toks scheme-false append local-def }
+                    if-else
+                /i i 1 add local-def
+            }
+            {
+                % atom or number -- scan until non-atom-char
+                /start i local-def
+                { i len lt { src i get is-atom-char } and? } { /i i 1 add local-def } while
+                /lexeme src start i start sub get-interval local-def
+                % Let Trix's number parser decide: try-result returns
+                % /ok int on success, or /err name (with the unconsumed
+                % string still on the stack) on failure.
+                /new-tok
+                    { lexeme to-number } try-result
+                    dup tag-name /ok eq
+                    { tag-value mk-number }
+                    { pop lexeme to-name mk-atom }
+                    if-else
+                local-def
+                /toks toks new-tok append local-def
+            } if-else } if-else } if-else } if-else } if-else } if-else
+        } if-else
+    } while
+    toks
+} def
+
+
+% ======================================================================
+%  4. Parser.  Token array in, nested AST (Scheme values) out.  The AST
+%  IS the value representation -- homoiconic.
+%
+%  Parser state lives in one dict rather than locals because parse-expr
+%  and parse-list are mutually recursive and both need to advance the
+%  same cursor.
+% ======================================================================
+
+/parser-state << /tokens null /pos 0 >> def
+
+/parse-peek  { parser-state /tokens get parser-state /pos get get } def
+/parse-take  { parse-peek  parser-state /pos parser-state /pos get 1 add put } def
+/parse-done? { parser-state /pos get parser-state /tokens get length ge } def
+
+% Note: parse-expr and parse-list are mutually recursive.  Each level would
+% normally need a local scope for /head /tail /inner to avoid clobbering
+% the caller's locals -- but for deeply-nested source that would push the
+% dict stack past its default 24-deep limit.  We instead thread the
+% intermediate values through the operand stack so no userdict/local
+% writes happen per-level.  Shared mutable state lives only in
+% parser-state, which advances monotonically.
+/parse-expr {
+    % -- scheme-value
+    parse-done?
+    { /parser-eof /parse-error /scheme-error perform pop scheme-nil }
+    {
+        parse-take
+        dup tag-name /lparen eq
+        { pop parse-list }
+        {
+            dup tag-name /quote eq
+            {
+                % 'expr  ==>  (quote expr)
+                pop
+                parse-expr               % stack: inner
+                /quote mk-atom           % stack: inner quote-atom
+                exch scheme-nil scheme-cons  % stack: quote-atom (inner . nil)
+                scheme-cons              % stack: (quote inner)
+            }
+            {
+                dup tag-name /rparen eq
+                { pop /unbalanced /parse-error /scheme-error perform pop scheme-nil }
+                { }                      % number/string/bool/atom is self-evaluating
+                if-else
+            } if-else
+        } if-else
+    } if-else
+} def
+
+/parse-list {
+    % -- scheme-list (consumed '(' already)
+    parse-done?
+    { /eof-in-list /parse-error /scheme-error perform pop scheme-nil }
+    {
+        parse-peek tag-name /rparen eq
+        { parse-take pop scheme-nil }
+        {
+            parse-expr                   % stack: head
+            parse-list                   % stack: head tail
+            scheme-cons                  % stack: (head . tail)
+        } if-else
+    } if-else
+} def
+
+/parse {
+    % tokens -- scheme-value
+    parser-state exch /tokens exch put
+    parser-state /pos 0 put
+    parse-expr
+} def
+
+
+% ======================================================================
+%  5. Evaluator.  Mutual recursion between eval and apply.  Every
+%  recursive proc uses { |params| ... } locals so parameter scopes
+%  nest properly across the recursion.
+% ======================================================================
+
+% eval-args and eval keep their parameters on the operand stack rather
+% than defining locals, because they sit on the hottest recursion path
+% (eval-args walks the arg list, eval recurses for every sub-expression)
+% and every `begin/end` scope costs one slot in the dict stack (default
+% 64, capped at 256 via --dict-depth).  This costs some readability but
+% keeps fact(10) inside the default dict-stack budget.
+/eval-args {
+    % args-list env -- values-list
+    1 index scheme-nil?
+    { pop pop scheme-nil }
+    {
+        over over                    % xs env xs env
+        exch scheme-car exch eval    % xs env car-val
+        3 1 roll                     % car-val xs env
+        exch scheme-cdr exch         % car-val cdr env
+        eval-args                    % car-val rest
+        scheme-cons
+    } if-else
+}#e def
+
+/eval {
+    % expr env -- value
+    1 index scheme-atom?
+    { exch tag-value exch env-lookup }
+    {
+        1 index scheme-pair?
+        { eval-pair }
+        { pop }
+        if-else
+    } if-else
+}#e def
+
+/eval-pair {
+    |expr env|#16
+    % pair env -- value
+    /head expr scheme-car local-def
+    head scheme-atom?
+    {
+        /hname head tag-value local-def
+        hname /quote  eq { expr scheme-cdr scheme-car }
+        { hname /if     eq { expr env eval-if }
+        { hname /define eq { expr env eval-define }
+        { hname /set!   eq { expr env eval-set! }
+        { hname /lambda eq { expr env eval-lambda }
+        { hname /let    eq { expr env eval-let }
+        { hname /begin  eq { expr scheme-cdr env eval-begin }
+        {
+            expr env eval-apply
+        } if-else } if-else } if-else } if-else } if-else } if-else } if-else
+    }
+    { expr env eval-apply } if-else
+}#e def
+
+/eval-if {
+    |expr env|#16
+    % (if cond then else?) env -- value
+    /cond-v expr scheme-cdr scheme-car env eval local-def
+    /truthy cond-v scheme-bool? { cond-v tag-value } { true } if-else local-def
+    truthy
+    { expr scheme-cdr scheme-cdr scheme-car env eval }
+    {
+        /rest expr scheme-cdr scheme-cdr scheme-cdr local-def
+        rest scheme-nil?
+        { scheme-nil }
+        { rest scheme-car env eval } if-else
+    } if-else
+}#e def
+
+/eval-define {
+    |expr env|#16
+    % (define name expr) env -- nil
+    /nm-ast expr scheme-cdr scheme-car local-def
+    nm-ast scheme-atom? not
+        { /define-non-atom /type /scheme-error perform pop } if
+    /nm nm-ast tag-value local-def
+    /val expr scheme-cdr scheme-cdr scheme-car env eval local-def
+    nm val env env-define
+    scheme-nil
+}#e def
+
+/eval-set! {
+    |expr env|#16
+    % (set! name expr) env -- nil
+    /nm expr scheme-cdr scheme-car tag-value local-def
+    /val expr scheme-cdr scheme-cdr scheme-car env eval local-def
+    nm val env env-set!
+    scheme-nil
+}#e def
+
+/eval-lambda {
+    |expr env|#16
+    % (lambda (params...) body...) env -- lambda
+    % body is the full tail (list of expressions); apply-lambda runs
+    % it through eval-begin so a lambda body with multiple expressions
+    % evaluates all of them and returns the last -- standard Scheme
+    % implicit begin.
+    /params expr scheme-cdr scheme-car local-def
+    /body   expr scheme-cdr scheme-cdr local-def
+    [ params body env ] /lambda tag
+}#e def
+
+/eval-let {
+    |expr env|#16
+    % (let ((n v) ...) body...) env -- value
+    % body is the full tail (implicit begin, same as lambda).
+    /bindings expr scheme-cdr scheme-car local-def
+    /body     expr scheme-cdr scheme-cdr local-def
+    /new-env  env make-env local-def
+    { bindings scheme-nil? not } {
+        /b    bindings scheme-car local-def
+        /bnm  b scheme-car tag-value local-def
+        /bval b scheme-cdr scheme-car env eval local-def
+        bnm bval new-env env-define
+        /bindings bindings scheme-cdr local-def
+    } while
+    body new-env eval-begin
+}#e def
+
+/eval-begin {
+    |xs env|#16
+    % cdr-list env -- value   (returns value of last form, nil if empty)
+    /result scheme-nil local-def
+    { xs scheme-nil? not } {
+        /result xs scheme-car env eval local-def
+        /xs xs scheme-cdr local-def
+    } while
+    result
+}#e def
+
+/eval-apply {
+    |expr env|#16
+    % pair env -- value
+    /proc expr scheme-car env eval local-def
+    /args expr scheme-cdr env eval-args local-def
+    proc args apply
+}#e def
+
+/apply {
+    % proc args-list -- value
+    % Stack-only dispatch -- no begin/end push, so deep recursion chains
+    % don't eat dict-stack slots in the hot path.
+    over tag-name /primitive eq
+    { exch tag-value exch apply-primitive }
+    {
+        over tag-name /lambda eq
+        { apply-lambda }
+        {
+            over tag-name /continuation eq
+            { apply-continuation }
+            {
+                over tag-name /continuation-resume eq
+                { apply-continuation-resume }
+                { pop pop /not-callable /type /scheme-error perform pop scheme-nil }
+                if-else
+            }
+            if-else
+        } if-else
+    } if-else
+}#e def
+
+/apply-continuation {
+    |k-obj args|#8
+    % continuation-tagged-value args-list -- value (resumes K with car args)
+    % Uses abort-exec so the receiver chain between the handler-push
+    % point and this call is discarded -- classic Scheme call/cc
+    % semantics: (k v) is a one-way exit, not a value-producing splice.
+    args 1 (continuation) require-arity
+    args scheme-car              % resume value on op stack top
+    k-obj tag-value abort-exec   % invoke Trix K; abort-exec trims + jumps
+}#e def
+
+/apply-continuation-resume {
+    |k-obj args|#8
+    % continuation-resume-tagged-value args-list -- value (splices K with car args)
+    % Uses exec (splice) so K's captured segment runs to completion in
+    % the resumer's dynamic extent.  Required for coroutine-style
+    % control transfer: K is invoked from a peer's frame, not its own
+    % handler-scope, so abort-exec's "trim to handler-scope" would
+    % fail.  See coroutine-call/cc above for the trade-offs.
+    args 1 (continuation-resume) require-arity
+    args scheme-car              % resume value on op stack top
+    k-obj tag-value exec         % splice K's segment; resume value flows through capture site
+}#e def
+
+/apply-lambda {
+    |lam args|#16
+    % lambda args-list -- value
+    /tv lam tag-value local-def
+    /params tv 0 get local-def
+    /body   tv 1 get local-def
+    /captured-env tv 2 get local-def
+    /frame captured-env make-env local-def
+    { params scheme-nil? not args scheme-nil? not and } {
+        params scheme-car tag-value
+        args scheme-car
+        frame env-define
+        /params params scheme-cdr local-def
+        /args   args   scheme-cdr local-def
+    } while
+    params scheme-nil? not { /too-few-args /arity /scheme-error perform pop } if
+    args   scheme-nil? not { /too-many-args /arity /scheme-error perform pop } if
+    body frame eval-begin
+}#e def
+
+
+% ======================================================================
+%  5b. CEK trampoline (in progress; switches over in Phase 6).
+%
+%  The evaluator above consumes one Trix dict-stack slot per |locals|
+%  and grows the Trix exec stack on every non-tail call (direct mutual
+%  recursion of eval/apply/eval-pair/...).  Even the cheapened frame
+%  dict can't free a Scheme call from those two ceilings: dict-stack
+%  is 64 deep by default and exec-stack is 2048.  (sum 100000) and
+%  (count-down 1000000) cannot fit at any reasonable budget.
+%
+%  A Felleisen-style CEK machine reorganizes evaluation as a single-
+%  step transition over (expr, env, kont) triples driven by a top-
+%  level loop.  Tail positions reuse the current kont; non-tail
+%  positions extend it by one cell.  The driver itself pushes nothing
+%  per Scheme call, so unbounded tail depth is free and non-tail depth
+%  is bounded only by VM heap.
+%
+%  Frame types (Tagged, payload mostly array):
+%      /if-frame       [then-expr else-expr env]
+%      /args-frame     [evaluated-reversed remaining env]
+%      /apply-frame    [proc evaluated-reversed]
+%      /set-frame      [name env]
+%      /define-frame   [name env]
+%      /begin-frame    [remaining env]
+%      /cont-frame     captured kont (a Scheme list of frames)
+%
+%  kont itself is just a Scheme list (frame . frame . ... . scheme-nil).
+%  scheme-cons it for push, scheme-car/scheme-cdr for pop.  No new VM
+%  cell type needed -- pairs are already kont cells.
+% ======================================================================
+
+/scheme-empty-kont scheme-nil def
+
+% GC pacing for the CEK trampoline.  Every per-iteration env Record /
+% Tagged frame / cons cell is allocated under m_curr_alloc_global=true
+% (see the ${...} wrap inside run-scheme-cek's while), so each step
+% leaks until reclaimed.  Periodic vm-global-gc inside the body
+% reclaims unreachable cells; auto-on-VMFull is the safety net but
+% explicit GC keeps the heap much smaller in practice (and prevents
+% m_vm_temp_ptr from clamping all the way down to m_vm_global before
+% GC can fire).  256 is empirically a good balance: high enough that
+% the per-pass cost is amortised across a meaningful chunk of work,
+% low enough that even the most allocation-hungry demo (sum 100000)
+% never exhausts the default 1MB VM between passes.
+/scheme-gc-interval 32 def
+
+% Names with `/` characters can't be written /xxx/yyy in Trix source --
+% the scanner splits on `/`.  Build them via to-name and bind once.
+/sym-callcc             (call/cc)            to-name def
+/sym-coroutine-callcc   (coroutine-call/cc)  to-name def
+
+% ---- Frame constructors ----------------------------------------------
+/make-if-frame {
+    |then-e else-e env|#8
+    % then-expr else-expr env -- if-frame
+    [ then-e else-e env ] /if-frame tag
+}#e def
+
+/make-args-frame {
+    |evaluated remaining env|#8
+    % evaluated-reversed remaining env -- args-frame
+    [ evaluated remaining env ] /args-frame tag
+}#e def
+
+/make-apply-frame {
+    |proc evaluated|#8
+    % proc evaluated-reversed -- apply-frame
+    [ proc evaluated ] /apply-frame tag
+}#e def
+
+/make-set-frame {
+    |nm env|#8
+    % name env -- set-frame
+    [ nm env ] /set-frame tag
+}#e def
+
+/make-define-frame {
+    |nm env|#8
+    % name env -- define-frame
+    [ nm env ] /define-frame tag
+}#e def
+
+/make-begin-frame {
+    |remaining env|#8
+    % remaining env -- begin-frame
+    [ remaining env ] /begin-frame tag
+}#e def
+
+/make-cont-frame {
+    % kont -- cont-frame   (payload is the kont list itself)
+    /cont-frame tag
+}#e def
+
+% ---- Frame predicates ------------------------------------------------
+/is-if-frame?     { dup is-tagged { tag-name /if-frame     eq } { pop false } if-else }#e def
+/is-args-frame?   { dup is-tagged { tag-name /args-frame   eq } { pop false } if-else }#e def
+/is-apply-frame?  { dup is-tagged { tag-name /apply-frame  eq } { pop false } if-else }#e def
+/is-set-frame?    { dup is-tagged { tag-name /set-frame    eq } { pop false } if-else }#e def
+/is-define-frame? { dup is-tagged { tag-name /define-frame eq } { pop false } if-else }#e def
+/is-begin-frame?  { dup is-tagged { tag-name /begin-frame  eq } { pop false } if-else }#e def
+/is-cont-frame?   { dup is-tagged { tag-name /cont-frame   eq } { pop false } if-else }#e def
+
+% kont = Scheme list of frames
+/kont-empty? { scheme-nil? }#e def
+/kont-push   { scheme-cons }#e def       % frame kont -- kont'
+/kont-top    { scheme-car  }#e def       % kont -- frame
+/kont-pop    { scheme-cdr  }#e def       % kont -- kont'
+
+% ---- Helpers --------------------------------------------------------
+/reverse-list {
+    |xs|#16
+    % scheme-list -- reversed-scheme-list
+    /acc scheme-nil local-def
+    { xs scheme-nil? not } {
+        /acc xs scheme-car acc scheme-cons local-def
+        /xs  xs scheme-cdr local-def
+    } while
+    acc
+}#e def
+
+
+% ======================================================================
+%  5c. eval-step / apply-step / driver loop.
+%
+%  Encoding of the next state on the operand stack: stamp a mode tag
+%  /eval or /value at top.  The driver pops the tag and unpacks the
+%  rest accordingly.
+%
+%      /eval mode:   ...  kont'  env'  expr'  /eval
+%      /value mode:  ...  kont'  val'         /value
+% ======================================================================
+
+% ---- eval-step ------------------------------------------------------
+/eval-step {
+    |expr env kont|#16
+    % expr env kont -- new-state...
+
+    expr scheme-atom?
+    {
+        % Variable reference
+        /val expr tag-value env env-lookup local-def
+        kont val /value
+    }
+    {
+    expr scheme-pair?
+    {
+        /head expr scheme-car local-def
+        head scheme-atom?
+        {
+            /hname head tag-value local-def
+
+            hname /quote eq
+            { kont expr scheme-cdr scheme-car /value }
+            {
+            hname /if eq
+            {
+                /cond-e expr scheme-cdr scheme-car local-def
+                /then-e expr scheme-cdr scheme-cdr scheme-car local-def
+                /rest   expr scheme-cdr scheme-cdr scheme-cdr local-def
+                /else-e rest scheme-nil? { scheme-nil } { rest scheme-car } if-else local-def
+                /frame  then-e else-e env make-if-frame local-def
+                frame kont kont-push  env  cond-e  /eval
+            }
+            {
+            hname /define eq
+            {
+                /nm-ast expr scheme-cdr scheme-car local-def
+                nm-ast scheme-atom? not
+                    { /define-non-atom /type /scheme-error perform pop } if
+                /nm     nm-ast tag-value local-def
+                /val-e  expr scheme-cdr scheme-cdr scheme-car local-def
+                /frame  nm env make-define-frame local-def
+                frame kont kont-push  env  val-e  /eval
+            }
+            {
+            hname /set! eq
+            {
+                /nm     expr scheme-cdr scheme-car tag-value local-def
+                /val-e  expr scheme-cdr scheme-cdr scheme-car local-def
+                /frame  nm env make-set-frame local-def
+                frame kont kont-push  env  val-e  /eval
+            }
+            {
+            hname /lambda eq
+            {
+                /params expr scheme-cdr scheme-car local-def
+                /body   expr scheme-cdr scheme-cdr local-def
+                /lam    [ params body env ] /lambda tag local-def
+                kont lam /value
+            }
+            {
+            hname /let eq
+            {
+                % Reduce (let ((n1 v1) ...) body...) to ((lambda (n1 ...) body...) v1 ...)
+                /bindings expr scheme-cdr scheme-car local-def
+                /body     expr scheme-cdr scheme-cdr local-def
+                /names    scheme-nil local-def
+                /vals     scheme-nil local-def
+                { bindings scheme-nil? not } {
+                    /b    bindings scheme-car local-def
+                    /names b scheme-car names scheme-cons local-def
+                    /vals  b scheme-cdr scheme-car vals scheme-cons local-def
+                    /bindings bindings scheme-cdr local-def
+                } while
+                /names    names reverse-list local-def
+                /vals     vals  reverse-list local-def
+                /lam-expr /lambda mk-atom names body scheme-cons scheme-cons local-def
+                /call     lam-expr vals scheme-cons local-def
+                kont env call /eval
+            }
+            {
+            hname /begin eq
+            {
+                /body expr scheme-cdr local-def
+                body scheme-nil?
+                { kont scheme-nil /value }
+                {
+                    /first body scheme-car local-def
+                    /rest  body scheme-cdr local-def
+                    rest scheme-nil?
+                    { kont env first /eval }
+                    {
+                        /frame rest env make-begin-frame local-def
+                        frame kont kont-push  env  first  /eval
+                    } if-else
+                } if-else
+            }
+            {
+                % Procedure call: eval head with args-frame above.
+                /frame scheme-nil expr scheme-cdr env make-args-frame local-def
+                frame kont kont-push  env  head  /eval
+            }
+            if-else } if-else } if-else } if-else } if-else } if-else } if-else
+        }
+        {
+            % Non-atom head -- still a procedure call: eval head expression
+            /frame scheme-nil expr scheme-cdr env make-args-frame local-def
+            frame kont kont-push  env  head  /eval
+        } if-else
+    }
+    {
+        % Self-evaluating (number, string, bool, nil, etc.)
+        kont expr /value
+    } if-else } if-else
+}#e def
+
+% ---- apply-step (run a procedure with an evaluated args list) -------
+/apply-step {
+    |proc args kont|#16
+    % proc args kont -- new-state...
+
+    proc tag-name /primitive eq
+    {
+        /sym proc tag-value local-def
+
+        % call/cc and coroutine-call/cc are special: capture current kont
+        % as a Scheme /continuation value, then call the receiver with it.
+        sym sym-callcc eq sym sym-coroutine-callcc eq or
+        {
+            args 1 sym require-arity
+            /receiver args scheme-car local-def
+            /k-tagged kont /continuation tag local-def
+            /k-args   k-tagged scheme-nil scheme-cons local-def
+            receiver k-args kont apply-step
+        }
+        {
+        primitives-dict sym known? not
+        {
+            sym /unknown-primitive /scheme-error perform pop
+            kont scheme-nil /value
+        }
+        {
+            args primitives-dict sym get exec
+            % primitive leaves a Scheme value on op stack
+            /val exch local-def
+            kont val /value
+        } if-else
+        } if-else
+    }
+    {
+    proc tag-name /lambda eq
+    {
+        /tv proc tag-value local-def
+        /params       tv 0 get local-def
+        /body         tv 1 get local-def
+        /captured-env tv 2 get local-def
+        /frame        captured-env make-env local-def
+        { params scheme-nil? not args scheme-nil? not and } {
+            params scheme-car tag-value
+            args scheme-car
+            frame env-define
+            /params params scheme-cdr local-def
+            /args   args   scheme-cdr local-def
+        } while
+        params scheme-nil? not { /too-few-args /arity /scheme-error perform pop } if
+        args   scheme-nil? not { /too-many-args /arity /scheme-error perform pop } if
+
+        body scheme-nil?
+        { kont scheme-nil /value }
+        {
+            /first body scheme-car local-def
+            /rest  body scheme-cdr local-def
+            rest scheme-nil?
+            { kont frame first /eval }
+            {
+                /bf rest frame make-begin-frame local-def
+                bf kont kont-push  frame  first  /eval
+            } if-else
+        } if-else
+    }
+    {
+    proc tag-name /continuation eq
+    {
+        % Phase 5: kont reification.  Captured kont replaces driver kont,
+        % carries arg0 as the resume value.
+        /captured proc tag-value local-def
+        /rv args scheme-car local-def
+        captured rv /value
+    }
+    {
+        % Not a callable
+        proc args /not-callable /type /scheme-error perform pop pop pop
+        kont scheme-nil /value
+    } if-else } if-else } if-else
+}#e def
+
+% ---- apply-frame: kont's top frame consumes the current value -------
+/apply-frame {
+    |val kont|#16
+    % val kont -- new-state...
+    /frame kont kont-top local-def
+    /rest  kont kont-pop local-def
+
+    frame is-if-frame?
+    {
+        /payload frame tag-value local-def
+        /then-e  payload 0 get local-def
+        /else-e  payload 1 get local-def
+        /env     payload 2 get local-def
+        val scheme-bool? { val tag-value not } { false } if-else
+        { rest env else-e /eval }
+        { rest env then-e /eval }
+        if-else
+    }
+    {
+    frame is-args-frame?
+    {
+        /payload frame tag-value local-def
+        /evd     payload 0 get local-def
+        /rem     payload 1 get local-def
+        /env     payload 2 get local-def
+        /new-evd val evd scheme-cons local-def
+        rem scheme-nil?
+        {
+            % Done collecting; reverse, split, dispatch to apply-step.
+            /reversed new-evd reverse-list local-def
+            /proc reversed scheme-car local-def
+            /args reversed scheme-cdr local-def
+            proc args rest apply-step
+        }
+        {
+            /next  rem scheme-car local-def
+            /rem'  rem scheme-cdr local-def
+            /frame' new-evd rem' env make-args-frame local-def
+            frame' rest kont-push  env  next  /eval
+        } if-else
+    }
+    {
+    frame is-set-frame?
+    {
+        /payload frame tag-value local-def
+        /nm  payload 0 get local-def
+        /env payload 1 get local-def
+        nm val env env-set!
+        rest scheme-nil /value
+    }
+    {
+    frame is-define-frame?
+    {
+        /payload frame tag-value local-def
+        /nm  payload 0 get local-def
+        /env payload 1 get local-def
+        nm val env env-define
+        rest scheme-nil /value
+    }
+    {
+    frame is-begin-frame?
+    {
+        /payload frame tag-value local-def
+        /rem-list payload 0 get local-def
+        /env      payload 1 get local-def
+        /first rem-list scheme-car local-def
+        /rest-list rem-list scheme-cdr local-def
+        rest-list scheme-nil?
+        { rest env first /eval }
+        {
+            /bf rest-list env make-begin-frame local-def
+            bf rest kont-push env first /eval
+        } if-else
+    }
+    {
+    frame is-cont-frame?
+    {
+        % Replace driver kont with captured one (call/cc resume).
+        /captured frame tag-value local-def
+        captured val /value
+    }
+    {
+        /unknown-frame /internal /scheme-error perform pop
+        rest scheme-nil /value
+    } if-else } if-else } if-else } if-else } if-else } if-else
+}#e def
+
+% ---- Driver loop ----------------------------------------------------
+/run-scheme-cek {
+    |start-expr start-env|#16
+    % expr env -- value
+    /st-mode  /eval local-def
+    /st-expr  start-expr local-def
+    /st-env   start-env local-def
+    /st-kont  scheme-empty-kont local-def
+    /st-val   scheme-nil local-def
+    /done     false local-def
+    /iter     0     local-def
+
+    % ${...} wrap routes per-iteration allocations (env Records, Tagged
+    % kont frames, cons cells) into global VM, where Phase 10 GC can
+    % reclaim them.  Without this, deep recursion (sum 100000,
+    % count-down 1000000) leaks every cell at sl=0 and overruns 1MB VM
+    % long before completion.
+    ${ { done not } {
+        st-mode /eval eq
+        {
+            st-expr st-env st-kont eval-step
+            dup /eval eq
+            {
+                pop
+                /st-expr exch local-def
+                /st-env  exch local-def
+                /st-kont exch local-def
+                /st-mode /eval local-def
+            }
+            {
+                pop
+                /st-val  exch local-def
+                /st-kont exch local-def
+                /st-mode /value local-def
+            } if-else
+        }
+        {
+            % value mode: apply top frame, or terminate
+            st-kont kont-empty?
+            { /done true local-def }
+            {
+                st-val st-kont apply-frame
+                dup /eval eq
+                {
+                    pop
+                    /st-expr exch local-def
+                    /st-env  exch local-def
+                    /st-kont exch local-def
+                    /st-mode /eval local-def
+                }
+                {
+                    pop
+                    /st-val  exch local-def
+                    /st-kont exch local-def
+                    /st-mode /value local-def
+                } if-else
+            } if-else
+        } if-else
+        /iter iter 1 add local-def
+        iter scheme-gc-interval mod 0 eq { vm-global-gc pop } if
+    } while }
+    st-val
+}#e def
+
+
+% ======================================================================
+%  6. Primitives.  Registered in primitives-dict, invoked by
+%  apply-primitive with the (already-evaluated) Scheme args list on top.
+%
+%  Each primitive handles its own arity/type checking and surfaces
+%  errors via /scheme-error perform.
+% ======================================================================
+
+/primitives-dict 40 dict def
+
+/def-prim {
+    % sym proc --
+    primitives-dict 3 1 roll put
+} def
+
+% Scheme symbols like `<`, `<=`, `>`, `>=` can't be written as /-prefixed
+% names in Trix source -- `/<` collides with the `<<` dict / `<(...)>` raw
+% string scanner forms.  Register via string -> Name instead.
+/def-str-prim {
+    % str-name proc --
+    exch to-name exch def-prim
+} def
+
+/arg-count {
+    |xs|#16
+    % args-list -- int
+    /n 0 local-def
+    { xs scheme-nil? not } { /n n 1 add local-def /xs xs scheme-cdr local-def } while
+    n
+}#e def
+
+/require-arity {
+    |xs want pname|#16
+    % args-list want prim-name --
+    xs arg-count want ne
+        { pname /arity /scheme-error perform pop } if
+}#e def
+
+/require-num {
+    |v pname|#16
+    % scheme-value prim-name --
+    v scheme-num? not
+        { pname /type /scheme-error perform pop } if
+}#e def
+
+/sch-nth {
+    |xs i|#16
+    % args-list index -- scheme-value
+    { i 0 gt } { /xs xs scheme-cdr local-def /i i 1 sub local-def } while
+    xs scheme-car
+}#e def
+
+% ---- Arithmetic ------------------------------------------------------
+/+ {
+    |xs|#16
+    /acc 0 local-def
+    { xs scheme-nil? not } {
+        xs scheme-car (+) require-num
+        /acc acc xs scheme-car tag-value add local-def
+        /xs xs scheme-cdr local-def
+    } while
+    acc mk-number
+} def-prim
+
+/- {
+    |xs|#16
+    xs arg-count 0 eq { /arity-dash /arity /scheme-error perform pop } if
+    xs arg-count 1 eq
+    {
+        xs scheme-car (-) require-num
+        xs scheme-car tag-value neg mk-number
+    }
+    {
+        /acc xs scheme-car tag-value local-def
+        /xs xs scheme-cdr local-def
+        { xs scheme-nil? not } {
+            xs scheme-car (-) require-num
+            /acc acc xs scheme-car tag-value sub local-def
+            /xs xs scheme-cdr local-def
+        } while
+        acc mk-number
+    } if-else
+} def-prim
+
+/* {
+    |xs|#16
+    /acc 1 local-def
+    { xs scheme-nil? not } {
+        xs scheme-car (*) require-num
+        /acc acc xs scheme-car tag-value mul local-def
+        /xs xs scheme-cdr local-def
+    } while
+    acc mk-number
+} def-prim
+
+/quotient {
+    |xs|#16
+    xs 2 (quotient) require-arity
+    xs 0 sch-nth (quotient) require-num
+    xs 1 sch-nth (quotient) require-num
+    xs 1 sch-nth tag-value 0 eq { /div-by-zero /arith /scheme-error perform pop } if
+    xs 0 sch-nth tag-value  xs 1 sch-nth tag-value  div mk-number
+} def-prim
+
+/modulo {
+    |xs|#16
+    xs 2 (modulo) require-arity
+    xs 0 sch-nth (modulo) require-num
+    xs 1 sch-nth (modulo) require-num
+    xs 1 sch-nth tag-value 0 eq { /mod-by-zero /arith /scheme-error perform pop } if
+    xs 0 sch-nth tag-value  xs 1 sch-nth tag-value  mod mk-number
+} def-prim
+
+% ---- Comparison (unrolled; avoids a helper's local-capture trap) -----
+(<) {
+    |xs|#16
+    xs 2 (<) require-arity
+    xs 0 sch-nth (<) require-num
+    xs 1 sch-nth (<) require-num
+    xs 0 sch-nth tag-value  xs 1 sch-nth tag-value  lt  mk-bool
+} def-str-prim
+
+(<=) {
+    |xs|#16
+    xs 2 (<=) require-arity
+    xs 0 sch-nth (<=) require-num
+    xs 1 sch-nth (<=) require-num
+    xs 0 sch-nth tag-value  xs 1 sch-nth tag-value  le  mk-bool
+} def-str-prim
+
+(>) {
+    |xs|#16
+    xs 2 (>) require-arity
+    xs 0 sch-nth (>) require-num
+    xs 1 sch-nth (>) require-num
+    xs 0 sch-nth tag-value  xs 1 sch-nth tag-value  gt  mk-bool
+} def-str-prim
+
+(>=) {
+    |xs|#16
+    xs 2 (>=) require-arity
+    xs 0 sch-nth (>=) require-num
+    xs 1 sch-nth (>=) require-num
+    xs 0 sch-nth tag-value  xs 1 sch-nth tag-value  ge  mk-bool
+} def-str-prim
+
+/= {
+    |xs|#16
+    xs 2 (=) require-arity
+    xs 0 sch-nth (=) require-num
+    xs 1 sch-nth (=) require-num
+    xs 0 sch-nth tag-value  xs 1 sch-nth tag-value  eq  mk-bool
+} def-prim
+
+% ---- Equality and type predicates ------------------------------------
+/eq? {
+    |xs|#16
+    xs 2 (eq?) require-arity
+    xs 0 sch-nth xs 1 sch-nth deep-eq mk-bool
+} def-prim
+
+/null?     { |xs| xs 1 (null?)     require-arity  xs scheme-car scheme-nil?  mk-bool } def-prim
+/pair?     { |xs| xs 1 (pair?)     require-arity  xs scheme-car scheme-pair? mk-bool } def-prim
+/symbol?   { |xs| xs 1 (symbol?)   require-arity  xs scheme-car scheme-atom? mk-bool } def-prim
+/number?   { |xs| xs 1 (number?)   require-arity  xs scheme-car scheme-num?  mk-bool } def-prim
+/boolean?  { |xs| xs 1 (boolean?)  require-arity  xs scheme-car scheme-bool? mk-bool } def-prim
+/string?   { |xs| xs 1 (string?)   require-arity  xs scheme-car scheme-str?  mk-bool } def-prim
+/procedure? { |xs| xs 1 (procedure?) require-arity xs scheme-car scheme-proc? mk-bool } def-prim
+
+/zero? {
+    |xs|#16
+    xs 1 (zero?) require-arity
+    xs scheme-car (zero?) require-num
+    xs scheme-car tag-value 0 eq mk-bool
+} def-prim
+
+/not {
+    |xs|#16
+    xs 1 (not) require-arity
+    /v xs scheme-car local-def
+    v scheme-bool? { v tag-value not } { false } if-else mk-bool
+} def-prim
+
+% ---- Pairs and lists -------------------------------------------------
+/cons {
+    |xs|#16
+    xs 2 (cons) require-arity
+    xs 0 sch-nth  xs 1 sch-nth  scheme-cons
+} def-prim
+
+/car {
+    |xs|#16
+    xs 1 (car) require-arity
+    /v xs 0 sch-nth local-def
+    v scheme-pair? not
+        { /car-of-non-pair /type /scheme-error perform pop scheme-nil }
+        { v scheme-car } if-else
+} def-prim
+
+/cdr {
+    |xs|#16
+    xs 1 (cdr) require-arity
+    /v xs 0 sch-nth local-def
+    v scheme-pair? not
+        { /cdr-of-non-pair /type /scheme-error perform pop scheme-nil }
+        { v scheme-cdr } if-else
+} def-prim
+
+/list {
+    % variadic: return the args list unchanged
+} def-prim
+
+/length-prim {
+    |xs|#16
+    xs 1 (length) require-arity
+    /lst xs 0 sch-nth local-def
+    /n 0 local-def
+    { lst scheme-nil? not } {
+        lst scheme-pair? not
+            { /length-non-list /type /scheme-error perform pop } if
+        /n n 1 add local-def
+        /lst lst scheme-cdr local-def
+    } while
+    n mk-number
+}#e def
+/length /length-prim load def-prim
+
+% ---- Output ----------------------------------------------------------
+/format-scheme {
+    |v quotes|#16
+    % scheme-value with-quotes? --
+    v scheme-nil?
+    { (()) print }
+    {
+        v scheme-num?
+        { ({0}) mark v tag-value print-fmt pop pop }
+        {
+            v scheme-bool?
+            { v tag-value { (#t) print } { (#f) print } if-else }
+            {
+                v scheme-str?
+                {
+                    quotes { (") print } if
+                    v tag-value print
+                    quotes { (") print } if
+                }
+                {
+                    v scheme-atom?
+                    { ({0}) mark v tag-value print-fmt pop pop }
+                    {
+                        v scheme-pair?
+                        {
+                            (\() print
+                            v scheme-car quotes format-scheme
+                            /rest v scheme-cdr local-def
+                            { rest scheme-pair? } {
+                                ( ) print
+                                rest scheme-car quotes format-scheme
+                                /rest rest scheme-cdr local-def
+                            } while
+                            rest scheme-nil? not {
+                                ( . ) print rest quotes format-scheme
+                            } if
+                            (\)) print
+                        }
+                        {
+                            v scheme-proc?
+                            {
+                                v tag-name /primitive eq
+                                { (#<primitive>) print }
+                                { (#<procedure>) print }
+                                if-else
+                            }
+                            { (#<?>) print } if-else
+                        } if-else
+                    } if-else
+                } if-else
+            } if-else
+        } if-else
+    } if-else
+} def
+
+/display {
+    |xs|#16
+    xs 1 (display) require-arity
+    xs scheme-car false format-scheme
+    scheme-nil
+} def-prim
+
+/write {
+    |xs|#16
+    xs 1 (write) require-arity
+    xs scheme-car true format-scheme
+    scheme-nil
+} def-prim
+
+/newline {
+    |xs|#16
+    xs 0 (newline) require-arity
+    nl
+    scheme-nil
+} def-prim
+
+% ---- call/cc ---------------------------------------------------------
+%
+%  The receiver Scheme-lambda is called with a /continuation-tagged
+%  Scheme value K.  If the receiver invokes K via Scheme apply, the
+%  captured exec segment is restored and the resumed body picks up
+%  immediately after the `capture` site with the resume value on top.
+%
+(call/cc) {
+    |args|#8
+    args 1 (call/cc) require-arity
+    % After capture fires, the handler runs on a clean op stack with K on
+    % top -- ambient between the enclosing `delimit` and `capture` is
+    % saved, and the |args| frame dict is captured via the dict-stack
+    % path.  `receiver` is therefore not reachable from the handler by
+    % name or via op stack; curry embeds it as closure state.
+    %
+    % Both paths converge on the same final value:
+    %   - Receiver returns normally: apply's result is on op; handler
+    %     completes; capture yields that result to the delimited body.
+    %   - Receiver invokes K via (k v): apply-continuation dispatches
+    %     to abort-exec K, which trims the receiver chain and splices
+    %     K's captured segment with v as the resume value.  apply never
+    %     returns in this case -- abort discards its frame.
+    args scheme-car                 % op: [..., receiver]
+    {
+        % Curry-exec pushes receiver, then this proc runs with op
+        % [..., K, receiver] (K pushed by capture, receiver by curry).
+        exch                        % op: [..., receiver, K]
+        /continuation tag           % op: [..., receiver, scheme-k]
+        scheme-nil scheme-cons      % op: [..., receiver, (scheme-k . nil)]
+        apply                       % op: [..., result]  (if receiver returned normally)
+    } curry
+    capture
+} def-str-prim
+
+% ---- coroutine-call/cc -----------------------------------------------
+%
+%  Like call/cc, but K is invoked via `exec` (splice) rather than
+%  abort-exec.  Two behavioural differences make this the right
+%  primitive for coroutine / control-transfer patterns:
+%
+%    1. K can be invoked from a different dynamic extent than where
+%       it was captured.  abort-exec requires the original handler
+%       scope to still be on the exec stack, which fails the moment
+%       K is stored in a variable and called from another coroutine.
+%       exec splices K regardless.
+%
+%    2. The handler wraps `apply` in a fresh `delimit` so the
+%       receiver body can itself invoke (coroutine-)call/cc.  Without
+%       this, every Trix `capture` consumes the single run-one
+%       delimit, leaving subsequent captures with no boundary to
+%       capture to ("capture: no enclosing delimit").
+%
+%  Trade-off:  every K invocation runs the captured body to
+%  completion *inside* the resumer's dynamic extent before exec
+%  returns.  Classic Scheme `(+ 10 (call/cc (lambda (k) (k 42))))`
+%  would yield the wrong answer here -- the rest of the program
+%  re-runs from the splice site.  Use plain `call/cc` for early-
+%  exit; use `coroutine-call/cc` when K's invocation is meant to
+%  transfer control with both sides alive afterwards.
+%
+(coroutine-call/cc) {
+    |args|#8
+    args 1 (coroutine-call/cc) require-arity
+    args scheme-car                 % op: [..., receiver]
+    {
+        exch                                % op: [..., receiver, K]
+        /continuation-resume tag            % distinct tag => apply dispatches via exec
+        scheme-nil scheme-cons              % op: [..., receiver, (scheme-k . nil)]
+        { apply } delimit                   % fresh delimit so nested captures find a boundary
+    } curry
+    capture
+} def-str-prim
+
+/apply-primitive {
+    |sym args|#16
+    % sym args-list -- value
+    primitives-dict sym known? not
+        { sym /unknown-primitive /scheme-error perform pop scheme-nil }
+        { args primitives-dict sym get exec }
+        if-else
+}#e def
+
+
+% ======================================================================
+%  7. Top-level driver.
+% ======================================================================
+
+/install-primitives {
+    % -- env
+    /e scheme-nil make-env def
+    primitives-dict {
+        % key value --
+        pop                                     % discard the proc
+        /sym exch def
+        sym sym /primitive tag e env-define
+    } for-all
+    e
+} def
+
+% Result checkers for the demo self-test.  Each takes the demo result
+% plus the expectation and returns a bool; numbers and atoms compare
+% via the Tagged payload, the list checker walks three pairs to nil.
+/num-result?  { |r n|#4 r scheme-num?  { r tag-value n eq } { false } if-else } def
+/atom-result? { |r a|#4 r scheme-atom? { r tag-value a eq } { false } if-else } def
+/list3-result? { |r a b c|#8
+    r scheme-pair?
+    {
+        r scheme-car a num-result?
+        r scheme-cdr scheme-pair?
+        {
+            r scheme-cdr scheme-car b num-result? and
+            r scheme-cdr scheme-cdr scheme-pair?
+            {
+                r scheme-cdr scheme-cdr scheme-car c num-result? and
+                r scheme-cdr scheme-cdr scheme-cdr scheme-nil? and
+            }
+            { pop false }
+            if-else
+        }
+        { pop false }
+        if-else
+    }
+    { false }
+    if-else
+} def
+
+/demo-fails 0 def
+
+/run-one {
+    |src env label verdict|#16
+    % source env label verdict-proc --   (verdict-proc: result -- bool)
+    (\n-- ) print label print ( --\n) print flush
+    src tokenize
+    parse
+    /ast exch local-def
+    % CEK trampoline: stack-safe evaluation.  call/cc and
+    % coroutine-call/cc both capture the current Scheme-level kont, so
+    % no Trix-level delimit/capture is involved.
+    ast env run-scheme-cek
+    /result exch local-def
+    (=> ) print result true format-scheme nl flush
+    % machine-check the printed result; a bare `verdict` lookup runs
+    % the proc bound in this |locals| frame with `result` on the stack
+    result verdict not {
+        /demo-fails demo-fails 1 add def
+        (   ^^ result MISMATCH vs expected\n) print flush
+    } if
+} def
+
+
+% ======================================================================
+%  8. Demo programs.  Each is a complete mini-Scheme program.  The
+%  handle-effect scope catches any /scheme-error performs raised by
+%  eval or a primitive; the handler prints a diagnostic and returns to
+%  the next demo.
+% ======================================================================
+
+/demo-factorial (
+    (begin
+      (define fact
+        (lambda (n)
+          (if (= n 0)
+              1
+              (* n (fact (- n 1))))))
+      (fact 5))
+) def
+
+/demo-fib (
+    (begin
+      (define fib
+        (lambda (n)
+          (if (< n 2)
+              n
+              (+ (fib (- n 1)) (fib (- n 2))))))
+      (fib 7))
+) def
+
+/demo-map (
+    (begin
+      (define map
+        (lambda (f xs)
+          (if (null? xs)
+              (quote ())
+              (cons (f (car xs)) (map f (cdr xs))))))
+      (define double (lambda (x) (* 2 x)))
+      (map double (quote (1 2 3))))
+) def
+
+/demo-let (
+    (let ((x 10) (y 20)) (+ x y))
+) def
+
+/demo-set (
+    (begin
+      (define counter 0)
+      (define bump (lambda () (set! counter (+ counter 1)) counter))
+      (bump) (bump) (bump))
+) def
+
+% Classic Scheme call/cc: receiver invokes K with the intended result,
+% which aborts the receiver chain and resumes at the capture point
+% with 42 as call/cc's value.  The outer (+ 10 ...) then evaluates
+% to 52.  Requires abort-exec semantics (handler frames discarded,
+% not spliced) -- if splice were used, the receiver's unwind would
+% re-add state on top of the captured computation's result.
+/demo-callcc (
+    (+ 10 (call/cc (lambda (k) (k 42))))
+) def
+
+% Cooperative two-coroutine demo.  yield saves its own continuation
+% into a shared slot and jumps to whatever K was last parked there,
+% swap-style.  Exactly two coroutines ping-pong through the slot:
+% each yield consumes one K and produces a fresh one, so Trix's
+% one-shot continuations never get re-invoked.
+%
+% Expected trace: A:1 B:1 A:2 B:2 A:3 B:done
+% Program result: b-done  (task B's return unwinds through B's
+%                          captured chain, back to run-one's delimit)
+%
+% Task A is stranded mid-execution (its last captured K is never
+% resumed) -- acceptable for the demo.  A scheduler that terminates
+% both tasks cleanly would need an explicit "both done" signal or
+% a different control structure; the minimal two-coroutine setup
+% shows the mechanism without that added machinery.
+% ---- Deep recursion demos -- impossible under the old direct-style
+% evaluator because each Scheme call would consume a Trix dict-stack
+% slot (default budget 24).  The CEK trampoline keeps the dict stack
+% at constant depth regardless of Scheme call depth; recursion is
+% bounded only by VM heap.
+
+% Pure tail recursion: kont stays empty between iterations.  Old eval
+% would die at n>~14 (dict-stack overflow); pre-GC CEK ran hundreds of
+% calls under default --vm-size.  With ${...}+vm-global-gc, every env
+% Record / Tagged kont frame / cons cell allocates in global VM and
+% gets reclaimed by Phase 10 GC every scheme-gc-interval iterations,
+% so call depth is bounded only by transient working set, not lifetime
+% leak.  count-down 100000 runs cleanly at 1MB default VM in ~21s.
+% Plan goal from plan_mini_scheme_tco.md (count-down 1000000 at default)
+% achieved 2026-05-10 -- runs in ~3:30 standalone; depth is pinned at
+% 100K for showcase pacing.  Higher targets work as standalone runs.
+/demo-tail-deep (
+    (begin
+      (define count-down (lambda (n) (if (= n 0) (quote done) (count-down (- n 1)))))
+      (count-down 100000))
+) def
+
+% Non-tail recursion: kont grows linearly with call depth.  Old eval
+% would die at n>~14; pre-GC CEK accumulated kont cells on VM heap and
+% capped around sum 50.  With ${...}+vm-global-gc, dead env frames
+% behind the live kont chain get reclaimed; only the LIVE kont frontier
+% needs to fit.  The demo runs sum 500: measured 2026-06-05, sum 800
+% is the ceiling at the default 1MB VM -- the budget shrank as the
+% engine gained more well-known names and larger coroutine stacks
+% (sum 1000, the old demo value, now needs ~1.25MB) -- so 500 keeps a
+% comfortable margin.  Higher targets (sum 10000+, the
+% plan_mini_scheme_tco.md goal of sum 100000) need --vm-size=8M -- the
+% kont frontier itself, not heap pressure, is the bound: each call
+% adds an args-frame Tagged Record (~80 bytes), so sum 100000 needs
+% ~8 MB resident.
+/demo-nontail-deep (
+    (begin
+      (define sum (lambda (n) (if (= n 0) 0 (+ n (sum (- n 1))))))
+      (sum 500))
+) def
+
+/demo-coroutines (
+    (begin
+      (define other-k '())
+      (define yield
+        (lambda (tag)
+          (coroutine-call/cc
+            (lambda (my-k)
+              (define peer other-k)
+              (set! other-k my-k)
+              (peer tag)))))
+      (define task-a
+        (lambda ()
+          (display "A:1 ") (yield 'a1)
+          (display "A:2 ") (yield 'a2)
+          (display "A:3 ") (yield 'a3)
+          'a-stranded))
+      (define task-b
+        (lambda ()
+          (display "B:1 ") (yield 'b1)
+          (display "B:2 ") (yield 'b2)
+          (display "B:done ")
+          'b-done))
+      (coroutine-call/cc
+        (lambda (main-k)
+          (set! other-k main-k)
+          (task-a)))
+      (task-b))
+) def
+
+
+% ----- main -----
+/top-env install-primitives def
+
+{
+    demo-factorial  top-env (factorial 5)           { 120 num-result? }      run-one
+    demo-fib        top-env (fib 7)                 { 13 num-result? }       run-one
+    demo-map        top-env (map double '(1 2 3))   { 2 4 6 list3-result? }  run-one
+    demo-let        top-env (let)                   { 30 num-result? }       run-one
+    demo-set        top-env (counter via set!)      { 3 num-result? }        run-one
+    demo-callcc     top-env (call/cc early-exit)    { 52 num-result? }       run-one
+    demo-coroutines top-env (two coroutines via call/cc) { /b-done atom-result? } run-one
+    demo-tail-deep  top-env (tail recursion -- count-down 100000) { /done atom-result? } run-one
+    demo-nontail-deep top-env (non-tail recursion -- sum 500) { 125250 num-result? } run-one
+} exec
+
+% The done marker doubles as the machine gate: it prints only when
+% every demo's result matched its expectation; any mismatch raises
+% /demo-mismatch and the process exits nonzero.
+demo-fails 0 eq
+{ (\n== mini-scheme done ==\n) print flush }
+{
+    (\n{0} demo result mismatch\(es\)\n) mark demo-fails print-fmt pop pop flush
+    /demo-mismatch throw
+}
+if-else

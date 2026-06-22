@@ -1,0 +1,261 @@
+% ====================================================================
+%  Showcase: algebraic-effects mini-Scheme interpreter
+%  --------------------------------------------------------------------
+%  A small Lisp-like AST evaluator built around THREE algebraic effects:
+%
+%      /env-lookup   ( name -- value )
+%      /apply-prim   ( arg1 arg2 op-name -- result )
+%      /stuck        ( bad-node -- value )
+%
+%  The evaluator never decides what these MEAN.  Three different
+%  handlers each install a different semantics for the same AST:
+%
+%    1. real-eval   -- production semantics: look up env, dispatch to
+%                      Trix's add/sub/mul/eq, throw /failure on stuck.
+%    2. tracing     -- delegates to real-eval but prints each effect
+%                      before/after, capped to ~4 lines per program.
+%    3. synthetic   -- permissive: unknown var = 0, unknown op = 0,
+%                      stuck node = 42.  Nothing ever fails.
+%
+%  Five demo programs run under each handler.  Three of them produce
+%  DIFFERENT results under different handlers -- the same evaluator
+%  succeeds (real), fails (real), or invents an answer (synthetic).
+%
+%  AST node kinds (4):
+%      /lit N            literal Integer
+%      /var /name        variable reference
+%      /app [op a1 a2]   2-arg primitive application
+%      /if  [c t e]      conditional (cond=0 means false)
+%
+%  Limitations: 2-arg primitives only.  No closures.  No /let.  For
+%  the full-scale Scheme interpreter (closures, call/cc, tail calls,
+%  CEK machine), see examples/mini-scheme.trx.
+%
+%  Companion reference: docs/effects.md.
+% ====================================================================
+
+/rt-ok { exch { = } { (FAILED: ) print = } if-else } def
+
+% --------------------------------------------------------------------
+% PHASE 1 -- AST constructors + 3-assert round-trip self-check
+% --------------------------------------------------------------------
+
+/mklit { |n|#1      n          /lit tag } def
+/mkvar { |nm|#1     nm         /var tag } def
+/mkapp { |op a b|#3 [ op a b ] /app tag } def
+/mkif  { |c t e|#3  [ c t e ]  /if  tag } def
+
+42 mklit dup tag-name /lit eq exch tag-value 42 eq and
+(ast: /lit round-trip) rt-ok clear
+
+/x mkvar dup tag-name /var eq exch tag-value /x eq and
+(ast: /var round-trip) rt-ok clear
+
+% (+ x 7): /app payload is [/add /x-as-var 7-as-lit]
+/add /x mkvar 7 mklit mkapp
+dup tag-name /app eq
+exch tag-value
+dup 0 get /add eq
+exch dup 1 get tag-name /var eq
+exch 2 get tag-name /lit eq
+and and and
+(ast: nested /app + /var + /lit) rt-ok clear
+
+% --------------------------------------------------------------------
+% PHASE 2 -- evaluator (4-case dispatcher via tag-match)
+% --------------------------------------------------------------------
+%
+%   eval : ast -- value
+%
+% tag-match auto-pushes the tagged payload before executing the proc.
+% So inside /lit's proc the literal integer is already on the stack;
+% inside /var's proc the name is already on the stack; etc.
+
+/eval {
+    <<
+        /lit { }                                      % payload (int) already on stack
+        /var { /env-lookup perform }                  % name on stack
+        /app { dup 1 get eval                         % eval arg1
+               exch dup 2 get eval                    % eval arg2
+               exch 0 get                             % op-name to top
+               /apply-prim perform }
+        /if  { dup 0 get eval                         % eval cond
+               0 eq { 2 get eval } { 1 get eval } if-else }
+        /default { /stuck perform }                   % unknown tag
+    >> tag-match
+} def
+
+% --------------------------------------------------------------------
+% PHASE 3 -- real-eval handler factory (closes over env Dict)
+% --------------------------------------------------------------------
+%
+% Handler stack-effect on entry: ( ...args K -- )
+%   /env-lookup K layout:  name K
+%   /apply-prim K layout:  arg1 arg2 op-name K
+%   /stuck      K layout:  bad-node K
+%
+% Idiom: `/k exch def` consumes K and binds it; do the work; then
+% `/k load exec` resumes K with the result on top.
+
+/real-eval { |env|#1
+    <<
+        /env-lookup { |name k|#2
+                      env name known?
+                      { env name get k exec }
+                      { /failure throw } if-else } [/env] closure-capture
+        /apply-prim { |a b op k|#4
+                      << /add { a b add }
+                         /sub { a b sub }
+                         /mul { a b mul }
+                         /eq  { a b eq { 1 } { 0 } if-else } >>
+                      op case
+                      k exec }
+        /stuck      { |bad k|#2 /failure throw }
+    >>
+} def
+
+% Phase 3 self-check: 5 programs under real-eval.
+
+% Program 1: 7+8 = 15
+<< >> real-eval
+{ /add 7 mklit 8 mklit mkapp eval } handle-effect
+15 eq (real: 7+8 = 15) rt-ok clear
+
+% Program 2: (if (eq x 0) 1 (* x 2)) with x=5 -- expect 10
+<< /x 5 >> real-eval
+{ /eq /x mkvar 0 mklit mkapp
+  1 mklit
+  /mul /x mkvar 2 mklit mkapp
+  mkif eval } handle-effect
+10 eq (real: if x=0 then 1 else x*2 [x=5] = 10) rt-ok clear
+
+% Program 3: (+ (+ x y) 3), x=2 y=3 -- expect 8
+<< /x 2 /y 3 >> real-eval
+{ /add /add /x mkvar /y mkvar mkapp
+  3 mklit
+  mkapp eval } handle-effect
+8 eq (real: (+ (+ x y) 3) [x=2 y=3] = 8) rt-ok clear
+
+% Program 4: same AST as Program 3 but empty env -- /failure
+{ << >> real-eval
+  { /add /add /x mkvar /y mkvar mkapp 3 mklit mkapp eval } handle-effect
+} try
+/failure eq (real: (+ (+ x y) 3) [empty env] = /failure) rt-ok clear
+
+% Program 5: bad-tag -- /failure
+{ << >> real-eval
+  { 99 /bogus tag eval } handle-effect
+} try
+/failure eq (real: bad-tag = /failure) rt-ok clear
+
+% --------------------------------------------------------------------
+% PHASE 4 -- tracing handler (delegates outward, observes + resumes)
+% --------------------------------------------------------------------
+%
+% Each handler proc:
+%   1. announces the effect (if under per-program trace cap)
+%   2. delegates outward via `perform`     -- next handler is real-eval
+%   3. resumes the captured K with the delegate's result
+%
+% Stacking tracing-handler over real-eval produces logged real-eval
+% without touching either the evaluator OR the production handler.
+
+/trace-cap 4 def
+/trace-count 0 def
+/reset-trace { /trace-count 0 store } def
+/trace? { trace-count trace-cap lt } def
+/trace-bump { /trace-count trace-count 1 add store } def
+
+/tracing-handler <<
+    /env-lookup { |name tk|#2
+                  trace? { name (  [trace] env-lookup ) print = } if
+                  trace-bump
+                  name /env-lookup perform
+                  tk exec }
+    /apply-prim { |a b op tk|#4
+                  trace? { op (  [trace] apply-prim op=) print = } if
+                  trace-bump
+                  a b op /apply-prim perform
+                  tk exec }
+    /stuck      { |bad tk|#2
+                  trace? { (  [trace] stuck (delegating, expect throw)) = } if
+                  trace-bump
+                  bad /stuck perform
+                  tk exec }
+>> def
+
+% Phase 4 self-check: same numeric results as Phase 3 + visible trace.
+(--- tracing handler stacked over real-eval ---) =
+
+reset-trace
+(trace for: 7+8) =
+<< >> real-eval
+{ tracing-handler { /add 7 mklit 8 mklit mkapp eval } handle-effect
+} handle-effect
+15 eq (tracing: 7+8 = 15 via stacked handlers) rt-ok clear
+
+reset-trace
+() =
+(trace for: (+ (+ x y) 3) x=2 y=3) =
+<< /x 2 /y 3 >> real-eval
+{ tracing-handler { /add /add /x mkvar /y mkvar mkapp 3 mklit mkapp eval } handle-effect
+} handle-effect
+8 eq (tracing: (+ (+ x y) 3) = 8 via stacked handlers) rt-ok clear
+
+% --------------------------------------------------------------------
+% PHASE 5 -- synthetic handler (permissive: unknown var = 0,
+%                               unknown op = 0, stuck node = 42)
+% --------------------------------------------------------------------
+%
+% Same evaluator, same ASTs, same primitive ops as real-eval -- but
+% the SEMANTIC GAPS are filled in by the handler instead of throwing:
+%   - missing env binding  -> 0
+%   - unknown primitive    -> 0
+%   - unknown AST tag      -> 42 (whimsical sentinel)
+% Nothing ever raises /failure.  The evaluator CANNOT fail under this
+% handler -- the handler chose to invent answers.
+
+/synthetic-eval { |env|#1
+    <<
+        /env-lookup { |name k|#2
+                      env name known?
+                      { env name get } { 0 } if-else
+                      k exec } [/env] closure-capture
+        /apply-prim { |a b op k|#4
+                      << /add { a b add }
+                         /sub { a b sub }
+                         /mul { a b mul }
+                         /eq  { a b eq { 1 } { 0 } if-else }
+                         /default { 0 } >>
+                      op case
+                      k exec }
+        /stuck      { |bad k|#2 42 k exec }
+    >>
+} def
+
+() =
+(--- synthetic handler ---) =
+
+<< >> synthetic-eval
+{ /add 7 mklit 8 mklit mkapp eval } handle-effect
+15 eq (synthetic: 7+8 = 15) rt-ok clear
+
+% Empty env: vars resolve to 0, so (+ (+ 0 0) 3) = 3
+<< >> synthetic-eval
+{ /add /add /x mkvar /y mkvar mkapp 3 mklit mkapp eval } handle-effect
+3 eq (synthetic: (+ (+ x y) 3) [no env] = 0+0+3 = 3) rt-ok clear
+
+<< >> synthetic-eval
+{ 99 /bogus tag eval } handle-effect
+42 eq (synthetic: bad-tag = 42 (invented)) rt-ok clear
+
+% --------------------------------------------------------------------
+% PHASE 6 -- summary + sentinel
+% --------------------------------------------------------------------
+
+() =
+(== effects_mini_scheme ==) =
+(All 13 assertions passed.  Same evaluator, three handlers,) =
+(three different semantics.  See file header for the lesson.) =
+(== effects_mini_scheme done ==) =
+(__test_ok__) =

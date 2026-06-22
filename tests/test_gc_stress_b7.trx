@@ -1,0 +1,571 @@
+% ====================================================================
+% test_gc_stress_b7.trx -- deterministic GC-stress regression guard for the
+%                          B7 GC-rooting fixes (F1 binding table, F3 pipeline)
+% ====================================================================
+% Debug-only (needs the vm-gc-stress operator, TRIX_DEBUGGER).  Run via
+% tests/run_gc_stress_tests.sh; run_all.sh skips it.
+%
+% `vm-gc-stress` makes gvm_alloc fire a full vm_global_gc before EVERY global
+% user allocation, so any in-flight global block held only in a C local / an
+% unrooted slot across the next allocation is collected right before the alloc
+% that needs it -- unless it is correctly rooted.  Long (`Nl`) payloads make the
+% per-element make_clone actually allocate (ExtValue), arming the windows.
+%
+% This file is the green regression guard for the GC-rooting holes the B7 oracle
+% dig FOUND and FIXED:
+%   F1  binding_table_put first-put bucket array (commit 5a6d646) -- exercised
+%       by the coroutine section (per-coroutine binding tables populate only
+%       while a coroutine is live; main's operator name-lookups cache into them).
+%   F3  pipe_materialize buffer rooting -- exercised by the pipeline section.
+%       PipeBuffers are global regardless of ${...}, so TOP-LEVEL pipelines hit
+%       the buffer-rooting window.
+%   Global-mode (${...}) cluster -- exercised by the "gmode:" section: execute_proc
+%       length-1 clone (the broad bare-ExtValue value-corruption, top-level + coro),
+%       coroutine_launch_common, curry, actor-broadcast, pipe_materialize source/
+%       stage procs + pipe-run/pipe-reduce, scan, supervisor pass-1, and the
+%       computed-cell builders cell-combine / cell-map / cell-transduce (local proc
+%       array stored into a region-aware global cell).
+%
+% RESIDUAL (NOT fixed -- see the note at the bottom + b7-gc-stress-findings.md):
+% at_gen_server_recv_op orphans the recv'd message across user_msg.make_clone (a
+% ${}-global gen-call payload); the repro path is too slow under per-alloc stress to
+% verify a fix here.  Tracked for a focused follow-up.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+true vm-gc-stress
+
+% ============ F1: coroutine binding table (binding_table_put first-put) =======
+% Per-coroutine binding tables are used only while m_live_coroutine_count > 0;
+% main's operator name-lookups cache into its table across the child's life, and
+% the first such cache populates the bucket array + an entry back-to-back (two
+% gvm_allocs, each draining the binding free lists).  Pre-fix the bucket array
+% was swept between them and on_last_death_transition freed a dangling chain.
+mark { 100l 200l add } coroutine-launch /c1 exch def
+mark { 1000l 250l sub } coroutine-launch /c2 exch def
+c1 coroutine-join /ok1 exch def /v1 exch def
+c2 coroutine-join /ok2 exch def /v2 exch def
+ok1 ok2 and (coroutine: both launches survive per-alloc GC + clean join) rt-ok
+v1 300l eq (coroutine: c1 body Long result = 300l intact) rt-ok
+v2 750l eq (coroutine: c2 body Long result = 750l intact) rt-ok
+clear
+
+% Many launch/join cycles with a sweep before every alloc -- main builds + frees
+% its binding table each round (on_last_death_transition on the 1->0 transition).
+0l /tot exch store
+0 1 5 { pop mark { 5l } coroutine-launch coroutine-join pop tot add /tot exch store } for
+tot 30l eq (coroutine: 6 launch/join cycles total 30l under GC-stress) rt-ok clear
+
+% ============ F3: pipeline buffer rooting (top-level, Long payloads) ==========
+% pipe_materialize allocates all PipeBuffers (global) up front into a C-local
+% array, then builds proc + coroutine per stage -- each a gvm_alloc that, pre-fix,
+% swept a buffer not yet referenced by a finalized coroutine.  Now every buffer is
+% rooted on the operand stack across materialization.  Long items exercise the
+% per-item ExtValue clone path through the buffers.
+[ 1l 2l 3l 4l ] { 10l add } pipe-map 16 pipe-collect /pm exch def
+pm 0 get 11l eq (pipeline: map Long pm[0]==11l survives GC-stress) rt-ok
+pm 3 get 14l eq (pipeline: map Long pm[3]==14l survives GC-stress) rt-ok clear
+
+[ 1l 2l 3l 4l 5l ] { 3l gt } pipe-filter 16 pipe-collect /pf exch def
+pf 0 get 4l eq (pipeline: filter Long pf[0]==4l) rt-ok
+pf length 2 eq (pipeline: filter Long keeps 2 elems) rt-ok clear
+
+[ [1l 2l] [3l 4l] [5l 6l] ] 2 pipe-batch 16 pipe-collect /pb exch def
+pb 0 get 0 get 0 get 1l eq (pipeline: batch Long pb[0][0][0]==1l) rt-ok clear
+
+[ [10l 20l] [30l 40l] [50l 60l] ] 2 pipe-window 16 pipe-collect /pw exch def
+pw 0 get 0 get 0 get 10l eq (pipeline: window Long pw[0][0][0]==10l) rt-ok clear
+
+[ [ 1l 2l 3l ] [ 10l 20l 30l ] ] pipe-zip 16 pipe-collect /pz exch def
+pz 0 get 1 get 10l eq (pipeline: zip Long tuple pz[0][1]==10l) rt-ok clear
+
+[ [ 1l 2l ] [ 3l 4l ] ] pipe-merge 16 pipe-collect /pmrg exch def
+pmrg length 4 eq (pipeline: merge Long inputs len 4) rt-ok clear
+
+% A two-stage chain: each stage is its own buffer + coroutine, so the buffer set
+% materialized up front is larger -- more in-flight buffers to keep rooted.
+[ 1l 2l 3l 4l ] { 10l add } pipe-map { 12l gt } pipe-filter 16 pipe-collect /pmf exch def
+pmf 0 get 13l eq (pipeline: map|filter Long chain pmf[0]==13l) rt-ok
+pmf length 2 eq (pipeline: map|filter Long chain keeps 2 elems) rt-ok clear
+
+% ============ Global-mode (${...}) cluster -- the rooting holes the oracle found
+% under per-alloc GC stress (all FIXED 2026-06-02; see b7-gc-stress-findings.md).
+% ${...} scans literals into GLOBAL VM, so each case builds a global value that an
+% operator popped into a C-local across a gvm_alloc, then used. =====================
+
+% execute_proc length-1 clone: a ${...} body's LAST bare ExtValue literal.  Pre-fix
+% the proc was not re-rooted on the exec stack for its final element, so make_clone's
+% GC swept the borrowed source and the clone silently read 0 (top-level AND coroutine).
+${ 12345l } 12345l eq (gmode: ${} bare-Long top-level value 12345l intact) rt-ok clear
+${ 12345l 678l } 678l eq (gmode: ${} proc last-element 678l intact) rt-ok 12345l eq (gmode: ${} proc first-element 12345l intact) rt-ok clear
+
+% F2: bare ExtValue result of ${...} in a coroutine -- coroutine_launch_common popped
+% the body proc into a C-local across coroutine_alloc_context / _stacks.
+mark { ${ 12345l } } coroutine-launch coroutine-join /okg exch def /vg exch def
+okg (gmode: F2 coroutine ${} survives launch GC) rt-ok
+vg 12345l eq (gmode: F2 coroutine Long result 12345l intact) rt-ok clear
+
+% F4: a global block left AT REST on main's operand stack while a coroutine runs.
+% main uses the PRIMORDIAL stacks (m_stacks_offset == nulloffset), so the suspended-
+% context stack walk in gc_walk_coroutine_context skipped it -> the parked block was
+% swept under the coroutine's GC (UAF / double-free on clear).  Fixed: main's saved
+% stacks are now walked when it is suspended.  Pre-fix these double-freed / read freed
+% memory; post-fix the parked Longs survive intact.
+${ 7654l } mark { ${ 1l } pop } coroutine-launch coroutine-join pop pop
+7654l eq (gmode: F4 parked global Long survives coroutine GC) rt-ok clear
+${ 11l } ${ 22l } mark { ${ 1l } pop } coroutine-launch coroutine-join pop pop
+22l eq (gmode: F4 two parked globals, top=22l) rt-ok 11l eq (gmode: F4 two parked globals, deep=11l) rt-ok clear
+
+% curry_op: callable popped (--m_op_ptr) before make_curry's pair alloc.
+${ 5l { 1l add } curry } /cu exch def
+cu exec 6l eq (gmode: ${} curry global callable survives, exec=6l) rt-ok clear
+
+% actor-broadcast: array + message popped into C-locals across the per-target clone loop.
+mark { actor-recv pop } actor-spawn /b1 exch def
+mark { actor-recv pop } actor-spawn /b2 exch def
+mark { actor-recv pop } actor-spawn /b3 exch def
+${ 9999999999l [ b1 b2 b3 ] actor-broadcast }
+0 1 6 { pop ${ 7l pop } } for
+(gmode: ${} actor-broadcast multi-target survives) =
+b1 coroutine-kill b2 coroutine-kill b3 coroutine-kill clear
+
+% ${...}-mode pipeline: pipe_materialize left root_source + per-stage procs unrooted;
+% pipe-run / pipe-reduce left their user proc + init unrooted across materialize.
+${ [ 1l 2l 3l 4l ] { 10l add } pipe-map 16 pipe-collect } /gp exch def
+gp 0 get 11l eq (gmode: ${} pipeline map gp[0]==11l) rt-ok
+gp 3 get 14l eq (gmode: ${} pipeline map gp[3]==14l) rt-ok clear
+${ [ 1l 2l 3l ] 16 0l { add } pipe-reduce } 6l eq (gmode: ${} pipe-reduce sum=6l) rt-ok clear
+
+% scan: result array (holds the global init clone) + first-element clone unrooted across setup.
+${ [ 1l 2l 3l ] 0l { add } scan } /gs exch def
+gs 0 get 0l eq (gmode: ${} scan gs[0]==init 0l) rt-ok
+gs 3 get 6l eq (gmode: ${} scan running-sum gs[3]==6l) rt-ok clear
+
+% supervisor: spec dict popped into a C-local across 14 Name::make interns in pass-1.
+${ << /strategy /one-for-one /intensity 5 /period 30000
+     /children [ << /id /w1 /start { { actor-recv pop 0 coroutine-sleep } loop } /restart /permanent >> ] >>
+   supervisor } /sup exch def
+sup is-coroutine (gmode: ${} supervisor spec survives pass-1 GC) rt-ok
+sup coroutine-kill clear
+
+% cell-combine / cell-map / cell-transduce: the computed proc was built LOCAL
+% (vm_alloc_n) even under ${...} while make_cell is region-aware -- a global cell
+% pointing at a local proc that is reclaimed once the local frame unwinds (the cell
+% survives but recomputes from freed memory -> wrong value or crash).  Now the proc
+% is region-aware (vm_alloc_dispatch_n) + rooted across make_cell's CellHeader alloc.
+% Force global GCs between build and the first cell-get so the proc must survive a
+% sweep via cell_gc_walk(m_proc), then recompute correctly.
+${ [ 3l cell 4l cell ] { add } cell-combine } 0 1 4 { pop ${ 1l pop } } for cell-get 7l eq (gmode: ${} cell-combine recompute=7l) rt-ok clear
+${ 5l cell { 4l add } cell-map } 0 1 4 { pop ${ 1l pop } } for cell-get 9l eq (gmode: ${} cell-map recompute=9l) rt-ok clear
+${ [ 1l 2l 3l ] cell { 1l add } xf-map cell-transduce } 0 1 4 { pop ${ 1l pop } } for cell-get 0 get 2l eq (gmode: ${} cell-transduce recompute gt[0]==2l) rt-ok clear
+
+% Reactive recompute: set the source, force GCs, re-read the derived cell -- the
+% global proc must still be reachable for the SECOND evaluation, not just the first.
+${ 3l cell } /gsrc exch def
+${ gsrc { 4l add } cell-map } /gder exch def
+gder cell-get 7l eq (gmode: ${} cell-map reactive initial=7l) rt-ok
+10l gsrc cell-set
+0 1 4 { pop ${ 1l pop } } for
+gder cell-get 14l eq (gmode: ${} cell-map reactive recompute-after-set=14l) rt-ok clear
+
+% Dict::put / set_put STRING key into a GLOBAL container.  A global dict/set is
+% journal-skipped (Save::save_data short-circuits global offsets), so a put at save
+% level > BASE persists across restore -- but pre-fix the String key's bytes were
+% copied with LOCAL vm_alloc, reclaimed on restore while the entry lingered, leaving a
+% dangling key (length 1 but lookups missed / read freed bytes).  Now the key is a
+% GC-TAGGED global String (gvm_alloc_n) when the container is global.  Force global GCs
+% after restore so the key block must survive a sweep.
+${ 8 dict } /gd exch def
+${ (foo) } /gk exch def
+save
+gd gk 7 put
+restore
+0 1 20 { pop ${ 1l pop } } for
+gd gk get 7 eq (gmode: dict global String key survives restore + GC) rt-ok clear
+
+${ 8 set } /gset exch def
+${ (bar) } /gsk exch def
+save
+gset gsk set-add pop
+restore
+0 1 20 { pop ${ 1l pop } } for
+gset gsk set-member? (gmode: set global String member survives restore + GC) rt-ok clear
+
+% put-persist / set-add-persist: the binding is a STANDALONE global entry block
+% (ChunkKind::HashEntry, outside the dict/set pool) so it persists across restore.
+% Pre-fix the entry was ChunkKind::Other -- invisible to Dict::gc_walk_contents's
+% kind-matched back-walk, so a GC swept it; and its String key used the untagged
+% vm_alloc_global_ptr, which corrupts gvm_for_each.  Now the entry is HashEntry
+% (back-walk finds + marks it; leaf walker -- key/value marked by the bucket walk)
+% and the key is a GC-tagged global String rooted across the entry alloc.
+${ 8 dict } /pd exch def
+${ (pk) } /pkk exch def
+save
+pd pkk 5 put-persist
+0 1 20 { pop ${ 1l pop } } for
+restore
+pd pkk get 5 eq (gmode: put-persist global String key survives restore + GC) rt-ok clear
+
+${ 8 set } /psset exch def
+${ (pm) } /psk exch def
+save
+psset psk set-add-persist pop
+0 1 20 { pop ${ 1l pop } } for
+restore
+psset psk set-member? (gmode: set-add-persist global String member survives restore + GC) rt-ok clear
+
+% cell-set R6: a restore-fragile LOCAL value (allocated at save level >= 1, outside
+% ${...}) stored into a GLOBAL cell.  The global cell block is journal-skipped, so
+% restore neither restores the old value nor (pre-fix) keeps the new one alive --
+% the new value's LOCAL storage was reclaimed by restore, leaving m_value dangling
+% (cell-get read garbage).  Now cell_set_core deep-clones a fragile-local value into
+% the global region (R6: a global cell must not reference local storage), so the set
+% persists across restore like a global-dict mutation.  Force GCs so the cloned
+% global value must survive a sweep via cell_gc_walk.
+${ 100l cell } /rc exch def
+save
+9999999999l rc cell-set
+0 1 20 { pop ${ 1l pop } } for
+restore
+0 1 20 { pop ${ 1l pop } } for
+rc cell-get 9999999999l eq (gmode: cell-set fragile-local into global cell survives restore + GC) rt-ok clear
+
+% ============ F11: genserver ${}-global message spines (was the residual) =====
+% gen-call / gen-call-timeout build [/gen-call, ref, self, msg] region-aware under
+% ${...}; the msg slot is a make_clone of the user message, and cloning an ExtValue/
+% WideValue message (Double/Long/...) allocates -> fires vm_global_gc.  Pre-fix the
+% call spine was allocated-but-unrooted across that clone, so the clone's GC swept
+% it -> corrupted call message -> the server's ref-predicate never matched ->
+% gen-call blocked forever (a HANG, not a trap).  An Integer message (immediate,
+% non-allocating clone) never tripped it -- which is why the old genserver:1-4 test
+% (a bare real, no gc-stress) missed it.  gen-cast / gen-stop / gen-reply are now
+% region-aware too (a global message into the global mailbox), with the same root-
+% before-clone discipline.  Double (`d`) payloads exercise the allocating-clone path.
+mark {
+  << /init { null } /handle-call { [/msg /from /state] let msg msg /reply end } >> gen-server /gcs exch def
+  ${ gcs 6.28318d gen-call } 6.28318d eq (gmode: gen-call Double message spine survives clone-GC) rt-ok
+  ${ gcs [ 7 8 9 ] gen-call } 2 get 9 eq (gmode: gen-call array message spine survives clone-GC) rt-ok
+  gcs /done gen-stop 50 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+mark {
+  << /init { null }
+     /handle-call { [/msg /from /state] let  from msg gen-reply  /noreply state /reply end }
+  >> gen-server /gcr exch def
+  ${ gcr 9.87654d gen-call } 9.87654d eq (gmode: gen-call + gen-reply Double survives clone-GC) rt-ok
+  gcr /done gen-stop 50 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+mark {
+  << /init { 0 } /handle-cast { add } >> gen-server /gca exch def
+  ${ gca 3.5e10d gen-cast } 50 coroutine-sleep
+  true (gmode: gen-cast Double region-aware spine survives) rt-ok
+  gca /done gen-stop 50 coroutine-sleep clear
+} actor-spawn coroutine-join pop clear
+
+% ============ F12: map-dict / filter-dict region-aware result (now global) =====
+% map-dict / filter-dict allocate their result dict region-aware: under ${...} it
+% lands in GLOBAL VM (survives save/restore) instead of LOCAL.  Build under ${},
+% then roll back the local region with restore -- a LOCAL result (pre-fix) would
+% dangle; a GLOBAL one survives.  (map-dict was previously listed AUDITED-CLEAN
+% precisely because its always-LOCAL result was immune to the GLOBAL GC; making it
+% region-aware moves it onto the exercised path.)
+<< /a 1 /b 2 /c 3 >> /mdsrc exch def
+${ mdsrc { 10 mul } map-dict } /mdr exch def
+save /mdtok exch def
+mdr /b get 20 eq (gmode: map-dict global result usable after save) rt-ok
+mdtok restore
+mdr /c get 30 eq (gmode: map-dict global result survives restore) rt-ok
+clear
+${ mdsrc { exch pop 1 gt } filter-dict } /fdr exch def
+fdr /a known? not (gmode: filter-dict global result drops a) rt-ok
+fdr /c get 3 eq (gmode: filter-dict global result keeps c) rt-ok
+clear
+
+% ============ F13: reactive cell watcher old-values survive clone-GC (task #31) =====
+% Also guards task #34: cell_add_watcher must null-init the watcher array's unused
+% capacity slots (the block is ChunkKind::Array walked by obj_count==capacity, so an
+% uninitialized tail slot is read as a garbage Object by the GC).  Reverting that
+% null-init reproduces `object.inl:478 index ... out of bounds` here.
+% cell_set_core holds each watcher's old-value clone (a GLOBAL ExtValue/WideValue under
+% ${...}) in a C-stack buffer across watcher collection + invalidation + firing -- each
+% step does make_clones that fire vm_global_gc, which the precise GC runs without scanning
+% C locals.  Pre-fix a later clone swept an earlier old-value (the freed cell reused by the
+% next clone) and the watcher saw a corrupted/aliased old value.  Now each old-value is
+% rooted on the gc-root stack.  Double payloads exercise the allocating-clone path.
+%
+% Run under vm-gc-poison (task #32) as well: the UAF only corrupts when the swept slot is
+% reused before the read (heap-state-dependent), so without poison this test is vacuous.
+% Poison scribbles freed payloads, making a swept old-value read deterministically wrong
+% (verified: with the fix reverted, these checks FAIL).  Poison is scoped per-section
+% (F13 here, F14 below for task #33) rather than enabled suite-wide.
+true vm-gc-poison
+
+% (a) single watched cell, all under ${} so the old-value clone lands in GLOBAL VM
+%     (only global blocks are swept by vm_global_gc; a local clone would never trip it).
+/f13-old null def
+${ 3.14159d cell /f13c exch def
+   f13c { pop /f13-old exch def } watch
+   2.71828d f13c cell-set }
+f13-old 3.14159d eq (gmode: single-cell watcher old value survives clone-GC) rt-ok
+clear
+
+% (b) downstream computed cells, each watched (under ${}): their cached old values are
+%     collected into the C-stack buffer (the path the bug actually corrupted) and must
+%     stay intact across the per-dep new-value clones in the fire loop.
+/f13-o1 null def  /f13-o2 null def  /f13-o3 null def
+${ 10.0d cell /f13base exch def
+   { f13base cell-get 2.0d mul } cell-computed /f13d1 exch def
+   { f13base cell-get 3.0d mul } cell-computed /f13d2 exch def
+   { f13base cell-get 4.0d mul } cell-computed /f13d3 exch def
+   f13d1 cell-get pop  f13d2 cell-get pop  f13d3 cell-get pop   % evaluate -> cache 20/30/40
+   f13d1 { pop /f13-o1 exch def } watch
+   f13d2 { pop /f13-o2 exch def } watch
+   f13d3 { pop /f13-o3 exch def } watch
+   99.0d f13base cell-set }   % invalidate d1/d2/d3 -> collect their old values, fire watchers
+f13-o1 20.0d eq (gmode: downstream watcher old value d1 survives clone-GC) rt-ok
+f13-o2 30.0d eq (gmode: downstream watcher old value d2 survives clone-GC) rt-ok
+f13-o3 40.0d eq (gmode: downstream watcher old value d3 survives clone-GC) rt-ok
+clear
+false vm-gc-poison
+
+% ============ F14: ${} pipe-reduce / pipe-scan accumulator survives clone-GC (task #33) =====
+% pipe_build_proc builds a LOCAL proc (vm_alloc_n) but bakes the GLOBAL `init` literal
+% (under ${...}) into slot 0.  execute_proc pops the head with array_pop_head -- which
+% ADVANCES the proc handle past slot 0 -- then clones the literal.  For length>1 it
+% re-pushes the advanced proc, but a LOCAL proc's GC walk reads the advanced handle and
+% no longer covers slot 0, so make_clone's vm_global_gc swept the init accumulator and the
+% clone read freed memory (the running sum started from garbage, not 0/100).  A GLOBAL
+% proc's header-based walk over-approximates and hid the bug -- only LOCAL procs (pipe-*,
+% scan) tripped it.  Fix: execute_proc roots `value` itself across the clone.
+%
+% Run under poison: the swept init only corrupts when the freed slot is reused before the
+% read, so this is vacuous without poison (it returned the right sum from stale bits).
+% Heap is primed by F1-F13 above.  (verified: with the fix reverted, the Long cases FAIL.)
+true vm-gc-poison
+
+% (a) Long reduce, zero init -- the canonical task #33 repro.
+${ [ 1l 2l 3l ] 16 0l { add } pipe-reduce } 6l eq (gmode: ${} pipe-reduce Long sum==6l) rt-ok clear
+
+% (b) Long reduce, non-zero init (init clone is the first value folded).
+${ [ 1l 2l 3l 4l 5l 6l 7l 8l 9l 10l ] 16 100l { add } pipe-reduce } 155l eq (gmode: ${} pipe-reduce 100+55==155l) rt-ok clear
+
+% (c) Double payloads -- a non-Long ExtValue type through the same clone path.
+${ [ 1.5d 2.5d 3.0d ] 16 0.0d { add } pipe-reduce } 7.0d eq (gmode: ${} pipe-reduce Double sum==7.0d) rt-ok clear
+
+% (d) pipe-scan running sums [1,3,6]: outer proc bakes the global init the same way.
+${ [ 1l 2l 3l ] 0l { add } pipe-scan 16 pipe-collect } /f14s exch def
+f14s 0 get 1l eq (gmode: ${} pipe-scan f14s[0]==1l) rt-ok
+f14s 2 get 6l eq (gmode: ${} pipe-scan f14s[2]==6l) rt-ok
+clear
+false vm-gc-poison
+
+% ============ F15: cell_fire_watchers keeps old/new rooted across clone loop (task #36) =====
+% For 2+ watchers, cell_fire_watchers make_clones (old,new) per watcher; pre-fix the
+% unrooted C-local sources (the caller passes a fresh, unrooted new_value clone) were
+% swept by the clone's vm_global_gc and later watchers saw a poisoned/aliased value.
+% Deterministic under stress alone (no poison needed): the new value reaches the watcher
+% as the OLD value (freed-slot aliasing) instead of the set value.  (verified: reverting
+% the fix makes the new-value checks FAIL.)  3 watchers force the i<len-1 clone path.
+/g-o0 null def /g-n0 null def /g-n1 null def /g-n2 null def
+${ 10l cell /f15c exch def
+   f15c { /g-n0 exch def /g-o0 exch def } watch
+   f15c { /g-n1 exch def pop } watch
+   f15c { /g-n2 exch def pop } watch
+   77l f15c cell-set }
+g-o0 10l eq (gmode: 3-watcher old value 0 == 10l intact) rt-ok
+g-n0 77l eq (gmode: 3-watcher new value 0 == 77l intact) rt-ok
+g-n1 77l eq (gmode: 3-watcher new value 1 == 77l intact) rt-ok
+g-n2 77l eq (gmode: 3-watcher new value 2 == 77l intact) rt-ok
+clear
+
+% ============ F16: record-type schema stays GC-reachable under ${} (task #37) =====
+% record_type_op's ctor proc references the schema through a markable schema-holder
+% record, not a bare uinteger offset (an immediate, invisible to the GC).  Pre-fix a
+% record-type defined inside ${} had its GLOBAL schema swept by a GC firing before the
+% type's first construction -> @record-ctor read a freed schema (field-not-found / arity
+% underflow).  Deterministic under stress alone, no poison needed.  (verified: reverting
+% the holder fix makes this crash at @record-ctor.)
+${ /f16pt [ /x /y /z ] record-type def
+   11l 22l 33l f16pt /f16r exch def
+   f16r /y get } 22l eq (gmode: record-type defined in ${} field y == 22l) rt-ok
+${ /f16pt2 [ /a /b ] record-type def
+   1l 2l f16pt2 /b 99l record-update /b get } 99l eq (gmode: record-type in ${} update b == 99l) rt-ok
+clear
+
+% ============ F17: aggregate accumulator survives the reduce-barrier clone (task #38a) =====
+% @aggregate-reduce-barrier popped the new accumulator off the op stack BEFORE cloning it
+% into the frame's acc slot; under ${...} that clone's make_clone fires vm_global_gc with the
+% (popped, above-m_op_ptr) source unrooted -> swept -> the accumulator silently collapsed and
+% aggregate returned the init unchanged (0l, not 6l).  Fix: clone while still rooted at
+% *m_op_ptr, then pop.  Deterministic under stress alone.  (verified: reverting -> 0l.)
+${ 0l { add } [ { 1l } { 2l } { 3l } ] aggregate } 6l eq (gmode: aggregate sum == 6l) rt-ok clear
+
+% ============ F18: array builders keep their result intact under ${} (Class A) =====
+% A whole family of array ops allocated their result with vm_alloc_n (LOCAL) and filled it
+% via make_clone WITHOUT protecting it.  Under ${...} each element clone is a GLOBAL ExtValue
+% alloc that fires vm_global_gc; the result array is not yet on any stack, so its
+% already-written global clones were swept (a later clone's GC reclaims them).  Two fixes by
+% op shape: the non-temp builders (append/sort/unique/dedupe/drop-while) root the result on
+% the gc-root stack across the fill (mirrors the scan_op template); the builders that hold a
+% temp packed-expansion buffer live (interpose + the nested zip/zip-longest/enumerate/chunk/
+% sliding-window) clone fully-LOCAL via make_clone_local, since a global alloc would also
+% clobber that temp buffer (see test_global_composite S8 for the packed-source cases).  Long
+% payloads arm the clones; poison makes a swept slot read as garbage.  (verified: reverting a
+% fix -> that op's check FAILS for the rooted ops.)
+true vm-gc-poison
+
+% flat single-array results
+${ [ 5000000001l 5000000002l 5000000003l ] 5000000004l append } dup 0 get 5000000001l eq (gmode: append[0]) rt-ok 3 get 5000000004l eq (gmode: append[3]) rt-ok
+${ [ 5000000003l 5000000001l 5000000002l ] sort } dup 0 get 5000000001l eq (gmode: sort[0]) rt-ok 2 get 5000000003l eq (gmode: sort[2]) rt-ok
+${ [ 5000000001l 5000000002l 5000000003l ] 5000000099l interpose } dup 1 get 5000000099l eq (gmode: interpose[1]) rt-ok 4 get 5000000003l eq (gmode: interpose[4]) rt-ok
+${ [ 5000000001l 5000000002l 5000000003l 5000000004l ] { 5000000002l le } drop-while } dup 0 get 5000000003l eq (gmode: drop-while[0]) rt-ok 1 get 5000000004l eq (gmode: drop-while[1]) rt-ok
+${ [ 5000000001l 5000000001l 5000000002l 5000000003l ] unique } dup 0 get 5000000001l eq (gmode: unique[0]) rt-ok 2 get 5000000003l eq (gmode: unique[2]) rt-ok
+${ [ 5000000001l 5000000001l 5000000002l 5000000002l 5000000003l ] dedupe } dup 1 get 5000000002l eq (gmode: dedupe[1]) rt-ok 2 get 5000000003l eq (gmode: dedupe[2]) rt-ok
+
+% nested sub-array results (each pair/group/window linked into the rooted result before fill)
+${ [ 5000000001l 5000000002l 5000000003l ] [ 6000000001l 6000000002l 6000000003l ] zip } dup 0 get 0 get 5000000001l eq (gmode: zip[0][0]) rt-ok 2 get 1 get 6000000003l eq (gmode: zip[2][1]) rt-ok
+${ [ 5000000001l 5000000002l 5000000003l ] [ 6000000001l ] 0l zip-longest } dup 0 get 1 get 6000000001l eq (gmode: zip-longest[0][1]) rt-ok 2 get 0 get 5000000003l eq (gmode: zip-longest[2][0]) rt-ok
+${ [ 5000000001l 5000000002l 5000000003l ] enumerate } dup 0 get 1 get 5000000001l eq (gmode: enumerate[0][1]) rt-ok 2 get 1 get 5000000003l eq (gmode: enumerate[2][1]) rt-ok
+${ [ 5000000001l 5000000002l 5000000003l 5000000004l ] 2 chunk } dup 0 get 0 get 5000000001l eq (gmode: chunk[0][0]) rt-ok 1 get 1 get 5000000004l eq (gmode: chunk[1][1]) rt-ok
+${ [ 5000000001l 5000000002l 5000000003l 5000000004l ] 2 sliding-window } dup 0 get 0 get 5000000001l eq (gmode: sliding-window[0][0]) rt-ok 2 get 1 get 5000000004l eq (gmode: sliding-window[2][1]) rt-ok
+clear
+
+% ============ F19: chained array ops -- consumed-source GC visited-set alias (task #41) =====
+% map/filter allocate their dst with vm_alloc_n (LOCAL) immediately ABOVE the source they
+% consume.  array_pop_clone_head advances the source's m_array as it drains; when the source
+% is FULLY consumed its offset has advanced to one-past-its-end = the dst's start offset.  The
+% global GC's local-VM descent dedups by offset (m_gc_local_visited): the empty source view is
+% walked first (offset == dst start, nothing to mark) and records that offset, so dst is then
+% skipped as "already visited" -- its already-written global element clones go UNMARKED and are
+% swept by the GC that fires while the proc builds the final element.  Signature: every dst
+% element EXCEPT the last is corrupted (the last is written after that fatal GC).  Only bites
+% when two array-consuming ops chain in the SAME ${} block (a closed block promotes the first
+% result to the global region, so its offset can never reach a later LOCAL dst).  Reaches
+% map->filter, map->map, filter->filter, and the transducer desugar (into/xf-compose, which
+% pushes Map then Filter onto the exec stack).  Fix: skip empty Array/Packed views from the
+% visited bookkeeping (gc.inl) -- they alias and have nothing to descend into.  Long payloads
+% arm the clones; element [0] is the canary.  (verified: reverting the gc.inl guard -> [0] FAILS.)
+true vm-gc-poison
+${ [ 5000000001l 5000000002l 5000000003l 5000000004l 5000000005l 5000000006l ] { 10l add } map { 100l add } map } dup 0 get 5000000111l eq (gmode: map->map[0]) rt-ok dup 2 get 5000000113l eq (gmode: map->map[2]) rt-ok 5 get 5000000116l eq (gmode: map->map[5]) rt-ok
+${ [ 5000000001l 5000000002l 5000000003l 5000000004l 5000000005l 5000000006l ] { 10l add } map { 5000000013l gt } filter } dup 0 get 5000000014l eq (gmode: map->filter[0]) rt-ok dup length 3 eq (gmode: map->filter len) rt-ok 2 get 5000000016l eq (gmode: map->filter[2]) rt-ok
+${ [ 5000000001l 5000000002l 5000000003l 5000000004l 5000000005l 5000000006l ] { 10l add } xf-map { 5000000013l gt } xf-filter xf-compose into } dup 0 get 5000000014l eq (gmode: xf-compose[0]) rt-ok 2 get 5000000016l eq (gmode: xf-compose[2]) rt-ok
+clear
+
+% ============ F20: deref of a bound lvar returns an independent value (task #42) =====
+% deref_op returned the value stored in the binding slot as-is -- a borrowed alias of the
+% ExtValue the binding owns.  A later pop / consuming op maybe_free_extvalue'd it, freeing the
+% binding's ExtValue and leaving the lvar dangling; the next global alloc's GC then walked the
+% dangling binding -> "references a freed block".  Fix: deref_op clones the result when the
+% input is a BOUND lvar (mirrors unify_impl's a_consumable=false for deref'd bound lvars).  Long
+% payloads arm the binding clone.  (verified: reverting the deref_op clone -> the deref FAILS;
+% production-facing latent variant without stress is test_global_composite S11.)
+true vm-gc-poison
+${ /f20a logic-var def f20a 5000000201l unify pop f20a deref pop  [ 5000000301l 5000000302l 5000000303l ] f20a deref } dup 5000000201l eq (gmode: deref bound lvar survives pop) rt-ok pop length 3 eq (gmode: global array intact after deref-pop) rt-ok
+${ /f20p logic-var def /f20q logic-var def f20p 5000000401l unify pop f20q 5000000402l unify pop f20p deref pop f20q deref } 5000000402l eq (gmode: 2nd bound lvar intact after 1st deref-pop) rt-ok
+clear
+
+% ============ F21: cell-set roots an undef'd cell across collect/invalidate/fire (task #44) ==
+% cell_set_op leaves the cell on the op stack and cell_set_core pops it (m_op_ptr -= 2) before
+% the collect/invalidate/fire steps -- each of which allocates and can fire vm_global_gc.  A cell
+% reachable ONLY via that popped slot (an undef'd inline cell) was then unrooted: the GC swept its
+% header, so the own-watcher fire read a garbage m_watchers_len (opstack-overflow) / a poisoned
+% m_value.  The batch path has the same hole at @batch-end/@batch-fire, where the deferred-watcher
+% buffer rooted only m_old_value, not the cell (header->m_value is read there as the NEW value).
+% Fix: cell_set_core roots the cell on the gc-root stack across the pop; the deferred-buffer GC
+% walk (gc.inl) now also marks each BatchEntry's cell.  (verified: reverting either -> FAILS/UAF.)
+true vm-gc-poison
+/f21seen 0l def
+${ 0l cell dup { /f21seen exch def pop } watch 5000000501l exch cell-set } f21seen 5000000501l eq (gmode: undef cell own-watcher new value, immediate) rt-ok
+/f21bseen 0l def
+${ 0l cell dup { /f21bseen exch def pop } watch { 5000000601l exch cell-set } batch } f21bseen 5000000601l eq (gmode: undef cell own-watcher new value, batch-deferred) rt-ok
+clear
+
+% ============ F22: Cat-2 string/regex array results region-aware + rooted under ${} (#46) ==
+% split / chars / flatten / reverse(array) / regex-find-all / regex-split / regex-search built
+% their result ARRAY with vm_alloc_n (LOCAL) and their element strings LOCAL too (split = views;
+% regex = make_string local copies).  #46 Cat 2 makes the array vm_alloc_dispatch_n (GLOBAL under
+% ${...}) and the element strings make_string_region (GLOBAL copies); each element clone/string
+% copy is a global alloc that fires vm_global_gc, so the result is null-init + rooted across the
+% fill (nested regex-find-all/-search sub-arrays are linked into the rooted outer BEFORE fill).
+% Without the rooting the already-written global elements are swept; poison makes the swept slot
+% read as garbage, so element [0] (written first, sees the most later-element GCs) is the canary.
+% (verified: reverting an op's dispatch_n/root -> its [0] check FAILS under poison.)
+true vm-gc-poison
+${ [ 5000000003l 5000000002l 5000000001l ] reverse } dup 0 get 5000000001l eq (gmode: reverse[0]) rt-ok 2 get 5000000003l eq (gmode: reverse[2]) rt-ok
+${ [ [ 5000000001l 5000000002l ] [ 5000000003l ] ] flatten } dup 0 get 5000000001l eq (gmode: flatten[0]) rt-ok 2 get 5000000003l eq (gmode: flatten[2]) rt-ok
+${ (aaa,bbb,ccc,ddd) (,) split } dup 0 get (aaa) eq (gmode: split[0]) rt-ok 3 get (ddd) eq (gmode: split[3]) rt-ok
+${ (zyx) () split } dup 0 get (z) eq (gmode: split empty-delim[0]) rt-ok 2 get (x) eq (gmode: split empty-delim[2]) rt-ok
+${ (abcd) chars } dup 0 get 97b eq (gmode: chars[0]) rt-ok 3 get 100b eq (gmode: chars[3]) rt-ok
+${ (a1b2c3) ([0-9]) regex-find-all } dup 0 get (1) eq (gmode: regex-find-all[0]) rt-ok 2 get (3) eq (gmode: regex-find-all[2]) rt-ok
+${ (a1b2) (([a-z])([0-9])) regex-find-all } dup 0 get 1 get (a) eq (gmode: regex-find-all grp[0][1]) rt-ok 1 get 2 get (2) eq (gmode: regex-find-all grp[1][2]) rt-ok
+${ (aa:bb:cc) (:) regex-split } dup 0 get (aa) eq (gmode: regex-split[0]) rt-ok 2 get (cc) eq (gmode: regex-split[2]) rt-ok
+${ (abc123) (([a-z]+)([0-9]+)) regex-search pop } dup 1 get (abc) eq (gmode: regex-search[1]) rt-ok 2 get (123) eq (gmode: regex-search[2]) rt-ok
+% #46 Cat 2b newly-rooted paths: dict-extract (values/keys) clones into a global result;
+% sort's packed single-element fast path clones one head into a global result.
+% exact-sum check (poison-sensitive: a swept Long reads as 0xBE.. garbage, not the exact sum)
+${ 4 dict dup /vk1 5000000701l put dup /vk2 5000000702l put values } dup length 2 eq (gmode: values len) rt-ok dup 0 get exch 1 get add 10000001403l eq (gmode: values sum survives) rt-ok
+${ 5000000801l 1 packed sort } 0 get 5000000801l eq (gmode: sort packed-1 clone) rt-ok
+% #46 Cat 2c proc-invoking ops: result parked on the exec stack across proc callbacks
+% (scan's setup is gc-rooted; drop-while's collect is gc-rooted).  Long payloads arm the
+% per-element clones; element [0] (written first) is the canary.  (map/filter chains: F19.)
+${ [ 5000000001l 5000000002l 5000000003l ] 0l { add } scan } dup 1 get 5000000001l eq (gmode: scan[1]) rt-ok 3 get 15000000006l eq (gmode: scan[3]) rt-ok
+${ [ 5000000010l 5000000020l ] { pop } map-indexed } dup 0 get 5000000010l eq (gmode: map-indexed[0]) rt-ok 1 get 5000000020l eq (gmode: map-indexed[1]) rt-ok
+${ [ 5000000001l 5000000002l 5000000009l ] { 5000000005l lt } take-while } dup 0 get 5000000001l eq (gmode: take-while[0]) rt-ok 1 get 5000000002l eq (gmode: take-while[1]) rt-ok
+${ [ 5000000001l 5000000007l 5000000008l ] { 5000000005l lt } drop-while } dup 0 get 5000000007l eq (gmode: drop-while collect[0]) rt-ok 1 get 5000000008l eq (gmode: drop-while collect[1]) rt-ok
+% #46 Cat 2d promote/coerce: result rooted across the conversion clones.  The PACKED path
+% expands into a local scratch buffer that must hold LOCAL clones (suppress-global guard) --
+% a global expansion left global clones in the unrooted buffer that a later GC swept (this
+% was a pre-existing latent UAF: reverting the suppress -> gvm_free double-free here).
+${ 5000000001l 5000000002l 5000000003l 3 packed promote } dup 0 get 5000000001l eq (gmode: promote packed[0]) rt-ok 2 get 5000000003l eq (gmode: promote packed[2]) rt-ok
+${ 5000000001l 5000000002l 2 packed /long-type coerce } dup 0 get 5000000001l eq (gmode: coerce packed[0]) rt-ok 1 get 5000000002l eq (gmode: coerce packed[1]) rt-ok
+${ [ 5000000001l 5000000002l 5000000003l ] promote } dup 0 get 5000000001l eq (gmode: promote array[0]) rt-ok 2 get 5000000003l eq (gmode: promote array[2]) rt-ok
+clear
+
+false vm-gc-poison
+
+false vm-gc-stress
+
+(test_gc_stress_b7.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =
+
+% ====================================================================
+% Global-mode (${...}) cluster: FIXED 2026-06-02 and exercised live above (the
+% "gmode:" checks).  Members fixed: execute_proc length-1 clone (the broad bare-
+% ExtValue value-corruption), coroutine_launch_common, curry_op, actor-broadcast,
+% pipe_materialize + pipe-run/pipe-reduce, scan/@array-scan, supervisor pass-1 +
+% supervisor-start-child, and the computed-cell builders cell-combine / cell-map /
+% cell-transduce (region-aware proc + rooted across make_cell).
+%
+% Members AUDITED-CLEAN (did not reproduce under per-alloc stress, so not exercised
+% here): ${...} named-var, base/global cell value, watch, actor-recv-match-timeout,
+% extreme-by/min-by-max-by.  (non-${} logic GC-rooting -- unify / unify-match /
+% copy-term -- is covered green by tests/test_b6_gc.trx.)
+%
+% FIXED 2026-06-02 (task #28; exercised by F11/F12 above):
+%   * genserver ${}-global message spines.  gen-call / gen-call-timeout build the
+%     call message [/gen-call, ref, self, msg] region-aware, but cloned the (possibly
+%     ExtValue/WideValue) msg into the spine BEFORE rooting it, so that clone's GC
+%     swept the unrooted spine -> corrupted call message -> the server's ref-predicate
+%     never matched -> gen-call HUNG.  An Integer message (immediate clone) hid it,
+%     which is why the old genserver:1-4 test (bare real, no gc-stress) missed it; the
+%     repro was previously parked as "too slow under per-alloc stress" but a minimal
+%     echo server is fast.  Fix: root-before-clone (null-fill the msg slot first).
+%     gen-cast / gen-stop / gen-reply were made region-aware at the same time (global
+%     message into the global mailbox) with the same discipline.
+%   * map-dict / filter-dict result dict made region-aware (global under ${...}), so
+%     it survives save/restore instead of dangling; this moves map-dict off the
+%     AUDITED-CLEAN list (its always-LOCAL result had been immune to the GLOBAL GC).
+% The at_gen_server_recv_op RECEIVE-side concern from the prior note was separately
+% investigated and is NOT a live bug (the gen-server coroutine runs with
+% m_curr_alloc_global==false, so its make_clone is local); its Stop-branch free-
+% before-clone was already fixed.  No genserver residuals remain.

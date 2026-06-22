@@ -1,0 +1,3 @@
+10 //add curry 5 exch exec
+10 20 //add curry curry exec
+42 //add curry uncurry

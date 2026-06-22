@@ -1,0 +1,81 @@
+% test_screen_render_direct.trx -- D5 from review_screen_system.md.
+% Exercises screen-render's direct-::write-to-STDOUT path that
+% screen-render-to (and therefore test_screen_render.trx) cannot
+% reach: m_stdout flush-first (A5), the 4 KiB stack buffer + chunked
+% drain, the EINTR/EAGAIN poll-and-retry loop, and the > 4 KiB
+% single-chunk fallback.
+%
+% The render emit code itself (cursor moves, SGR diff, UTF-8 encode)
+% is byte-asserted by test_screen_render.trx via screen-render-to.
+% This complement only verifies the I/O wrapper.
+%
+% Run model: screen-render writes ANSI bytes to STDOUT_FILENO.  Under
+% run_all.sh stdout is captured by the runner; the rendered bytes
+% mingle with this test's = output but the sentinel check
+% (`^__test_ok__$`) still finds the trailing line because = writes a
+% newline and the rendered output doesn't end on the sentinel string.
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+% --- 1. Smallest possible render ------------------------------------------
+% 1x1 screen, single 'A'.  Tests the m_stdout-flush-first path on a
+% trivial diff (~25 bytes total output).
+1 1 make-screen /s1 exch def
+s1 0 0 65 7 0 0 screen-put-cell pop
+s1 screen-render
+s1 screen? (smallest render returned same screen) rt-ok
+
+% Re-render unchanged screen produces zero bytes -- still must succeed.
+s1 screen-render
+s1 screen? (no-op render returned same screen) rt-ok
+
+% --- 2. Buffer-drain path (output > 4 KiB) --------------------------------
+% A 40x12 fresh screen first-render emits roughly:
+%   for each cell: cursor-position CSI (~6 bytes) + SGR (~18 bytes) +
+%   character (1 byte) -- but adjacent cells with same SGR skip the
+%   SGR, so realistic ~10-15 bytes/cell.  40*12 = 480 cells -> ~6 KiB.
+% This forces screen-render's flush_sink to drain the 4 KiB stack
+% buffer at least twice during a single render call.
+40 12 make-screen /s2 exch def
+% Vary fg per column so SGR re-emits roughly every cell -- inflates
+% per-cell bytes and pushes the total well past 4 KiB.
+0 1 11 {|r|#3
+    0 1 39 {|c|#2
+        s2 c r 65 c add 26 mod 65 add 1 c 16 mod add 0 0 screen-put-cell pop
+    } for
+} for
+s2 screen-render
+s2 screen-cols 40 eq (4-KiB+ render returned screen) rt-ok
+
+% --- 3. Mixed-with-print interleaving (A5 footgun documented) -------------
+% screen-render flushes m_stdout before its direct ::write, so prior
+% print bytes still in m_stdout's buffer reach the terminal BEFORE
+% the render bytes.  Verify the call sequence doesn't crash; byte-
+% order checking proper requires byte-level capture which only
+% screen-render-to supports (and is covered there in test_screen_render.trx).
+1 1 make-screen /s3 exch def
+s3 0 0 88 7 0 0 screen-put-cell pop
+(\nMIXED-BEFORE) print
+s3 screen-render
+(MIXED-AFTER\n) print
+s3 screen? (mix-with-print returned screen) rt-ok
+
+(\npassed: ) print passed = (failed: ) print failed = (total: ) print total =
+failed 0 eq { (test_screen_render_direct OK) } { (test_screen_render_direct FAILED) } if-else =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

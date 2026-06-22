@@ -1,0 +1,24 @@
+% S6: coroutine reader parked in read-key-byte while MAIN cycles 20ms
+% coroutine-sleep timers.  Regression: the scheduler's real sleep could
+% wake just before the earliest timer expired (poll timeout truncated to
+% whole ms, or EINTR), fall through to load main while main was still
+% LINKED IN THE TIMER LIST, and main's next sleep re-inserted the linked
+% node -- timer-list cycle, infinite timer_list_insert walk, stdin never
+% polled again (dead keyboard at 99% CPU).  The byte at t+2s lands far
+% beyond the ~200ms pre-fix corruption window.
+(lib/keys.trx) run
+/done false def
+/reader {
+    (reader-start\n) print flush
+    read-key-byte
+    { (got-byte: ) print /integer-type cast = flush }
+    { (got-eof\n) print flush }
+    if-else
+    /done true store
+} def
+{
+    mark { reader } coroutine-launch pop
+    { done not } { 20 coroutine-sleep } while
+} with-raw-mode
+(S6-done\n) print flush
+quit

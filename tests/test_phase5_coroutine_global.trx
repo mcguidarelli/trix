@@ -1,0 +1,108 @@
+% ====================================================================
+% test_phase5_coroutine_global.trx -- VM Redux Phase 5 invariants
+% ====================================================================
+% After Phase 5, CoroutineContext + the contiguous stack block + the
+% per-coroutine BindingBucket array + BindingEntry cache slots all
+% allocate from global VM via gvm_alloc<...>(.., ChunkKind::CoroutineContext
+% / ChunkKind::CoroutineStacks / ChunkKind::BindingBucket /
+% ChunkKind::BindingEntry).  Phase 3 of plan_alloc_walker_audit.md
+% (2026-05-09) split the original Coroutine kind into Context + Stacks.
+%
+% Three invariants:
+%   I1. Spawning a coroutine bumps /by-kind/coroutinecontext AND
+%       /by-kind/coroutinestacks (both +1) and increases
+%       vm-global-used by at least sizeof(CoroutineContext) +
+%       stack-block-size (~5 KB total).
+%   I2. A coroutine spawned at save level N SURVIVES an outer restore
+%       past N -- the deliberate behavioral change introduced by
+%       Phase 5.  Pre-Phase-5 the kill walk would have slaughtered it.
+%   I3. The survivor's mailbox + monitor relationships (Phase 3+4
+%       global) keep working after the outer restore.
+%
+% Note: monitor / link / actor-spawn require the caller to be an
+% actor.  All such assertions live inside a "tester" actor body;
+% main just polls until the tester is done.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+/yield-many { 0 1 39 { pop 0 coroutine-sleep } for } def
+
+% --- SECTION 1 (I1): /coroutinecontext + /coroutinestacks rise on spawn ---
+vm-global-info /by-kind get /coroutinecontext get /count get /ctx-pre1 exch def
+vm-global-info /by-kind get /coroutinestacks  get /count get /stk-pre1 exch def
+//:status:vm-global-used /vmg-pre1 exch def
+
+[ { 0 coroutine-sleep coroutine-die } coroutine-launch /survivor1 exch def
+yield-many
+
+vm-global-info /by-kind get /coroutinecontext get /count get ctx-pre1 sub 1 ge
+    (s1: /coroutinecontext count rose by >= 1 per spawn) rt-ok
+vm-global-info /by-kind get /coroutinestacks  get /count get stk-pre1 sub 1 ge
+    (s1: /coroutinestacks  count rose by >= 1 per spawn) rt-ok
+//:status:vm-global-used vmg-pre1 sub 2048 gt
+    (s1: vm-global-used grew > 2 KB per spawn) rt-ok
+
+survivor1 coroutine-await pop yield-many
+
+% --- SECTION 2 (I2): coroutine spawned at sl=N survives outer restore ---
+% The cross-coroutine validator rejects above-barrier composites in any
+% surviving coroutine's stacks.  Define the spawn body BEFORE the save
+% so the proc literal (and the Name binding for actor-recv resolved
+% inside it) land below the barrier.
+{ { actor-recv pop 0 coroutine-sleep } loop } /pre-save-body exch def
+
+//:status:coroutine-count /count-pre2 exch def
+/sv2 save def
+% Use `load` to push the proc value (not execute it -- bare name lookup
+% would run pre-save-body on main, which has no mailbox).
+[ /pre-save-body load actor-spawn /survivor2 exch def
+yield-many
+
+% Pre-restore: count is elevated, survivor2 alive
+//:status:coroutine-count count-pre2 gt
+    (s2: count rose inside save scope) rt-ok
+survivor2 coroutine-status /dead ne
+    (s2: survivor2 is alive pre-restore) rt-ok
+
+sv2 restore   % outer restore -- pre-Phase-5 would have killed survivor2
+
+% Post-restore: survivor2 STILL alive (Phase 5 behavior change).
+% The Coroutine handle stored via def was rolled back by the journal,
+% but the CoroutineContext itself survives in global VM and remains
+% reachable via the registry.
+//:status:coroutine-count count-pre2 gt
+    (s2: coroutine-count stays elevated post-restore -- spawn survived) rt-ok
+
+% --- SECTION 3 (I3): monitor / mailbox keep working after restore ---
+% Wrap inside a tester actor (monitor requires actor caller).
+/tester-body {
+    % Spawn a target inside the tester (so monitor can be issued).
+    [ { 0 coroutine-sleep coroutine-die } actor-spawn /target exch def
+    target monitor pop
+    yield-many                        % target runs and dies + /down delivered
+    actor-recv  /msg exch def         % consume /down message (Tagged with /down tag)
+    msg type /tagged-type eq          (s3: /down message delivered as Tagged) rt-ok
+} def
+[ { tester-body } actor-spawn /tester exch def
+{ tester coroutine-status /dead eq { exit } if 0 coroutine-sleep } loop
+
+% --- SECTION 4: bindingbucket / bindingentry counts non-zero post-spawn ---
+% First spawn flips m_live_coroutine_count > 0, which activates the
+% per-coroutine binding cache on subsequent Name lookups in any
+% coroutine.  By now main has done plenty of lookups -- assert > 0.
+vm-global-info /by-kind get /bindingbucket get /count get 0 gt
+    (s4: /bindingbucket count > 0 after first spawn) rt-ok
+vm-global-info /by-kind get /bindingentry  get /count get 0 gt
+    (s4: /bindingentry  count > 0 after first spawn) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_phase5_coroutine_global: ALL TESTS PASSED) =
+(__test_ok__) =

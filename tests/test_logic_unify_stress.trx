@@ -1,0 +1,121 @@
+% ====================================================================
+% test_logic_unify_stress.trx
+% ====================================================================
+% Stress coverage for Option B (context-aware lvar_bind).  Each test
+% exercises a high-iteration or deep-nesting case that would amplify
+% any per-bind leak or corruption introduced by the new clone path.
+%
+% Run: ./trix --vm-size=2M tests/test_logic_unify_stress.trx
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- T1: 10k tight unify-match alternating match/fail ---
+%        Per-iter brackets a unify-match attempt in save/restore.
+%        Alternates between a matching pattern (binds a fresh lvar)
+%        and a failing pattern (mismatch in slot 1).  Verifies the
+%        ExtValue counter returns to baseline at the end.
+%        Baseline captured AFTER proc defs so the packed-proc literals
+%        (42l/99l/0l baked into the bodies) are part of the baseline.
+{
+    save /S exch def
+    logic-var /xT1 exch def
+    [ 42l 99l ] [[ [ xT1 99l ]   { xT1 bound? pop } ]] unify-match
+    S restore
+} /t1-match exch def
+{
+    save /S exch def
+    logic-var /yT1 exch def
+    { [ 42l 99l ] [[ [ yT1 0l ] { yT1 bound? pop } ]] unify-match }
+        /Fail { clear } try
+    S restore
+} /t1-fail exch def
+{
+    /t1-match load exec
+    /t1-fail  load exec
+} /t1-iter exch def
+//:status:extvalue-active /t1-base exch def
+5000 /t1-iter load repeat
+//:status:extvalue-active t1-base eq
+    (T1: 5000x match+fail alternation -- ExtValue counter at baseline) rt-ok
+
+% --- T2: 4 sequential coroutines each running 100x unify-match ---
+%        (True concurrency in trix is cooperative; this confirms each
+%        coroutine's binding journals are independent and do not leak
+%        across coroutine context switches.)
+%        Each coroutine returns true if its 100 binds succeeded.
+/t2-body {
+    100 {
+        save /S exch def
+        logic-var /xT2 exch def
+        [ 42l 99l ] [[ [ xT2 99l ] { xT2 bound? pop } ]] unify-match
+        S restore
+    } repeat
+    true
+} def
+[ { /t2-body load exec } coroutine-launch coroutine-join pop /t2-a exch def
+[ { /t2-body load exec } coroutine-launch coroutine-join pop /t2-b exch def
+[ { /t2-body load exec } coroutine-launch coroutine-join pop /t2-c exch def
+[ { /t2-body load exec } coroutine-launch coroutine-join pop /t2-d exch def
+clear   % drop the four marks left by [
+t2-a t2-b and t2-c and t2-d and
+    (T2: 4 coroutines x 100 unify-match each -- all true) rt-ok
+
+% --- T3: 10-level nested pattern with leaf lvar ---
+%        Value is 10-deep singleton-array nest; pattern same depth with
+%        lvar at the bottom.  Each level of unify_impl recurses with
+%        consumable=false; the leaf bind takes the clone path.
+{
+    save /S exch def
+    logic-var /xT3 exch def
+    [[[[[[[[[[ 42l ]]]]]]]]]]
+    [[[[[[[[[[ xT3 ]]]]]]]]]]
+    unify pop
+    xT3 bound? pop
+    S restore
+} /t3-iter exch def
+//:status:extvalue-active /t3-base exch def
+30 /t3-iter load repeat
+//:status:extvalue-active t3-base eq
+    (T3: 30x depth-10 nested array -- ExtValue counter at baseline) rt-ok
+
+% --- T4: Mixed-type leaves (Long, Real, UInt128, Integer-inline) ---
+%        Pattern has one lvar leaf per type.  Each ExtValue-bearing
+%        type's leaf bind allocates +1 ExtValue/WideValue via the
+%        deep-clone path; Integer-inline allocates 0.
+%        Verify counters return to baseline after restore.
+{
+    save /S exch def
+    logic-var /xL  exch def
+    logic-var /xR  exch def
+    logic-var /xU  exch def
+    logic-var /xI  exch def
+    [ 42l 1.5d 100uq 42 ]
+    [ xL xR xU xI ]
+    unify pop
+    xL bound?  xR bound? and  xU bound? and  xI bound? and pop
+    S restore
+} /t4-iter exch def
+//:status:extvalue-active  /t4-eva-base   exch def
+//:status:widevalue-active /t4-wva-base   exch def
+50 /t4-iter load repeat
+//:status:extvalue-active t4-eva-base eq
+    (T4: mixed-leaf 50x iters -- extvalue-active at baseline) rt-ok
+//:status:widevalue-active t4-wva-base eq
+    (T4: mixed-leaf 50x iters -- widevalue-active at baseline) rt-ok
+
+% --- Final ---
+/vm-validate query-status true eq
+    (vm-validate passes after all stress tests) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_logic_unify_stress: ALL TESTS PASSED) =
+(__test_ok__) =

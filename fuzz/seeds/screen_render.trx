@@ -1,0 +1,5 @@
+10 5 make-screen 4096 make-string-stream screen-render-to pop
+10 5 make-screen 1 1 65 7 0 1 screen-put-cell 4096 make-string-stream screen-render-to pop
+10 5 make-screen 0 0 5 5 64 7 0 0 screen-fill-rect 4096 make-string-stream screen-render-to pop
+10 5 make-screen 0 0 5 5 35 7 0 127 screen-fill-rect 4096 make-string-stream screen-render-to pop
+10 5 make-screen screen-clear 4096 make-string-stream screen-render-to pop

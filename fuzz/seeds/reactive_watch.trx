@@ -1,0 +1,4 @@
+10 cell /c exch def
+c cell-watchers
+20 c cell-set
+c cell-value

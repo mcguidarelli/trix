@@ -1,0 +1,223 @@
+% test_sched_stress.trx -- seeded random-topology scheduler stressor.
+%
+% gc-stress's sibling for the actor/coroutine/mailbox/pipe seams: each
+% round seeds the engine PCG, spawns a random worker topology (tickers,
+% echoers, a pipe producer/consumer pair, long sleepers, recv-match
+% waiters, all reporting to a collector), then drives a random churn
+% sequence over it -- sends, nested save/restore, vm-global-gc, kills,
+% suspend/resume, yields, context-recycling spawns -- and tears it all
+% down.  After every round the full integrity validator (heap +
+% scheduler invariants, including the orphaned-sleeper rule) must hold.
+% The matrix file (test_sched_interactions.trx) enumerates the seams
+% one cell at a time; this file walks random PATHS through the same
+% state space to catch the interleavings nobody enumerated.
+%
+% Reproducible: every round prints its seed; a failure is replayed with
+%   ./trix tests/test_sched_stress.trx --seed=N --rounds=1
+% Defaults: --seed=900913, --rounds=8 (about 2s).  The dedicated
+% campaign runner (tests/run_sched_stress_tests.sh) sweeps many seeds.
+
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM): the file THROWS at EOF so failures gate the verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+/vm-ok { /vm-validate query-status } def
+
+% --- knobs -----------------------------------------------------------------
+
+/base-seed  900913 def
+/rounds     8 def
+
+% (--seed=) is 7 bytes, (--rounds=) is 9 -- slice PAST the '='.
+/cli-args command-line-args def
+0 1 cli-args length 1 sub {
+    /i exch def
+    /arg cli-args i get def
+    arg (--seed=) starts-with? {
+        /base-seed arg 7 arg length 7 sub get-interval to-number /integer-type cast store
+    } if
+    arg (--rounds=) starts-with? {
+        /rounds arg 9 arg length 9 sub get-interval to-number /integer-type cast store
+    } if
+} for
+
+% --- shared state (global VM: survives every churn restore) -----------------
+
+/tally ${ 1 array } def                    % messages seen by collectors, all rounds
+tally 0 0 put
+
+% rand helpers: engine PCG, Integer-typed results.
+/pick { /ulong-type cast rand-bounded-ulong /integer-type cast } def   % n -- [0,n)
+
+% --- worker bodies -----------------------------------------------------------
+% All cross-boundary messages are Integers (restore-immune through any
+% mailbox at any save level).  Workers run forever; teardown kills them
+% in whatever park state the churn left them.
+
+/collector-body {
+    { actor-recv pop  tally 0  tally 0 get 1 add  put } loop
+} def
+
+/ticker-body { |main delay|#2
+    { delay coroutine-sleep  1 main actor-send } loop
+} def
+
+/echo-body { |main|#2
+    { actor-recv 1 add main actor-send } loop
+} def
+
+/sleeper-body {
+    60000 coroutine-sleep
+} def
+
+/match-body {
+    { { dup 1000000 eq } actor-recv-match pop } loop
+} def
+
+/producer-body { |buf|#2
+    { 1 buf pipe-put } loop
+} def
+
+/consumer-body { |main buf|#2
+    { buf pipe-get { main actor-send } { exit } if-else } loop
+} def
+
+% --- one stress round --------------------------------------------------------
+
+/run-round { |seed|#8
+    seed /ulong-type cast rand-seed
+
+    % Topology: collector + 4 random workers (a pipe pick contributes
+    % the producer/consumer pair and its buffer).
+    /collector mark { collector-body } actor-spawn local-def
+    /workers 8 array local-def              % up to 2 handles per pick
+    /wcount 0 local-def
+    /pipe-buf null local-def
+    0 1 3 {
+        pop
+        5 pick
+        dup 0 eq {
+            [ collector  5 5 pick 5 mul add  { ticker-body } actor-spawn
+            workers wcount 3 -1 roll put
+            /wcount wcount 1 add local-def
+        } if
+        dup 1 eq {
+            [ collector { echo-body } actor-spawn
+            workers wcount 3 -1 roll put
+            /wcount wcount 1 add local-def
+        } if
+        dup 2 eq {
+            pipe-buf null eq {
+                /pipe-buf 2 pipe-buffer local-def
+                % actor-spawn (not coroutine-launch): churn sends random
+                % ints at random workers, and a plain coroutine has no
+                % mailbox (actor-send raises /invalid-access).
+                [ pipe-buf { producer-body } actor-spawn
+                workers wcount 3 -1 roll put
+                /wcount wcount 1 add local-def
+                [ collector pipe-buf { consumer-body } actor-spawn
+                workers wcount 3 -1 roll put
+                /wcount wcount 1 add local-def
+            } if
+        } if
+        dup 3 eq {
+            mark { sleeper-body } actor-spawn
+            workers wcount 3 -1 roll put
+            /wcount wcount 1 add local-def
+        } if
+        4 eq {
+            mark { match-body } actor-spawn
+            workers wcount 3 -1 roll put
+            /wcount wcount 1 add local-def
+        } if
+    } for
+
+    % Bootstrap: let every child reach its first blocking op at sl=0,
+    % below any churn save barrier (frame-dict placement contract).
+    0 1 7 { pop 0 coroutine-sleep } for
+
+    % Churn: 12-24 random actions.  Save/restore pairs are balanced
+    % WITHIN an action, so spawns and parks always happen at sl=0.
+    /actions 12  12 pick  add local-def
+    0 1 actions {
+        pop
+        10 pick
+        dup 0 eq { wcount 0 gt { 1000 pick  workers wcount pick get  actor-send } if } if
+        dup 1 eq { save restore } if
+        dup 2 eq { save save restore restore } if
+        dup 3 eq { vm-global-gc pop } if
+        dup 4 eq {
+            wcount 0 gt {
+                /w workers wcount pick get local-def
+                w coroutine-status /dead ne { w coroutine-kill } if
+            } if
+        } if
+        dup 5 eq {
+            wcount 0 gt {
+                /w workers wcount pick get local-def
+                w coroutine-status /dead ne { w coroutine-suspend } if
+            } if
+        } if
+        dup 6 eq {
+            wcount 0 gt {
+                /w workers wcount pick get local-def
+                w coroutine-status /dead ne { w coroutine-resume } if
+            } if
+        } if
+        dup 7 eq { 15 pick coroutine-sleep } if
+        dup 8 eq { wcount 0 gt { 1000000  workers wcount pick get  actor-send } if } if
+        9 eq { mark { } actor-spawn pop 0 coroutine-sleep } if   % context-recycle churn
+    } for
+
+    % Drain window: let surviving tickers / the pipe pair actually move
+    % traffic before teardown -- and prove main's timed sleeps stay live
+    % under whatever hot-loop mix the churn left running (the ENGINE BUG
+    % #14 shape: busy coroutines must not starve the timer sweep).
+    30 coroutine-sleep
+
+    % Teardown: resume anything suspended (kill handles every state,
+    % but exercising the resume path costs nothing), then kill workers,
+    % close the pipe, kill the collector last.
+    0 1 wcount 1 sub {
+        /i exch local-def
+        /w workers i get local-def
+        w coroutine-status /suspended eq { w coroutine-resume } if
+    } for
+    0 1 wcount 1 sub {
+        /i exch local-def
+        /w workers i get local-def
+        w coroutine-status /dead ne { w coroutine-kill } if
+    } for
+    pipe-buf null ne { pipe-buf pipe-close } if
+    collector coroutine-status /dead ne { collector coroutine-kill } if
+    0 coroutine-sleep
+} def
+
+% --- drive -------------------------------------------------------------------
+
+(sched-stress: base seed ) print base-seed =
+0 1 rounds 1 sub {
+    /r exch def
+    /round-seed base-seed r 10007 mul add def
+    round-seed run-round
+    vm-ok
+    dup not { (  round seed ) print round-seed = } if
+    (round validator clean) rt-ok
+} for
+
+% Topology is random per seed: a single round can legitimately draw
+% only sleepers and match-waiters.  Across 4+ rounds (the default 8),
+% traffic is deterministic for the fixed seed ladder.
+rounds 4 ge {
+    tally 0 get 0 gt
+        (collector saw traffic across the rounds) rt-ok
+} if
+
+vm-ok
+    (sched-stress: final vm-validate) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /sched-stress-failed throw } if
+(test_sched_stress: ALL TESTS PASSED) =
+(__test_ok__) =

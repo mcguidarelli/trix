@@ -1,0 +1,423 @@
+% ====================================================================
+% Supervision Primitives Tests
+% Reuses a small set of global variables to avoid overflowing userdict.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+/yield-many { 0 1 49 { pop 0 coroutine-sleep } for } def
+(VM free at start: ) print /vm-free query-status =
+
+% Shared result variables (reused across sections)
+/R null def  /R2 null def  /R3 false def  /R4 false def
+
+% SECTION 1: monitor basic — death delivers /down message
+/W [ {
+    /T [ { 0 coroutine-sleep } actor-spawn def
+    /REF T monitor def
+    yield-many
+    actor-recv
+    /R over tag-name def
+    /R2 over tag-value /reason get def
+    /R3 over tag-value /actor get T eq def
+    /R4 exch tag-value /ref get REF eq def
+} actor-spawn def
+yield-many yield-many
+R /down eq               (monitor: tag name is /down) rt-ok
+R2 /normal eq            (monitor: reason is /normal) rt-ok
+R3                       (monitor: actor handle matches) rt-ok
+R4                       (monitor: ref-id matches) rt-ok
+clear
+
+% SECTION 2: monitor — abnormal exit reason
+/W [ { /T [ { 0 coroutine-sleep /deliberate-crash actor-exit } actor-spawn def
+    T monitor pop yield-many /R actor-recv tag-value /reason get def
+} actor-spawn def
+yield-many yield-many
+R /deliberate-crash eq  (monitor-abnormal: reason is /deliberate-crash) rt-ok  clear
+
+% SECTION 3: monitor dead actor — immediate delivery
+/W [ { /T [ { } actor-spawn def yield-many T monitor pop
+    /R actor-self actor-mailbox-empty? not def actor-recv pop
+} actor-spawn def
+yield-many yield-many
+R                       (monitor-dead: immediate delivery) rt-ok  clear
+
+% SECTION 4: demonitor cancels notification
+/W [ { /T [ { yield-many } actor-spawn def /REF T monitor def
+    REF demonitor yield-many /R actor-self actor-mailbox-empty? def
+} actor-spawn def
+yield-many yield-many
+R                       (demonitor: no message after cancel) rt-ok  clear
+
+% SECTION 5: double monitor — two notifications
+/R 0 def  /R2 false def
+/W [ { /T [ { 0 coroutine-sleep } actor-spawn def
+    /RA T monitor def /RB T monitor def /R2 RA RB ne def yield-many
+    actor-recv tag-name /down eq { /R R 1 add def } if
+    actor-recv tag-name /down eq { /R R 1 add def } if
+} actor-spawn def
+yield-many yield-many
+R2                      (double-monitor: distinct ref-ids) rt-ok
+R 2 eq                  (double-monitor: two /down delivered) rt-ok  clear
+
+% SECTION 6: monitor ref is integer
+/W [ { /T [ { yield-many } actor-spawn def /R T monitor is-integer def
+    T coroutine-kill yield-many actor-recv pop
+} actor-spawn def
+yield-many yield-many
+R                       (monitor: ref-id is integer) rt-ok  clear
+
+% SECTION 7: monitor non-actor coroutine
+/R null def  /R2 null def
+/W [ { /T [ { { 200 coroutine-sleep } loop } coroutine-launch def
+    T monitor pop T coroutine-kill yield-many
+    actor-recv /R over tag-name def /R2 exch tag-value /reason get def
+} actor-spawn def
+yield-many yield-many
+R /down eq              (monitor-non-actor: /down from plain coroutine) rt-ok
+R2 /killed eq           (monitor-non-actor: reason is /killed) rt-ok  clear
+
+% SECTION 8: monitor self — error
+/R null def
+/W [ { clear { actor-self monitor } try /R exch def } actor-spawn pop
+yield-many
+R /invalid-access eq    (monitor-self: error on self-monitor) rt-ok  clear
+
+% SECTION 9: link — abnormal exit kills partner
+/A [ { 0 coroutine-sleep /lc actor-exit } actor-spawn def
+/B [ { A link { 200 coroutine-sleep } loop } actor-spawn def
+yield-many
+B coroutine-status /dead eq (link: abnormal exit kills partner) rt-ok  clear
+
+% SECTION 10: link — normal exit does NOT propagate
+/R false def
+/A [ { 0 coroutine-sleep } actor-spawn def
+/B [ { A link yield-many /R true def } actor-spawn def
+yield-many yield-many
+R                       (link-normal: normal exit does not kill partner) rt-ok
+B coroutine-kill yield-many  clear
+
+% SECTION 11: link idempotent
+/R false def
+/A [ { { yield-many } loop } actor-spawn def
+/B [ { A link A link 0 coroutine-sleep /R true def } actor-spawn def
+yield-many
+R                       (link-idempotent: double link no error) rt-ok
+B coroutine-kill A coroutine-kill yield-many  clear
+
+% SECTION 12: unlink prevents propagation
+/R false def
+/A [ { 0 coroutine-sleep 0 coroutine-sleep /uc actor-exit } actor-spawn def
+/B [ { A link 0 coroutine-sleep A unlink yield-many /R true def } actor-spawn def
+yield-many yield-many
+R                       (unlink: partner survives after unlink + crash) rt-ok  clear
+
+% SECTION 13: actor-exit /normal
+/R null def
+/W [ { /T [ { 0 coroutine-sleep /normal actor-exit } actor-spawn def
+    T monitor pop yield-many /R actor-recv tag-value /reason get def
+} actor-spawn def
+yield-many yield-many
+R /normal eq            (actor-exit-normal: reason is /normal) rt-ok  clear
+
+% SECTION 14: actor-exit custom reason
+/R null def
+/W [ { /T [ { 0 coroutine-sleep /maintenance actor-exit } actor-spawn def
+    T monitor pop yield-many /R actor-recv tag-value /reason get def
+} actor-spawn def
+yield-many yield-many
+R /maintenance eq       (actor-exit-custom: reason is /maintenance) rt-ok  clear
+
+% SECTION 15: actor-exit from main
+{ /test actor-exit } try /no-error ne (actor-exit-main: error from main) rt-ok  clear
+
+% SECTION 16: trap-exit converts link death to message
+/R null def  /R2 null def  /R3 false def
+/A [ { 0 coroutine-sleep /tc actor-exit } actor-spawn def
+/W [ { true actor-trap-exit A link actor-recv
+    /R over tag-name def /R2 over tag-value /reason get def
+    /R3 exch tag-value /actor get A eq def
+} actor-spawn def
+yield-many yield-many
+R /exit eq              (trap-exit: tag is /exit) rt-ok
+R2 /tc eq               (trap-exit: reason matches) rt-ok
+R3                      (trap-exit: actor handle matches) rt-ok  clear
+
+% SECTION 17: trap-exit false — link still kills
+/A [ { 0 coroutine-sleep /c17 actor-exit } actor-spawn def
+/B [ { true actor-trap-exit false actor-trap-exit A link { 200 coroutine-sleep } loop } actor-spawn def
+yield-many
+B coroutine-status /dead eq (trap-exit-false: disabling trap lets link kill) rt-ok  clear
+
+% SECTION 18: trap-exit on non-actor — error
+/R null def
+[ { clear { true actor-trap-exit } try /R exch def } coroutine-launch pop
+yield-many
+R /invalid-access eq    (trap-exit-noactor: error on non-actor) rt-ok  clear
+
+% SECTION 19: spawn-link basic
+/R null def  /R2 null def
+/W [ { true actor-trap-exit [ { 0 coroutine-sleep /slc actor-exit } spawn-link pop
+    actor-recv /R over tag-name def /R2 exch tag-value /reason get def
+} actor-spawn def
+yield-many yield-many
+R /exit eq              (spawn-link: exit signal received) rt-ok
+R2 /slc eq              (spawn-link: reason matches) rt-ok  clear
+
+% SECTION 20: spawn-link returns actor
+/R false def
+/W [ { /R [ { { yield-many } loop } spawn-link is-actor def yield-many } actor-spawn def
+yield-many yield-many
+R                       (spawn-link: child is actor) rt-ok
+W coroutine-kill yield-many  clear
+
+% SECTION 21: spawn-monitor basic
+/R null def  /R2 null def
+/W [ { [ { 0 coroutine-sleep } spawn-monitor pop pop actor-recv
+    /R over tag-name def /R2 exch tag-value /reason get def
+} actor-spawn def
+yield-many yield-many
+R /down eq              (spawn-monitor: tag is /down) rt-ok
+R2 /normal eq           (spawn-monitor: child exited normally) rt-ok  clear
+
+% SECTION 22: spawn-monitor returns actor + ref
+/R false def  /R2 false def
+/W [ { [ { { yield-many } loop } spawn-monitor
+    /R2 exch is-integer def /R exch is-actor def yield-many
+} actor-spawn def
+yield-many yield-many
+R                       (spawn-monitor: child is actor) rt-ok
+R2                      (spawn-monitor: ref-id is integer) rt-ok
+W coroutine-kill yield-many  clear
+
+% SECTION 23: spawn-monitor demonitor
+/R true def
+/W [ { [ { 0 coroutine-sleep } spawn-monitor /REF exch def pop
+    REF demonitor yield-many /R actor-self actor-mailbox-empty? def
+} actor-spawn def
+yield-many yield-many
+R                       (spawn-monitor-demonitor: no msg after cancel) rt-ok  clear
+
+% SECTION 24: link to dead actor — abnormal exit
+/R null def  /R2 null def
+/A [ { /dc actor-exit } actor-spawn def
+yield-many
+/W [ { true actor-trap-exit A link actor-recv
+    /R over tag-name def /R2 exch tag-value /reason get def
+} actor-spawn def
+yield-many yield-many
+R /exit eq              (link-dead-abnormal: immediate exit signal) rt-ok
+R2 /dc eq               (link-dead-abnormal: reason matches) rt-ok  clear
+
+% SECTION 25: link to dead actor — normal (no-op)
+/R true def
+/A [ { } actor-spawn def
+yield-many
+/W [ { A link 0 coroutine-sleep /R actor-self actor-mailbox-empty? def } actor-spawn def
+yield-many yield-many
+R                       (link-dead-normal: no signal on normal exit) rt-ok
+W coroutine-kill yield-many  clear
+
+% SECTION 26: link self — error
+/R null def
+/W [ { clear { actor-self link } try /R exch def } actor-spawn pop
+yield-many
+R /invalid-access eq    (link-self: error on self-link) rt-ok  clear
+
+% SECTION 27: uncaught error — reason
+/R null def
+/W [ { /T [ { 0 coroutine-sleep 1 0 div } actor-spawn def
+    T monitor pop yield-many /R actor-recv tag-value /reason get def
+} actor-spawn def
+yield-many yield-many
+R /div-by-zero eq       (uncaught-error: reason is error name) rt-ok  clear
+
+% SECTION 28: coroutine-kill delivers /killed
+/R null def
+/W [ { /T [ { { 200 coroutine-sleep } loop } actor-spawn def
+    T monitor pop T coroutine-kill yield-many
+    /R actor-recv tag-value /reason get def
+} actor-spawn def
+yield-many yield-many
+R /killed eq            (coroutine-kill: reason is /killed) rt-ok  clear
+
+% SECTION 29: coroutine-die delivers /normal
+/R null def
+/W [ { /T [ { 0 coroutine-sleep coroutine-die } actor-spawn def
+    T monitor pop yield-many /R actor-recv tag-value /reason get def
+} actor-spawn def
+yield-many yield-many
+R /normal eq            (coroutine-die: reason is /normal) rt-ok  clear
+
+% SECTION 30: multiple watchers
+/R false def  /R2 false def
+/T [ { 0 coroutine-sleep } actor-spawn def
+[ { T monitor pop actor-recv tag-name /down eq /R exch def } actor-spawn pop
+[ { T monitor pop actor-recv tag-name /down eq /R2 exch def } actor-spawn pop
+yield-many yield-many
+R                       (multi-watcher: A got /down) rt-ok
+R2                      (multi-watcher: B got /down) rt-ok  clear
+
+% SECTION 31: demonitor one of two
+/R false def  /R2 false def
+/W [ { /T [ { 0 coroutine-sleep } actor-spawn def
+    /RA T monitor def /RB T monitor def RA demonitor yield-many
+    /R actor-recv tag-value /ref get RB eq def
+    /R2 actor-self actor-mailbox-empty? def
+} actor-spawn def
+yield-many yield-many
+R                       (partial-demonitor: got ref-b only) rt-ok
+R2                      (partial-demonitor: only one message) rt-ok  clear
+
+% SECTION 32: chain kill via link
+/A [ { { 200 coroutine-sleep } loop } actor-spawn def
+/B [ { A link { 200 coroutine-sleep } loop } actor-spawn def
+/C [ { B link { 200 coroutine-sleep } loop } actor-spawn def
+0 coroutine-sleep  A coroutine-kill  yield-many
+B coroutine-status /dead eq (chain-kill: B dies) rt-ok
+C coroutine-status /dead eq (chain-kill: C dies) rt-ok  clear
+
+% SECTION 33: trap-exit breaks chain
+/A [ { { 200 coroutine-sleep } loop } actor-spawn def
+/B [ { true actor-trap-exit A link actor-recv pop 200 coroutine-sleep } actor-spawn def
+/C [ { B link { 200 coroutine-sleep } loop } actor-spawn def
+0 coroutine-sleep  A coroutine-kill  yield-many
+B coroutine-status /dead ne (trap-chain: B survives) rt-ok
+C coroutine-status /dead ne (trap-chain: C survives) rt-ok
+B coroutine-kill yield-many  clear
+
+% SECTION 34: monitor + link on same target
+/R 0 def
+/T [ { 0 coroutine-sleep /ml actor-exit } actor-spawn def
+/W [ { true actor-trap-exit T monitor pop T link
+    actor-recv pop /R R 1 add def  actor-recv pop /R R 1 add def
+} actor-spawn def
+yield-many yield-many
+R 2 eq                  (monitor+link: two messages) rt-ok  clear
+
+% SECTION 35: stress — monitor 10 actors
+/R 0 def
+/W [ { 1 1 10 { pop [ { } actor-spawn dup monitor pop 0 coroutine-sleep } for
+    yield-many
+    1 1 10 { pop actor-recv tag-name /down eq { /R R 1 add def } if } for
+} actor-spawn def
+yield-many yield-many yield-many
+R 10 eq                 (stress: all 10 /down received) rt-ok  clear
+
+% SECTION 36: spawn-link error from non-actor
+/R null def
+[ { clear { [ { } spawn-link } try /R exch def } coroutine-launch pop
+yield-many
+R /invalid-access eq    (spawn-link-noactor: error from non-actor) rt-ok  clear
+
+% SECTION 37: spawn-monitor error from non-actor
+/R null def
+[ { clear { [ { } spawn-monitor } try /R exch def } coroutine-launch pop
+yield-many
+R /invalid-access eq    (spawn-monitor-noactor: error from non-actor) rt-ok  clear
+
+% SECTION 38: actor-exit /normal doesn't propagate link
+/R false def
+/A [ { 0 coroutine-sleep /normal actor-exit } actor-spawn def
+/B [ { A link yield-many /R true def } actor-spawn def
+yield-many yield-many
+R                       (exit-normal-link: partner survives) rt-ok  clear
+
+% SECTION 39: demonitor on already-fired
+/R false def
+/W [ { /T [ { } actor-spawn def /REF T monitor def yield-many actor-recv pop
+    REF demonitor /R true def
+} actor-spawn def
+yield-many yield-many
+R                       (demonitor-fired: no-op, no crash) rt-ok  clear
+
+% SECTION 40: unlink on non-existent link
+/R false def
+[ { /T [ { { yield-many } loop } actor-spawn def T unlink /R true def T coroutine-kill
+} actor-spawn pop
+yield-many
+R                       (unlink-none: no-op) rt-ok  clear
+
+% SECTION 41: monitor ref monotonic
+/R false def
+/W [ { /T [ { { yield-many } loop } actor-spawn def
+    /RA T monitor def /RB T monitor def /RC T monitor def
+    /R RB RA gt RC RB gt and def
+    RA demonitor RB demonitor RC demonitor T coroutine-kill
+} actor-spawn def
+yield-many yield-many
+R                       (monitor-refs: monotonically increasing) rt-ok  clear
+
+% SECTION 42: rapid spawn-die (5 cycles)
+/R 0 def
+/W [ { 1 1 5 { pop [ { } actor-spawn dup monitor pop 0 coroutine-sleep
+    actor-recv tag-name /down eq { /R R 1 add def } if } for
+} actor-spawn def
+yield-many yield-many
+R 5 eq                  (rapid-spawn-die: 5 cycles delivered) rt-ok  clear
+
+% SECTION 43: ExtValue reason in /down
+/R null def
+/W [ { /T [ { 0 coroutine-sleep 99999999999l actor-exit } actor-spawn def
+    T monitor pop yield-many /R actor-recv tag-value /reason get def
+} actor-spawn def
+yield-many yield-many
+R 99999999999l eq       (extvalue-reason: Long preserved) rt-ok  clear
+
+% SECTION 44: monitor wakes sleeping watcher
+/R null def
+[ { /T [ { 0 coroutine-sleep } actor-spawn def T monitor pop
+    /R actor-recv tag-name def } actor-spawn pop
+yield-many yield-many
+R /down eq              (monitor-sleep: wakes sleeping watcher) rt-ok  clear
+
+% SECTION 45: type checks (from main)
+{ 42 link } try /no-error ne           (type-check: link rejects integer) rt-ok  clear
+{ (hi) link } try /no-error ne         (type-check: link rejects string) rt-ok  clear
+{ 42 monitor } try /no-error ne        (type-check: monitor rejects integer) rt-ok  clear
+{ (hi) demonitor } try /no-error ne    (type-check: demonitor rejects string) rt-ok  clear
+
+% SECTION 46: monitor from non-actor (main)
+/A [ { { yield-many } loop } actor-spawn def
+{ A monitor } try /no-error ne (monitor-noactor: error from main) rt-ok
+A coroutine-kill yield-many  clear
+
+% SECTION 47: spawn-link bidirectional
+/R false def
+/W [ { true actor-trap-exit /CH [ { { 200 coroutine-sleep } loop } spawn-link def
+    CH coroutine-kill /R actor-recv tag-name /exit eq def
+} actor-spawn def
+yield-many yield-many
+R                       (spawn-link-bidir: parent gets /exit) rt-ok
+W coroutine-kill yield-many  clear
+
+% SECTION 48: link idempotent — only one exit message
+/R false def
+/A [ { { 200 coroutine-sleep } loop } actor-spawn def
+/W [ { true actor-trap-exit A link A link A link
+    A coroutine-kill yield-many actor-recv pop
+    /R actor-self actor-mailbox-empty? def
+} actor-spawn def
+yield-many yield-many
+R                       (link-idempotent: only one exit msg) rt-ok
+W coroutine-kill yield-many  clear
+
+% SECTION 49: link from non-actor (main)
+/A [ { { yield-many } loop } actor-spawn def
+{ A link } try /no-error ne (link-noactor: error from main) rt-ok
+A coroutine-kill yield-many  clear
+
+% SECTION 50: vm-validate
+/vm-validate query-status true eq (vm-validate: heap integrity after all tests) rt-ok  clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_supervision: ALL TESTS PASSED) =
+(__test_ok__) =

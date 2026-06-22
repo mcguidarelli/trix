@@ -1,0 +1,1 @@
+[ 1 2 3 ] { dup [ /a exch ] } flat-map

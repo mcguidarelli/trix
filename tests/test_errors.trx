@@ -1,0 +1,965 @@
+% ====================================================================
+% test_errors.trx -- systematic tests for EVERY Trix error code
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% helper: pop all extra dicts from dict stack, leaving only systemdict and userdict
+/cleanup-dictstack { count-dictstack 3 sub { end } repeat } def
+
+% ====================================================================
+% SECTION: no-error (NoError)
+% ====================================================================
+
+{ 1 pop } try /no-error eq (no-error: try clean proc) rt-ok clear
+{ 1 2 add pop } try /no-error eq (no-error: try add) rt-ok clear
+
+% ====================================================================
+% SECTION: opstack-underflow (OpStackUnderflow)
+% ====================================================================
+
+{ pop } try /opstack-underflow eq (opstack-underflow: pop empty) rt-ok clear
+{ add } try /opstack-underflow eq (opstack-underflow: add no args) rt-ok clear
+{ dup } try /opstack-underflow eq (opstack-underflow: dup empty) rt-ok clear
+{ 1 exch } try /opstack-underflow eq (opstack-underflow: exch needs 2) rt-ok clear
+
+% ====================================================================
+% SECTION: opstack-overflow (OpStackOverflow)
+% ====================================================================
+
+% opstack-overflow cannot be caught by try (stack full, no room to push error name)
+{ /opstack-overflow throw } try /opstack-overflow eq (opstack-overflow: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: execstack-overflow (ExecStackOverflow)
+% ====================================================================
+
+% Non-tail recursive patterns to defeat TCO and trigger execstack-overflow
+{ /exec-overflow { exec-overflow 1 pop } def exec-overflow } try /execstack-overflow eq (execstack-overflow: infinite recursion) rt-ok clear
+{ /exec-ov2 { { exec-ov2 } exec 1 pop } def exec-ov2 } try /execstack-overflow eq (execstack-overflow: nested exec) rt-ok clear
+
+% ====================================================================
+% SECTION: dictstack-underflow (DictStackUnderflow)
+% ====================================================================
+
+% Test underflow BEFORE overflow to avoid dict stack pollution
+{ end } try /dictstack-underflow eq (dictstack-underflow: end past base) rt-ok clear
+
+% ====================================================================
+% SECTION: dictstack-overflow (DictStackOverflow)
+% ====================================================================
+
+{ /dict-overflow { << >> begin dict-overflow } def dict-overflow } try /dictstack-overflow eq (dictstack-overflow: recursive begin) rt-ok
+cleanup-dictstack clear
+
+% ====================================================================
+% SECTION: type-check (TypeCheck)
+% ====================================================================
+
+{ 1 (hello) add } try /type-check eq (type-check: add string+int) rt-ok clear
+{ null 1 def } try /type-check eq (type-check: null key for def) rt-ok clear
+{ (notanumber) to-number } try /type-check eq (type-check: to-number bad string) rt-ok clear
+{ mark null 1 dict-from-mark } try /type-check eq (type-check: null dict key via dict-from-mark) rt-ok clear
+
+% ====================================================================
+% SECTION: range-check (RangeCheck)
+% ====================================================================
+
+{ mark /a 1 /b dict-from-mark } try /range-check eq (range-check: odd dict pairs) rt-ok clear
+{ 1 0 div } try /div-by-zero eq (div-by-zero: integer div by zero) rt-ok clear
+{ -1.0 sqrt } try /range-check eq (range-check: sqrt negative) rt-ok clear
+
+% Long digit runs in print-fmt/sscan-fmt arg-id and width fields used to
+% overflow int silently; both paths now cap at 9 digits.
+{ ({1:{5555555555}}) mark 1 print-fmt } try /range-check eq (range-check: print-fmt nested arg-id over 9 digits) rt-ok clear
+{ ({:5555555555c}) mark 1 print-fmt } try /range-check eq (range-check: print-fmt width over 9 digits) rt-ok clear
+{ (1) ({5555555555:d}) mark 0 sscan-fmt } try /range-check eq (range-check: sscan-fmt arg-id over 9 digits) rt-ok clear
+% arg-id <= 9 digits but >= arg-count (and >= 64): the single-use bitmask shift `1ull << argid`
+% must not be evaluated before the bound check (shift >= 64 is UB).  Bound check now fires first.
+{ (1) ({99:d}) mark 0 sscan-fmt } try /range-check eq (range-check: sscan-fmt arg-id 99 guarded before shift) rt-ok clear
+
+% ====================================================================
+% SECTION: index-check (IndexCheck)
+% ====================================================================
+
+{ [1 2 3] 10 get } try /index-check eq (index-check: array get oob) rt-ok clear
+{ (abc) 10 get } try /index-check eq (index-check: string get oob) rt-ok clear
+{ 1 2 3 10 index } try /index-check eq (index-check: index op oob) rt-ok clear
+{ [1 2 3] 2 5 get-interval } try /index-check eq (index-check: get-interval oob) rt-ok clear
+{ [1 2 3] 10 take } try /index-check eq (index-check: take oob) rt-ok clear
+
+% ====================================================================
+% SECTION: limit-check (LimitCheck)
+% ====================================================================
+
+{ 1000000 string } try /limit-check eq (limit-check: string too large) rt-ok clear
+
+% ====================================================================
+% SECTION: undefined (Undefined)
+% ====================================================================
+
+{ /this-name-does-not-exist-xyz load } try /undefined eq (undefined: load missing name) rt-ok clear
+{ this-name-does-not-exist-abc } try /undefined eq (undefined: exec missing name) rt-ok clear
+
+% ====================================================================
+% SECTION: dict-full (DictFull)
+% ====================================================================
+
+% begin pushes dict; def fails; must end after try to clean dict stack
+{ 0 dict begin /a 1 def } try /dict-full eq (dict-full: zero-capacity dict) rt-ok
+cleanup-dictstack clear
+
+{ 1 dict begin /a 1 def /b 2 def } try /dict-full eq (dict-full: exceed fixed capacity) rt-ok
+cleanup-dictstack clear
+
+% ====================================================================
+% SECTION: read-only (ReadOnly)
+% ====================================================================
+
+% begin pushes systemdict; def fails; must end after try
+{ systemdict begin /test-ro 1 def } try /read-only eq (read-only: def in systemdict) rt-ok
+cleanup-dictstack clear
+
+{ (hello)#r 0 65b put } try /read-only eq (read-only: put in ro string) rt-ok clear
+
+{ systemdict begin /add 1 store } try /read-only eq (read-only: store in systemdict) rt-ok
+cleanup-dictstack clear
+
+% ====================================================================
+% SECTION: invalid-exit (InvalidExit)
+% ====================================================================
+
+{ exit } try /invalid-exit eq (invalid-exit: exit no loop) rt-ok clear
+{ { exit } exec } try /invalid-exit eq (invalid-exit: exit in proc no loop) rt-ok clear
+
+% ====================================================================
+% SECTION: invalid-stop (InvalidStop)
+% ====================================================================
+
+{ stop } try /invalid-stop eq (invalid-stop: stop no context) rt-ok clear
+
+% ====================================================================
+% SECTION: invalid-throw (InvalidThrow)
+% ====================================================================
+
+% /no-error is the one reserved Name; any other Name is throwable (as itself).
+{ /no-error throw } try /invalid-throw eq (invalid-throw: /no-error reserved) rt-ok clear
+
+% ====================================================================
+% SECTION: invalid-name (InvalidName) -- '@'-prefix names reserved for internal use
+% ====================================================================
+
+% Binding a leading-'@' name via any def-family op is rejected.
+{ /@x 1 def } try /invalid-name eq (invalid-name: def @-name) rt-ok clear
+{ /@y 2 def-persist } try /invalid-name eq (invalid-name: def-persist @-name) rt-ok clear
+{ ||#2 /@z 3 local-def } try /invalid-name eq (invalid-name: local-def @-name) rt-ok clear
+{ ||#2 4 [/@w] bind-locals } try /invalid-name eq (invalid-name: bind-locals @-name) rt-ok clear
+% Normal names and a non-leading '@' are unaffected.
+{ /ok-name 9 def ok-name pop } try /no-error eq (invalid-name: normal def still ok) rt-ok clear
+{ /a@b 1 def } try /no-error eq (invalid-name: '@' mid-name allowed) rt-ok clear
+
+% ====================================================================
+% SECTION: invalid-restore (InvalidRestore)
+% ====================================================================
+
+% save, restore, save again, then try double restore to trigger invalid-restore
+save /mysave exch def
+mysave restore
+save /mysave2 exch def
+{ mysave2 restore mysave2 restore } try /invalid-restore eq (invalid-restore: double restore) rt-ok clear
+
+% ====================================================================
+% SECTION: invalid-stream (InvalidStream)
+% ====================================================================
+
+% close-stream is idempotent: closing an already-closed stream is a no-op.
+{ (test_err_tmp_close.txt) 119b stream dup close-stream close-stream } try /no-error eq (no-error: double close is idempotent) rt-ok
+{ (test_err_tmp_close.txt) delete-file } try pop clear
+
+{ (test_err_tmp_flush.txt) 119b stream dup close-stream flush-stream } try /invalid-stream eq (invalid-stream: flush closed) rt-ok
+{ (test_err_tmp_flush.txt) delete-file } try pop clear
+
+{ (test_err_tmp_reset.txt) 119b stream dup close-stream reset-stream } try /invalid-stream eq (invalid-stream: reset closed) rt-ok
+{ (test_err_tmp_reset.txt) delete-file } try pop clear
+
+% ====================================================================
+% SECTION: invalid-stream-access (InvalidStreamAccess)
+% ====================================================================
+
+{ (test_err_tmp_w.txt) 119b stream read } try /invalid-stream-access eq (invalid-stream-access: read write-only) rt-ok
+{ (test_err_tmp_w.txt) delete-file } try pop clear
+
+(test_err_tmp_r.txt) 119b stream dup 65b write close-stream
+{ (test_err_tmp_r.txt) 114b stream 65b write } try /invalid-stream-access eq (invalid-stream-access: write read-only) rt-ok
+{ (test_err_tmp_r.txt) delete-file } try pop clear
+
+{ (test_err_tmp_x.txt) 122b stream } try /invalid-stream-access eq (invalid-stream-access: bad mode char) rt-ok clear
+
+% ====================================================================
+% SECTION: file-open-error (FileOpenError)
+% ====================================================================
+
+% ENOTDIR triggers file-open-error (ENOENT triggers filename-not-found instead)
+{ (/dev/null/impossible) 114b stream } try /file-open-error eq (file-open-error: ENOTDIR read) rt-ok clear
+{ (/dev/null/impossible) 119b stream } try /file-open-error eq (file-open-error: ENOTDIR write) rt-ok clear
+
+% ====================================================================
+% SECTION: filename-not-found (FilenameNotFound)
+% ====================================================================
+
+{ (nonexistent_file_xyz.txt) delete-file } try /filename-not-found eq (filename-not-found: delete missing) rt-ok clear
+{ (nonexistent_src_xyz.txt) (newname.txt) rename-file } try /filename-not-found eq (filename-not-found: rename missing) rt-ok clear
+
+% ====================================================================
+% SECTION: filename-exists (FilenameExists)
+% ====================================================================
+
+{ /filename-exists throw } try /filename-exists eq (filename-exists: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: numerical-overflow (NumericalOverflow)
+% ====================================================================
+
+{ -2147483648 -1 mod } try /numerical-overflow eq (numerical-overflow: signed mod overflow) rt-ok clear
+{ -2147483648 1 lcm } try /numerical-overflow eq (numerical-overflow: lcm min int) rt-ok clear
+
+% ====================================================================
+% SECTION: numerical-inf (NumericalINF)
+% ====================================================================
+
+{ 3.4e38 3.4e38 mul } try /numerical-inf eq (numerical-inf: mul overflow) rt-ok clear
+{ 3.4e38 3.4e38 add } try /numerical-inf eq (numerical-inf: add overflow) rt-ok clear
+
+% ====================================================================
+% SECTION: numerical-nan (NumericalNaN)
+% ====================================================================
+
+% NaN cannot be produced from user code (inputs are validated before operations)
+{ /numerical-nan throw } try /numerical-nan eq (numerical-nan: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: undefined-result (UndefinedResult)
+% ====================================================================
+
+{ 10 0 mod } try /div-by-zero eq (div-by-zero: mod by zero) rt-ok clear
+{ 10 0 quot-rem } try /div-by-zero eq (div-by-zero: quot-rem by zero) rt-ok clear
+{ 1.0 0.0 fmod } try /div-by-zero eq (div-by-zero: fmod div zero) rt-ok clear
+{ 1.0 0.0 remainder } try /div-by-zero eq (div-by-zero: remainder real div zero) rt-ok clear
+{ 1.0d 0.0d remainder } try /div-by-zero eq (div-by-zero: remainder double div zero) rt-ok clear
+
+% ====================================================================
+% SECTION: unmatched-mark (UnmatchedMark)
+% ====================================================================
+
+{ count-to-mark } try /unmatched-mark eq (unmatched-mark: count-to-mark no mark) rt-ok clear
+{ clear-to-mark } try /unmatched-mark eq (unmatched-mark: clear-to-mark no mark) rt-ok clear
+
+% ====================================================================
+% SECTION: unsupported (Unsupported)
+% ====================================================================
+
+{ /unsupported throw } try /unsupported eq (unsupported: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: undefined-case (UndefinedCase)
+% ====================================================================
+
+% case expects: case-container key case (key on top, container below)
+{ << /a 1 /b 2 >> /x case } try /undefined-case eq (undefined-case: dict no match no default) rt-ok clear
+{ [ /a 1 /b 2 ] /x case } try /type-check eq (type-check: case rejects array container) rt-ok clear
+
+% ====================================================================
+% SECTION: invalid-format-string (InvalidFormatString)
+% ====================================================================
+
+% print-fmt: formatstr mark args... print-fmt
+{ ({) mark 1 print-fmt } try /invalid-format-string eq (invalid-format-string: lone open brace) rt-ok clear
+{ (}) mark 1 print-fmt } try /invalid-format-string eq (invalid-format-string: lone close brace) rt-ok clear
+
+% ====================================================================
+% SECTION: scan-input-fail (ScanInputFail)
+% ====================================================================
+
+% scan-input-fail: input exhausted during field-width scan
+{ (a) (a{:5c}) mark (hello) sscan-fmt } try /scan-input-fail eq (scan-input-fail: field width exceeds input) rt-ok clear
+
+% ====================================================================
+% SECTION: scan-match-fail (ScanMatchFail)
+% ====================================================================
+
+{ (xyz) (abc{:d}) mark 0 sscan-fmt } try /scan-match-fail eq (scan-match-fail: literal mismatch) rt-ok clear
+
+% ====================================================================
+% SECTION: scan-type-fail (ScanTypeFail)
+% ====================================================================
+
+{ (abc) ({:d}) mark 0 sscan-fmt } try /scan-type-fail eq (scan-type-fail: not a number) rt-ok clear
+
+% ====================================================================
+% SECTION: scan-type-mismatch (ScanTypeMismatch)
+% ====================================================================
+
+% scan-type-mismatch: boolean scan with invalid character
+{ (x) ({:c}) mark false sscan-fmt } try /scan-type-mismatch eq (scan-type-mismatch: boolean scan bad char) rt-ok clear
+
+% ====================================================================
+% SECTION: scan-duplicate-arg-id (ScanDuplicateArgId)
+% ====================================================================
+
+{ (12 34) ({0:d} {0:d}) mark 0 sscan-fmt } try /scan-duplicate-arg-id eq (scan-duplicate-arg-id: same arg twice) rt-ok clear
+
+% ====================================================================
+% SECTION: set-file-position-required (SetFilePositionRequired)
+% ====================================================================
+
+{ /set-file-position-required throw } try /set-file-position-required eq (set-file-position-required: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: syntax-error (SyntaxError)
+% ====================================================================
+
+% Scanner errors at parse time cannot be caught by try
+{ /syntax-error throw } try /syntax-error eq (syntax-error: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: errstack-overflow (ErrStackOverflow)
+% ====================================================================
+
+{ /errstack-overflow throw } try /errstack-overflow eq (errstack-overflow: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: assert-failed (AssertFailed)
+% ====================================================================
+
+{ /assert-failed throw } try /assert-failed eq (assert-failed: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: internal-error (InternalError)
+% ====================================================================
+
+{ /internal-error throw } try /internal-error eq (internal-error: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: invalid-image-file (InvalidImageFile)
+% ====================================================================
+
+{ /invalid-image-file throw } try /invalid-image-file eq (invalid-image-file: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: snap-shot-error (SnapShotError)
+% ====================================================================
+
+{ /snap-shot-error throw } try /snap-shot-error eq (snap-shot-error: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: io-read-error (IOReadError)
+% ====================================================================
+
+{ /io-read-error throw } try /io-read-error eq (io-read-error: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: io-write-error (IOWriteError)
+% ====================================================================
+
+{ /io-write-error throw } try /io-write-error eq (io-write-error: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: io-seek-error (IOSeekError)
+% ====================================================================
+
+{ /io-seek-error throw } try /io-seek-error eq (io-seek-error: via throw) rt-ok clear
+
+% ====================================================================
+% SECTION: throw all named error codes
+% ====================================================================
+
+% /no-error is reserved and cannot be thrown
+{ /no-error throw } try /invalid-throw eq (throw: /no-error reserved) rt-ok clear
+{ /no-error (data) throw-with } try /invalid-throw eq (throw-with: /no-error reserved) rt-ok clear
+{ /assert-failed throw } try /assert-failed eq (throw: assert-failed) rt-ok clear
+{ /dict-full throw } try /dict-full eq (throw: dict-full) rt-ok clear
+{ /dictstack-overflow throw } try /dictstack-overflow eq (throw: dictstack-overflow) rt-ok clear
+{ /dictstack-underflow throw } try /dictstack-underflow eq (throw: dictstack-underflow) rt-ok clear
+{ /errstack-overflow throw } try /errstack-overflow eq (throw: errstack-overflow) rt-ok clear
+{ /execstack-overflow throw } try /execstack-overflow eq (throw: execstack-overflow) rt-ok clear
+{ /file-open-error throw } try /file-open-error eq (throw: file-open-error) rt-ok clear
+{ /filename-exists throw } try /filename-exists eq (throw: filename-exists) rt-ok clear
+{ /filename-not-found throw } try /filename-not-found eq (throw: filename-not-found) rt-ok clear
+{ /io-read-error throw } try /io-read-error eq (throw: io-read-error) rt-ok clear
+{ /io-seek-error throw } try /io-seek-error eq (throw: io-seek-error) rt-ok clear
+{ /io-write-error throw } try /io-write-error eq (throw: io-write-error) rt-ok clear
+{ /index-check throw } try /index-check eq (throw: index-check) rt-ok clear
+{ /internal-error throw } try /internal-error eq (throw: internal-error) rt-ok clear
+{ /invalid-exit throw } try /invalid-exit eq (throw: invalid-exit) rt-ok clear
+{ /invalid-format-string throw } try /invalid-format-string eq (throw: invalid-format-string) rt-ok clear
+{ /invalid-restore throw } try /invalid-restore eq (throw: invalid-restore) rt-ok clear
+{ /invalid-stop throw } try /invalid-stop eq (throw: invalid-stop) rt-ok clear
+{ /invalid-stream throw } try /invalid-stream eq (throw: invalid-stream) rt-ok clear
+{ /invalid-stream-access throw } try /invalid-stream-access eq (throw: invalid-stream-access) rt-ok clear
+{ /invalid-throw throw } try /invalid-throw eq (throw: invalid-throw) rt-ok clear
+{ /limit-check throw } try /limit-check eq (throw: limit-check) rt-ok clear
+{ /numerical-inf throw } try /numerical-inf eq (throw: numerical-inf) rt-ok clear
+{ /numerical-nan throw } try /numerical-nan eq (throw: numerical-nan) rt-ok clear
+{ /numerical-overflow throw } try /numerical-overflow eq (throw: numerical-overflow) rt-ok clear
+{ /opstack-overflow throw } try /opstack-overflow eq (throw: opstack-overflow) rt-ok clear
+{ /opstack-underflow throw } try /opstack-underflow eq (throw: opstack-underflow) rt-ok clear
+{ /range-check throw } try /range-check eq (throw: range-check) rt-ok clear
+{ /read-only throw } try /read-only eq (throw: read-only) rt-ok clear
+{ /scan-duplicate-arg-id throw } try /scan-duplicate-arg-id eq (throw: scan-duplicate-arg-id) rt-ok clear
+{ /scan-input-fail throw } try /scan-input-fail eq (throw: scan-input-fail) rt-ok clear
+{ /scan-match-fail throw } try /scan-match-fail eq (throw: scan-match-fail) rt-ok clear
+{ /scan-type-fail throw } try /scan-type-fail eq (throw: scan-type-fail) rt-ok clear
+{ /scan-type-mismatch throw } try /scan-type-mismatch eq (throw: scan-type-mismatch) rt-ok clear
+{ /set-file-position-required throw } try /set-file-position-required eq (throw: set-file-position-required) rt-ok clear
+{ /syntax-error throw } try /syntax-error eq (throw: syntax-error) rt-ok clear
+{ /type-check throw } try /type-check eq (throw: type-check) rt-ok clear
+{ /undefined throw } try /undefined eq (throw: undefined) rt-ok clear
+{ /undefined-case throw } try /undefined-case eq (throw: undefined-case) rt-ok clear
+{ /undefined-result throw } try /undefined-result eq (throw: undefined-result) rt-ok clear
+{ /unmatched-mark throw } try /unmatched-mark eq (throw: unmatched-mark) rt-ok clear
+{ /unsupported throw } try /unsupported eq (throw: unsupported) rt-ok clear
+{ /vm-full throw } try /vm-full eq (throw: vm-full) rt-ok clear
+{ /invalid-image-file throw } try /invalid-image-file eq (throw: invalid-image-file) rt-ok clear
+{ /snap-shot-error throw } try /snap-shot-error eq (throw: snap-shot-error) rt-ok clear
+
+% ====================================================================
+% SECTION: arbitrary user-defined error Names
+% ====================================================================
+
+% Any Name (other than /no-error) may be thrown and round-trips through
+% last-error / try / try-catch.  Internally these raise Error::UserError
+% which is an implementation detail -- user code sees only the Name.
+
+% basic throw + try returns the exact Name
+{ /my-err throw } try /my-err eq (user-name: throw round-trips via try) rt-ok clear
+
+% the literal builtin name /user-error must round-trip like any user Name too.
+% Regression: it used to take the known-builtin branch of is_error_name and
+% raise UserError WITHOUT writing the name, so last-error reported a stale name
+% (e.g. /no-error) instead of /user-error.
+{ /user-error throw } try /user-error eq (user-name: literal /user-error round-trips via try) rt-ok clear
+{ /user-error (payload) throw-with } try /user-error eq (user-name: literal /user-error round-trips via throw-with) rt-ok clear
+
+% throw + last-error (inside try-catch body)
+<< /my-err { last-error } >>
+{ /my-err throw }
+try-catch
+/my-err eq (user-name: last-error returns thrown Name) rt-ok clear
+
+% throw-with + last-error-data round-trip
+<< /my-err { pop last-error-data } >>
+{ /my-err (payload) throw-with }
+try-catch
+(payload) eq (user-name: throw-with preserves data) rt-ok clear
+
+% throw-with with structured data
+<< /my-err { pop last-error-data } >>
+{ /my-err << /code 42 /msg (oops) >> throw-with }
+try-catch
+/code get 42 eq (user-name: throw-with dict data) rt-ok clear
+
+% multiple user Names in one handler dict, correct dispatch
+<< /err-a { pop (A) } /err-b { pop (B) } >>
+{ /err-b throw }
+try-catch
+(B) eq (user-name: multi-name dispatch) rt-ok clear
+
+% /default fallback catches unregistered user Names
+<< /default { pop (default-fired) } >>
+{ /unregistered-err throw }
+try-catch
+(default-fired) eq (user-name: /default catches unregistered) rt-ok clear
+
+% unmatched handler dict: error propagates to outer try
+{ << /other-err { pop (wrong) } >> { /real-err throw } try-catch } try
+/real-err eq (user-name: unmatched handler propagates) rt-ok clear
+
+% nested try: inner re-raises, outer catches
+{
+    << /foo-err { rethrow } >>
+    { /foo-err (data) throw-with }
+    try-catch
+} try
+/foo-err eq (user-name: rethrow preserves Name) rt-ok clear
+
+% user Names survive across rethrow: data is cleared though
+<< /foo-err { pop last-error-data } >>
+{
+    << /foo-err { rethrow } >>
+    { /foo-err 99 throw-with }
+    try-catch
+}
+try-catch
+is-null (user-name: rethrow clears error-data) rt-ok clear
+
+% Names are case-sensitive; /Err and /err are distinct
+{ /Err throw } try /Err eq (user-name: case sensitivity Err) rt-ok clear
+{ /err throw } try /err eq (user-name: case sensitivity err) rt-ok clear
+
+% Mixed: one custom Name, one builtin in same handler dict
+<< /my-err { pop (custom) } /type-check { pop (builtin) } >>
+{ 1 (bad) add }
+try-catch
+(builtin) eq (user-name: coexists with builtin in handler dict) rt-ok clear
+
+% last-error after user throw reflects thrown Name via query-status
+{ /my-status-err throw } try pop
+//:status:last-error /my-status-err eq (user-name: status last-error reflects thrown) rt-ok clear
+
+% ====================================================================
+% SECTION: try-catch tests
+% ====================================================================
+
+% try-catch: error caught by matching handler in dict
+{ pop }
+<< /type-check { /type-check } >>
+{ 1 (hello) add }
+try-catch
+/type-check eq (try-catch: dict handler matches) rt-ok clear
+
+% try-catch: array handler rejected (dict-only)
+{ [ /type-check { /type-check } ] { 1 (hello) add } try-catch } try
+/type-check eq (try-catch: array handler -> type-check) rt-ok clear
+
+% try-catch: clean execution produces no error
+<< /type-check { /type-check } >>
+{ 1 2 add }
+try-catch
+3 eq (try-catch: no error keeps result) rt-ok clear
+
+% try-catch: unmatched error falls through to outer try
+{
+  << /range-check { /range-check } >>
+  { pop }
+  try-catch
+} try /opstack-underflow eq (try-catch: unmatched falls through) rt-ok clear
+
+% try-catch: multiple error names in handler dict
+{ pop }
+<< /undefined { /caught-undefined } /type-check { /caught-type } >>
+{ this-name-does-not-exist-qqq }
+try-catch
+/caught-undefined eq (try-catch: multi-handler dict) rt-ok clear
+
+% ====================================================================
+% SECTION: throw
+% ====================================================================
+
+{ /type-check throw } try /type-check eq (throw: raises named error) rt-ok clear
+{ /invalid-throw throw } try /invalid-throw eq (throw: invalid-throw is itself throwable) rt-ok clear
+
+% ====================================================================
+% SECTION: rethrow
+% ====================================================================
+
+{
+  << /type-check { rethrow } >>
+  { 1 (hello) add }
+  try-catch
+} try /type-check eq (rethrow: re-raises last error) rt-ok clear
+
+{
+  { /range-check throw } try pop
+  rethrow
+} try /range-check eq (rethrow: after throw) rt-ok clear
+
+% ====================================================================
+% SECTION: last-error
+% ====================================================================
+
+{ 1 (hello) add } try pop
+last-error /type-check eq (last-error: captures type-check) rt-ok clear
+
+{ pop } try pop
+last-error /opstack-underflow eq (last-error: captures opstack-underflow) rt-ok clear
+
+% ====================================================================
+% SECTION: errordict
+% ====================================================================
+
+errordict type /dict-type eq (errordict: is a dict) rt-ok clear
+errordict /error-name known? (errordict: has error-name) rt-ok clear
+errordict /command known? (errordict: has command) rt-ok clear
+errordict /error-message known? (errordict: has error-message) rt-ok clear
+errordict /handlersdict known? (errordict: has handlersdict) rt-ok clear
+
+% ====================================================================
+% SECTION: handlersdict
+% ====================================================================
+
+errordict /handlersdict get type /dict-type eq (handlersdict: is a dict) rt-ok clear
+errordict /handlersdict get /type-check known? (handlersdict: has type-check) rt-ok clear
+errordict /handlersdict get /undefined known? (handlersdict: has undefined) rt-ok clear
+errordict /handlersdict get /opstack-underflow known? (handlersdict: has opstack-underflow) rt-ok clear
+
+% ====================================================================
+% SECTION: stopped operator
+% ====================================================================
+
+{ stop } stopped (stopped: catches stop) rt-ok clear
+{ 1 pop } stopped not (stopped: false on normal) rt-ok clear
+
+% ====================================================================
+% SECTION: vm-full (VMFull)
+% ====================================================================
+
+% ====================================================================
+% SECTION: try-catch /default handler
+% ====================================================================
+
+% default handler catches unmatched error
+<< /type-check { pop /matched-type }
+   /default { pop /matched-default }
+>> { 1 0 div } try-catch
+/matched-default eq (try-catch default: unmatched error -> /default handler) rt-ok clear
+
+% specific handler takes priority over /default
+<< /div-by-zero { pop /matched-specific }
+   /default { pop /matched-default }
+>> { 1 0 div } try-catch
+/matched-specific eq (try-catch default: specific handler takes priority) rt-ok clear
+
+% /default handler receives /error-name on stack
+<< /default { } >> { 1 0 div } try-catch
+/div-by-zero eq (try-catch default: error name on stack) rt-ok clear
+
+% no /default and no match re-raises
+{ << /type-check { pop } >> { 1 0 div } try-catch } try
+/div-by-zero eq (try-catch default: no default re-raises) rt-ok clear
+
+% /default with clean proc pushes no-error via try-barrier
+<< /default { pop /oops } >> { 42 } try-catch
+42 eq (try-catch default: clean proc no error) rt-ok clear
+
+% /default in nested try-catch
+<< /default { pop /outer } >> {
+  << /type-check { pop /inner } >> { 1 0 div } try-catch
+} try-catch
+/outer eq (try-catch default: nested unmatched -> outer default) rt-ok clear
+
+% ====================================================================
+% SECTION: backtrace operator
+% ====================================================================
+
+% backtrace returns an array
+backtrace is-array (backtrace: returns array) rt-ok clear
+
+% Capture baseline frame count (may be > 0 under test_all.trx run wrapper)
+/bt-base-depth backtrace length def
+
+% backtrace at top level matches baseline
+backtrace length bt-base-depth eq (backtrace: top-level is baseline) rt-ok clear
+
+% backtrace inside a named proc adds one frame above baseline
+/bt-test-func { backtrace } def
+bt-test-func
+dup length bt-base-depth 1 add eq (backtrace: one frame inside named proc) rt-ok
+0 get /name get (bt-test-func) eq (backtrace: frame name is bt-test-func) rt-ok clear
+
+% backtrace with nested calls (non-tail: 0 pop after bt-inner prevents TCO)
+/bt-inner { backtrace } def
+/bt-outer { bt-inner 0 pop } def
+bt-outer 0 pop
+dup length bt-base-depth 2 add eq (backtrace: two frames in nested call) rt-ok
+dup 0 get /name get (bt-inner) eq (backtrace: frame 0 is bt-inner) rt-ok
+1 get /name get (bt-outer) eq (backtrace: frame 1 is bt-outer) rt-ok clear
+
+% backtrace with tail call (TCO collapses outer frame)
+/bt-tail-inner { backtrace } def
+/bt-tail-outer { bt-tail-inner } def
+bt-tail-outer
+length bt-base-depth 1 add eq (backtrace: tail call TCO collapses to 1 frame) rt-ok clear
+
+% backtrace frame has /file, /line, /col keys
+/bt-keys-test { backtrace } def
+bt-keys-test
+0 get
+dup /name known? (backtrace: frame has /name key) rt-ok
+dup /file known? (backtrace: frame has /file key) rt-ok
+dup /line known? (backtrace: frame has /line key) rt-ok
+/col known? (backtrace: frame has /col key) rt-ok clear
+
+% backtrace /line value is an integer
+/bt-line-test { backtrace } def
+bt-line-test
+0 get /line get is-integer (backtrace: /line is integer) rt-ok clear
+
+% backtrace inside try-catch handler
+<< /div-by-zero { pop backtrace } >> { /bt-in-handler { 1 0 div } def bt-in-handler } try-catch
+% handler runs outside the @call frame, so bt-in-handler frame is unwound
+is-array (backtrace: inside handler returns array) rt-ok clear
+
+% ====================================================================
+% SECTION: throw-with (structured error data)
+% ====================================================================
+
+% throw-with stores data accessible via last-error-data
+<< /type-check { pop last-error-data } >> {
+  /type-check 42 throw-with
+} try-catch
+42 eq (throw-with: integer data via last-error-data) rt-ok clear
+
+% throw-with with dict data
+<< /range-check { pop last-error-data } >> {
+  /range-check << /min 0 /max 100 /actual 200 >> throw-with
+} try-catch
+dup /min get 0 eq (throw-with: dict /min = 0) rt-ok
+dup /max get 100 eq (throw-with: dict /max = 100) rt-ok
+/actual get 200 eq (throw-with: dict /actual = 200) rt-ok clear
+
+% throw-with with string data
+<< /undefined { pop last-error-data } >> {
+  /undefined (extra context) throw-with
+} try-catch
+(extra context) eq (throw-with: string data) rt-ok clear
+
+% throw-with with null data
+<< /type-check { pop last-error-data } >> {
+  /type-check null throw-with
+} try-catch
+is-null (throw-with: null data) rt-ok clear
+
+% throw-with with array data
+<< /type-check { pop last-error-data } >> {
+  /type-check [1 2 3] throw-with
+} try-catch
+length 3 eq (throw-with: array data length 3) rt-ok clear
+
+% plain throw sets error-data to null
+<< /type-check { pop last-error-data } >> {
+  /type-check throw
+} try-catch
+is-null (throw: plain throw sets error-data to null) rt-ok clear
+
+% built-in error sets error-data to null
+<< /div-by-zero { pop last-error-data } >> {
+  1 0 div
+} try-catch
+is-null (error-data: built-in error sets null) rt-ok clear
+
+% throw-with with Long data (ExtValue)
+<< /type-check { pop last-error-data } >> {
+  /type-check 999999999999l throw-with
+} try-catch
+999999999999l eq (throw-with: Long ExtValue data) rt-ok clear
+
+% throw-with with Double data (ExtValue)
+<< /type-check { pop last-error-data } >> {
+  /type-check 3.14d throw-with
+} try-catch
+3.14d eq (throw-with: Double ExtValue data) rt-ok clear
+
+% throw-with of a user-defined Name raises that Name (UserError under the hood)
+{ /not-a-real-error 42 throw-with } try
+/not-a-real-error eq (throw-with: user Name -> user Name) rt-ok clear
+last-error-data 42 eq (throw-with: user Name preserves data) rt-ok clear
+
+% throw-with then rethrow: rethrow calls error() which clears data
+<< /type-check { pop last-error-data } >> {
+  << /type-check { rethrow } >> {
+    /type-check 99 throw-with
+  } try-catch
+} try-catch
+is-null (throw-with: rethrow clears error-data) rt-ok clear
+
+% last-error-data readable after try
+{ /type-check 77 throw-with } try pop
+last-error-data 77 eq (last-error-data: readable after try) rt-ok clear
+
+% last-error-message returns the error message string
+{ 1 0 div } try pop
+last-error-message is-string (last-error-message: returns string) rt-ok clear
+
+% last-error-message contains diagnostic text
+{ 1 0 div } try pop
+last-error-message (div) search pop pop pop true (last-error-message: contains div) rt-ok clear
+
+% last-error-message after throw
+{ /type-check throw } try pop
+last-error-message (throw: type-check) eq (last-error-message: throw message) rt-ok clear
+
+% Place vm-full test truly last since it temporarily exhausts VM heap
+% and leaves minimal headroom for subsequent allocations.
+{ { 60000 string pop } loop } try /vm-full eq (vm-full: exhaust vm) rt-ok clear
+
+% ====================================================================
+% SECTION: try operand-stack rollback on error (Wart W04 -- 2026-04-28)
+% ====================================================================
+% try rolls the operand stack back to the depth it had when `try` was
+% called (just after the proc literal was popped) when the wrapped
+% proc errors.  Residue pushed inside the proc body before the failure
+% is freed (extvalues released) and discarded.  /error-name lands
+% directly above whatever was on the stack BEFORE the try call.
+% Implemented via [saved-depth] [@try-rollback] [@try-barrier] [proc]
+% layout in src/ops_flow.inl.
+
+% --- Success path: proc results preserved + /no-error on top ---
+clear
+{ 1 2 add } try
+count 2 eq                                 (W04 success: 2 items on stack) rt-ok clear
+{ 1 2 add } try /no-error eq               (W04 success: /no-error on top) rt-ok clear
+{ 1 2 add } try pop  3 eq                  (W04 success: proc result preserved) rt-ok clear
+
+% --- Error path: residue gone, only /error-name remains ---
+{ 1 2 3 1 0 div } try
+count 1 eq                                 (W04 error: 1 item on stack) rt-ok clear
+{ 1 2 3 1 0 div } try
+/div-by-zero eq                            (W04 error: error name on top) rt-ok clear
+
+% --- Pre-try values preserved on the error path ---
+clear
+99 88 { 1 2 3 1 0 div } try
+count 3 eq                                 (W04 mixed: pre-try preserved + 1 error name) rt-ok clear
+99 88 { 1 2 3 1 0 div } try
+/div-by-zero eq                            (W04 mixed: error on top) rt-ok
+88 eq                                      (W04 mixed: 88 (pre-try) preserved) rt-ok
+99 eq                                      (W04 mixed: 99 (pre-try) preserved) rt-ok clear
+
+% --- ExtValue residue: WideValue (Int128) pushed inside body is freed ---
+% 1q 2q 3q are 128-bit ints (heap cells).  Without the rollback, after
+% an error the WideValue cells would leak (or be reclaimed by the
+% per-save-level free list lazily).  W04's rollback frees them eagerly.
+{ 1q 2q 3q 1q 0q div } try
+/div-by-zero eq                            (W04 widevalue: error name on top) rt-ok clear
+
+% --- Caught error in nested proc: residue from inner body freed ---
+% Outer proc body pushes 10, then calls inner proc which errors.  Both
+% the 10 and inner residue should be rolled back.
+{ 10 { 20 30 1 0 div } exec } try
+/div-by-zero eq                            (W04 nested: error name on top) rt-ok clear
+
+(W04 try-rollback tests complete.) =
+
+% ====================================================================
+% SECTION: for-all body stack-effect check (Wart W07 -- 2026-04-28)
+% ====================================================================
+% Each at_*_forall control op verifies that the body's per-iteration
+% stack effect matches the documented contract:
+%   array/packed/string for-all  -- body: 'value -- '
+%   dict for-all                 -- body: 'key value -- '
+%   set for-all                  -- body: 'key -- '
+%   record for-all               -- body: 'name value -- '
+% Mismatch raises /range-check.  Implemented via a saved-depth slot
+% pushed below each @*-forall control op in src/ops_flow.inl /
+% runtime.inl push_forall_frame.
+
+% --- Correct fold (body stack effect 'value -- ', acc preserved) ---
+0 [1 2 3] { add } for-all 6 eq                 (W07 fold: array sum) rt-ok clear
+0 { 10 20 30 } { add } for-all 60 eq           (W07 fold: packed sum) rt-ok clear
+
+% --- Body that leaves residue: caught at next iteration ---
+{ [1 2 3] { 99 } for-all clear } try
+/range-check eq                                (W07 catches: body pushes 99 instead of consuming) rt-ok clear
+
+% --- Body that early-skips on a branch: caught when skip happens ---
+% This was the original wart: body sometimes consumes, sometimes leaks.
+{ [1 2 3] { dup 1 eq { } { pop } if-else } for-all clear } try
+/range-check eq                                (W07 catches: early-skip leak) rt-ok clear
+
+% --- Empty body leaks every iter value: caught immediately ---
+{ [1 2 3] { } for-all clear } try
+/range-check eq                                (W07 catches: empty body leaks iter value) rt-ok clear
+
+% --- Set / dict / record bodies (key-only, key-value pairs) ---
+{ {{ 1 2 3 }} { } for-all clear } try
+/range-check eq                                (W07 catches: set empty body) rt-ok clear
+
+{ << /a 1 /b 2 >> { } for-all clear } try
+/range-check eq                                (W07 catches: dict empty body) rt-ok clear
+
+% --- Body that over-consumes (digs below iter values) ---
+% { pop pop } consumes the iter value PLUS the value below it; net
+% per iter = -2, leaving the operand stack one slot shallower than
+% saved-depth on the next @array-forall fire.
+{ 0 [1 2 3] { pop pop } for-all clear } try
+/range-check eq                                (W07 catches: body over-consumes) rt-ok clear
+
+(W07 for-all stack-effect tests complete.) =
+
+% ====================================================================
+% SECTION: range vs range-from (Wart W01 -- 2026-04-28)
+% ====================================================================
+% `range` was previously arity-overloaded: 1-arg `stop -- arr` OR
+% 2-arg `start stop -- arr`.  The dispatch picked the 2-arg form
+% whenever an integer was sitting in the slot below top-of-stack,
+% so an unrelated loop counter (or any other int) silently became
+% the `start` and the result was a wrong-shape array.  Split into
+% two named ops: `range stop -- arr` (strict 1-arg) and `range-from
+% start stop -- arr` (strict 2-arg).
+
+% --- range is now strict 1-arg; the value below stays put ---
+clear
+99 5 range
+count 2 eq                                 (W01 range: only 1 arg consumed) rt-ok clear
+99 5 range
+length 5 eq                                (W01 range: 5-element result) rt-ok clear
+99 5 range
+pop 99 eq                                  (W01 range: pre-call 99 preserved) rt-ok clear
+
+% --- range-from is the explicit 2-arg form ---
+3 7 range-from length 4 eq                 (W01 range-from: 4-element result) rt-ok clear
+3 7 range-from 0 get 3 eq                  (W01 range-from: starts at 3) rt-ok clear
+
+% --- range-from inverted bounds returns empty ---
+7 3 range-from length 0 eq                 (W01 range-from: inverted = empty) rt-ok clear
+5 5 range-from length 0 eq                 (W01 range-from: equal bounds = empty) rt-ok clear
+
+% --- arity errors ---
+{ range } try /opstack-underflow eq        (W01 range: no arg = opstack-underflow) rt-ok clear
+{ 5 range-from } try /opstack-underflow eq (W01 range-from: only 1 arg = opstack-underflow) rt-ok clear
+
+(W01 range / range-from tests complete.) =
+
+% --- W02 $-suffix mutex matrix: every pair raises /syntax-error ---
+% scan_eq_rw_suffix and scan_proc_suffix accept #= / #$ / #$$ in the
+% first slot; pairwise combinations of these three are mutex.
+
+% array suffix
+{ <([ 1 ]#=$)>#x exec   } try /syntax-error eq  (W02 [arr]#=$ rejected)  rt-ok clear
+{ <([ 1 ]#=$$)>#x exec  } try /syntax-error eq  (W02 [arr]#=$$ rejected) rt-ok clear
+{ <([ 1 ]#$=)>#x exec   } try /syntax-error eq  (W02 [arr]#$= rejected)  rt-ok clear
+{ <([ 1 ]#$$=)>#x exec  } try /syntax-error eq  (W02 [arr]#$$= rejected) rt-ok clear
+{ <([ 1 ]#$$$)>#x exec  } try /syntax-error eq  (W02 [arr]#$$$ rejected) rt-ok clear
+
+% dict suffix
+{ <(<< /a 1 >>#=$)>#x exec   } try /syntax-error eq  (W02 <<dict>>#=$ rejected)  rt-ok clear
+{ <(<< /a 1 >>#=$$)>#x exec  } try /syntax-error eq  (W02 <<dict>>#=$$ rejected) rt-ok clear
+{ <(<< /a 1 >>#$=)>#x exec   } try /syntax-error eq  (W02 <<dict>>#$= rejected)  rt-ok clear
+{ <(<< /a 1 >>#$$=)>#x exec  } try /syntax-error eq  (W02 <<dict>>#$$= rejected) rt-ok clear
+{ <(<< /a 1 >>#$$$)>#x exec  } try /syntax-error eq  (W02 <<dict>>#$$$ rejected) rt-ok clear
+
+% set suffix
+{ <({{ /a }}#=$)>#x exec   } try /syntax-error eq  (W02 {{set}}#=$ rejected)  rt-ok clear
+{ <({{ /a }}#=$$)>#x exec  } try /syntax-error eq  (W02 {{set}}#=$$ rejected) rt-ok clear
+{ <({{ /a }}#$=)>#x exec   } try /syntax-error eq  (W02 {{set}}#$= rejected)  rt-ok clear
+{ <({{ /a }}#$$=)>#x exec  } try /syntax-error eq  (W02 {{set}}#$$= rejected) rt-ok clear
+{ <({{ /a }}#$$$)>#x exec  } try /syntax-error eq  (W02 {{set}}#$$$ rejected) rt-ok clear
+
+% string suffix
+{ <((x)#=$)>#x exec   } try /syntax-error eq  (W02 (str)#=$ rejected)  rt-ok clear
+{ <((x)#=$$)>#x exec  } try /syntax-error eq  (W02 (str)#=$$ rejected) rt-ok clear
+{ <((x)#$=)>#x exec   } try /syntax-error eq  (W02 (str)#$= rejected)  rt-ok clear
+{ <((x)#$$=)>#x exec  } try /syntax-error eq  (W02 (str)#$$= rejected) rt-ok clear
+{ <((x)#$$$)>#x exec  } try /syntax-error eq  (W02 (str)#$$$ rejected) rt-ok clear
+
+% proc suffix
+{ <({ 1 }#=$)>#x exec   } try /syntax-error eq  (W02 {proc}#=$ rejected)  rt-ok clear
+{ <({ 1 }#=$$)>#x exec  } try /syntax-error eq  (W02 {proc}#=$$ rejected) rt-ok clear
+{ <({ 1 }#$=)>#x exec   } try /syntax-error eq  (W02 {proc}#$= rejected)  rt-ok clear
+{ <({ 1 }#$$=)>#x exec  } try /syntax-error eq  (W02 {proc}#$$= rejected) rt-ok clear
+{ <({ 1 }#$$$)>#x exec  } try /syntax-error eq  (W02 {proc}#$$$ rejected) rt-ok clear
+
+(W02 $-suffix mutex matrix tests complete.) =
+
+(Error code coverage tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

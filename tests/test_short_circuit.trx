@@ -1,0 +1,154 @@
+% ====================================================================
+% test_short_circuit.trx -- tests for and? / or? short-circuit ops
+% ====================================================================
+% bool proc -- bool
+%   and?:  if bool is false, leave false and drop proc unevaluated;
+%          else execute proc and let its bool take the slot.
+%   or?:   if bool is true,  leave true  and drop proc unevaluated;
+%          else execute proc and let its bool take the slot.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: truth tables
+% ====================================================================
+
+true  { true  } and?  true  eq   (and? t t = t) rt-ok clear
+true  { false } and?  false eq   (and? t f = f) rt-ok clear
+false { true  } and?  false eq   (and? f t = f) rt-ok clear
+false { false } and?  false eq   (and? f f = f) rt-ok clear
+
+true  { true  } or?   true  eq   (or? t t = t) rt-ok clear
+true  { false } or?   true  eq   (or? t f = t) rt-ok clear
+false { true  } or?   true  eq   (or? f t = t) rt-ok clear
+false { false } or?   false eq   (or? f f = f) rt-ok clear
+
+% ====================================================================
+% SECTION 2: short-circuit (proc NOT evaluated)
+% ====================================================================
+
+/counter 0 def
+false { /counter counter 1 add store true } and?
+counter 0 eq                     (and? f _ : proc unevaluated (counter 0)) rt-ok
+false eq                         (and? f _ : result is false) rt-ok clear
+
+/counter 0 def
+true  { /counter counter 1 add store false } or?
+counter 0 eq                     (or? t _ : proc unevaluated (counter 0)) rt-ok
+true  eq                         (or? t _ : result is true) rt-ok clear
+
+% ====================================================================
+% SECTION 3: proc IS evaluated in the non-short-circuit branch
+% ====================================================================
+
+/counter 0 def
+true  { /counter counter 1 add store true } and?
+counter 1 eq                     (and? t _ : proc ran (counter 1)) rt-ok
+true  eq                         (and? t _ : result true) rt-ok clear
+
+/counter 0 def
+false { /counter counter 1 add store false } or?
+counter 1 eq                     (or? f _ : proc ran (counter 1)) rt-ok
+false eq                         (or? f _ : result false) rt-ok clear
+
+% ====================================================================
+% SECTION 4: guarded access past end of array
+% ====================================================================
+% This is the motivating minidb idiom: check bounds first, then
+% touch the element only when safe.  Without and?, the second
+% subexpression index-checks.
+
+/arr [ 10 20 30 ] def
+5 arr length lt { arr 5 get 99 eq } and?  false eq
+                                 (bounds-guard past end => false) rt-ok clear
+
+0 arr length lt { arr 0 get 10 eq } and?  true eq
+                                 (bounds-guard in range => computed) rt-ok clear
+
+% or? version: "too big OR matches"
+/len arr length def
+5 len ge { arr 5 get 99 eq } or?  true eq
+                                 (or? true LHS => proc skipped, still true) rt-ok clear
+
+% ====================================================================
+% SECTION 5: chaining
+% ====================================================================
+
+true { true } and? { true } and?  true eq
+                                 (chained and?: t ? t ? t = t) rt-ok clear
+
+true { false } and? { true } and? false eq
+                                 (chained and?: t ? f ? _ = f (skip last)) rt-ok clear
+
+% Confirm the last proc DIDN'T run when the chain already went false
+/counter 0 def
+true { false } and? { /counter counter 1 add store true } and?
+counter 0 eq                     (chain short-circuit: last skipped) rt-ok
+false eq                         (chain short-circuit: result false) rt-ok clear
+
+% or? chain: first true wins
+/counter 0 def
+false { true } or? { /counter counter 1 add store false } or?
+counter 0 eq                     (or? chain: rest skipped after true) rt-ok
+true eq                          (or? chain: result true) rt-ok clear
+
+% ====================================================================
+% SECTION 6: nesting with if / if-else
+% ====================================================================
+
+/arr [ 1 2 3 ] def
+/look {
+    |i|#4
+    % Returns true iff i is in range AND arr[i] is even.
+    i arr length lt { arr i get 2 mod 0 eq } and?
+} def
+
+0 look false eq                  (nested: 0 in range, arr[0] odd => false) rt-ok clear
+1 look true  eq                  (nested: 1 in range, arr[1] even => true) rt-ok clear
+2 look false eq                  (nested: 2 in range, arr[2] odd => false) rt-ok clear
+99 look false eq                 (nested: 99 out of range => false) rt-ok clear
+
+% ====================================================================
+% SECTION 7: type errors
+% ====================================================================
+
+{ true 42 and? } try /type-check eq        (and?: proc must be proc) rt-ok clear
+{ 42 { true } and? } try /type-check eq    (and?: cond must be bool) rt-ok clear
+{ and? } try /opstack-underflow eq         (and?: empty stack underflow) rt-ok clear
+{ true and? } try /opstack-underflow eq    (and?: one-arg underflow) rt-ok clear
+
+{ false 42 or? } try /type-check eq        (or?: proc must be proc) rt-ok clear
+{ 42 { true } or? } try /type-check eq     (or?: cond must be bool) rt-ok clear
+{ or? } try /opstack-underflow eq          (or?: empty stack underflow) rt-ok clear
+
+% ====================================================================
+% SECTION 8: interaction with errors inside the proc
+% ====================================================================
+% If proc raises, the error surfaces normally (no swallow).
+
+{ true { 1 0 div } and? } try /div-by-zero eq
+                                 (and?: proc error propagates) rt-ok clear
+
+{ false { 1 0 div } or? } try /div-by-zero eq
+                                 (or?: proc error propagates) rt-ok clear
+
+% But a false LHS of and? skips the proc, so no error:
+false { 1 0 div } and? false eq  (and? f: skipped proc, no div-by-zero) rt-ok clear
+
+% And a true LHS of or? skips the proc too:
+true  { 1 0 div } or?  true eq   (or? t: skipped proc, no div-by-zero) rt-ok clear
+
+//:status:extvalue-validate      (short-circuit: extvalue-validate) rt-ok clear
+//:status:vm-validate            (short-circuit: vm-validate) rt-ok clear
+
+(Short-circuit tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

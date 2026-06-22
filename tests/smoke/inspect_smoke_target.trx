@@ -1,0 +1,13 @@
+% smoke_target.trx -- tiny target for the --inspect TTY smoke test.
+% Defines /fact then invokes it twice.
+
+/fact {|n|
+    n 0 le
+    { 1 }
+    { n n 1 sub fact mul }
+    if-else
+} def
+
+5 fact /r1 exch def
+3 fact /r2 exch def
+r1 r2 add =

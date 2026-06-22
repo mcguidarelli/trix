@@ -1,0 +1,3 @@
+% narrow-before-bound-check: byte counts near the 65535 string cap.
+(abcdefgh) 8191 repeat-string length
+(xy) 32768 repeat-string

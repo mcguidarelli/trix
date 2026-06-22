@@ -1,0 +1,9 @@
+% abort-exec: trim-then-splice resume variant of `exec` on Continuations.
+% capture } delimit
+{ 0 4s abort-exec } try
+userdict /k null put
+{ { userdict exch /k exch put 42 } capture pop } delimit pop
+{ 0 userdict /k get abort-exec } try
+{ 7 userdict /k get exec } try
+10 { { |x| 99 /x load abort-put
+{ { userdict exch /k exch put 42 } capture pop } delimit } curry capture 5 add } delimit add

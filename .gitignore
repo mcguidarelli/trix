@@ -1,0 +1,92 @@
+# Build artifacts
+trix
+trix.opt
+trix.su
+tetrix
+tetrix.opt
+tetrix.su
+chip8
+chip8.opt
+chip8.su
+
+# Editor backups
+*~
+# Emacs auto-save (#file#) and lock (.#file) artifacts
+\#*\#
+.\#*
+
+# Backup snapshots (ad-hoc, not part of history)
+trix.h.prephase2
+trix.h.backup
+trix.h.pre-*
+trix.h.post-*
+
+# Snap-shot/thaw image files
+*.img
+
+# Error logs
+error.txt
+
+# Stray terminal-capture files
+*.txt
+!tests/*.txt
+!docs/*.txt
+!examples/*.txt
+!examples/**/*.txt
+!CMakeLists.txt
+trix.h.prerevert
+build/
+build-fuzz/
+build-prod/
+
+# backup.sh output (tarballs mirrored to Mac Desktop and Dropbox)
+backup/
+
+# Z-Machine story files (Infocom IP; not ours to redistribute).
+# Players bring their own .z3/.z4/.z5/.z7/.z8 files from MS GitHub
+# release / IF Archive into examples/zmachine/.  Also ignore .zblorb
+# wrappers (Inform 6/7 release format) -- use blorb-extract.py to
+# unwrap them into plain .z5/.z8 files.
+examples/zmachine/*.z?
+examples/zmachine/*.z??
+examples/zmachine/*.zblorb
+
+# CHIP-8 / Super-CHIP ROMs (third-party; not ours to redistribute).
+# Run examples/chip8-roms/fetch-ch8.py to pull CC0 ROMs from the
+# chip8Archive into examples/chip8-roms/.  ROMs and any captured
+# framebuffer snapshots are generated on demand, never committed.
+examples/chip8-roms/*.ch8
+examples/chip8-roms/snapshots/
+
+# Generated maze gallery (regenerate via examples/gallery.sh).  The full set is
+# not committed; a curated showcase subset (README hero + a small gallery index)
+# IS tracked via the negations below.
+examples/maze-gallery/*
+!examples/maze-gallery/README.md
+!examples/maze-gallery/grid-theta-viridis.png
+!examples/maze-gallery/grid-hex-magma.png
+!examples/maze-gallery/grid-upsilon-viridis.png
+!examples/maze-gallery/grid-triangle-inferno.png
+!examples/maze-gallery/compare-4-algos.png
+!examples/maze-gallery/grid-hex-solve.png
+!examples/maze-gallery/monster-magma.png
+
+# Fuzz artifacts (binaries, auto-corpus, crashes)
+fuzz/fuzz_trix
+fuzz/corpus/
+fuzz/crashes/
+fuzz/crashes_rejected/
+.claude/
+
+# Personal / ad-hoc scratch space (not shared)
+/local/
+
+# Claude Code agent instructions (auto-loaded from filesystem; not
+# part of the public project surface).
+/CLAUDE.md
+
+# user-supplied sudoku override puzzle -- never ship it
+examples/sudoku-input.txt
+
+# clang-20 signed-char reproduction build dir (regenerable)
+build-c20/

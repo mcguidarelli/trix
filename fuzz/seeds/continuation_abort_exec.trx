@@ -1,0 +1,14 @@
+% abort-exec: trim-then-splice resume variant of `exec` on Continuations.
+% Shapes exercise identity matching, stale-scope detection, and
+% cleanup across barriers in the trim range.
+10 { { 99 exch abort-exec } capture 5 add } delimit add
+10 { { 99 exch abort-exec 1 add } capture 5 add } delimit add
+10 { { pop 42 } capture } delimit add
+{ { null exch abort-exec } capture } delimit
+{ 0 42 abort-exec } try
+userdict /k null put
+{ { userdict exch /k exch put 42 } capture pop } delimit pop
+{ 0 userdict /k get abort-exec } try
+{ 7 userdict /k get exec } try
+10 { { |x| 99 /x load abort-exec } capture 5 add } delimit add
+10 { 99 { exch abort-exec } curry capture 5 add } delimit add

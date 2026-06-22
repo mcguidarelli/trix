@@ -1,0 +1,273 @@
+% ====================================================================
+% test_modules.trx -- Module system tests
+% ====================================================================
+% Tests: module definition, module-dict, module?, use, import,
+%        require-module, dict path access, error paths, save/restore,
+%        nested modules, transitive require.
+
+/test_name (test_modules) def
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ============================================================
+% Section 1: Basic module definition and access
+% ============================================================
+
+/my-mod {
+    /add1 { 1 add } def
+    /mul2 { 2 mul } def
+    /val 99 def
+} module
+
+/my-mod module? (module?: defined returns true) rt-ok clear
+/nonexistent module? not (module?: undefined returns false) rt-ok clear
+
+% module-dict returns the dict
+/my-mod module-dict type /dict-type eq (module-dict: type is dict) rt-ok clear
+
+% Access values via module-dict
+/my-mod module-dict /val get 99 eq (module-dict: get val) rt-ok clear
+
+% Module dict is read-only
+/my-mod module-dict readable? (module: dict is read-only) rt-ok clear
+
+% ============================================================
+% Section 2: Dict path access
+% ============================================================
+
+//:modules:my-mod:val 99 eq (dict-path: val) rt-ok clear
+5 //:modules:my-mod:add1 exec 6 eq (dict-path: add1 exec) rt-ok clear
+3 //:modules:my-mod:mul2 exec 6 eq (dict-path: mul2 exec) rt-ok clear
+
+% ============================================================
+% Section 3: use (push module dict as scope)
+% ============================================================
+
+/my-mod use
+    5 add1 6 eq (use: add1 in scope) rt-ok clear
+    10 mul2 20 eq (use: mul2 in scope) rt-ok clear
+    val 99 eq (use: val in scope) rt-ok clear
+end
+
+% After end, module-scoped mul2 is out of scope
+% (add1 and val not tested here -- they get imported in Section 4)
+{ mul2 } try /undefined eq (use: mul2 out of scope after end) rt-ok clear
+
+% ============================================================
+% Section 4: import (selective)
+% ============================================================
+
+/my-mod /add1 /val 2 import
+
+5 add1 6 eq (import: add1 works) rt-ok clear
+val 99 eq (import: val works) rt-ok clear
+
+% mul2 was NOT imported (only add1 and val were)
+{ mul2 } try /undefined eq (import: mul2 not imported) rt-ok clear
+
+% ============================================================
+% Section 5: require-module
+% ============================================================
+
+(tests/module_helper_a.trx) /test-mod-a require-module
+
+/test-mod-a module? (require-module: module defined) rt-ok clear
+5 //:modules:test-mod-a:square exec 25 eq (require-module: square works) rt-ok clear
+3 //:modules:test-mod-a:cube exec 27 eq (require-module: cube works) rt-ok clear
+
+% Idempotent: second require-module is a no-op
+(tests/module_helper_a.trx) /test-mod-a require-module
+/test-mod-a module? (require-module: idempotent) rt-ok clear
+
+% ============================================================
+% Section 6: Transitive require
+% ============================================================
+
+(tests/module_helper_b.trx) /test-mod-b require-module
+
+/test-mod-b module? (transitive: mod-b defined) rt-ok clear
+7 //:modules:test-mod-b:double exec 14 eq (transitive: double works) rt-ok clear
+4 //:modules:test-mod-b:uses-a-square exec 16 eq (transitive: uses-a-square works) rt-ok clear
+
+% ============================================================
+% Section 7: use + import on required modules
+% ============================================================
+
+/test-mod-a use
+    5 square 25 eq (use require: square) rt-ok clear
+    _private 42 eq (use require: _private visible) rt-ok clear
+end
+
+/test-mod-a /square 1 import
+5 square 25 eq (import require: square) rt-ok clear
+
+% ============================================================
+% Section 8: Error paths
+% ============================================================
+
+% module with non-executable body
+{ /bad 42 module } try /type-check eq (err: non-executable body) rt-ok clear
+
+% module with non-name first arg
+{ (bad) { } module } try /type-check eq (err: non-name first arg) rt-ok clear
+
+% module-dict on unknown module
+{ /nonexistent module-dict } try /undefined eq (err: module-dict unknown) rt-ok clear
+
+% use on unknown module
+{ /nonexistent use } try /undefined eq (err: use unknown) rt-ok clear
+
+% import with unknown module
+{ /nonexistent /foo 1 import } try /undefined eq (err: import unknown module) rt-ok clear
+
+% import with unknown entry
+{ /my-mod /nonexistent 1 import } try /undefined eq (err: import unknown entry) rt-ok clear
+
+% import with non-positive count
+{ /my-mod /foo 0 import } try /range-check eq (err: import zero count) rt-ok clear
+
+% require-module on file that doesn't define the module
+{ (tests/module_helper_a.trx) /nonexistent require-module } try /undefined eq
+    (err: require-module wrong name) rt-ok clear
+
+% Duplicate module name
+{ /my-mod { /x 1 def } module } try /undefined eq
+    (err: duplicate module name) rt-ok clear
+
+% ============================================================
+% Section 9: Error during module body (dict stack cleanup)
+% ============================================================
+
+save /sv exch def
+
+//:status:dict-depth /dict-before exch def
+
+{ /err-mod { /x 1 def 1 0 div } module } try
+pop  % pop the error name
+
+//:status:dict-depth dict-before eq
+    (err-body: dict stack restored) rt-ok clear
+
+% err-mod should NOT be registered (body failed)
+/err-mod module? not (err-body: module not registered) rt-ok clear
+
+sv restore clear
+
+% ============================================================
+% Section 10: save/restore interaction
+% ============================================================
+
+save /sv2 exch def
+
+/save-mod {
+    /sval 777 def
+} module
+
+/save-mod module? (save: module defined) rt-ok clear
+//:modules:save-mod:sval 777 eq (save: value correct) rt-ok clear
+
+sv2 restore clear
+
+% After restore, save-mod should be gone (module dict restored)
+/save-mod module? not (save: module gone after restore) rt-ok clear
+
+% ============================================================
+% Section 11: Empty module
+% ============================================================
+
+/empty-mod { } module
+/empty-mod module? (empty: module defined) rt-ok clear
+/empty-mod module-dict length 0 eq (empty: dict is empty) rt-ok clear
+
+% ============================================================
+% Section 12: Module with many entries
+% ============================================================
+
+/big-mod {
+    /a 1 def /b 2 def /c 3 def /d 4 def /e 5 def
+    /f 6 def /g 7 def /h 8 def /i 9 def /j 10 def
+} module
+
+/big-mod module-dict length 10 eq (big: 10 entries) rt-ok clear
+//:modules:big-mod:a 1 eq (big: a=1) rt-ok clear
+//:modules:big-mod:j 10 eq (big: j=10) rt-ok clear
+
+% ============================================================
+% Section 13: Module with ExtValue types
+% ============================================================
+
+/ext-mod {
+    /lval 123456789l def
+    /dval 3.14159d def
+    /ulval 42ul def
+} module
+
+//:modules:ext-mod:lval 123456789l eq (ext: long) rt-ok clear
+//:modules:ext-mod:dval 3.14159d eq (ext: double) rt-ok clear
+//:modules:ext-mod:ulval 42ul eq (ext: ulong) rt-ok clear
+
+% ============================================================
+% Section 14: Nested module definitions
+% ============================================================
+
+/outer-mod {
+    /outer-val 1 def
+
+    /inner-mod {
+        /inner-val 2 def
+    } module
+} module
+
+/outer-mod module? (nested: outer defined) rt-ok clear
+/inner-mod module? (nested: inner defined) rt-ok clear
+//:modules:outer-mod:outer-val 1 eq (nested: outer-val) rt-ok clear
+//:modules:inner-mod:inner-val 2 eq (nested: inner-val) rt-ok clear
+
+% ============================================================
+% Section 15: import into a local scope
+% ============================================================
+
+4 dict begin
+    /my-mod /add1 /mul2 2 import
+    5 add1 6 eq (import-local: add1) rt-ok clear
+    5 mul2 10 eq (import-local: mul2) rt-ok clear
+end
+
+% ============================================================
+% Section 16: Stress - define many modules
+% ============================================================
+
+% Just verify the system handles the load
+/stress-mod-0 { /v 0 def } module
+/stress-mod-1 { /v 1 def } module
+/stress-mod-2 { /v 2 def } module
+/stress-mod-3 { /v 3 def } module
+/stress-mod-4 { /v 4 def } module
+
+//:modules:stress-mod-0:v 0 eq (stress: mod-0) rt-ok clear
+//:modules:stress-mod-4:v 4 eq (stress: mod-4) rt-ok clear
+
+% ====================================================================
+% Regression: integer-width overflow in import count
+% ====================================================================
+% Prior bug: require_op_count's stack_depth_t (uint16_t) parameter
+% silently truncated (n+1) when n came from an attacker-controlled
+% 32-bit integer literal.  With n = 65536, (n+1) & 0xFFFF = 2, the
+% check passed with 2 stack items, and m_op_ptr - n read 65536 slots
+% below the stack base -- ASan SEGV.
+
+{ 65536 import } try /opstack-underflow eq  (import: n=65536 rejected) rt-ok clear
+{ 2147483647 import } try /range-check eq  (import: n=INT32_MAX rejected) rt-ok clear
+{ -1 import } try /range-check eq  (import: n=-1 rejected) rt-ok clear
+
+(test_modules: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

@@ -1,0 +1,3 @@
+% abort-exec from inside nested ${ ${ } } with barriers between.
+{ ${ ${ 42 2 abort-exec } } 99 } capture pop
+{ { ${ 7 2 abort-exec } } delimit } capture

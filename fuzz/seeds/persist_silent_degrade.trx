@@ -1,0 +1,7 @@
+% At sl=0 every -persist op silently degrades to its base op.
+4 dict /st exch def st /count 5 put-persist st /count get pop
+4 dict /env exch def env begin /x 9 def-persist /x load pop end
+4 dict /st exch def st /a 1 put st /a { 10 add } update-persist st /a get pop
+4 dict /st exch def st /a 1 put st /a undef-persist st /a known? pop
+[0 0 0] /a exch def 10 20 30 a array-store-persist pop
+8 set /s exch def s /key set-add-persist s /key set-remove-persist pop

@@ -1,0 +1,201 @@
+% ====================================================================
+% test_binary_token_errors.trx -- Phase-3 P4b: binary_tokens.inl sad
+% paths (decode arms for malformed byte streams) plus happy-path
+% decode breadth and to-binary-token round trips.  Targets enumerated
+% from per-line gcov; every
+% trigger and error name was probed live before being pinned.
+% Contract: trix-reference.md 3.9 (pack) / binary-pack.md; opcode map
+% in src/enums.inl (BinaryToken, 0x80-0xFF).
+%
+% Delivery mechanism: `token` on a string whose bytes are crafted via
+% \xNN escapes (or runtime-built with `pack` where the byte values are
+% computed) routes bytes >= 0x80 through scan_binary_token exactly like
+% stream input.
+%
+% Accepted-uncovered arms (defensive tripwires, unreachable from the
+% wire):
+%   - fixed_scale scale-out-of-range (decode_fixed_object only passes
+%     scale 1..31; scale 0 returns Integer before the call)
+%   - bt_name_to_value "not a Name object" (both callers construct
+%     Name objects)
+%   - bt_numberarray unhandled sub_rep (rep <= 56 means sub_rep <= 8,
+%     every value cased)
+%   - scan_binary_token "not a binary token" (the scanner dispatches
+%     only ch >= 0x80) and its default arm (all 256 opcode values are
+%     enumerated)
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: decode error arms
+% ====================================================================
+
+% Fixed: rep 48..127 unsupported, both endian flag states
+{ (\xA9\x30) token } try
+/unsupported eq (bt: fixed rep 48 rejected) rt-ok clear
+{ (\xA9\xB0) token } try
+/unsupported eq (bt: fixed rep 48 little-endian flag rejected) rt-ok clear
+
+% System name indexes: 16-bit forms can exceed SYSTEMNAME_COUNT
+{ (\xB4\xFF\xFF) token } try
+/index-check eq (bt: system lit name index 65535 rejected) rt-ok clear
+{ (\xB8\xFF\xFF) token } try
+/index-check eq (bt: system exec name index 65535 rejected) rt-ok clear
+
+% Well-known name indexes: 8-bit form past WELLKNOWN_COUNT
+{ (\xEE\xFF) token } try
+/index-check eq (bt: well-known lit name index 255 rejected) rt-ok clear
+{ (\xEF\xFF) token } try
+/index-check eq (bt: well-known exec name index 255 rejected) rt-ok clear
+
+% System value indexes: same range check before the dict lookup
+{ (\xBC\xFF\xFF) token } try
+/index-check eq (bt: system lit value index 65535 rejected) rt-ok clear
+{ (\xC0\xFF\xFF) token } try
+/index-check eq (bt: system exec value index 65535 rejected) rt-ok clear
+
+% NumberArray: rep 57..127 unsupported (validated before the count is
+% consumed)
+{ (\xC6\x39\x00\x01) token } try
+/unsupported eq (bt: number-array rep 57 rejected) rt-ok clear
+
+% Reserved opcodes 0xF2..0xFF
+{ (\xF2) token } try
+/unsupported eq (bt: reserved token F2 rejected) rt-ok clear
+{ (\xFF) token } try
+/unsupported eq (bt: reserved token FF rejected) rt-ok clear
+
+% SystemValue with a VALID index but an unbound name (control ops and
+% other internal system names have no systemdict binding) raises
+% /undefined.  Sweep every 8-bit index: the split between bound and
+% unbound shifts as operators are added, but both classes must be
+% non-empty and every index must resolve to exactly one of the two.
+/unbound 0 def
+/bound 0 def
+/idx 0 def
+{
+  idx 255 gt { exit } if
+  { mark 186 idx (BB) pack token pop pop pop /bound bound 1 add def } try
+  dup /undefined eq { /unbound unbound 1 add def } if pop
+  /idx idx 1 add def
+} loop
+unbound 0 gt (bt: unbound system value raises undefined) rt-ok clear
+bound 0 gt (bt: bound system value decodes to its clone) rt-ok clear
+unbound bound add 256 eq (bt: every u8 system value index classified) rt-ok clear
+
+% ====================================================================
+% SECTION 2: truncation -- stream ends mid-payload.  scan_binary_token
+% converts the EndOfStream to the scanner's clean EOF, so `token`
+% returns the false branch (and any in-flight string allocation window
+% is closed).
+% ====================================================================
+
+(\x85\x01) token not (bt: truncated integer-32 payload is EOF) rt-ok clear
+(\xF0\x2A\x00) token not (bt: truncated uint128 payload is EOF) rt-ok clear
+(\xAE\x05ab) token not (bt: truncated string-8 payload is EOF) rt-ok clear
+(\xC6\x30\x00\x05\x01) token not (bt: truncated number-array elements are EOF) rt-ok clear
+
+% ====================================================================
+% SECTION 3: VMFull arms under starvation (own save window; the fill
+% strings live on the operand stack as roots until the restore)
+% ====================================================================
+
+% Fill until free VM is below 65000 -- strictly less than the 65535-byte
+% String_16b request below.  The exit threshold MUST stay under that
+% request: the loop guarantees residual < threshold, so threshold < 65535
+% guarantees the residual can never satisfy the 65535-byte allocation and
+% the VMFull arm fires deterministically.  (A larger threshold, e.g. the
+% earlier 70000, let the 60000-byte fill granularity leave residual in
+% [65535, 70000) on some builds -- enough room for the alloc to succeed,
+% so the assertion flickered with boot-time VM occupancy / build flags.)
+save
+{ /vm-free query-status 65000 lt { exit } if 60000 string } loop
+% String_16b length 65535: capacity is checked before the payload is
+% consumed, so the three header bytes suffice to hit the arm
+{ (\xB0\xFF\xFF) token } try
+/vm-full eq (bt: string-16 allocation rejected when VM starved) rt-ok clear
+% NumberArray byte rep, count 65535: needs 64K Objects of array space
+{ (\xC6\x30\xFF\xFF) token } try
+/vm-full eq (bt: number-array allocation rejected when VM starved) rt-ok clear
+clear
+-1 restore
+
+% ====================================================================
+% SECTION 4: happy-path decode breadth (sign extension, endianness,
+% fixed-point forms, constants, special literals)
+% ====================================================================
+
+(\x80\x2A) token pop exch pop 42b eq (bt: byte payload decodes) rt-ok clear
+(\x83\xFF\xFE) token pop exch pop -2 eq (bt: integer-16 BE sign-extends) rt-ok clear
+(\x84\xFE\xFF) token pop exch pop -2 eq (bt: integer-16 LE sign-extends) rt-ok clear
+(\x86\xFF\xFF\xFF\xFE) token pop exch pop -2 eq (bt: integer-32 BE sign-extends) rt-ok clear
+(\x8F\xFE) token pop exch pop -2l eq (bt: long-8 sign-extends to Long) rt-ok clear
+(\x99\xFF) token pop exch pop 255ul eq (bt: ulong-8 zero-extends to ULong) rt-ok clear
+(\xF0\x2A\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00) token pop exch pop
+  42q eq (bt: int128 native payload decodes) rt-ok clear
+
+(\xA9\x10\x00\x01\x00\x00) token pop exch pop 1.0 eq (bt: fixed 32-bit scale-16 is 1.0) rt-ok clear
+(\xA9\x21\x00\x03) token pop exch pop 1.5 eq (bt: fixed 16-bit scale-1 is 1.5) rt-ok clear
+(\xA9\x20\x00\x07) token pop exch pop dup 7 eq exch type /integer-type eq and
+  (bt: fixed rep 32 scale-0 yields Integer) rt-ok clear
+
+(\xAE\x03abc) token pop exch pop (abc) eq (bt: string-8 payload decodes) rt-ok clear
+(\xB0\x00\x03xyz) token pop exch pop (xyz) eq (bt: string-16 BE payload decodes) rt-ok clear
+
+(\xC6\x30\x00\x02\x01\x02) token pop exch pop
+  dup length 2 eq exch dup 0 get 1b eq exch 1 get 2b eq and and
+  (bt: number-array byte elements BE) rt-ok clear
+(\xC6\xB0\x02\x00\x05\x06) token pop exch pop
+  dup 0 get 5b eq exch 1 get 6b eq and
+  (bt: number-array little-endian flag honored) rt-ok clear
+(\xC6\x21\x00\x01\x00\x03) token pop exch pop
+  0 get 1.5 eq (bt: number-array 16-bit fixed elements) rt-ok clear
+
+(\xCC) token pop exch pop -2147483648 eq (bt: Integer_Min constant) rt-ok clear
+(\xCB) token pop exch pop 255b eq (bt: Byte_255 constant) rt-ok clear
+(\xE1) token pop exch pop dup 0.0 gt exch dup eq and
+  (bt: Real_INF constant is positive and not NaN) rt-ok clear
+(\xEA) token pop exch pop 0x0#a eq (bt: Address_nullptr constant) rt-ok clear
+(\xAC) token pop exch pop type /mark-type eq (bt: Mark literal) rt-ok clear
+(\xAD) token pop exch pop type /null-type eq (bt: Null literal) rt-ok clear
+(\xAB) token pop exch pop (bt: True literal) rt-ok clear
+(\xAA) token pop exch pop not (bt: False literal) rt-ok clear
+
+(\xB2\x00) token pop exch pop type /name-type eq (bt: system lit name index 0) rt-ok clear
+(\xB6\x00) token pop exch pop type /name-type eq (bt: system exec name index 0) rt-ok clear
+(\xEE\x00) token pop exch pop type /name-type eq (bt: well-known lit name index 0) rt-ok clear
+
+% ====================================================================
+% SECTION 5: to-binary-token round trips (make side -> decode side)
+% ====================================================================
+
+42 to-binary-token token pop exch pop 42 eq (bt: integer round trip) rt-ok clear
+200b to-binary-token token pop exch pop 200b eq (bt: byte round trip) rt-ok clear
+1.5 to-binary-token token pop exch pop 1.5 eq (bt: real round trip) rt-ok clear
+1.5d to-binary-token token pop exch pop 1.5d eq (bt: double round trip) rt-ok clear
+5000000000l to-binary-token token pop exch pop 5000000000l eq (bt: long round trip) rt-ok clear
+(hello) to-binary-token token pop exch pop (hello) eq (bt: string round trip) rt-ok clear
+170141183460469231731687303715884105727q to-binary-token token pop exch pop
+  170141183460469231731687303715884105727q eq (bt: int128 round trip) rt-ok clear
+340282366920938463463374607431768211455uq to-binary-token token pop exch pop
+  340282366920938463463374607431768211455uq eq (bt: uint128 round trip) rt-ok clear
+
+% Arbitrary user names have no binary-token encoding (the opcode map
+% carries system and well-known name indexes only) -- the make side
+% reports the name as undefined rather than emitting bytes
+{ /no-such-user-name to-binary-token } try
+/undefined eq (bt: user name has no binary encoding) rt-ok clear
+
+(Binary token decode tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

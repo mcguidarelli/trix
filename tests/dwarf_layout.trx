@@ -1,0 +1,546 @@
+% tests/dwarf_layout.trx -- assert lib/dwarf.trx resolves the fixture's global
+% g_probe and the DwarfProbe layout by name.  The fixture binary path arrives
+% as argv[0]; run via tests/run_dwarf_tests.sh, not the standalone sweep.
+(lib/dwarf.trx) run
+
+% rt-ok: restore-immune failure counter; the file THROWS at EOF so a print-only
+% failure cannot slip the runner's verdict.  bool (label) rt-ok --
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+/fixture command-line-args 0 get def
+fixture dwarf-load /ctx exch def
+
+% --- global lookup ---
+ctx (g_probe) dwarf-lookup /info exch def
+info null eq not (lookup: g_probe found) rt-ok clear
+info null eq not {
+    info /address get 0ul gt (lookup: address nonzero) rt-ok clear
+    (g_probe-address=) print info /address get = % cross-checked against nm by the runner
+} if
+
+% --- type layout ---
+ctx info /type-offset get dwarf-layout /lay exch def
+lay /kind get /struct eq (layout: kind is struct) rt-ok clear
+lay /name get (DwarfProbe) eq (layout: name DwarfProbe) rt-ok clear
+lay /byte-size get 24 eq (layout: byte-size 24) rt-ok clear
+
+/mem-list lay /members get def
+mem-list length 4 eq (layout: 4 members) rt-ok clear
+
+% member-by-name accessor (mem-list is a free var resolved up to userdict)
+/member-by {
+    |nm|#+3
+    /found null local-def
+    0 1 mem-list length 1 sub { /i exch local-def /m mem-list i get local-def m /name known? { m /name get nm eq } { false } if-else { /found m local-def } if } for
+    found
+} def
+
+/id-m (id) member-by def
+/scale-m (scale) member-by def
+/flags-m (flags) member-by def
+/kind-m (kind) member-by def
+
+id-m /offset get 0 eq (member id: offset 0) rt-ok clear
+id-m /peek-type get /uinteger-type eq (member id: peek uinteger-type) rt-ok clear
+scale-m /offset get 8 eq (member scale: offset 8) rt-ok clear
+scale-m /peek-type get /double-type eq (member scale: peek double-type) rt-ok clear
+flags-m /offset get 16 eq (member flags: offset 16) rt-ok clear
+flags-m /peek-type get /integer-type eq (member flags: peek integer-type) rt-ok clear
+kind-m /offset get 20 eq (member kind: offset 20) rt-ok clear
+kind-m /peek-type get /byte-type eq (member kind: peek byte-type) rt-ok clear
+
+% --- multi-CU: g_other lives in the second compilation unit; resolving its
+% --- type ref requires the per-CU base, so a misresolution shows as a wrong
+% --- struct name / member set, not a silent pass.
+ctx (g_other) dwarf-lookup /info2 exch def
+info2 null eq not (multi-cu: g_other found) rt-ok clear
+info2 null eq not {
+    ctx info2 /type-offset get dwarf-layout /lay2 exch def
+    lay2 /kind get /struct eq (layout2: kind is struct) rt-ok clear
+    lay2 /name get (OtherProbe) eq (layout2: name OtherProbe) rt-ok clear
+    lay2 /byte-size get 24 eq (layout2: byte-size 24) rt-ok clear
+    /mem-list lay2 /members get def
+    mem-list length 3 eq (layout2: 3 members) rt-ok clear
+    /counter-m (counter) member-by def
+    /ratio-m (ratio) member-by def
+    /mask-m (mask) member-by def
+    counter-m /offset get 0 eq (member counter: offset 0) rt-ok clear
+    counter-m /peek-type get /long-type eq (member counter: peek long-type) rt-ok clear
+    ratio-m /offset get 8 eq (member ratio: offset 8) rt-ok clear
+    ratio-m /peek-type get /real-type eq (member ratio: peek real-type) rt-ok clear
+    mask-m /offset get 16 eq (member mask: offset 16) rt-ok clear
+    mask-m /peek-type get /ulong-type eq (member mask: peek ulong-type) rt-ok clear
+} if
+
+% --- typedef/qualifier/pointer/enum resolution (Chunk D): members must
+% --- resolve THROUGH the typedef + const wrappers to the underlying scalar.
+ctx (g_typed) dwarf-lookup /info3 exch def
+info3 null eq not (typed: g_typed found) rt-ok clear
+info3 null eq not {
+    ctx info3 /type-offset get dwarf-layout /lay3 exch def
+    lay3 /name get (TypedProbe) eq (layout3: name TypedProbe) rt-ok clear
+    lay3 /byte-size get 32 eq (layout3: byte-size 32) rt-ok clear
+    /mem-list lay3 /members get def
+    mem-list length 4 eq (layout3: 4 members) rt-ok clear
+    /tid-m (tid) member-by def
+    /factor-m (factor) member-by def
+    /link-m (link) member-by def
+    /hue-m (hue) member-by def
+    tid-m /offset get 0 eq (member tid: offset 0) rt-ok clear
+    tid-m /peek-type get /uinteger-type eq (member tid: typedef -> uinteger-type) rt-ok clear
+    factor-m /offset get 8 eq (member factor: offset 8) rt-ok clear
+    factor-m /peek-type get /double-type eq (member factor: const -> double-type) rt-ok clear
+    link-m /offset get 16 eq (member link: offset 16) rt-ok clear
+    link-m /peek-type get /ulong-type eq (member link: pointer -> ulong-type) rt-ok clear
+    link-m /kind get /pointer eq (member link: kind pointer) rt-ok clear
+    hue-m /offset get 24 eq (member hue: offset 24) rt-ok clear
+    hue-m /peek-type get /uinteger-type eq (member hue: enum -> uinteger-type) rt-ok clear
+    hue-m /kind get /enum eq (member hue: kind enum) rt-ok clear
+} if
+
+% --- anonymous member (Wave 0, L-2): a nameless DW_TAG_member (the anonymous
+% --- union) must not crash dwarf-layout; it appears as a member with no /name.
+ctx (g_anon) dwarf-lookup /info4 exch def
+info4 null eq not (anon: g_anon found) rt-ok clear
+info4 null eq not {
+    ctx info4 /type-offset get dwarf-layout /lay4 exch def
+    lay4 /kind get /struct eq (layout4: kind is struct) rt-ok clear
+    lay4 /name get (AnonHost) eq (layout4: name AnonHost) rt-ok clear
+    /mem-list lay4 /members get def
+    mem-list length 3 eq (layout4: 3 members incl. anonymous) rt-ok clear
+    /tag-m (tag) member-by def
+    /trailer-m (trailer) member-by def
+    tag-m /offset get 0 eq (member tag: offset 0) rt-ok clear
+    tag-m /peek-type get /integer-type eq (member tag: peek integer-type) rt-ok clear
+    trailer-m /offset get 16 eq (member trailer: offset 16) rt-ok clear
+    % the anonymous union member: nameless, offset 8, kind aggregate
+    /anon-found false def
+    0 1 mem-list length 1 sub {
+        /i exch def /m mem-list i get def
+        m /name known? not {
+            m /offset get 8 eq  m /kind get /aggregate eq  and { /anon-found true def } if
+        } if
+    } for
+    anon-found (layout4: nameless union member present, off 8, aggregate) rt-ok clear
+} if
+
+% --- typed peek (L-3 / L-12): a global's static value decoded to a typed Trix
+% --- value.  Reads the .data initializer from the mmap'd image (not live
+% --- memory), so it runs across the whole producer x version matrix.
+% --- g_probe -> Record from DwarfProbe{0x1234, 2.5, 7, 9}.
+ctx (g_probe) dwarf-peek /pv exch def
+pv is-record (peek g_probe: is a Record) rt-ok clear
+pv null eq not {
+    pv /id get 4660u eq (peek g_probe.id == 4660u) rt-ok clear
+    pv /scale get 2.5d eq (peek g_probe.scale == 2.5d) rt-ok clear
+    pv /flags get 7 eq (peek g_probe.flags == 7) rt-ok clear
+    pv /kind get 9b eq (peek g_probe.kind == 9b) rt-ok clear
+} if
+
+% g_other -> OtherProbe{123456789L, 1.5f, 0xABCDEF0123456789UL}: long + float
+% (Real) + a full-width unsigned long.
+ctx (g_other) dwarf-peek /ov exch def
+ov is-record (peek g_other: is a Record) rt-ok clear
+ov null eq not {
+    ov /counter get 123456789l eq (peek g_other.counter == 123456789l) rt-ok clear
+    ov /ratio get 1.5 eq (peek g_other.ratio == 1.5) rt-ok clear
+    ov /mask get 16#abcdef0123456789#ul eq (peek g_other.mask == 0xABCDEF0123456789) rt-ok clear
+} if
+
+% g_typed -> TypedProbe{7u, 3.5, nullptr, GREEN}: resolves through typedef /
+% const / pointer / enum to the right scalar values.
+ctx (g_typed) dwarf-peek /tv exch def
+tv is-record (peek g_typed: is a Record) rt-ok clear
+tv null eq not {
+    tv /tid get 7u eq (peek g_typed.tid == 7u) rt-ok clear
+    tv /factor get 3.5d eq (peek g_typed.factor == 3.5d) rt-ok clear
+    tv /link get 0ul eq (peek g_typed.link == 0 (nullptr)) rt-ok clear
+    tv /hue get 1u eq (peek g_typed.hue == GREEN (1u)) rt-ok clear
+} if
+
+% g_anon -> AnonHost{1, {0}, 9}: a nameless union member forces a Dict (a Record
+% schema cannot carry an unnamed field); the named fields still decode.
+ctx (g_anon) dwarf-peek /av exch def
+av is-record not (peek g_anon: nameless member -> Dict not Record) rt-ok clear
+av null eq not {
+    av /tag get 1 eq (peek g_anon.tag == 1) rt-ok clear
+    av /trailer get 9 eq (peek g_anon.trailer == 9) rt-ok clear
+} if
+
+% --- L-8 function lookup: dwarf-lookup-fn resolves a DW_TAG_subprogram by name
+% --- to its entry address (DW_AT_low_pc), cross-checked against nm by the runner.
+% --- The variable and function name spaces are separate indices.
+ctx (dwarf_probe_fn) dwarf-lookup-fn /fn exch def
+fn null eq not (fn: dwarf_probe_fn found) rt-ok clear
+fn null eq not {
+    fn /address get 0ul gt (fn: address nonzero) rt-ok clear
+    (dwarf_probe_fn-address=) print fn /address get =  % cross-checked against nm by the runner
+    fn /name get (dwarf_probe_fn) eq (fn: name matches) rt-ok clear
+} if
+% a global variable must NOT resolve through the function index, and vice-versa
+ctx (g_probe) dwarf-lookup-fn null eq (fn: variable g_probe absent from fn index) rt-ok clear
+ctx (dwarf_probe_fn) dwarf-lookup null eq (fn: function absent from var index) rt-ok clear
+
+% --- L-22: line table.  dwarf-line-fn maps the function's entry low_pc to its
+% --- source row; the runner cross-checks file:line against addr2line. ---
+ctx (dwarf_probe_fn) dwarf-line-fn /loc exch def
+loc null eq not (line: dwarf-line-fn resolves a source row) rt-ok clear
+loc null eq not {
+    loc /line get 0 gt (line: source line is positive) rt-ok clear
+    loc /file get is-string (line: source file is a string) rt-ok clear
+    (dwarf_probe_fn-line=) print loc /line get =        % cross-checked against addr2line by the runner
+    (dwarf_probe_fn-file=) print loc /file get =        % cross-checked against addr2line by the runner
+} if
+
+% --- L-9 recursive nested layout + nested peek.  NestHost has a by-value Inner
+% --- member, so dwarf-layout must expand inner's /layout and dwarf-peek must
+% --- decode it into a nested Record.  g_nested = {0xFEED, {42, 1.25}, 999}.
+ctx (g_nested) dwarf-lookup /ni exch def
+ni null eq not (nested: g_nested found) rt-ok clear
+ni null eq not {
+    ctx ni /type-offset get dwarf-layout /nlay exch def
+    nlay /kind get /struct eq (nested: layout kind struct) rt-ok clear
+    /mem-list nlay /members get def
+    mem-list length 3 eq (nested: 3 members) rt-ok clear
+    /inner-m (inner) member-by def
+    inner-m /kind get /aggregate eq (nested: inner member is aggregate) rt-ok clear
+    inner-m /layout known? (nested: inner member carries recursive /layout) rt-ok clear
+    inner-m /layout known? {
+        /ilay inner-m /layout get def
+        ilay /kind get /struct eq (nested: inner /layout kind struct) rt-ok clear
+        ilay /name get (Inner) eq (nested: inner /layout name Inner) rt-ok clear
+        ilay /members get length 2 eq (nested: Inner has 2 members) rt-ok clear
+    } if
+
+    % nested typed peek -> Record whose /inner field is itself a Record
+    ctx (g_nested) dwarf-peek /nv exch def
+    nv is-record (nested: peek g_nested is a Record) rt-ok clear
+    nv null eq not {
+        nv /tag get 65261u eq (nested: peek tag == 0xFEEDu) rt-ok clear
+        nv /tail get 999l eq (nested: peek tail == 999l) rt-ok clear
+        nv /inner get is-record (nested: peek inner is a nested Record) rt-ok clear
+        nv /inner get /a get 42 eq (nested: peek inner.a == 42) rt-ok clear
+        nv /inner get /b get 1.25d eq (nested: peek inner.b == 1.25d) rt-ok clear
+    } if
+} if
+
+% --- L-10 arrays: array globals + array members decode to typed Trix arrays. ---
+% 1D array global g_ints = {10,20,30,40,50}
+ctx (g_ints) dwarf-lookup /ai exch def
+ai null eq not (arr: g_ints found) rt-ok clear
+ai null eq not {
+    ctx ai /type-offset get dwarf-layout /alay exch def
+    alay /kind get /array eq (arr: g_ints layout kind array) rt-ok clear
+    alay /count get 5 eq (arr: g_ints count 5) rt-ok clear
+    alay /element-layout get /peek-type get /integer-type eq (arr: g_ints element int) rt-ok clear
+    ctx (g_ints) dwarf-peek /av exch def
+    av is-array (arr: peek g_ints is an array) rt-ok clear
+    av null eq not {
+        av length 5 eq (arr: peek g_ints length 5) rt-ok clear
+        av 0 get 10 eq (arr: g_ints[0] == 10) rt-ok clear
+        av 4 get 50 eq (arr: g_ints[4] == 50) rt-ok clear
+    } if
+} if
+
+% struct with array member: g_arr = ArrHost{ n 3, vals [1.5,2.5,3.5] }
+ctx (g_arr) dwarf-peek /gv exch def
+gv is-record (arr: peek g_arr is a Record) rt-ok clear
+gv null eq not {
+    gv /n get 3u eq (arr: g_arr.n == 3u) rt-ok clear
+    gv /vals get is-array (arr: g_arr.vals is a nested array) rt-ok clear
+    gv /vals get length 3 eq (arr: g_arr.vals length 3) rt-ok clear
+    gv /vals get 0 get 1.5d eq (arr: g_arr.vals[0] == 1.5d) rt-ok clear
+    gv /vals get 2 get 3.5d eq (arr: g_arr.vals[2] == 3.5d) rt-ok clear
+} if
+
+% 2D array (row-major) flattens to a single array of 6: g_grid = {{1,2,3},{4,5,6}}
+ctx (g_grid) dwarf-lookup /g2i exch def
+g2i null eq not (arr: g_grid found) rt-ok clear
+g2i null eq not {
+    ctx g2i /type-offset get dwarf-layout /g2lay exch def
+    g2lay /counts get length 2 eq (arr: g_grid has 2 dims) rt-ok clear
+    g2lay /count get 6 eq (arr: g_grid flat count 6) rt-ok clear
+    ctx (g_grid) dwarf-peek /g2v exch def
+    g2v null eq not  g2v is-array  and {
+        g2v length 6 eq (arr: g_grid flat length 6) rt-ok clear
+        g2v 0 get 1 eq (arr: g_grid[0] == 1) rt-ok clear
+        g2v 5 get 6 eq (arr: g_grid[5] == 6) rt-ok clear
+    } if
+} if
+
+% --- L-6 bitfields: members carry /bit-size + /bit-offset (absolute bits from
+% --- struct start, consistent across the modern data_bit_offset and legacy
+% --- bit_offset encodings); dwarf-peek extracts the packed value, sign-extending
+% --- signed fields.  Flags{ a:3, b:5, c:10 signed, d:14 } = {5, 17, -100, 9000}.
+ctx (g_flags) dwarf-lookup /bfi exch def
+bfi null eq not (bf: g_flags found) rt-ok clear
+bfi null eq not {
+    ctx bfi /type-offset get dwarf-layout /bflay exch def
+    /mem-list bflay /members get def
+    mem-list length 4 eq (bf: 4 members) rt-ok clear
+    /a-m (a) member-by def
+    /c-m (c) member-by def
+    /d-m (d) member-by def
+    a-m /bit-size get 3 eq (bf: a bit-size 3) rt-ok clear
+    a-m /bit-offset get 0 eq (bf: a bit-offset 0) rt-ok clear
+    c-m /bit-size get 10 eq (bf: c bit-size 10) rt-ok clear
+    c-m /bit-offset get 8 eq (bf: c bit-offset 8) rt-ok clear
+    d-m /bit-offset get 18 eq (bf: d bit-offset 18) rt-ok clear
+
+    ctx (g_flags) dwarf-peek /bfv exch def
+    bfv is-record (bf: peek g_flags is a Record) rt-ok clear
+    bfv null eq not {
+        bfv /a get 5ul eq (bf: a == 5) rt-ok clear
+        bfv /b get 17ul eq (bf: b == 17) rt-ok clear
+        bfv /c get -100l eq (bf: c == -100 sign-extended) rt-ok clear
+        bfv /d get 9000ul eq (bf: d == 9000) rt-ok clear
+    } if
+} if
+
+% --- L-5 out-of-line definitions: a nameless definition DIE (DW_AT_specification)
+% --- is indexed by following the spec to its declaration's name + type.
+% --- SpecHost::s_counter = 12345 (out-of-line static member definition).
+ctx (s_counter) dwarf-lookup /spi exch def
+spi null eq not (spec: s_counter resolved via specification) rt-ok clear
+spi null eq not {
+    spi /address get 0ul gt (spec: s_counter address nonzero) rt-ok clear
+    spi /type-offset get null eq not (spec: s_counter type resolved via spec) rt-ok clear
+    ctx (s_counter) dwarf-peek /spv exch def
+    spv 12345 eq (spec: peek s_counter == 12345) rt-ok clear
+} if
+
+% --- L-14 namespace/qualified lookup: a namespace/class-scoped name resolves by
+% --- its bare OR its qualified form (ns::C::name).  Two same-bare-named globals
+% --- in different namespaces are disambiguated only by the qualified form.  GCC
+% --- splits a namespace global into an in-scope declaration + a file-scope
+% --- located definition (recovered via DW_AT_specification); clang locates it
+% --- directly inside the namespace (recovered from the lexical scope) -- both
+% --- yield the same qualified name.
+ctx (alpha::ns_dup) dwarf-lookup /q1 exch def
+q1 null eq not (ns: alpha::ns_dup resolved by qualified name) rt-ok clear
+q1 null eq not {
+    q1 /name get (ns_dup) eq (ns: alpha::ns_dup bare /name is ns_dup) rt-ok clear
+    q1 /qualified-name get (alpha::ns_dup) eq (ns: alpha::ns_dup /qualified-name) rt-ok clear
+    ctx (alpha::ns_dup) dwarf-peek 111 eq (ns: peek alpha::ns_dup == 111) rt-ok clear
+} if
+
+ctx (alpha::beta::ns_dup) dwarf-lookup /q2 exch def
+q2 null eq not (ns: alpha::beta::ns_dup resolved by qualified name) rt-ok clear
+q2 null eq not {
+    q2 /qualified-name get (alpha::beta::ns_dup) eq (ns: nested /qualified-name) rt-ok clear
+    ctx (alpha::beta::ns_dup) dwarf-peek 222 eq (ns: peek alpha::beta::ns_dup == 222) rt-ok clear
+} if
+
+% the two same-bare-named vars are distinct entries (different addresses)
+q1 null eq not  q2 null eq not  and {
+    q1 /address get q2 /address get eq not (ns: the two ns_dup vars are distinct) rt-ok clear
+} if
+
+% bare lookup still works (last definition indexed wins, ignores scope)
+ctx (ns_dup) dwarf-lookup null eq not (ns: bare ns_dup still resolves) rt-ok clear
+
+% a uniquely-named namespace var resolves by both its bare and qualified forms
+ctx (alpha::ns_only) dwarf-lookup /q3 exch def
+q3 null eq not (ns: alpha::ns_only resolved) rt-ok clear
+q3 null eq not {
+    ctx (alpha::ns_only) dwarf-peek 7777l eq (ns: peek alpha::ns_only == 7777l) rt-ok clear
+    ctx (ns_only) dwarf-peek 7777l eq (ns: peek bare ns_only == 7777l) rt-ok clear
+} if
+
+% qualified FUNCTION lookup: an out-of-line namespace function and an out-of-line
+% class member function both index under their qualified names too.
+ctx (alpha::ns_func) dwarf-lookup-fn /qf exch def
+qf null eq not (ns: alpha::ns_func resolved by qualified name) rt-ok clear
+qf null eq not {
+    qf /name get (ns_func) eq (ns: alpha::ns_func bare /name) rt-ok clear
+    qf /qualified-name get (alpha::ns_func) eq (ns: alpha::ns_func /qualified-name) rt-ok clear
+    qf /address get 0ul gt (ns: alpha::ns_func address nonzero) rt-ok clear
+} if
+
+ctx (QualHost::compute) dwarf-lookup-fn /qc exch def
+qc null eq not (ns: QualHost::compute resolved by qualified name) rt-ok clear
+qc null eq not {
+    qc /qualified-name get (QualHost::compute) eq (ns: QualHost::compute /qualified-name) rt-ok clear
+    qc /address get 0ul gt (ns: QualHost::compute address nonzero) rt-ok clear
+} if
+
+% static class member: SpecHost::s_counter is now resolvable by its qualified
+% name too (the in-class declaration carries the SpecHost scope).
+ctx (SpecHost::s_counter) dwarf-lookup /qs exch def
+qs null eq not (ns: SpecHost::s_counter resolved by qualified name) rt-ok clear
+qs null eq not {
+    qs /qualified-name get (SpecHost::s_counter) eq (ns: SpecHost::s_counter /qualified-name) rt-ok clear
+    ctx (SpecHost::s_counter) dwarf-peek 12345 eq (ns: peek SpecHost::s_counter == 12345) rt-ok clear
+} if
+
+% --- L-13 C++ reference / rvalue-reference / function-pointer / ptr-to-member
+% --- kinds: these used to resolve to /other.  A reference is a pointer-width
+% --- address (peek as ULong); a function pointer is /pointer; a pointer-to-member
+% --- is /ptr-to-member and not a simple scalar (peek null).
+ctx (g_lref) dwarf-lookup /lri exch def
+lri null eq not (l13: g_lref found) rt-ok clear
+lri null eq not {
+    ctx lri /type-offset get dwarf-layout /lrlay exch def
+    lrlay /kind get /reference eq (l13: g_lref kind /reference) rt-ok clear
+    lrlay /byte-size get 8 eq (l13: g_lref byte-size 8) rt-ok clear
+    lrlay /peek-type get /ulong-type eq (l13: g_lref peeks as ulong) rt-ok clear
+    % the reference holds the address of l13_target
+    ctx (l13_target) dwarf-lookup /tgt exch def
+    tgt null eq not {
+        ctx (g_lref) dwarf-peek tgt /address get eq (l13: peek g_lref == &l13_target) rt-ok clear
+    } if
+} if
+
+% int&& g_rref: rvalue reference -> /kind /rvalue-reference on DWARF v4+; v2/v3
+% lack DW_TAG_rvalue_reference_type so the compiler emits a plain reference there
+% (accept either -- the reader faithfully reports the encoding).  Peeks non-null.
+ctx (g_rref) dwarf-lookup /rri exch def
+rri null eq not {
+    ctx rri /type-offset get dwarf-layout /rrlay exch def
+    rrlay /kind get dup /rvalue-reference eq exch /reference eq or (l13: g_rref kind is an (rvalue-)reference) rt-ok clear
+    ctx (g_rref) dwarf-peek 0ul gt (l13: peek g_rref is a non-null address) rt-ok clear
+} if
+
+% int(*g_fnptr)(int): a function pointer is /pointer; its value is the callee's
+% entry address == alpha::ns_func's low_pc.
+ctx (g_fnptr) dwarf-lookup /fpi exch def
+fpi null eq not {
+    ctx fpi /type-offset get dwarf-layout /fplay exch def
+    fplay /kind get /pointer eq (l13: g_fnptr kind /pointer) rt-ok clear
+    ctx (alpha::ns_func) dwarf-lookup-fn /nf exch def
+    nf null eq not {
+        ctx (g_fnptr) dwarf-peek nf /address get eq (l13: peek g_fnptr == alpha::ns_func low_pc) rt-ok clear
+    } if
+} if
+
+% long (QualHost::*g_qual_mp)(int): pointer-to-member -> /kind /ptr-to-member;
+% not a simple scalar, so peek yields null.
+ctx (g_qual_mp) dwarf-lookup /mpi exch def
+mpi null eq not (l13: g_qual_mp found) rt-ok clear
+mpi null eq not {
+    ctx mpi /type-offset get dwarf-layout /mplay exch def
+    mplay /kind get /ptr-to-member eq (l13: g_qual_mp kind /ptr-to-member) rt-ok clear
+    ctx (g_qual_mp) dwarf-peek null eq (l13: peek g_qual_mp is null (non-scalar)) rt-ok clear
+} if
+
+% --- L-4 same-name statics: two file-local `static int l4_dup` (100 in CU A,
+% --- 200 in CU B) must both be reachable, not shadowed.  dwarf-lookup returns
+% --- the last indexed; dwarf-lookup-all returns both, distinguished by /cu-name
+% --- + /address; dwarf-peek-info reads each one's own value.
+ctx (l4_dup) dwarf-lookup-all /dups exch def
+dups length 2 eq (l4: lookup-all returns both l4_dup statics) rt-ok clear
+dups length 2 eq {
+    dups 0 get /name get (l4_dup) eq  dups 1 get /name get (l4_dup) eq  and (l4: both named l4_dup) rt-ok clear
+    dups 0 get /address get  dups 1 get /address get  eq not (l4: the two have distinct addresses) rt-ok clear
+    dups 0 get /cu-name get  dups 1 get /cu-name get  eq not (l4: distinct /cu-name source files) rt-ok clear
+    % each peeks its OWN value via dwarf-peek-info; the two are 100 and 200
+    /v0 ctx dups 0 get dwarf-peek-info def
+    /v1 ctx dups 1 get dwarf-peek-info def
+    v0 v1 add 300 eq (l4: peek-info reads 100 and 200 separately) rt-ok clear
+    v0 100 eq v0 200 eq or (l4: [0] peeks one of the two values) rt-ok clear
+} if
+
+% bare dwarf-lookup still resolves one (last-wins) and matches lookup-all's head
+ctx (l4_dup) dwarf-lookup /one exch def
+one null eq not (l4: bare lookup still resolves one) rt-ok clear
+one null eq not  dups length 2 eq  and {
+    one /address get dups 0 get /address get eq (l4: bare lookup == lookup-all head) rt-ok clear
+} if
+
+% a uniquely-named global's lookup-all is a 1-element array
+ctx (g_probe) dwarf-lookup-all /sgl exch def
+sgl length 1 eq (l4: unique-name lookup-all has length 1) rt-ok clear
+sgl length 1 eq { sgl 0 get /name get (g_probe) eq (l4: unique lookup-all[0] is g_probe) rt-ok clear } if
+
+% --- L-11 enumerators: an enum type's layout carries /enumerators (name->value).
+% --- Color (RED/GREEN/BLUE = 0/1/2, unsigned) is the default sequence; Status
+% --- exercises explicit values including a negative (signed const_value, sdata).
+ctx (g_color) dwarf-lookup /eci exch def
+eci null eq not (enum: g_color found) rt-ok clear
+eci null eq not {
+    ctx eci /type-offset get dwarf-layout /eclay exch def
+    eclay /kind get /enum eq (enum: g_color kind /enum) rt-ok clear
+    eclay /name get (Color) eq (enum: g_color type name Color) rt-ok clear
+    eclay /enumerators known? (enum: Color carries /enumerators) rt-ok clear
+    eclay /enumerators known? {
+        /ce eclay /enumerators get def
+        ce /RED get 0 eq (enum: Color.RED == 0) rt-ok clear
+        ce /GREEN get 1 eq (enum: Color.GREEN == 1) rt-ok clear
+        ce /BLUE get 2 eq (enum: Color.BLUE == 2) rt-ok clear
+    } if
+    ctx (g_color) dwarf-peek 1u eq (enum: peek g_color == GREEN (1u)) rt-ok clear
+} if
+
+ctx (g_status) dwarf-lookup /esi exch def
+esi null eq not (enum: g_status found) rt-ok clear
+esi null eq not {
+    ctx esi /type-offset get dwarf-layout /eslay exch def
+    eslay /enumerators known? (enum: Status carries /enumerators) rt-ok clear
+    eslay /enumerators known? {
+        /se eslay /enumerators get def
+        se /ST_OK get 0 eq (enum: Status.ST_OK == 0) rt-ok clear
+        se /ST_WARN get 5 eq (enum: Status.ST_WARN == 5) rt-ok clear
+        se /ST_ERR get -1 eq (enum: Status.ST_ERR == -1 signed) rt-ok clear
+    } if
+    ctx (g_status) dwarf-peek 5 eq (enum: peek g_status == ST_WARN (5)) rt-ok clear
+} if
+
+% --- L-15 scalar widths: a 2-byte short/unsigned short widens to a Trix
+% --- Integer/UInteger; __int128 / unsigned __int128 use the 16-byte Trix wide
+% --- types; an 80/128-bit long double has no Trix type (-> /unknown peek).
+ctx (g_s16) dwarf-lookup /w16i exch def
+w16i null eq not (l15: g_s16 found) rt-ok clear
+w16i null eq not {
+    ctx w16i /type-offset get dwarf-layout /w16lay exch def
+    w16lay /peek-type get /short-type eq (l15: g_s16 peek-type /short-type) rt-ok clear
+    w16lay /byte-size get 2 eq (l15: g_s16 byte-size 2) rt-ok clear
+    ctx (g_s16) dwarf-peek -1234 eq (l15: peek g_s16 == -1234 sign-extended Integer) rt-ok clear
+} if
+ctx (g_u16) dwarf-lookup null eq not {
+    ctx (g_u16) dwarf-peek 50000u eq (l15: peek g_u16 == 50000u UInteger) rt-ok clear
+} if
+
+ctx (g_i128) dwarf-lookup /w128i exch def
+w128i null eq not (l15: g_i128 found) rt-ok clear
+w128i null eq not {
+    ctx w128i /type-offset get dwarf-layout /w128lay exch def
+    w128lay /peek-type get /int128-type eq (l15: g_i128 peek-type /int128-type) rt-ok clear
+    w128lay /byte-size get 16 eq (l15: g_i128 byte-size 16) rt-ok clear
+    ctx (g_i128) dwarf-peek 16#10000000000000000#q eq (l15: peek g_i128 == 2^64 Int128) rt-ok clear
+} if
+ctx (g_u128) dwarf-lookup null eq not {
+    ctx (g_u128) dwarf-peek 16#10000000000000000#uq eq (l15: peek g_u128 == 2^64 UInt128) rt-ok clear
+} if
+
+% long double: no Trix extended/quad float -> /unknown peek-type, peek null.
+% Guard on byte-size > 8 (the wide case on this matrix; an 8-byte long double
+% would legitimately map to /double-type instead).
+ctx (g_ld) dwarf-lookup /wldi exch def
+wldi null eq not {
+    ctx wldi /type-offset get dwarf-layout /wldlay exch def
+    wldlay /byte-size get 8 gt {
+        wldlay /peek-type get /unknown eq (l15: wide long double -> /unknown peek-type) rt-ok clear
+        ctx (g_ld) dwarf-peek null eq (l15: peek wide long double is null (no Trix type)) rt-ok clear
+    } if
+} if
+
+% --- L-17 close: release a context's mmap.  Re-load into a FRESH ctx (so the
+% --- main ctx stays valid), close it, verify it is idempotent, and verify a
+% --- post-close read fails cleanly (/undefined) instead of faulting on the
+% --- now-unmapped image -- the assertion only runs if no SIGSEGV occurred.
+fixture dwarf-load /ctx9 exch def
+ctx9 (g_probe) dwarf-lookup null eq not (close: fresh ctx resolves before close) rt-ok clear
+{ ctx9 dwarf-close } try /no-error eq (close: dwarf-close succeeds) rt-ok clear
+ctx9 /elf-base known? not (close: elf-base invalidated after close) rt-ok clear
+{ ctx9 dwarf-close } try /no-error eq (close: second close is an idempotent no-op) rt-ok clear
+{ ctx9 (g_probe) dwarf-peek } try /no-error eq not (close: peek after close fails cleanly, no fault) rt-ok clear
+
+% --- error handling (Chunk E): the right error names must fire ---
+{ (lib/dwarf.trx) dwarf-load pop } try /invalid-image-file eq (error: non-ELF file -> invalid-image-file) rt-ok clear
+{ (/no/such/dwarf/file/xyz) dwarf-load pop } try /file-open-error eq (error: missing file -> file-open-error) rt-ok clear
+
+(dwarf layout tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

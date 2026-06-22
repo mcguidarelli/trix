@@ -1,0 +1,347 @@
+% ====================================================================
+% test_gvm_heap_fastbins.trx -- Phase 3c segregated fastbins
+% ====================================================================
+% Phase 3c partitions the smallest free-block sizes (32/40/48/56 bytes)
+% into per-size LIFO stacks, leaving >= 64-byte blocks on the existing
+% sorted-by-address general free list.  Alloc/free of small blocks
+% (the realistic ${...} ExtValue churn workload) becomes O(1).
+%
+% This file verifies behaviors that are NEW or SUBTLE under bins:
+%   - bin LIFO reuse: free a sub-threshold block (not at top edge),
+%     allocate another of the same size, verify the block's offset
+%     was reused (m_vm_global unchanged).
+%   - coalesce unlinks from bin: two adjacent bin-resident blocks
+%     merge cleanly via gvm_free_unlink_anywhere; the merged block
+%     lands in the right structure (bin if < threshold, list otherwise).
+%   - top-edge advance with bin-eligible block: a sub-threshold block
+%     at m_vm_global is reclaimed, NOT inserted into a bin.
+%   - mixed bin sizes: bin[0] and bin[1] coexist independently.
+%   - split into bin remainder: alloc carves a sub-threshold remainder
+%     out of a >= threshold list block; the remainder lands in a bin.
+%
+% Block sizes used (header 16 + payload + tail 4, padded to 8):
+%   Long       (8 byte payload) -> 32 byte block (bin[0])
+%   Int128    (16 byte payload) -> 40 byte block (bin[1])
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: bin LIFO reuse -- free + alloc same size
+% ====================================================================
+% Layout: anchor1 (high), sink1 (low at m_vm_global).
+% Free anchor1 (mid -- sink1 still alive below it): goes to bin[0].
+% Alloc another 32-byte block: bin[0] hit, reuses anchor1's slot.
+% Verify by /total-bytes equality (no bump on second alloc).
+
+/anchor1 null def
+/sink1   null def
+/sink1b  null def
+
+% Pre-warm: trigger lazy GC scratch alloc so deltas measure user blocks only.
+% Post main-context-local (2026-05-09), the global region starts empty.
+${ 8 dict } /pre-warm-dict exch def
+
+vm-global-info /pre1 exch def
+
+true set-global
+12345l /anchor1 exch def    % HIGH addr (first global alloc)
+67890l /sink1   exch def    % LOW addr (m_vm_global)
+false set-global
+
+vm-global-info /alloc1 exch def
+alloc1 /total-bytes get pre1 /total-bytes get sub 64 eq
+    (s1: two 32-byte longs grew global by 64)        rt-ok
+alloc1 /free-blocks get 0 eq                          (s1: no free blocks after alloc) rt-ok
+
+% Free anchor1 (NOT at m_vm_global -- sink1 below it).  Forward neighbour
+% above is whatever was at vm_limit (no neighbour or live), backward is
+% sink1 (live).  No coalesce.  Block size 32 < 64 -> bin[0].
+/anchor1 0 def
+
+vm-global-info /freed1 exch def
+freed1 /free-blocks get 1 eq                          (s1: one block in bin[0]) rt-ok
+freed1 /free-bytes  get 32 eq                         (s1: free bytes = 32) rt-ok
+freed1 /total-bytes get alloc1 /total-bytes get eq
+    (s1: total-bytes unchanged on free)              rt-ok
+
+% Alloc another 32-byte global Long.  Phase 3c: bin[0] check first.
+% Bin[0] non-empty -> pop head, reuse slot.  m_vm_global UNCHANGED.
+true set-global
+99999l /sink1b exch def
+false set-global
+
+vm-global-info /reused1 exch def
+reused1 /free-blocks get 0 eq                         (s1: bin[0] hit -- no free blocks)  rt-ok
+reused1 /total-bytes get freed1 /total-bytes get eq
+    (s1: m_vm_global unchanged on bin reuse)         rt-ok
+
+% Cleanup back to baseline.
+/sink1  0 def
+/sink1b 0 def
+
+vm-global-info /clean1 exch def
+clean1 /total-bytes get pre1 /total-bytes get eq      (s1: cleanup back to baseline)  rt-ok
+
+% ====================================================================
+% SECTION 2: coalesce unlinks from bin
+% ====================================================================
+% Layout: anchor2 (high), b2, c2, d2 (low).
+% Free b2 (mid): bin[0].  Free c2 (mid): forward neighbour b2 IS in bin[0]
+%   -> gvm_free_unlink_anywhere unlinks b2; merged 48-byte block.
+%   Merged size 48 < 56 -> goes to bin[3].  Net: 1 bin block (in bin[3]).
+
+/anchor2 null def
+/b2 null def
+/c2 null def
+/d2 null def
+
+vm-global-info /pre2 exch def
+
+true set-global
+11l /anchor2 exch def
+22l /b2 exch def
+33l /c2 exch def
+44l /d2 exch def
+false set-global
+
+% Layout (high->low): anchor2, b2, c2, d2.  m_vm_global = d2.
+% c2's higher-addr neighbour is b2; backward is d2.
+
+% Free b2 (mid-block).  Forward (anchor2 live), backward (c2 live).
+% No coalesce.  32 bytes -> bin[0].
+/b2 0 def
+
+vm-global-info /step2-1 exch def
+step2-1 /free-blocks get 1 eq                         (s2: step1 -- b2 in bin[0]) rt-ok
+step2-1 /free-bytes  get 32 eq                        (s2: step1 -- 32 free bytes) rt-ok
+
+% Free c2 (mid-block).  Forward neighbour b2 is FREE in bin[0].
+% gvm_free coalesce: gvm_free_unlink_anywhere(b2_offset, 32) -> bin[0] unlink.
+% Merged block size = 32 + 32 = 64; 64 NOT bin-eligible (threshold 64 exclusive)
+% -> general list.  Backward (d2 live), so no further coalesce.
+/c2 0 def
+
+vm-global-info /step2-2 exch def
+step2-2 /free-blocks get 1 eq                         (s2: step2 -- coalesce -> 1 free block) rt-ok
+step2-2 /free-bytes  get 64 eq                        (s2: step2 -- merged size 64) rt-ok
+
+% Free d2 (at m_vm_global).  Forward neighbour is the 64-byte free block
+% in the general list.  Coalesce: unlink-anywhere from list; merged
+% 32+64 = 96 bytes.  d2 was at m_vm_global -> top-edge advance.  /free-blocks = 0.
+/d2 0 def
+
+vm-global-info /step2-3 exch def
+step2-3 /free-blocks get 0 eq                         (s2: step3 -- forward+top-edge clears list) rt-ok
+
+% Cleanup anchor2.
+/anchor2 0 def
+
+vm-global-info /clean2 exch def
+clean2 /total-bytes get pre2 /total-bytes get eq      (s2: cleanup back to baseline) rt-ok
+
+% ====================================================================
+% SECTION 3: top-edge advance with bin-eligible block
+% ====================================================================
+% Sub-threshold block AT m_vm_global must NOT enter a bin -- it's
+% reclaimed via top-edge advance instead.  Free + re-alloc cycle
+% should not leak into the bin.
+
+/anchor3 null def
+/topx    null def
+
+vm-global-info /pre3 exch def
+
+true set-global
+55l /anchor3 exch def       % HIGH addr (anchored)
+66l /topx    exch def       % LOW addr (m_vm_global)
+false set-global
+
+% topx is at m_vm_global.  Free topx -> top-edge advance, NOT bin insertion.
+/topx 0 def
+
+vm-global-info /freed3 exch def
+freed3 /free-blocks get 0 eq                          (s3: top-edge advance -- no bin block) rt-ok
+freed3 /free-bytes  get 0 eq                          (s3: top-edge -- free-bytes 0) rt-ok
+
+% Cleanup.
+/anchor3 0 def
+
+vm-global-info /clean3 exch def
+clean3 /total-bytes get pre3 /total-bytes get eq      (s3: cleanup back to baseline) rt-ok
+
+% ====================================================================
+% SECTION 4: mixed sizes -- bin[0] and bin[1] coexist
+% ====================================================================
+% Allocate Long (32) and Int128 (40) with anchors so neither is at
+% m_vm_global when freed.  Both go to their respective bins
+% independently; coalesce doesn't cross between them because they're
+% separated by anchors.
+
+/anchor4-hi null def
+/long-mid   null def
+/anchor4-mid null def
+/int128-mid null def
+/anchor4-lo null def
+
+vm-global-info /pre4 exch def
+
+true set-global
+77l /anchor4-hi   exch def         % HIGH (32 bytes, Long)
+88l /long-mid     exch def         % 32 bytes, Long  -- to free into bin[0]
+99l /anchor4-mid  exch def         % 32 bytes, Long
+1q /int128-mid exch def                        % 40 bytes, Int128 -- to free into bin[1]
+1010l /anchor4-lo exch def         % 32 bytes, Long, at m_vm_global
+false set-global
+
+vm-global-info /alloc4 exch def
+% 32*4 + 40 = 168 bytes
+alloc4 /total-bytes get pre4 /total-bytes get sub 168 eq
+    (s4: 4 longs + 1 int128 grew by 168)             rt-ok
+
+% Free long-mid (mid, 32 bytes) -> bin[0].
+% Forward (anchor4-hi live), backward (anchor4-mid live).  No coalesce.
+/long-mid 0 def
+
+vm-global-info /freed4-1 exch def
+freed4-1 /free-blocks get 1 eq                        (s4: long freed into bin[0]) rt-ok
+freed4-1 /free-bytes  get 32 eq                       (s4: 32 free bytes after long) rt-ok
+
+% Free int128-mid (mid, 40 bytes) -> bin[1].
+% Forward (anchor4-mid live), backward (anchor4-lo live).  No coalesce.
+/int128-mid 0 def
+
+vm-global-info /freed4-2 exch def
+freed4-2 /free-blocks get 2 eq                        (s4: bin[0] + bin[1] = 2 blocks) rt-ok
+freed4-2 /free-bytes  get 72 eq                       (s4: 32 + 40 = 72 free bytes) rt-ok
+
+% Allocate a NEW Long.  Bin[0] hit (32 byte), reuses long-mid's slot.
+/long-reuse null def
+true set-global
+121l /long-reuse exch def
+false set-global
+
+vm-global-info /alloc4-r1 exch def
+alloc4-r1 /free-blocks get 1 eq                       (s4: bin[0] consumed; bin[1] still has 1) rt-ok
+alloc4-r1 /free-bytes  get 40 eq                      (s4: 40 free bytes (only int128 left)) rt-ok
+alloc4-r1 /total-bytes get freed4-2 /total-bytes get eq
+    (s4: total-bytes unchanged on bin[0] reuse)      rt-ok
+
+% Allocate a NEW Int128.  Bin[1] hit, reuses int128-mid's slot.
+/int128-reuse null def
+true set-global
+2q /int128-reuse exch def
+false set-global
+
+vm-global-info /alloc4-r2 exch def
+alloc4-r2 /free-blocks get 0 eq                       (s4: both bins empty after reuse) rt-ok
+alloc4-r2 /total-bytes get freed4-2 /total-bytes get eq
+    (s4: total-bytes unchanged on bin[1] reuse)      rt-ok
+
+% Cleanup.
+/anchor4-hi 0 def
+/anchor4-mid 0 def
+/anchor4-lo 0 def
+/long-reuse 0 def
+/int128-reuse 0 def
+
+vm-global-info /clean4 exch def
+clean4 /total-bytes get pre4 /total-bytes get eq      (s4: cleanup back to baseline) rt-ok
+
+% ====================================================================
+% SECTION 5: split into bin remainder
+% ====================================================================
+% Coalesce two free blocks into a >= threshold block in the general
+% list, then sub-threshold alloc carves a piece off, leaving a
+% sub-threshold remainder which gvm_free_insert_anywhere routes to a bin.
+%
+% Plan:
+%   1. Allocate anchor5-hi (32), top-long (32), int128-piece (40),
+%      anchor5-lo (32).  Layout (high->low):
+%      anchor5-hi, top-long, int128-piece, anchor5-lo.
+%   2. Free top-long.  Mid block -> bin[0] (32 bytes).
+%   3. Free int128-piece.  Mid block.  Forward neighbour top-long is
+%      free in bin[0] -> coalesce, unlink-anywhere.  Merged 40+32 = 72
+%      bytes.  72 >= threshold -> goes to GENERAL LIST (not a bin).
+%      Backward (anchor5-lo live), no further coalesce.
+%   4. Allocate a 32-byte global Long.  Bin[0] empty (top-long was
+%      coalesced out).  Walk general list, find 72-byte block, take
+%      32, leave 40-byte remainder.  40 < 64 -> remainder lands in
+%      BIN[1].  Free-blocks goes from 1 (general list) to 1 (bin[1]),
+%      but free-bytes drops from 72 to 40.
+
+/anchor5-hi  null def
+/top-long    null def
+/int128-piece null def
+/anchor5-lo  null def
+
+vm-global-info /pre5 exch def
+
+true set-global
+130l /anchor5-hi exch def                                % 32 bytes
+140l /top-long exch def                                  % 32 bytes -> bin[0]
+3q /int128-piece exch def                                % 40 bytes
+150l /anchor5-lo exch def                                % 32 bytes (m_vm_global)
+false set-global
+
+vm-global-info /alloc5 exch def
+alloc5 /total-bytes get pre5 /total-bytes get sub 136 eq
+    (s5: 3 longs + 1 int128 grew by 136)             rt-ok
+
+% Step 1: free top-long -> bin[0].
+/top-long 0 def
+vm-global-info /step5-1 exch def
+step5-1 /free-blocks get 1 eq                         (s5: step1 -- top-long in bin[0])  rt-ok
+step5-1 /free-bytes  get 32 eq                        (s5: step1 -- 32 free bytes)       rt-ok
+
+% Step 2: free int128-piece.  Forward neighbour top-long is in bin[0]
+% -> gvm_free_unlink_anywhere.  Merged 40+32 = 72 bytes.  72 NOT
+% bin-eligible -> general list.
+/int128-piece 0 def
+vm-global-info /step5-2 exch def
+step5-2 /free-blocks get 1 eq                         (s5: step2 -- coalesced 72-byte block in list) rt-ok
+step5-2 /free-bytes  get 72 eq                        (s5: step2 -- 72 free bytes) rt-ok
+
+% Step 3: allocate a 32-byte Long.  Bin[0] empty -> walk list -> find
+% 72-byte block -> take 32, leave 40-byte remainder -> bin[1].
+/split-target null def
+true set-global
+160l /split-target exch def
+false set-global
+
+vm-global-info /step5-3 exch def
+step5-3 /free-blocks get 1 eq                         (s5: step3 -- split remainder in bin[1])  rt-ok
+step5-3 /free-bytes  get 40 eq                        (s5: step3 -- 40 free bytes) rt-ok
+
+% Step 4: confirm remainder is bin-resident by allocating an Int128
+% (40 bytes).  Bin[1] hit, reuses the remainder slot.
+/int128-final null def
+true set-global
+4q /int128-final exch def
+false set-global
+
+vm-global-info /step5-4 exch def
+step5-4 /free-blocks get 0 eq                         (s5: step4 -- bin[1] consumed, bins empty) rt-ok
+step5-4 /total-bytes get step5-3 /total-bytes get eq
+    (s5: step4 -- total-bytes unchanged on bin[1] reuse) rt-ok
+
+% Cleanup.
+/anchor5-hi 0 def
+/anchor5-lo 0 def
+/split-target 0 def
+/int128-final 0 def
+
+vm-global-info /clean5 exch def
+clean5 /total-bytes get pre5 /total-bytes get eq      (s5: cleanup back to baseline) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_gvm_heap_fastbins: ALL TESTS PASSED) =
+(__test_ok__) =

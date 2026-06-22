@@ -1,0 +1,198 @@
+% ====================================================================
+% test_format_errors.trx -- Phase-3 P3 sad-path coverage for the
+% format-string engine (printfmt.inl / scanfmt.inl / ops_format.inl).
+% Targets enumerated from per-line gcov; every trigger and error
+% name was probed live
+% against the engine before being pinned here.  Grammar contracts:
+% trix-reference.md "PrintFmt/ScanFmt Format-String Specification".
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: PrintFmt format-string parse errors
+% ====================================================================
+
+{ 32 string ({0) mark 5 sprint-fmt } try
+/invalid-format-string eq (pf: premature end of format string) rt-ok clear
+
+{ 32 string ({0x}) mark 5 sprint-fmt } try
+/invalid-format-string eq (pf: junk after arg-id) rt-ok clear
+
+{ 32 string ({0:dq}) mark 5 sprint-fmt } try
+/invalid-format-string eq (pf: junk after format-spec) rt-ok clear
+
+{ 32 string ({01234567890}) mark 5 sprint-fmt } try
+/range-check eq (pf: arg-id exceeds 9 digits) rt-ok clear
+
+{ 32 string ({0:{<5d}) mark 5 sprint-fmt } try
+/invalid-format-string eq (pf: brace as fill specifier) rt-ok clear
+
+{ 32 string ({0:.}) mark 5 sprint-fmt } try
+/invalid-format-string eq (pf: missing precision after dot) rt-ok clear
+
+% dynamic width: wrong arg type, then out-of-range value
+{ 32 string ({0:{1}d}) mark 5 (x) sprint-fmt } try
+/type-check eq (pf: dynamic width arg not an integer) rt-ok clear
+
+{ 32 string ({0:{1}d}) mark 5 99999 sprint-fmt } try
+/range-check eq (pf: dynamic width out of range) rt-ok clear
+
+% ====================================================================
+% SECTION 2: PrintFmt unsupported-type-for-kind arms (one per
+% Object kind's formatter; float types on integrals, integer types
+% on floats/composites)
+% ====================================================================
+
+{ 32 string ({0:e}) mark 5b sprint-fmt } try
+/invalid-format-string eq (pf: e on byte) rt-ok clear
+{ 32 string ({0:f}) mark 5 sprint-fmt } try
+/invalid-format-string eq (pf: f on integer) rt-ok clear
+{ 32 string ({0:f}) mark 5u sprint-fmt } try
+/invalid-format-string eq (pf: f on uinteger) rt-ok clear
+{ 32 string ({0:f}) mark 5l sprint-fmt } try
+/invalid-format-string eq (pf: f on long) rt-ok clear
+{ 32 string ({0:f}) mark 5ul sprint-fmt } try
+/invalid-format-string eq (pf: f on ulong) rt-ok clear
+{ 32 string ({0:f}) mark 5q sprint-fmt } try
+/invalid-format-string eq (pf: f on int128) rt-ok clear
+{ 32 string ({0:f}) mark 5uq sprint-fmt } try
+/invalid-format-string eq (pf: f on uint128) rt-ok clear
+{ 32 string ({0:f}) mark 5a sprint-fmt } try
+/invalid-format-string eq (pf: f on address) rt-ok clear
+{ 32 string ({0:d}) mark 3.5 sprint-fmt } try
+/invalid-format-string eq (pf: d on real) rt-ok clear
+{ 32 string ({0:d}) mark 3.5d sprint-fmt } try
+/invalid-format-string eq (pf: d on double) rt-ok clear
+{ 32 string ({0:f}) mark true sprint-fmt } try
+/invalid-format-string eq (pf: f on boolean) rt-ok clear
+{ 32 string ({0:d}) mark /n sprint-fmt } try
+/invalid-format-string eq (pf: d on name) rt-ok clear
+{ 32 string ({0:d}) mark (s) sprint-fmt } try
+/invalid-format-string eq (pf: d on string) rt-ok clear
+% //add inside {} executes when the proc runs (scanner immediate-lookup);
+% push the operands BEFORE the try and keep only sprint-fmt in the proc.
+32 string ({0:d}) mark //add { sprint-fmt } try
+/invalid-format-string eq (pf: d on operator) rt-ok clear
+% (no Mark case: a Mark value above the args-mark is indistinguishable
+% from the args boundary, so the mark-formatter arm is unreachable
+% through the mark-based print ops)
+{ 32 string ({0:d}) mark null sprint-fmt } try
+/invalid-format-string eq (pf: d on null) rt-ok clear
+{ 32 string ({0:d}) mark [1] sprint-fmt } try
+/invalid-format-string eq (pf: d on array) rt-ok clear
+{ 32 string ({0:d}) mark { 1 } sprint-fmt } try
+/invalid-format-string eq (pf: d on packed) rt-ok clear
+{ 32 string ({0:d}) mark << /a 1 >> sprint-fmt } try
+/invalid-format-string eq (pf: d on dict) rt-ok clear
+{ 32 string ({0:d}) mark {{ 1 }} sprint-fmt } try
+/invalid-format-string eq (pf: d on set) rt-ok clear
+{ 32 string ({0:d}) mark 5 { add } curry sprint-fmt } try
+/invalid-format-string eq (pf: d on curry) rt-ok clear
+
+% precision limits: float precision cap and radix base out of range
+{ 32 string ({0:.99f}) mark 3.5 sprint-fmt } try
+/invalid-format-string eq (pf: float precision exceeds max) rt-ok clear
+{ 32 string ({0:.37d}) mark 5 sprint-fmt } try
+/invalid-format-string eq (pf: radix base above 36) rt-ok clear
+
+% ====================================================================
+% SECTION 3: ScanFmt format-string parse errors
+% ====================================================================
+
+{ (x) ({0) mark 0 sscan-fmt } try
+/invalid-format-string eq (sf: premature end of format string) rt-ok clear
+
+{ (5) ({01234567890:d}) mark 0 sscan-fmt } try
+/range-check eq (sf: arg-id exceeds 9 digits) rt-ok clear
+
+{ (5) ({0:2000d}) mark 0 sscan-fmt } try
+/range-check eq (sf: width out of range) rt-ok clear
+
+{ (5) ({0:{<3d}) mark 0 sscan-fmt } try
+/invalid-format-string eq (sf: brace as fill specifier) rt-ok clear
+
+{ (5) ({0:.}) mark 0 sscan-fmt } try
+/invalid-format-string eq (sf: missing precision after dot) rt-ok clear
+
+{ (x) ({0:I}) mark null sscan-fmt } try
+/invalid-format-string eq (sf: empty :I strftime template) rt-ok clear
+
+{ (x) ({0:D}) mark null sscan-fmt } try
+/invalid-format-string eq (sf: empty :D strftime template) rt-ok clear
+
+% ====================================================================
+% SECTION 4: ScanFmt input/match/type failures
+% ====================================================================
+
+{ () (X) mark sscan-fmt } try
+/scan-match-fail eq (sf: literal vs end of input) rt-ok clear
+
+{ (4) ({0:d} {1:d}) mark 0 0 sscan-fmt } try
+/scan-type-fail eq (sf: input exhausted at second slot) rt-ok clear
+
+{ (42.5) ({0:d}) mark 0 sscan-fmt } try
+/scan-type-fail eq (sf: fractional literal into integer target) rt-ok clear
+
+{ (1e3) ({0:d}) mark 0 sscan-fmt } try
+/scan-type-fail eq (sf: scientific notation into integer target) rt-ok clear
+
+{ (abc) ({0:d}) mark 0 sscan-fmt } try
+/scan-type-fail eq (sf: non-numeric input for d) rt-ok clear
+
+{ (42u) ({0:d}) mark 0 sscan-fmt } try
+/scan-type-fail eq (sf: suffix-mismatched literal into integer target) rt-ok clear
+
+{ (3.14d) ({0:f}) mark 0.0 sscan-fmt } try
+/scan-type-fail eq (sf: d-suffix literal into real target) rt-ok clear
+
+{ (verylongword) ({0:s}) mark 4 string sscan-fmt } try
+/scan-input-fail eq (sf: target string too small) rt-ok clear
+
+{ (12) ({0:5d}) mark 0 sscan-fmt } try
+/scan-input-fail eq (sf: minimum width not satisfied) rt-ok clear
+
+{ (****) ({0:*>3d}) mark 0 sscan-fmt } try
+/scan-type-fail eq (sf: all fill no digits) rt-ok clear
+
+{ (tr) ({0:?}) mark null sscan-fmt } try
+/scan-input-fail eq (sf: input ends mid boolean literal) rt-ok clear
+
+% ====================================================================
+% SECTION 5: stream-target print ops on a non-writable stream
+% ====================================================================
+
+% The write-access verify fires before the ops' own not-writable arm,
+% so a read-only stream raises /read-only (operands pre-pushed: the
+% stream op inside {} would re-execute per the proc-element rule).
+/ro-stream (LICENSE) (r)#b stream def
+ro-stream ({0}) mark 5 { fprint-fmt } try
+/read-only eq (fprint-fmt: read-only stream rejected) rt-ok clear
+ro-stream ({0}) [5] { afprint-fmt } try
+/read-only eq (afprint-fmt: read-only stream rejected) rt-ok clear
+ro-stream close-stream
+
+% control: the engine still works after the gauntlet
+32 string ({0:#06x}) mark 255 sprint-fmt
+true eq exch (0x00ff) eq and (pf: clean format after error gauntlet) rt-ok clear
+% trailing space: a :s slot reads up to the next whitespace and raises
+% scan-input-fail on bare end-of-input (reference example has it too)
+(42 ok ) ({0:d} {1:s}) mark 0 8 string sscan-fmt
+2 eq exch (ok) eq and exch 42 eq and (sf: clean scan after error gauntlet) rt-ok clear
+
+% ====================================================================
+% Done
+% ====================================================================
+
+(Format error tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

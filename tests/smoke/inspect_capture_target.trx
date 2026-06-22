@@ -1,0 +1,21 @@
+% inspect_capture_target.trx -- target for the output-capture smoke test.
+% Prints between steps so we can confirm:
+%   1. user-script print does NOT corrupt the alt-screen UI;
+%   2. drained output reaches the output pane (visible in the captured
+%      bytes from the pty);
+%   3. uninstall dumps the tail to the real terminal.
+%
+% The debugger hook only fires INSIDE proc bodies (top-level ops have no
+% @call frame so debug_current_source_pos returns 0/0 and source-line
+% coalescing suppresses every event).  All the action happens inside
+% /run-target.
+
+/run-target {
+    (banner-line-one) =
+    (banner-line-two) =
+    /x 42 def
+    (after-x) =
+    (final) =
+} def
+
+run-target

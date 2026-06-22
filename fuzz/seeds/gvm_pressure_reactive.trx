@@ -1,0 +1,7 @@
+% reactive cells created/combined inside ${...}.
+${ mark 20 { 256 string } repeat array-from-mark } pop
+${ 1 cell } /a exch def
+${ 2 cell } /b exch def
+${ [ a b ] { add } cell-combine } /sum exch def
+{ 10 a cell-set 20 b cell-set } batch
+sum cell-get

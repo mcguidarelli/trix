@@ -1,0 +1,28 @@
+% ====================================================================
+% golden/global_handler.trx -- custom handlersdict handler regression.
+%
+% A proc installed into handlersdict (errordict /handlersdict get)
+% intercepts an uncaught error: the runtime prints the backtrace to
+% stderr, invokes the handler with the six-operand contract
+% (errname operator msg ostack estack dstack, errname on top), and a
+% handler that returns NORMALLY must end the run cleanly with exit
+% code 0 -- the run_golden_tests.sh exit-code check is part of this
+% test.  Regression for the empty-exec-stack hang: error()'s stack
+% reset used to discard the bootstrap's Quit floor, so a returning
+% handler parked the interpreter forever in wait_for_exec_ready
+% (fixed in ops_system.inl error() by re-pushing Quit beneath
+% @handler-done; this file deadlocked before the fix).
+% ====================================================================
+
+errordict /handlersdict get /div-by-zero {
+    (handler errname: ) print =
+    (handler operator: ) print =
+    (handler msg: ) print =
+    % three stack-snapshot arrays remain (ostack estack dstack)
+    pop pop pop
+    (handler returning normally) =
+} put
+
+(before error) =
+1 0 div
+(NOT REACHED -- the error unwound the program) =

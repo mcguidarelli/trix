@@ -1,0 +1,132 @@
+% test_logic_aggregate_between.trx -- Tests for aggregate operator
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+%=== aggregate: basic ===
+
+% sum of explicit alternatives
+0 { add } [{ 1 } { 2 } { 3 }] aggregate
+6 eq                                    (aggregate: sum 1+2+3 = 6) rt-ok
+clear
+
+% count alternatives
+0 { pop 1 add } [{ 10 } { 20 } { 30 }] aggregate
+3 eq                                    (aggregate: count = 3) rt-ok
+clear
+
+% empty alternatives returns init
+42 { add } [] aggregate
+42 eq                                   (aggregate: empty = init) rt-ok
+clear
+
+% all alternatives fail returns init
+99 { add } [{ fail } { fail }] aggregate
+99 eq                                   (aggregate: all fail = init) rt-ok
+clear
+
+% failing alternatives are skipped
+0 { add } [{ 1 } { fail } { 3 }] aggregate
+4 eq                                    (aggregate: skip fail = 4) rt-ok
+clear
+
+% max via aggregate
+-999999 { max } [{ 42 } { 7 } { 100 } { 3 }] aggregate
+100 eq                                  (aggregate: max = 100) rt-ok
+clear
+
+% min via aggregate
+999999 { min } [{ 42 } { 7 } { 100 } { 3 }] aggregate
+3 eq                                    (aggregate: min = 3) rt-ok
+clear
+
+%=== aggregate + range ===
+
+% sum 1..10
+0 { add } 1 11 range-from aggregate
+55 eq                                   (aggregate+range: sum 1..10 = 55) rt-ok
+clear
+
+% sum 1..100
+0 { add } 1 101 range-from aggregate
+5050 eq                                 (aggregate+range: sum 1..100 = 5050) rt-ok
+clear
+
+% sum of squares 1..5 via map + aggregate
+0 { add } 1 6 range-from { dup mul } map aggregate
+55 eq                                   (aggregate+range: sum sq 1..5 = 55) rt-ok
+clear
+
+% count even numbers in 1..20 via filter + length
+1 21 range-from { dup 2 mod 0 eq } filter length
+10 eq                                   (range+filter: count even = 10) rt-ok
+clear
+
+%=== aggregate: error handling ===
+
+% non-persistable init rejected
+{ [] { pop } [{ 1 }] aggregate } try
+/type-check eq                          (aggregate: array init rejected) rt-ok
+clear
+
+% non-persistable reducer result rejected
+{ 0 { pop [] } [{ 1 }] aggregate } try
+/type-check eq                          (aggregate: array result rejected) rt-ok
+clear
+
+% non-callable reducer rejected
+{ 0 42 [{ 1 }] aggregate } try
+/type-check eq                          (aggregate: non-callable reducer) rt-ok
+clear
+
+% non-array alternatives rejected
+{ 0 { add } 42 aggregate } try
+/type-check eq                          (aggregate: non-array alts) rt-ok
+clear
+
+%=== aggregate: product ===
+
+1 { mul } 1 6 range-from aggregate
+120 eq                                  (aggregate: 5! = 120) rt-ok
+clear
+
+%=== nested aggregate via map ===
+
+% sum of (sum of 1..i) for i = 1..5
+% i=1: 1, i=2: 3, i=3: 6, i=4: 10, i=5: 15 -> total 35
+0 { add } 1 6 range-from {
+    /i exch def
+    0 { add } 1 i 1 add range-from aggregate
+} map aggregate
+35 eq                                   (aggregate: nested sum = 35) rt-ok
+clear
+
+%=== convenience dict ===
+
+% logic dict has aggregate
+//:systemdict:logic /aggregate known?    (logic dict: aggregate) rt-ok
+clear
+
+%=== aggregate: composability ===
+
+% aggregate inside each element of a map
+1 4 range-from {
+    /base exch def
+    0 { add } 1 base 1 add range-from aggregate
+} map
+dup length 3 eq                         (aggregate+map: 3 results) rt-ok
+dup 0 get 1 eq                          (aggregate+map: sum 1..1 = 1) rt-ok
+dup 1 get 3 eq                          (aggregate+map: sum 1..2 = 3) rt-ok
+dup 2 get 6 eq                          (aggregate+map: sum 1..3 = 6) rt-ok
+pop clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_logic_aggregate_between: ALL TESTS PASSED) =
+(__test_ok__) =

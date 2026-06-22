@@ -1,0 +1,6 @@
+% composite builders inside ${...} after global filler: the 2nd/3rd
+% sub-alloc can fire vm_global_gc mid-op.
+${ mark 40 { 512 string } repeat array-from-mark } /filler exch def
+${ << /a [1 2 3] /b (str) /c 3.14d >> } /g exch def
+g /a get length
+${ mark 1 2 3 4 5 array-from-mark dup 0 (boxed) put }

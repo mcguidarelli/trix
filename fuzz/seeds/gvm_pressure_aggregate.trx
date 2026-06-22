@@ -1,0 +1,5 @@
+% aggregate with global alternatives + ExtValue accumulator in ${...}.
+${ mark 30 { 300 string } repeat array-from-mark } pop
+0 { pop 1 add } [ { ${ [1 2 3] } } { ${ (gs) } } ] aggregate pop
+${ 5000000000l { add } [ { 1 } { 2l } { 7 } ] aggregate } pop
+0 { add } [ { 1 } { 2 } { 3 } ] aggregate

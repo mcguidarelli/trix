@@ -1,0 +1,1 @@
+10 20 /x /y 2 2 { x y add } begin-locals

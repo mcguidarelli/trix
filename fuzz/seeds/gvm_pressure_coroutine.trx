@@ -1,0 +1,5 @@
+% coroutine launch contexts inside ${...} (registry link windows).
+${ mark 20 { 256 string } repeat array-from-mark } pop
+${ mark { 1 2 add } coroutine-launch } /c exch def
+0 coroutine-sleep
+c coroutine-await

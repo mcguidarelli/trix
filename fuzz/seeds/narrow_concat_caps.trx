@@ -1,0 +1,6 @@
+% append/concat/join/flatten with grown counts (count-narrowing shapes).
+mark 1 1 900 { dup } repeat array-from-mark
+(boxed) append length
+(abcdefgh) dup concat dup concat dup concat length
+[(aaaa) (bbbb) (cccc)] (--) join length
+[[1 2] [3 4] [5 6]] flatten length

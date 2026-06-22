@@ -1,0 +1,93 @@
+% ====================================================================
+% test_b6_lazy_gc.trx -- B6 group 1b-3 regression (lazy:1-0)
+% ====================================================================
+% The lazy thunk-chain builders (lazy-from / lazy-repeat / lazy-repeat-n /
+% lazy-map / lazy-filter / lazy-take / lazy-take-while, plus the @-resume/build
+% completions) held freshly-allocated curry/thunk/lazy intermediates -- and the
+% head clones / popped exec-stack sources -- only in C locals across the NEXT
+% allocating call.  Inside ${...} those allocs route to gvm_alloc, which can fire
+% vm_global_gc mid-build (gvm_heap.inl:899-903); the unrooted half-built chain was
+% then swept and the published lazy-seq referenced freed VM.  Fixed by rooting
+% every in-flight global handle on the op/exec stack across each allocation
+% (helpers gated on m_curr_alloc_global; the @-resume/test sites defer their
+% exec-stack pops so the popped sources stay rooted across the build).
+%
+% COVERAGE NOTE: the precise mid-op auto-GC SWEEP window is covered by code
+% inspection + the systemic helper application, matching tests/test_b6_gc.trx's
+% methodology.  An auto-GC was empirically confirmed to fire during a large lazy
+% realization (e.g. lazy-for-each over tens of thousands of elements), but a
+% deterministic non-vacuous assertion is not possible here without environment-
+% specific VM tuning: lazy realization retains its forced prefix, so a large
+% enough run to guarantee a mid-op GC also exhausts the region rather than
+% recovering.  These checks instead (a) verify every builder produces the correct
+% sequence in the global region -- guarding the rooting/reorder refactor against
+% breaking normal operation -- and (b) verify a built-in-global chain survives an
+% explicit vm-global-gc.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: each builder produces a correct sequence inside ${...}
+% (the global region, where the rooting fix applies)
+% ====================================================================
+${ 5 lazy-from 3 lazy-take lazy-to-array } /b exch def
+b length 3 eq (lazy: lazy-from length, global) rt-ok
+0  0 1 2 { b exch get add } for  18 eq (lazy: lazy-from values, global) rt-ok       % 5+6+7
+
+${ 9 lazy-repeat 4 lazy-take lazy-to-array } /c exch def
+c length 4 eq (lazy: lazy-repeat length, global) rt-ok
+0  0 1 3 { c exch get add } for  36 eq (lazy: lazy-repeat values, global) rt-ok     % 9*4
+
+${ 7 3 lazy-repeat-n lazy-to-array } /d exch def
+d length 3 eq (lazy: lazy-repeat-n length, global) rt-ok
+0  0 1 2 { d exch get add } for  21 eq (lazy: lazy-repeat-n values, global) rt-ok   % 7*3
+
+${ 1 lazy-from 5 lazy-take { 2 mul } lazy-map lazy-to-array } /e exch def
+e length 5 eq (lazy: lazy-map length, global) rt-ok
+0  0 1 4 { e exch get add } for  30 eq (lazy: lazy-map values, global) rt-ok        % 2+4+6+8+10
+
+${ 1 lazy-from 10 lazy-take { 2 mod 0 eq } lazy-filter lazy-to-array } /f exch def
+f length 5 eq (lazy: lazy-filter length, global) rt-ok
+0  0 1 4 { f exch get add } for  30 eq (lazy: lazy-filter values, global) rt-ok     % 2+4+6+8+10
+
+${ 1 lazy-from { 5 le } lazy-take-while lazy-to-array } /g exch def
+g length 5 eq (lazy: lazy-take-while length, global) rt-ok
+0  0 1 4 { g exch get add } for  15 eq (lazy: lazy-take-while values, global) rt-ok % 1..5
+
+% ====================================================================
+% SECTION 2: composed pipeline + streaming consumer in the global region
+% ====================================================================
+% A map+filter+take pipeline (exercises lazy_map_impl, lazy_filter_impl/test,
+% lazy_take, and the @-build/@-resume completions together).
+% 1,2,3,... -> x3 -> 3,6,9,12,15,18,21,... -> keep >10 -> 12,15,18,21,... -> take 4
+${ 1 lazy-from { 3 mul } lazy-map { 10 gt } lazy-filter 4 lazy-take lazy-to-array } /p exch def
+p length 4 eq (lazy: map+filter+take length, global) rt-ok
+0  0 1 3 { p exch get add } for  66 eq (lazy: map+filter+take values, global) rt-ok % 12+15+18+21
+p 0 get 12 eq (lazy: pipeline first element) rt-ok
+
+% Streaming consumer (lazy-for-each) over a global chain: bounded live set,
+% verifies element values via an accumulator.
+/acc 0 store
+${ 1 lazy-from 200 lazy-take { acc add /acc exch store } lazy-for-each }
+acc 20100 eq (lazy: lazy-for-each streams global chain intact) rt-ok               % sum 1..200
+
+% ====================================================================
+% SECTION 3: a built-in-global chain survives an explicit vm-global-gc
+% ====================================================================
+${ 100 lazy-from 5 lazy-take } /h exch def
+vm-global-gc pop
+${ h lazy-to-array } /h2 exch def
+h2 length 5 eq (lazy: chain length survives vm-global-gc) rt-ok
+0  0 1 4 { h2 exch get add } for  510 eq (lazy: chain values survive vm-global-gc) rt-ok % 100..104
+
+(test_b6_lazy_gc.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

@@ -1,0 +1,1407 @@
+% lib/dwarf.trx -- Layer 2: a DWARF reader written in Trix.
+%
+% Reads the host program's own debug info (or any on-disk ELF) to answer the
+% two questions a debugger needs and `peek` alone cannot: name -> address and
+% type -> layout.  The C++ side (src/ops_dwarf.inl) supplies the raw primitives
+% a stack language cannot do safely or cheaply: dwarf-open (mmap an ELF),
+% peek-bytes (windowed blob read), leb128-decode, module-load-bias /
+% module-load-bias-for (per-module runtime slide), and dwarf-read-die (a fused
+% per-DIE parser -- a performance op, see below).  The
+% ELF header walk, compilation-unit iteration, type layout, and the public API
+% are parsed in Trix here.
+%
+% Storage model: LAZY / on-demand.  A single Trix container caps at 65535
+% elements (length_t = uint16_t) and a real binary has far more DIEs than that
+% (the trix debug binary alone is ~140K DIEs in one CU), so the reader never
+% materializes the whole DIE tree.  dwarf-load retains only a paged name index
+% (variables with a static address) and a small per-CU descriptor table;
+% dwarf-layout re-parses just a type's subtree on demand from the mmap'd bytes.
+% Resident memory scales with #globals, not #DIEs.
+%
+% Performance: per-DIE parsing (abbrev lookup + form decoding) ran ~15-20
+% interpreted ops per attribute; on a real binary that interpreter overhead --
+% not allocation -- dominated (~64% of a load profile).  So a single C++ op,
+% dwarf-read-die, parses one DIE given a per-CU scope array (built by
+% dwarf--scope-for); the Trix walks (dwarf--index-cu at load, dwarf--members-at
+% for layout) drive it.  This cut the engine-binary load from ~70s to ~0.4s.
+%
+% Public API:
+%   dwarf-load    path -- ctx             open an ELF + index its DWARF
+%   dwarf-lookup  ctx name -- info|null   global by name -> info dict
+%                                         << /name /address /type-offset /cu-name >>.
+%                                         A namespace/class-scoped name resolves by
+%                                         its bare OR qualified form (ns::C::name);
+%                                         a name shared by several globals resolves
+%                                         to the last (see dwarf-lookup-all).
+%   dwarf-lookup-all ctx name -- [info..] ALL globals sharing a name (L-4: cross-CU
+%                                         file statics / per-function statics no
+%                                         longer shadow); empty array if none.
+%   dwarf-lookup-fn ctx name -- info|null function by name -> info dict (same
+%                                         shape; /address is DW_AT_low_pc, the
+%                                         entry; /type-offset is the return type;
+%                                         bare or qualified, like dwarf-lookup)
+%   dwarf-lookup-fn-all ctx name -- [..]  ALL functions sharing a name (overloads)
+%   dwarf-layout  ctx type-offset -- lay  type DIE -> layout dict (see below)
+%   dwarf-peek    ctx name -- value|null  global by name -> its static value,
+%                                         decoded to a typed Trix value: a Record
+%                                         for a struct (Dict if it has nameless
+%                                         members), a scalar for a base/enum/ptr.
+%   dwarf-peek-info ctx info -- value|null peek a SPECIFIC info (one entry from
+%                                         dwarf-lookup-all) -- same static decode.
+%   dwarf-peek-live ctx name -- value|null same, but the CURRENT value from THIS
+%                                         process's memory (relocated by the ctx
+%                                         module's load bias); self-introspection
+%                                         only -- ctx = the running exe or a .so
+%                                         loaded in this process (L-21).
+%   dwarf-close   ctx --                  release the ctx's mmap'd ELF image; the
+%                                         ctx is dead afterward (idempotent) -- L-17.
+%   dwarf-line    ctx addr -- row|null    map a link-time PC to its source row
+%                                         << /file /line /column /is-stmt /address >>
+%                                         via .debug_line (v2-v5); null if uncovered
+%                                         or no line info (L-22).
+%   dwarf-line-fn ctx name -- row|null    the source location of a function by
+%                                         name (lookup-fn + dwarf-line on its
+%                                         entry low_pc) -- L-22.
+%
+% Dynamic scoping note: dwarf--find-section reads parse state (dw-endian, the
+% ELF section cursors) as free variables that resolve up the dict stack from
+% the active frame.  This is Trix dynamic scoping, not module-global state.
+
+% ====================================================================
+% Fixed-width readers.  Multi-byte reads honor the file's byte order via the
+% free variable dw-endian (a "(<)" or "(>)" unpack prefix set by dwarf-load
+% from ELF EI_DATA).   addr -- value
+% ====================================================================
+/dwarf-rd-u8 { 1 peek-bytes (B) unpack pop /integer-type cast } def
+/dwarf-rd-u16 { 2 peek-bytes dw-endian (H) concat unpack pop /integer-type cast } def
+/dwarf-rd-i32 { 4 peek-bytes dw-endian (i) concat unpack pop } def
+/dwarf-rd-u32 { 4 peek-bytes dw-endian (I) concat unpack pop /integer-type cast } def
+/dwarf-rd-u64 { 8 peek-bytes dw-endian (L) concat unpack pop } def
+
+% A DWARF section offset: 4 bytes in 32-bit DWARF, 8 in 64-bit DWARF, per the
+% free variable dw-offset-size set by dwarf-load from each CU's initial length.
+/dwarf-rd-off { dw-offset-size 8 eq { dwarf-rd-u64 } { dwarf-rd-u32 } if-else } def
+
+% True when the C string at nameaddr equals target exactly.
+% nameaddr target -- bool
+/dwarf-name-matches {
+    |nameaddr target|#+4
+    /tlen target length local-def
+    /buf nameaddr tlen 1 add peek-bytes local-def
+    buf 0 tlen get-interval target eq
+    buf tlen get 0b eq and
+} def
+
+% ====================================================================
+% ELF section lookup.  Reads elf-base / sh-table / e_shnum / e_shentsize /
+% shstr-base as free variables from the dwarf-load frame.
+% target -- addr size   (addr null + size 0 if the section is absent)
+% ====================================================================
+/dwarf--find-section {
+    |target|#+6
+    /r-addr null local-def
+    /r-size 0 local-def
+    0 1 e_shnum 1 sub {
+        /i exch local-def
+        /hdr sh-table i e_shentsize mul add local-def
+        shstr-base hdr dwarf-rd-i32 add target dwarf-name-matches {
+            /r-addr elf-base hdr 24 add dwarf-rd-u64 add local-def
+            /r-size hdr 32 add dwarf-rd-u64 local-def
+        } if
+    } for
+    r-addr r-size
+} def
+
+% ====================================================================
+% Paged name -> value map.  A single Trix dict caps at 65535 entries, but a
+% large target can hold more than that many globals/functions, so the index
+% hash-buckets into dwarf--pmap-buckets fixed sub-dicts (the z-machine
+% array-of-pages pattern applied to a map): capacity ~= buckets * 65535.
+% ====================================================================
+/dwarf--pmap-buckets 64 def
+
+% Cheap O(1) bucket from a name's first byte, last byte, and length.
+% name -- bucket-index
+/dwarf--pmap-hash {
+    |name|#+3
+    /len name length local-def
+    len 0 eq { 0 } {
+        /a name 0 get /integer-type cast local-def
+        /b name len 1 sub get /integer-type cast local-def
+        a 131 mul  b 7 mul add  len add  dwarf--pmap-buckets mod
+    } if-else
+} def
+
+% cap -- pmap   (cap = initial per-bucket dict capacity)
+/dwarf--pmap-new {
+    |cap|#+3
+    /m 4 dynamic-dict local-def
+    /bs dwarf--pmap-buckets array local-def
+    0 1 dwarf--pmap-buckets 1 sub { /i exch local-def bs i  cap dynamic-dict  put } for
+    m /buckets bs put
+    m
+} def
+
+% m name value --   (L-4: keep ALL same-name entries, not just the last.  A
+% unique name stores the bare info; on collision the bucket becomes a cons link
+% [info prev] whose head is the latest -- O(1) per put, so a heavily-collided
+% name like a per-function `__PRETTY_FUNCTION__` static does not turn indexing
+% quadratic.  dwarf--pmap-get returns the raw bucket value; dwarf-lookup unwraps
+% the head and dwarf-lookup-all walks the chain via dwarf--chain-to-array.)
+/dwarf--pmap-put {
+    |m name value|#+4
+    /sd m /buckets get  name dwarf--pmap-hash  get local-def
+    sd name known? { sd name  [ value  sd name get ]  put } { sd name value put } if-else
+} def
+
+% m name -- value true | false   (value is a bare info or a [info prev] cons head)
+/dwarf--pmap-get {
+    |m name|#+3
+    /sd m /buckets get  name dwarf--pmap-hash  get local-def
+    sd name known? { sd name get true } { false } if-else
+} def
+
+% A pmap bucket value (a bare info, or a cons chain [info [info ... terminal]])
+% flattened to an array of infos, newest first.   v -- [ info ... ]
+/dwarf--chain-to-array {
+    |v|#+4
+    /res 0 array local-def
+    /cur v local-def
+    { cur is-array } { /res res cur 0 get append local-def  /cur cur 1 get local-def } while
+    res cur append
+} def
+
+% ====================================================================
+% peek-type derivation.  Keyed by (DW_AT_encoding * 16 + byte-size).
+% DWARF encodings: 2 boolean, 4 float, 5 signed, 6 signed_char,
+% 7 unsigned, 8 unsigned_char.   enc bsz -- key
+% ====================================================================
+/dwarf--peek-key { exch 16 mul add } def
+
+/dwarf--peek-type 32 dynamic-dict def
+dwarf--peek-type 4 4 dwarf--peek-key /real-type put
+dwarf--peek-type 4 8 dwarf--peek-key /double-type put
+dwarf--peek-type 5 2 dwarf--peek-key /short-type put     % L-15: short (widens to Integer)
+dwarf--peek-type 5 4 dwarf--peek-key /integer-type put
+dwarf--peek-type 5 8 dwarf--peek-key /long-type put
+dwarf--peek-type 5 16 dwarf--peek-key /int128-type put   % L-15: __int128
+dwarf--peek-type 6 1 dwarf--peek-key /byte-type put
+dwarf--peek-type 7 1 dwarf--peek-key /byte-type put
+dwarf--peek-type 7 2 dwarf--peek-key /ushort-type put    % L-15: unsigned short (widens to UInteger)
+dwarf--peek-type 7 4 dwarf--peek-key /uinteger-type put
+dwarf--peek-type 7 8 dwarf--peek-key /ulong-type put
+dwarf--peek-type 7 16 dwarf--peek-key /uint128-type put  % L-15: unsigned __int128
+dwarf--peek-type 8 1 dwarf--peek-key /byte-type put
+dwarf--peek-type 2 1 dwarf--peek-key /byte-type put
+% L-15: an 80-bit / 128-bit FLOAT (long double, encoding 4 byte-size 16) stays
+% unmapped -> /unknown: Trix has no extended/quad float type to decode it into.
+
+% enc bsz -- /peek-type   (/unknown if the (encoding,width) pair is unmapped)
+/dwarf--peek-type-for {
+    |enc bsz|#+1
+    /k enc bsz dwarf--peek-key local-def
+    dwarf--peek-type k known? { dwarf--peek-type k get } { /unknown } if-else
+} def
+
+% ====================================================================
+% Integer-keyed paged map (offset -> value).  Parallels dwarf--pmap-* but keys
+% on a DIE's .debug_info offset (an integer), so it cannot reuse the byte-hash;
+% the hash is offset mod buckets.  Used during indexing to record a scoped
+% declaration's qualified name keyed by its offset (L-14), so an out-of-line
+% definition can recover it through DW_AT_specification.  capacity ~= buckets *
+% 65535 -- the paging keeps a DIE-heavy C++ binary under the single-dict cap.
+% ====================================================================
+/dwarf--imap-buckets 64 def
+
+% cap -- imap   (cap = initial per-bucket dict capacity)
+/dwarf--imap-new {
+    |cap|#+3
+    /m 2 dynamic-dict local-def
+    /bs dwarf--imap-buckets array local-def
+    0 1 dwarf--imap-buckets 1 sub { /i exch local-def bs i  cap dynamic-dict  put } for
+    m /buckets bs put
+    m
+} def
+
+% m off value --
+/dwarf--imap-put {
+    |m off value|#+2
+    /bs m /buckets get local-def
+    bs  off dwarf--imap-buckets mod  get  off value put
+} def
+
+% m off -- value true | false
+/dwarf--imap-get {
+    |m off|#+3
+    /sd m /buckets get  off dwarf--imap-buckets mod  get local-def
+    sd off known? { sd off get true } { false } if-else
+} def
+
+% ====================================================================
+% L-14 qualified-name helpers.  scope-names / nscopes / by-decl-off are read as
+% free variables from the dwarf--index-cu frame (Trix dynamic scoping).
+% ====================================================================
+
+% Build ns::Class::basename from the active lexical scope stack.   basename -- qname
+% (the caller ensures nscopes > 0).
+/dwarf--qualify {
+    |basename|#+4
+    /qn () local-def
+    0 1 nscopes 1 sub { /i exch local-def /qn qn scope-names i get concat (::) concat local-def } for
+    qn basename concat
+} def
+
+% A DIE's DW_AT_specification / DW_AT_abstract_origin target offset, or null.
+% die -- off|null
+/dwarf--spec-off {
+    |die|#+1
+    die /specification known? { die /specification get }
+        { die /abstract-origin known? { die /abstract-origin get } { null } if-else } if-else
+} def
+
+% Index info under the bare DW_AT_name (last write wins -- a bare query still
+% resolves, ignoring scope), and when a qualified name is supplied, also under it
+% (unique) plus stored as /qualified-name.   basename qname pmap info --
+/dwarf--index-scoped {
+    |basename qname pmap info|#+2
+    pmap basename info dwarf--pmap-put
+    qname null eq not {
+        info /qualified-name qname put
+        pmap qname info dwarf--pmap-put
+    } if
+} def
+
+% Index one DEFINITION (located variable / low_pc subprogram).  A lexically
+% scoped definition (clang emits namespace members in place) is qualified inline
+% from the scope stack; a file-scope definition is bare-indexed now and DEFERRED
+% into `pending` (read as a free var, a reference mutated in place + self-counting
+% via /count) so dwarf--resolve-pending can qualify it via its DW_AT_specification
+% target once the walk is complete -- the declaration may be walked after it.
+% die basename info pmap --
+/dwarf--index-def {
+    |die basename info pmap|#+5
+    nscopes 0 gt {
+        basename  basename dwarf--qualify  pmap info dwarf--index-scoped
+    } {
+        /so die dwarf--spec-off local-def
+        so null eq {
+            basename null pmap info dwarf--index-scoped
+        } {
+            % File-scope definition: take its declaration's recorded qualified name
+            % now if the declaration was already walked, else bare-index + defer.
+            by-decl-off so /integer-type cast dwarf--imap-get {
+                /qn exch local-def
+                basename qn pmap info dwarf--index-scoped
+            } {
+                basename null pmap info dwarf--index-scoped
+                /n pending /count get local-def
+                pending n [ info so pmap ] put
+                pending /count n 1 add put
+            } if-else
+        } if-else
+    } if-else
+} def
+
+% Resolve the deferred out-of-line definitions: each pending entry is
+% [ info spec-off pmap ] for a file-scope definition whose declaration's
+% qualified name (in by-decl-off, keyed by offset) was not yet known when the
+% definition was indexed (a compiler may emit the located definition BEFORE the
+% namespace/struct holding the declaration -- e.g. clang's static members).  Now
+% that the CU walk is complete, attach the qualified key + /qualified-name.
+% pending by-decl-off --
+/dwarf--resolve-pending {
+    |pending bdo|#+4
+    0 1 pending /count get 1 sub {
+        /pi exch local-def
+        /pe pending pi get local-def
+        bdo pe 1 get /integer-type cast dwarf--imap-get {
+            /pqn exch local-def
+            pe 0 get /qualified-name pqn put
+            pe 2 get pqn pe 0 get dwarf--pmap-put
+        } if
+    } for
+} def
+
+% ====================================================================
+% Index pass for one CU.  Walks every DIE via the C++ dwarf-read-die op,
+% retaining only (a) the CU root's DW_AT_str_offsets_base / DW_AT_addr_base
+% (folded back into the scope so later DIEs resolve strx/addrx correctly) and
+% (b) every variable with a static address (-> by-var-name) and every subprogram
+% with an entry address DW_AT_low_pc (-> by-fn-name), added to the paged indices.
+% Each per-DIE dict is transient (recycled when the next read overwrites it);
+% nothing but the indices survive, so memory scales with #globals+#functions.
+%   ctx cu-desc --
+% ====================================================================
+/dwarf--index-cu {
+    |ctx cu|#+28
+    /by-var-name ctx /by-var-name get local-def
+    /by-fn-name ctx /by-fn-name get local-def
+    /so-base ctx /so-base get local-def
+    /ad-base ctx /ad-base get local-def
+    /scope ctx cu dwarf--scope-for local-def
+    /cu-hi cu /hi get local-def
+    /cur-off cu /die-start get local-def
+    % L-14: track the lexical scope while descending so a namespace/class-scoped
+    % name is indexed under its qualified form (ns::Class::name) as well as its
+    % bare DW_AT_name.  depth is the DIE-tree depth (CU root = 0); the scope stack
+    % holds enclosing namespace/class names + the depth each opened at, popped
+    % when a null sibling terminator returns us to that depth.  by-decl-off maps a
+    % scoped declaration's offset -> its qualified name, so an out-of-line
+    % definition (located, at file scope) recovers it via DW_AT_specification.  It
+    % is CU-local: spec refs are CU-relative, and dropping it per CU bounds memory
+    % and leaves nothing extra in the post-load context.
+    /depth 0 local-def
+    /scope-names 32 array local-def
+    /scope-depths 32 array local-def
+    /nscopes 0 local-def
+    /by-decl-off 4 dwarf--imap-new local-def
+    % Out-of-line definitions whose declaration is walked AFTER them defer their
+    % qualified key here ([ info spec-off pmap ] at integer keys, /count tracks the
+    % length); dwarf--resolve-pending finishes them once by-decl-off is complete
+    % (CU-local, like by-decl-off).
+    /pending 8 dynamic-dict local-def
+    pending /count 0 put
+    % L-4: the CU's source file (DW_AT_name on the compile_unit root, the first
+    % DIE), stamped onto each info as /cu-name so collisions are distinguishable.
+    /cu-name null local-def
+    {
+        cur-off cu-hi sub 0 ge { exit } if
+        scope cur-off dwarf-read-die /haschild exch local-def /noff exch local-def /die exch local-def
+        /die-off cur-off local-def
+        /cur-off noff local-def
+        die null eq {
+            % End of a sibling chain: ascend one level, closing scopes that opened
+            % at or below the level we just left.
+            /depth depth 1 sub local-def
+            { nscopes 0 gt { scope-depths nscopes 1 sub get depth ge } and? }
+            { /nscopes nscopes 1 sub local-def } while
+        } {
+            /tg die /tag get local-def
+            % L-19 guard: reject split DWARF up front with a clear error instead of
+            % silently returning empty lookups.  The skeleton CU in the main file
+            % carries (almost) no real DIEs -- they live in a separate .dwo that is
+            % typically absent at runtime.  A DWARF5 skeleton root is
+            % DW_TAG_skeleton_unit (74); a pre-v5 GNU split root is an ordinary
+            % compile_unit carrying DW_AT_GNU_dwo_name.  Both surface /dwo-name.
+            die-off cu /die-start get eq {
+                tg 74 eq  die /dwo-name known?  or {
+                    /unsupported (dwarf-load: split DWARF (.dwo) is unsupported -- rebuild the target with non-split -g, i.e. without -gsplit-dwarf) throw-with
+                } if
+            } if
+            % CU root: fold the *_base attrs into BOTH the cu-desc (so on-demand
+            % dwarf-layout reads the right per-CU slice) and the scope (so the
+            % rest of this index walk resolves strx/addrx correctly).
+            die /str-offsets-base-attr known? {
+                cu /str-offsets-base so-base die /str-offsets-base-attr get add put
+                scope 7 so-base die /str-offsets-base-attr get add put
+            } if
+            die /addr-base-attr known? {
+                cu /addr-base ad-base die /addr-base-attr get add put
+                scope 8 ad-base die /addr-base-attr get add put
+            } if
+            % CU root (compile_unit=17) is the first DIE: capture its source-file
+            % name for /cu-name stamping (L-4).  Re-read it now that this CU's
+            % str_offsets_base is folded in, so a strx name (clang) resolves against
+            % THIS CU's slice, not the default first-CU slice (a strp name from gcc
+            % was already correct, but re-reading is harmless).
+            tg 17 eq {
+                /croot scope die-off dwarf-read-die pop pop local-def
+                /cu-name croot null eq { null } { croot /name known? { croot /name get } { null } if-else } if-else local-def
+            } if
+            % Variable (DW_TAG_variable=52) with a static address.  L-5: an
+            % out-of-line C++ definition is nameless with a DW_AT_specification,
+            % so the name + type come from dwarf--die-name / dwarf--die-type
+            % (which follow the spec to the declaration).  Skip if still nameless.
+            % L-14: a lexically scoped definition is qualified inline; a file-scope
+            % one defers via dwarf--index-def (its qualified name comes from the
+            % spec target's recorded declaration once the walk completes).
+            tg 52 eq  die /location known?  and {
+                /loc die /location get local-def
+                loc 0ul eq not {
+                    /nm ctx die dwarf--die-name local-def
+                    nm null eq not {
+                        /info 6 dynamic-dict local-def
+                        info /name nm put
+                        info /address loc put
+                        info /type-offset ctx die dwarf--die-type put
+                        info /cu-name cu-name put
+                        die nm info by-var-name dwarf--index-def
+                    } if
+                } if
+            } if
+            % Subprogram (DW_TAG_subprogram=46) with a body: DW_AT_low_pc is its
+            % entry address.  Declarations (no low-pc) are skipped.  /type is the
+            % return type (null = void).  Name/type follow the spec too (L-5).
+            tg 46 eq  die /low-pc known?  and {
+                /loc die /low-pc get local-def
+                loc 0ul eq not {
+                    /nm ctx die dwarf--die-name local-def
+                    nm null eq not {
+                        /info 6 dynamic-dict local-def
+                        info /name nm put
+                        info /address loc put
+                        info /type-offset ctx die dwarf--die-type put
+                        info /cu-name cu-name put
+                        die nm info by-fn-name dwarf--index-def
+                    } if
+                } if
+            } if
+            % L-14: a scoped NAMED declaration records its qualified name keyed by
+            % offset so the out-of-line definition above can recover it.  A static
+            % data member is a variable without a location (gcc>=5/clang) or, in
+            % legacy DWARF (gcc<=4), a DW_TAG_member (13) carrying DW_AT_declaration;
+            % a function declaration is a subprogram without low_pc.
+            nscopes 0 gt { die /name known? } and? {
+                tg 52 eq die /location known? not and
+                tg 46 eq die /low-pc known? not and  or
+                tg 13 eq die /declaration known? and  or
+                {
+                    by-decl-off  die-off  die /name get dwarf--qualify  dwarf--imap-put
+                } if
+            } if
+            % L-14: a named namespace (57) / class (2) / struct (19) / union (23)
+            % with children opens a lexical scope for everything nested below it.
+            haschild 1 eq {
+                tg 57 eq  tg 2 eq or  tg 19 eq or  tg 23 eq or  die /name known?  and
+                nscopes 32 lt  and {
+                    scope-names nscopes die /name get put
+                    scope-depths nscopes depth put
+                    /nscopes nscopes 1 add local-def
+                } if
+                /depth depth 1 add local-def
+            } if
+        } if-else
+    } loop
+    pending by-decl-off dwarf--resolve-pending
+} def
+
+% ====================================================================
+% Public: open an ELF + index every compilation unit in .debug_info.
+% Handles DWARF v2-v5, 32- and 64-bit DWARF, both byte orders.  Retains only a
+% paged variable-name index and a per-CU descriptor table (cu-base/hi/die-start
+% + abbrev/offset/base info) so dwarf-layout can re-parse types on demand.
+% path -- ctx
+% ====================================================================
+/dwarf-load {
+    |path|#+48
+    path dwarf-open /elf-size exch local-def /elf-base exch local-def
+    % Validate the ELF identity (byte-order independent) before any multi-byte
+    % read, then set dw-endian from EI_DATA (1 = LSB/little, 2 = MSB/big).
+    elf-base 4 peek-bytes (\x7fELF) eq not { /invalid-image-file (dwarf-load: not an ELF file) throw-with } if
+    elf-base 4 add dwarf-rd-u8 2 eq not { /invalid-image-file (dwarf-load: not a 64-bit ELF (ELFCLASS64)) throw-with } if
+    /dw-endian elf-base 5 add dwarf-rd-u8 2 eq { (>) } { (<) } if-else local-def
+    % e_shoff and the Elf64_Shdr sh_offset/sh_size below are 8-byte fields; read
+    % them as full u64 (a 4-byte read only happens to work on little-endian).
+    /e_shoff elf-base 40 add dwarf-rd-u64 local-def
+    /e_shentsize elf-base 58 add dwarf-rd-u16 local-def
+    /e_shnum elf-base 60 add dwarf-rd-u16 local-def
+    /e_shstrndx elf-base 62 add dwarf-rd-u16 local-def
+    /sh-table elf-base e_shoff add local-def
+    /shstr-hdr sh-table e_shstrndx e_shentsize mul add local-def
+    /shstr-base elf-base shstr-hdr 24 add dwarf-rd-u64 add local-def
+    (.debug_info) dwarf--find-section /di-size exch local-def /di-base exch local-def
+    (.debug_abbrev) dwarf--find-section /ab-size exch local-def /ab-base exch local-def
+    (.debug_str) dwarf--find-section /ds-size exch local-def /ds-base exch local-def
+    (.debug_line_str) dwarf--find-section /ls-size exch local-def /ls-base exch local-def
+    (.debug_str_offsets) dwarf--find-section /so-size exch local-def /so-base exch local-def
+    (.debug_addr) dwarf--find-section /ad-size exch local-def /ad-base exch local-def
+    (.debug_line) dwarf--find-section /dl-size exch local-def /dl-base exch local-def
+    di-base null eq { /invalid-image-file (dwarf-load: no .debug_info section) throw-with } if
+    ab-base null eq { /invalid-image-file (dwarf-load: no .debug_abbrev section) throw-with } if
+    /di-section-end di-base di-size add local-def
+    /ctx 24 dynamic-dict local-def
+    ctx /elf-base elf-base put
+    ctx /elf-size elf-size put
+    % The load path, kept so a live peek can relocate by the bias of the module
+    % this ELF was loaded from (main exe or a .so) -- see dwarf--peek-info-impl.
+    ctx /path path put
+    ctx /dw-endian dw-endian put
+    ctx /di-base di-base put
+    ctx /ds-base ds-base put
+    ctx /ls-base ls-base put
+    ctx /so-base so-base put
+    ctx /ad-base ad-base put
+    % .debug_line (L-22): null if absent (a binary built without line info); the
+    % CU root's DW_AT_stmt_list offsets into it.
+    ctx /dl-base dl-base put
+    % Section-header table (for the L-3 typed peek's VA -> file-image mapping,
+    % resolved on demand after dwarf-load's frame is gone).
+    ctx /sh-table sh-table put
+    ctx /e_shnum e_shnum put
+    ctx /e_shentsize e_shentsize put
+    ctx /by-var-name 8 dwarf--pmap-new put
+    ctx /by-fn-name 8 dwarf--pmap-new put
+    ctx /cus 16 dynamic-dict put
+    ctx /n-cus 0 put
+    /cu-start di-base local-def
+    {
+        cu-start di-section-end sub 0l ge { exit } if
+        % Initial length: a 0xffffffff sentinel selects 64-bit DWARF (8-byte
+        % length + 8-byte section offsets); otherwise 32-bit (4-byte each).
+        /init-len cu-start dwarf-rd-i32 local-def
+        init-len -1 eq {
+            /dw-offset-size 8 local-def
+            /cu-len-field 12 local-def
+            /cu-unit-length cu-start 4 add dwarf-rd-u64 /long-type cast local-def
+        } {
+            /dw-offset-size 4 local-def
+            /cu-len-field 4 local-def
+            /cu-unit-length init-len /long-type cast local-def
+        } if-else
+        cu-unit-length 1l lt { /invalid-image-file (dwarf-load: non-positive CU unit_length) throw-with } if
+        cu-start cu-len-field add cu-unit-length add di-section-end sub 0l gt { /invalid-image-file (dwarf-load: CU extends past .debug_info) throw-with } if
+        /cu-vp cu-start cu-len-field add local-def
+        /cu-version cu-vp dwarf-rd-u16 local-def
+        cu-version 5 eq {
+            % v5: version(2) unit_type(1) address_size(1) abbrev_offset(offset)
+            % L-19 guard: a split-DWARF skeleton (DW_UT_skeleton=4) or split
+            % compile unit (DW_UT_split_compile=5) carries an EXTRA 8-byte dwo_id
+            % after abbrev_offset (so the die-start math below would be wrong) and
+            % its real DIEs live in a separate .dwo, typically absent at runtime.
+            % Reject up front with a clear error rather than mis-parsing.
+            /cu-unit-type cu-vp 2 add dwarf-rd-u8 local-def
+            cu-unit-type 4 eq  cu-unit-type 5 eq  or {
+                /unsupported (dwarf-load: split DWARF (.dwo) is unsupported -- rebuild the target with non-split -g, i.e. without -gsplit-dwarf) throw-with
+            } if
+            /cu-abbrev-offset cu-vp 4 add dwarf-rd-off local-def
+            /cu-die-start cu-vp 4 add dw-offset-size add local-def
+        } {
+            cu-version 2 ge cu-version 4 le and {
+                % v2/v3/v4: version(2) abbrev_offset(offset) address_size(1)
+                /cu-abbrev-offset cu-vp 2 add dwarf-rd-off local-def
+                /cu-die-start cu-vp 2 add dw-offset-size add 1 add local-def
+            } {
+                /unsupported (dwarf-load: only DWARF v2-v5 are supported in this build) throw-with
+            } if-else
+        } if-else
+        % Per-CU descriptor in section offsets.  v5 index bases default to just
+        % past the unit header (8 bytes in 32-bit DWARF, 16 in 64-bit) and are
+        % overwritten by the CU root's DW_AT_*_base during dwarf--index-cu.
+        /hdr-skip dw-offset-size 8 eq { 16 } { 8 } if-else local-def
+        /cu 12 dynamic-dict local-def
+        cu /cu-base cu-start di-base sub /integer-type cast put
+        cu /hi cu-start cu-len-field add cu-unit-length add di-base sub /integer-type cast put
+        cu /die-start cu-die-start di-base sub /integer-type cast put
+        cu /abbrev-base ab-base cu-abbrev-offset add put
+        cu /dw-offset-size dw-offset-size put
+        cu /str-offsets-base so-base null eq { null } { so-base hdr-skip add } if-else put
+        cu /addr-base ad-base null eq { null } { ad-base hdr-skip add } if-else put
+        ctx /cus get  ctx /n-cus get  cu put
+        ctx /n-cus  ctx /n-cus get 1 add  put
+        ctx cu dwarf--index-cu
+        /cu-start cu-start cu-len-field add cu-unit-length add local-def
+    } loop
+    ctx
+} def
+
+% ====================================================================
+% Public: resolve a global variable by name.   O(1) paged-index lookup.
+% Returns the SHARED stored info dict -- callers must not mutate it.
+% L-14: a namespace/class-scoped global is indexed under BOTH its bare name and
+% its qualified form (`ns::Class::name`), so either resolves it; a bare query
+% ignores scope (last definition indexed wins on a name collision), and the
+% qualified form disambiguates.  /qualified-name is present on scoped globals.
+% L-4: a name shared by several globals (cross-CU file statics, per-function
+% statics) resolves here to the LAST indexed; dwarf-lookup-all returns them all.
+% Each info carries /cu-name (its CU's source file) to tell collisions apart.
+% ctx name -- << /name /address /type-offset /cu-name [/qualified-name] >> | null
+% ====================================================================
+/dwarf-lookup {
+    |ctx target|#+2
+    ctx /by-var-name get target dwarf--pmap-get
+    { dup is-array { 0 get } if } { null } if-else
+} def
+
+% ====================================================================
+% Public (L-4): ALL globals sharing a name, newest first (empty array if none).
+% Same-name file-local statics in different CUs -- or a per-function static like
+% __PRETTY_FUNCTION__ repeated across functions -- no longer shadow each other;
+% /cu-name + /address distinguish them, and dwarf-peek-info reads each.
+% ctx name -- [ << /name /address /type-offset /cu-name [/qualified-name] >> ... ]
+% ====================================================================
+/dwarf-lookup-all {
+    |ctx target|#+2
+    ctx /by-var-name get target dwarf--pmap-get
+    { dwarf--chain-to-array } { 0 array } if-else
+} def
+
+% ====================================================================
+% Public: resolve a function (DW_TAG_subprogram) by name to its entry address.
+% O(1) paged-index lookup; returns the SHARED stored info dict -- do not mutate.
+% Only DEFINED functions (those with DW_AT_low_pc) are indexed; declarations are
+% not.  L-14: an out-of-line member / namespace function is indexed under BOTH
+% its bare DW_AT_name and its qualified form (`ns::Class::fn`, recovered from the
+% declaration the definition's DW_AT_specification points back to).  A bare query
+% still collides across overloads / same-named methods (last definition wins);
+% the qualified form disambiguates by scope.  /qualified-name is present then.
+% L-4: dwarf-lookup-fn-all returns every overload / same-named definition.
+% ctx name -- << /name /address /type-offset /cu-name [/qualified-name] >> | null   (/type-offset = return type, null = void)
+% ====================================================================
+/dwarf-lookup-fn {
+    |ctx target|#+2
+    ctx /by-fn-name get target dwarf--pmap-get
+    { dup is-array { 0 get } if } { null } if-else
+} def
+
+% Public (L-4): ALL functions sharing a name (overloads / same-named methods),
+% newest first; empty array if none.   ctx name -- [ info ... ]
+/dwarf-lookup-fn-all {
+    |ctx target|#+2
+    ctx /by-fn-name get target dwarf--pmap-get
+    { dwarf--chain-to-array } { 0 array } if-else
+} def
+
+% ====================================================================
+% Find the CU descriptor whose [cu-base, hi) section-offset range contains an
+% offset (linear over the small per-CU table).   ctx off -- cu-desc | null
+% ====================================================================
+/dwarf--cu-for {
+    |ctx off|#+6
+    /cus ctx /cus get local-def
+    /n ctx /n-cus get local-def
+    /res null local-def
+    0 1 n 1 sub {
+        /i exch local-def
+        /c cus i get local-def
+        res null eq  off c /cu-base get ge  and  off c /hi get lt  and { /res c local-def } if
+    } for
+    res
+} def
+
+% ====================================================================
+% Build the per-CU parse scope array that the C++ dwarf-read-die op consumes.
+% Index order is the op's contract:
+%   0 di-base  1 ds-base  2 ls-base  3 big?  4 cu-base  5 off-size
+%   6 abbrev-base  7 str-offsets-base  8 addr-base
+% ctx cu -- scope-array
+% ====================================================================
+/dwarf--scope-for {
+    |ctx cu|#+2
+    [ ctx /di-base get
+      ctx /ds-base get
+      ctx /ls-base get
+      ctx /dw-endian get (>) eq
+      cu /cu-base get
+      cu /dw-offset-size get
+      cu /abbrev-base get
+      cu /str-offsets-base get
+      cu /addr-base get ]
+} def
+
+% ctx off -- die-dict | null   (on-demand single-DIE parse via dwarf-read-die)
+/dwarf--die-at {
+    |ctx off|#+4
+    /off off /integer-type cast local-def
+    /cu ctx off dwarf--cu-for local-def
+    cu null eq { null } {
+        ctx cu dwarf--scope-for off dwarf-read-die pop pop
+    } if-else
+} def
+
+% L-5: a DIE's DW_AT_specification / DW_AT_abstract_origin target (an out-of-line
+% C++ definition points back to its declaration for the name + type; an inlined
+% instance points to its abstract origin).   ctx die -- target-die | null
+/dwarf--spec-target {
+    |ctx die|#+2
+    die /specification known? { ctx die /specification get dwarf--die-at } {
+        die /abstract-origin known? { ctx die /abstract-origin get dwarf--die-at } { null } if-else
+    } if-else
+} def
+
+% A DIE's name, following specification/abstract-origin when the DIE itself is a
+% nameless out-of-line definition.   ctx die -- name | null
+/dwarf--die-name {
+    |ctx die|#+3
+    die /name known? { die /name get } {
+        /t ctx die dwarf--spec-target local-def
+        t null eq { null } { ctx t dwarf--die-name } if-else
+    } if-else
+} def
+
+% A DIE's type offset, following specification/abstract-origin similarly.
+% ctx die -- type-offset | null
+/dwarf--die-type {
+    |ctx die|#+3
+    die /type known? { die /type get } {
+        /t ctx die dwarf--spec-target local-def
+        t null eq { null } { ctx t dwarf--die-type } if-else
+    } if-else
+} def
+
+% ctx struct-off -- [ member-dict ... ]   (forward subtree walk of direct
+% members; nameless members are kept without a /name -- the L-2 anon guard).
+% Cursor is threaded as an immediate Integer offset (not a heap Address).
+/dwarf--members-at {
+    |ctx struct-off|#+20
+    /struct-off struct-off /integer-type cast local-def
+    % Collect into a local append-grown array, NOT the global scratch arena: this
+    % proc must be re-entrant (dwarf-layout recurses into nested aggregate
+    % members) and must not consume a caller's pending scratch items.
+    /members 0 array local-def
+    /be ctx /dw-endian get (>) eq local-def
+    /cu ctx struct-off dwarf--cu-for local-def
+    cu null eq not {
+        /scope ctx cu dwarf--scope-for local-def
+        /cu-hi cu /hi get local-def
+        scope struct-off dwarf-read-die /shc exch local-def /cur-off exch local-def pop
+        shc 1 eq {
+            /depth 1 local-def
+            {
+                cur-off cu-hi sub 0 ge { exit } if
+                scope cur-off dwarf-read-die /chc exch local-def /noff exch local-def /cd exch local-def
+                /cur-off noff local-def
+                cd null eq {
+                    /depth depth 1 sub local-def
+                    depth 0 le { exit } if
+                } {
+                    depth 1 eq  cd /tag get 13 eq  and {
+                        /mem 12 dynamic-dict local-def
+                        cd /name known? { mem /name cd /name get put } if
+                        cd /member-offset known? { mem /offset cd /member-offset get put } { mem /offset 0 put } if-else
+                        cd /type known? {
+                            mem /type-offset cd /type get put
+                            /ti ctx cd /type get dwarf--describe-type local-def
+                            mem /resolved-type-offset ti /resolved-type-offset get put
+                            mem /kind ti /kind get put
+                            ti /byte-size known? { mem /byte-size ti /byte-size get put } if
+                            ti /encoding known? { mem /encoding ti /encoding get put } if
+                            ti /peek-type known? { mem /peek-type ti /peek-type get put } if
+                        } if
+                        % L-6/L-23 bitfield: carry /bit-size + /bit-offset, the
+                        % field's anchor in the byte order's natural direction
+                        % (LSB-from-struct-start on LE, MSB-from-struct-start on
+                        % BE -- dwarf--extract-bits reads it the same way).
+                        % Modern DW_AT_data_bit_offset (DWARF4+/clang) already IS
+                        % that value on both byte orders.  Legacy DW_AT_bit_offset
+                        % (gcc <=v4) counts bits to the LEFT of (more significant
+                        % than) the field's MSB within a DW_AT_byte_size storage
+                        % unit -- a big-endian-natural definition: on BE the anchor
+                        % is member_offset*8 + bit_offset directly; on LE it flips
+                        % to member_offset*8 + (byte_size*8 - bit_offset - bit_size).
+                        cd /bit-size known? {
+                            mem /bit-size cd /bit-size get put
+                            /abs cd /data-bit-offset known? {
+                                cd /data-bit-offset get
+                            } {
+                                be {
+                                    cd /member-offset known? { cd /member-offset get } { 0 } if-else 8 mul
+                                    cd /bit-offset known? { cd /bit-offset get } { 0 } if-else
+                                    add
+                                } {
+                                    cd /member-offset known? { cd /member-offset get } { 0 } if-else 8 mul
+                                    cd /byte-size known? { cd /byte-size get } { 0 } if-else 8 mul
+                                    cd /bit-offset known? { cd /bit-offset get } { 0 } if-else sub
+                                    cd /bit-size get sub
+                                    add
+                                } if-else
+                            } if-else local-def
+                            mem /bit-offset abs put
+                            mem /offset abs 8 div put
+                        } if
+                        /members members mem append local-def
+                    } if
+                    chc 1 eq { /depth depth 1 add local-def } if
+                } if-else
+            } loop
+        } if
+    } if
+    members
+} def
+
+% ====================================================================
+% Follow typedef / const / volatile / restrict / atomic qualifier chains to
+% the underlying type DIE.  Returns the original offset unchanged if it is not
+% a qualifier (or if a qualifier has no DW_AT_type -- e.g. const void).
+% ctx toff -- toff'
+% ====================================================================
+/dwarf--strip-type {
+    |ctx toff|#+6
+    /cur toff local-def
+    {
+        /d ctx cur dwarf--die-at local-def
+        d null eq { exit } if
+        /tg d /tag get local-def
+        tg 22 eq tg 38 eq or tg 53 eq or tg 55 eq or tg 71 eq or {
+            d /type known? { /cur d /type get local-def } { exit } if-else
+        } { exit } if-else
+    } loop
+    cur
+} def
+
+% DW_AT_encoding of a type offset (after stripping qualifiers), or 0 if none.
+% ctx toff -- enc
+/dwarf--enc-of {
+    |ctx toff|#+4
+    /r ctx toff dwarf--strip-type local-def
+    /d2 ctx r dwarf--die-at local-def
+    d2 null eq { 0 } {
+        d2 /encoding known? { d2 /encoding get } { 0 } if-else
+    } if-else
+} def
+
+% DW_TAG -> the semantic kind dwarf--describe-type reports (a dispatch table --
+% the map a `case` would consult, but consulted via known?/get so an UNMAPPED tag
+% falls through to /other rather than throwing).  base_type(36)/enumeration(4)
+% are scalars; pointer(15)/reference(16)/rvalue_reference(66) are pointer-width
+% addresses; structure(19)/union(23) -> aggregate; array(1); ptr_to_member(31);
+% subroutine(21) -> function (a bare function type, the pointee of a fn pointer).
+/dwarf--tag-kind <<
+    36 /base   4 /enum
+    15 /pointer
+    16 /reference   66 /rvalue-reference
+    19 /aggregate   23 /aggregate
+    1 /array
+    31 /ptr-to-member
+    21 /function
+>> def
+
+% ====================================================================
+% Resolve a type offset (through qualifiers) and describe it for peeking.
+% ctx toff -- << /resolved-type-offset N /kind K [/byte-size] [/encoding]
+%                [/peek-type] >>
+% K is /base|/enum (scalar; carries byte-size/encoding/peek-type),
+% /pointer (peek-type /ulong-type, byte-size 8), /reference|/rvalue-reference
+% (L-13: a pointer-width address, peek-type /ulong-type), /aggregate
+% (struct/union), /array, /ptr-to-member (L-13: byte-size if the DIE gives it, no
+% scalar peek), /function (L-13: a bare subroutine type), /void, or /other.
+% ====================================================================
+/dwarf--describe-type {
+    |ctx toff|#+12
+    /rtoff ctx toff dwarf--strip-type local-def
+    /info 8 dynamic-dict local-def
+    info /resolved-type-offset rtoff put
+    /td ctx rtoff dwarf--die-at local-def
+    td null eq { info /kind /void put } {
+        % Tag -> kind via the dispatch table (graceful default /other), then fill
+        % the kind-specific fields.  Dispatching on the semantic kind keeps this a
+        % shallow set of cases instead of a deep tag if-else chain.
+        /tg td /tag get local-def
+        /knd dwarf--tag-kind tg known? { dwarf--tag-kind tg get } { /other } if-else local-def
+        info /kind knd put
+        knd /base eq knd /enum eq or {
+            td /byte-size known? { info /byte-size td /byte-size get put } if
+            /b td /byte-size known? { td /byte-size get } { 0 } if-else local-def
+            % Encoding: the type's own DW_AT_encoding, else (an enum that omits
+            % it, as clang does) the underlying DW_AT_type's encoding.
+            /e td /encoding known? { td /encoding get }
+                { td /type known? { ctx td /type get dwarf--enc-of } { 0 } if-else } if-else local-def
+            e 0 eq not { info /encoding e put } if
+            info /peek-type e b dwarf--peek-type-for put
+        } {
+            knd /pointer eq  knd /reference eq or  knd /rvalue-reference eq or {
+                % L-13: pointer (T*) / reference (T&) / rvalue reference (T&&) are
+                % all a pointer-width address -- peek as a ULong (the DIE gives the
+                % width; 8 if absent).
+                info /byte-size td /byte-size known? { td /byte-size get } { 8 } if-else put
+                info /peek-type /ulong-type put
+            } {
+                % L-13: ptr-to-member carries an ABI byte-size if the DIE gives it
+                % but is not a simple scalar (no peek-type); aggregate / array /
+                % function / other need no extra fields.
+                knd /ptr-to-member eq { td /byte-size known? { info /byte-size td /byte-size get put } if } if
+            } if-else
+        } if-else
+    } if-else
+    info
+} def
+
+% ====================================================================
+% Resolve a DW_TAG_array_type: its element type (DW_AT_type) and the per-dimension
+% element counts from its DW_TAG_subrange_type children (DW_AT_upper_bound + 1, or
+% DW_AT_count).  /counts is the per-dim list; /count is the flat total (product,
+% row-major) -- a flexible/unknown dimension yields count 0.
+% ctx array-off -- << /element-type-offset /count /counts [/byte-size] >>
+% ====================================================================
+/dwarf--array-info {
+    |ctx array-off|#+16
+    /array-off array-off /integer-type cast local-def
+    /info 6 dynamic-dict local-def
+    /ad ctx array-off dwarf--die-at local-def
+    info /element-type-offset ad /type known? { ad /type get } { null } if-else put
+    ad /byte-size known? { info /byte-size ad /byte-size get put } if
+    /counts 0 array local-def
+    /total 1 local-def
+    /cu ctx array-off dwarf--cu-for local-def
+    cu null eq not {
+        /scope ctx cu dwarf--scope-for local-def
+        /cu-hi cu /hi get local-def
+        scope array-off dwarf-read-die /shc exch local-def /cur-off exch local-def pop
+        shc 1 eq {
+            /depth 1 local-def
+            {
+                cur-off cu-hi sub 0 ge { exit } if
+                scope cur-off dwarf-read-die /chc exch local-def /noff exch local-def /cd exch local-def
+                /cur-off noff local-def
+                cd null eq {
+                    /depth depth 1 sub local-def
+                    depth 0 le { exit } if
+                } {
+                    depth 1 eq  cd /tag get 33 eq  and {
+                        /dim cd /upper-bound known? { cd /upper-bound get 1 add }
+                            { cd /count known? { cd /count get } { 0 } if-else } if-else local-def
+                        /counts counts dim append local-def
+                        /total total dim mul local-def
+                    } if
+                    chc 1 eq { /depth depth 1 add local-def } if
+                } if-else
+            } loop
+        } if
+    } if
+    info /counts counts put
+    info /count counts length 0 eq { 0 } { total } if-else put
+    info
+} def
+
+% ====================================================================
+% L-11: resolve a DW_TAG_enumeration_type's enumerators to a name -> value dict.
+% Walks the type's DW_TAG_enumerator (40) children, mapping each DW_AT_name to its
+% DW_AT_const_value (an Integer; signed enumerators arrive via sdata).  Keys are
+% Names (/RED), so the user reads `enums /RED get`.   ctx enum-off -- << /name value ... >>
+% ====================================================================
+/dwarf--enumerators-at {
+    |ctx enum-off|#+12
+    /enum-off enum-off /integer-type cast local-def
+    /enums 8 dynamic-dict local-def
+    /cu ctx enum-off dwarf--cu-for local-def
+    cu null eq not {
+        /scope ctx cu dwarf--scope-for local-def
+        /cu-hi cu /hi get local-def
+        scope enum-off dwarf-read-die /shc exch local-def /cur-off exch local-def pop
+        shc 1 eq {
+            /depth 1 local-def
+            {
+                cur-off cu-hi sub 0 ge { exit } if
+                scope cur-off dwarf-read-die /chc exch local-def /noff exch local-def /cd exch local-def
+                /cur-off noff local-def
+                cd null eq {
+                    /depth depth 1 sub local-def
+                    depth 0 le { exit } if
+                } {
+                    depth 1 eq  cd /tag get 40 eq  and  cd /name known?  and {
+                        enums  cd /name get to-name  cd /const-value known? { cd /const-value get } { 0 } if-else  put
+                    } if
+                    chc 1 eq { /depth depth 1 add local-def } if
+                } if-else
+            } loop
+        } if
+    } if
+    enums
+} def
+
+% ====================================================================
+% Public: resolve a type DIE (by .debug_info offset) to a layout dict.
+% Qualifier/typedef chains are followed first (a typedef'd struct resolves to
+% the struct; a const scalar to the scalar).
+%   base/enum: << /kind /base|/enum /name /byte-size /encoding /peek-type
+%                 /type-offset /resolved-type-offset >>  (an enum also carries
+%                 /enumerators << /NAME value ... >> -- L-11)
+%   pointer:   << /kind /pointer /byte-size 8 /peek-type /ulong-type ... >>
+%   struct:    << /kind /struct /name /byte-size /type-offset /resolved-type-offset
+%                 /members [ << /name /offset /type-offset /resolved-type-offset
+%                              /kind /byte-size /encoding /peek-type >> ... ] >>
+%   union:     same as struct with /kind /union
+%   array:     << /kind /array /count N /counts [d1 ..] /byte-size /type-offset
+%                 /resolved-type-offset /element-layout << recursive layout >> >>
+%                 (/count = flat element total, row-major; multi-dim counts in
+%                 /counts; the element-layout is the base element's layout)
+% A member whose /kind is /aggregate (nested struct/union) or /array also carries
+% /layout -- the recursive dwarf-layout of that member's type -- so the whole
+% shape is resolved in one call (bounded to 16 levels against cyclic DWARF).
+% A bitfield member also carries /bit-size and /bit-offset (absolute bits from the
+% struct start); /offset is then the byte holding the field's first bit.
+% ctx type-offset -- layout
+% ====================================================================
+% ctx toff depth -- lay   (depth = remaining nested-aggregate expansion budget)
+/dwarf--layout-d {
+    |ctx toff depth|#+14
+    /rtoff ctx toff dwarf--strip-type local-def
+    /tdie ctx rtoff dwarf--die-at local-def
+    tdie null eq { << /kind /unknown /type-offset toff >> } {
+        /ttag tdie /tag get local-def
+        /lay 16 dynamic-dict local-def
+        lay /type-offset toff put
+        lay /resolved-type-offset rtoff put
+        tdie /name known? { lay /name tdie /name get put } if
+        ttag 19 eq ttag 23 eq or {
+            ttag 19 eq { lay /kind /struct put } { lay /kind /union put } if-else
+            tdie /byte-size known? { lay /byte-size tdie /byte-size get put } if
+            /members ctx rtoff dwarf--members-at local-def
+            % L-9/L-10: expand each nested aggregate OR array member one level
+            % deeper (struct shape, or array element type + dims), bounded by depth
+            % so pathological / cyclic DWARF cannot recurse forever.  (and?
+            % short-circuits: /kind is absent on a member with no DW_AT_type.)
+            depth 0 gt {
+                0 1 members length 1 sub {
+                    /i exch local-def
+                    /m members i get local-def
+                    m /kind known? { m /kind get  dup /aggregate eq  exch /array eq  or } and? {
+                        m /layout  ctx m /resolved-type-offset get depth 1 sub dwarf--layout-d  put
+                    } if
+                } for
+            } if
+            lay /members members put
+        } {
+            ttag 1 eq {
+                % L-10 array: element type (recursive layout) + per-dim counts.
+                lay /kind /array put
+                /ainfo ctx rtoff dwarf--array-info local-def
+                lay /count ainfo /count get put
+                lay /counts ainfo /counts get put
+                ainfo /byte-size known? { lay /byte-size ainfo /byte-size get put } if
+                /eto ainfo /element-type-offset get local-def
+                eto null eq not  depth 0 gt  and {
+                    lay /element-layout ctx eto depth 1 sub dwarf--layout-d put
+                } if
+                % GCC omits DW_AT_byte_size on array_type -- derive it from
+                % count * element size so a top-level array peek knows its extent.
+                lay /byte-size known? not  lay /element-layout known?  and
+                    { lay /element-layout get /byte-size known? } and? {
+                    lay /byte-size  lay /count get  lay /element-layout get /byte-size get  mul  put
+                } if
+            } {
+                /ti ctx toff dwarf--describe-type local-def
+                lay /kind ti /kind get put
+                ti /byte-size known? { lay /byte-size ti /byte-size get put } if
+                ti /encoding known? { lay /encoding ti /encoding get put } if
+                ti /peek-type known? { lay /peek-type ti /peek-type get put } if
+                % L-11: an enum also carries its enumerator name -> value map.
+                ti /kind get /enum eq { lay /enumerators ctx rtoff dwarf--enumerators-at put } if
+            } if-else
+        } if-else
+        lay
+    } if-else
+} def
+
+% ctx toff -- lay   (public; nested aggregate members carry a recursive /layout)
+/dwarf-layout {
+    |ctx toff|#+2
+    ctx toff 16 dwarf--layout-d
+} def
+
+% ====================================================================
+% L-3 typed peek: resolve a global by name to a typed Trix value.
+%
+% dwarf-peek reads the global's static (link-time) value out of the mmap'd ELF
+% image and decodes it per its type layout: a struct/union becomes a Record
+% (field name -> value), a base type / enum / pointer becomes the matching
+% scalar, and nested structs recurse.  A struct with a nameless member (e.g. an
+% anonymous union) becomes a Dict instead, since a Record schema cannot carry an
+% unnamed field.  The bytes come from the file image, not live process memory,
+% so this works on any on-disk ELF -- not only self; a .bss global (SHT_NOBITS,
+% no file bytes) reads as zero, its load-time value.  Undecoded kinds (arrays,
+% unmapped scalars) appear as null fields rather than failing the whole peek.
+% ====================================================================
+
+% peek-type -> unpack format char.  Width is implied by the char (read via
+% pack-size); byte order is prefixed from dw-endian at decode time.  L-15:
+% /short-type + /ushort-type are 2-byte tags (no native Trix 16-bit scalar) that
+% widen to a Trix Integer / UInteger; /int128-type + /uint128-type are the real
+% 16-byte Trix wide types.
+/dwarf--peek-fmt 16 dynamic-dict def
+dwarf--peek-fmt /byte-type (B) put
+dwarf--peek-fmt /short-type (h) put
+dwarf--peek-fmt /ushort-type (H) put
+dwarf--peek-fmt /integer-type (i) put
+dwarf--peek-fmt /uinteger-type (I) put
+dwarf--peek-fmt /long-type (l) put
+dwarf--peek-fmt /ulong-type (L) put
+dwarf--peek-fmt /int128-type (q) put
+dwarf--peek-fmt /uint128-type (Q) put
+dwarf--peek-fmt /real-type (f) put
+dwarf--peek-fmt /double-type (d) put
+
+% Decode one scalar from a blob at a byte offset; null for an unmapped peek-type.
+% blob off peek-type -- value
+/dwarf--decode-scalar {
+    |blob off pt|#+4
+    dwarf--peek-fmt pt known? {
+        /fmt dw-endian dwarf--peek-fmt pt get concat local-def
+        /n fmt pack-size local-def
+        blob off n get-interval fmt unpack pop
+    } { null } if-else
+} def
+
+% L-6/L-23 bitfield extraction: pull bitsize bits at absolute bit offset bitoff
+% (from blob start) and return a Trix integer.  signed? sign-extends to a Long;
+% an unsigned field returns a ULong.  bitoff is the field's anchor in the byte
+% order's natural direction (set by dwarf--members-at): LSB-from-start on little-
+% endian, MSB-from-start on big-endian -- so `shift` (bitoff mod 8) counts from
+% the low bit of the start byte on LE and from its high bit on BE.  dw-endian is
+% read from dynamic scope (dwarf--peek-lay binds it).
+%   blob bitoff bitsize signed? -- value
+/dwarf--extract-bits {
+    |blob bitoff bitsize signed|#+12
+    /startbyte bitoff 8 div local-def
+    /shift bitoff 8 mod local-def
+    /nbytes shift bitsize add 7 add 8 div local-def
+    /val 0ul local-def
+    dw-endian (>) eq {
+        % Big-endian: byte `startbyte` is most significant, so assemble the
+        % window MSB-first; the field's low bit then sits (window-bits - shift -
+        % bitsize) up from the bottom (shift counts from the start byte's MSB).
+        0 1 nbytes 1 sub {
+            /i exch local-def
+            /val  val 8 shift-left  blob startbyte i add get /ulong-type cast  or  local-def
+        } for
+        /val  val  nbytes 8 mul shift sub bitsize sub  shift-right  1ul bitsize shift-left 1ul sub  and  local-def
+    } {
+        % Little-endian: byte `startbyte` is least significant; the field starts
+        % `shift` bits up from the window's low bit.
+        0 1 nbytes 1 sub {
+            /i exch local-def
+            /val  val  blob startbyte i add get /ulong-type cast  i 8 mul shift-left  or  local-def
+        } for
+        /val  val shift shift-right  1ul bitsize shift-left 1ul sub  and  local-def
+    } if-else
+    signed {
+        bitsize 0 gt { val 1ul bitsize 1 sub shift-left and 0ul eq not } and? {
+            val /long-type cast  1ul bitsize shift-left /long-type cast  sub
+        } {
+            val /long-type cast
+        } if-else
+    } {
+        val
+    } if-else
+} def
+
+% Map a link-time VA to its bytes in the mmap'd image and read nbytes.  Walks
+% the section headers for the allocated section whose VA range contains va; a
+% SHT_NOBITS (.bss) section has no file bytes, so it reads as a zero blob.
+% ctx va nbytes -- blob | null
+/dwarf--read-image {
+    |ctx va nbytes|#+12
+    /dw-endian ctx /dw-endian get local-def
+    /elf-base ctx /elf-base get local-def
+    /sh-table ctx /sh-table get local-def
+    /e_shnum ctx /e_shnum get local-def
+    /e_shentsize ctx /e_shentsize get local-def
+    /res null local-def
+    0 1 e_shnum 1 sub {
+        /i exch local-def
+        res null eq {
+            /hdr sh-table i e_shentsize mul add local-def
+            /sec-va hdr 16 add dwarf-rd-u64 local-def
+            sec-va 0ul gt {
+                /sec-size hdr 32 add dwarf-rd-u64 local-def
+                va sec-va ge  va sec-va sec-size add lt  and {
+                    hdr 4 add dwarf-rd-u32 8 eq {
+                        /res nbytes string local-def
+                    } {
+                        /img elf-base hdr 24 add dwarf-rd-u64 add  va sec-va sub  add local-def
+                        /res img nbytes peek-bytes local-def
+                    } if-else
+                } if
+            } if
+        } if
+    } for
+    res
+} def
+
+% Decode a value from blob at byte offset base, driven by a (recursively
+% expanded) layout dict.  struct/union -> Record (Dict if any member is nameless),
+% array -> a Trix array of decoded elements, scalar/enum/pointer -> the scalar.
+% Nested aggregate / array members and array elements decode via their
+% pre-expanded /layout (or /element-layout) -- no re-derivation.
+% ctx blob base layout -- value
+/dwarf--peek-lay {
+    |ctx blob base lay|#+18
+    /dw-endian ctx /dw-endian get local-def
+    /knd lay /kind get local-def
+    knd /array eq {
+        % L-10: decode into a Trix array of /count elements via /element-layout.
+        /elay lay /element-layout known? { lay /element-layout get } { null } if-else local-def
+        /n lay /count get local-def
+        elay null eq { null } {
+            /esize elay /byte-size known? { elay /byte-size get } { 0 } if-else local-def
+            esize 0 le { null } {
+                /arr n array local-def
+                0 1 n 1 sub {
+                    /i exch local-def
+                    arr i  ctx blob  base i esize mul add  elay dwarf--peek-lay  put
+                } for
+                arr
+            } if-else
+        } if-else
+    } {
+        knd /struct eq knd /union eq or {
+            /members lay /members get local-def
+            /d members length 1 max dynamic-dict local-def
+            /names members length array local-def
+            /nnamed 0 local-def
+            /anon false local-def
+            0 1 members length 1 sub {
+                /i exch local-def
+                /m members i get local-def
+                m /name known? {
+                    % DIE names arrive as Strings; a Record schema (and the names
+                    % array record-from-dict consumes) needs Names.
+                    /mname m /name get to-name local-def
+                    /moff base m /offset get add local-def
+                    % L-6 bitfield: extract bits (abs offset = base*8 + member
+                    % bit-offset).  Else aggregate/array members recurse via their
+                    % pre-expanded /layout; everything else is a plain scalar.
+                    /mval m /bit-size known? {
+                        blob  base 8 mul m /bit-offset get add  m /bit-size get
+                        m /encoding known? { m /encoding get dup 5 eq exch 6 eq or } { false } if-else
+                        dwarf--extract-bits
+                    } {
+                        m /layout known? {
+                            ctx blob moff m /layout get dwarf--peek-lay
+                        } {
+                            blob moff m /peek-type known? { m /peek-type get } { /unknown } if-else dwarf--decode-scalar
+                        } if-else
+                    } if-else local-def
+                    d mname mval put
+                    names nnamed mname put
+                    /nnamed nnamed 1 add local-def
+                } { /anon true local-def } if-else
+            } for
+            anon { d } { d names record-from-dict } if-else
+        } {
+            % Bind the result (not a tail call) so dwarf--decode-scalar still sees
+            % this frame's dw-endian via dynamic scope -- a tail call would pop it.
+            /sv  blob base lay /peek-type known? { lay /peek-type get } { /unknown } if-else  dwarf--decode-scalar  local-def
+            sv
+        } if-else
+    } if-else
+} def
+
+% Shared engine: decode a resolved info dict's value.  Get its layout + byte
+% size, read the bytes from the chosen source, and decode.
+%   live? false: the STATIC file-image bytes (the initializer) -- any on-disk ELF.
+%   live? true:  the CURRENT bytes from THIS process's memory at the link-time
+%                address relocated by the ctx module's load bias (a ULong
+%                reinterpreted to an Address).  Valid when ctx was loaded from a
+%                module mapped in THIS process -- the running executable or a
+%                loaded .so (L-21: module-load-bias-for keys the slide off the
+%                ctx's load path); null if that module is not currently mapped.
+% ctx info live? -- value|null
+/dwarf--peek-info-impl {
+    |ctx info live|#+10
+    info null eq { null } {
+        info /type-offset get null eq { null } {
+            /toff info /type-offset get local-def
+            /lay ctx toff dwarf-layout local-def
+            /nbytes lay /byte-size known? { lay /byte-size get } { 0 } if-else local-def
+            nbytes 0 le { null } {
+                /va info /address get local-def
+                /blob live {
+                    % L-21: relocate by the load bias of the MODULE this ctx was
+                    % loaded from (main exe OR a loaded .so), matched by path, not
+                    % always the main exe.  found? false => the module is not
+                    % mapped in this process, so a live read is impossible -> null.
+                    ctx /path get module-load-bias-for
+                    { va add /address-type reinterpret nbytes peek-bytes } { pop null } if-else
+                } {
+                    ctx va nbytes dwarf--read-image
+                } if-else local-def
+                blob null eq { null } { ctx blob 0 lay dwarf--peek-lay } if-else
+            } if-else
+        } if-else
+    } if-else
+} def
+
+% Look the global up by name, then decode the resolved info.   ctx name live? -- value|null
+/dwarf--peek-impl {
+    |ctx name live|#+2
+    ctx  ctx name dwarf-lookup  live dwarf--peek-info-impl
+} def
+
+% Public: a global by name -> its typed STATIC value (the file-image initializer;
+% works on any on-disk ELF).   ctx name -- value|null
+/dwarf-peek {
+    |ctx name|#+2
+    ctx name false dwarf--peek-impl
+} def
+
+% Public: a global by name -> its typed LIVE value, read from THIS process's
+% memory (link-time address relocated by the ctx module's load bias).  Self-
+% introspection only -- ctx must have been loaded from a module mapped in this
+% process: the running executable (executable-path) or a loaded shared object
+% (L-21, keyed off the ctx's load path).  If the ctx's module is not mapped here
+% the relocation has no valid base, so the peek returns null rather than reading
+% a bogus address.   ctx name -- value|null
+/dwarf-peek-live {
+    |ctx name|#+2
+    ctx name true dwarf--peek-impl
+} def
+
+% Public (L-4): peek a SPECIFIC info's static value -- e.g. one entry from
+% dwarf-lookup-all, when several globals share a name and dwarf-peek (by name)
+% would only reach the last.   ctx info -- value|null
+/dwarf-peek-info {
+    |ctx info|#+2
+    ctx info false dwarf--peek-info-impl
+} def
+
+% Public (L-17): release a context's mmap'd ELF image (the mapping dwarf-load
+% opened), so a program that loads many ELFs does not leak address space.  After
+% this the ctx is dead: its live pointers are invalidated, so dwarf-layout /
+% dwarf-peek* fail with /undefined rather than faulting, and dwarf-lookup* (which
+% only read the cached index) still return infos but their bytes can no longer be
+% peeked.  Idempotent -- closing an already-closed (or never-loaded) ctx is a
+% no-op.   ctx --
+/dwarf-close {
+    |ctx|#+2
+    ctx /elf-base known? {
+        ctx /elf-base get  ctx /elf-size get  dwarf-munmap
+        % Drop every key that holds a pointer into the now-unmapped image, so a
+        % later read raises /undefined cleanly instead of dereferencing freed
+        % memory; /elf-base's absence also makes a second close a no-op.
+        ctx /elf-base undef
+        ctx /di-base undef
+        ctx /ds-base undef
+        ctx /ls-base undef
+        ctx /dl-base undef
+        ctx /sh-table undef
+    } if
+} def
+
+% ====================================================================
+% Public (L-22): map a link-time code address to its source location.
+% Scans each CU's .debug_line program (reached via the CU root's
+% DW_AT_stmt_list) for the row whose [address, next-address) range covers addr,
+% and returns << /file /line /column /is-stmt /address >> (file = the directory-
+% joined source path, decoded v2-v5) or null when no row covers addr / the
+% binary carries no .debug_line.  addr is a LINK-TIME PC -- e.g. dwarf-lookup-fn's
+% /address (DW_AT_low_pc); it must be a ULong.  The hot opcode loop runs in the
+% C++ dwarf-line-lookup primitive (fused like dwarf-read-die).
+% ctx addr -- << /file /line /column /is-stmt /address >> | null
+% ====================================================================
+/dwarf-line {
+    |ctx addr|#+14
+    ctx /dl-base get null eq { null } {
+        /dl ctx /dl-base get local-def
+        /ls ctx /ls-base get local-def
+        /ds ctx /ds-base get local-def
+        /be ctx /dw-endian get (>) eq local-def
+        /res null local-def
+        /n ctx /n-cus get local-def
+        0 1 n 1 sub {
+            /i exch local-def
+            res null eq {
+                /cu ctx /cus get i get local-def
+                /root ctx cu /die-start get dwarf--die-at local-def
+                root null eq not { root /stmt-list known? } and? {
+                    /params [ dl  root /stmt-list get  ls  ds  be ] local-def
+                    /row params addr dwarf-line-lookup local-def
+                    row null eq not { /res row local-def } if
+                } if
+            } if
+        } for
+        res
+    } if-else
+} def
+
+% ====================================================================
+% Public (L-22): the source location of a function by name -- a convenience
+% over dwarf-lookup-fn + dwarf-line (resolves the function, then maps its entry
+% low_pc to file:line).   ctx name -- << /file /line /column /is-stmt /address >> | null
+% ====================================================================
+/dwarf-line-fn {
+    |ctx name|#+4
+    /info ctx name dwarf-lookup-fn local-def
+    info null eq not { info /address get null eq not } and? {
+        ctx info /address get dwarf-line
+    } { null } if-else
+} def

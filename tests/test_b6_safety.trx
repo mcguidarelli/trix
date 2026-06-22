@@ -1,0 +1,126 @@
+% ====================================================================
+% test_b6_safety.trx -- B6 group 1a regression tests
+% ====================================================================
+% The four standalone (non-GC-rooting) HIGH correctness findings from the
+% B6 source review:
+%
+%   flow:1-0       signed-overflow UB in the for-loop overflow clamp
+%                  (updated_control -/+ 1 when updated_control is the type
+%                  extreme).  Fix: compute the clamp in the unsigned domain.
+%   transducer-0   forged /xf-scan tagged step -> array_objects() on a
+%                  non-2-element-array payload (release-build OOB read).
+%                  Fix: validate is_array() + length == 2 first.
+%   effect-0       perform left ContinuationContext::m_alloc_global_at_capture
+%                  uninitialized -> garbage m_curr_alloc_global on resume.
+%                  Fix: capture the live flag (mirror capture_op).
+%   continuation-0 abort-exec err-scan + unwind_exec_to omitted @end-in-global
+%                  -> misaligned err-scan / wrong handler match.  Fix: both
+%                  walks now account for @end-in-global's one err companion.
+%
+% Run on the DEBUG build (-fsanitize=address,undefined): pre-fix, the flow:1-0
+% cases UBSan-abort on the signed overflow and transducer-0 trips the
+% array_objects() is_array() assert; continuation-0 mismatches/asserts.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: flow:1-0 -- for-loop overflow clamp is not signed-overflow UB
+% ====================================================================
+% Each loop runs one iteration at the type extreme; the post-iteration control
+% update wraps and the clamp (since flow:1-1) restores the pre-update control and
+% sets limit just past it, so the loop terminates at the extreme WITHOUT iterating
+% the wrapped value.  The exit-on-wrapped-value guard is now a dead safety net --
+% kept so a clamp regression surfaces as a clean exit rather than a ~2^width-
+% iteration hang.  These cases still assert the clamp arithmetic is not signed-
+% overflow UB (UBSan would abort pre-G1a-fix).
+
+% integer_t, positive increment -> clamp via (updated_control - 1)
+2147483647 1 2147483647 { -2147483648 eq { exit } if } for
+true (flow:1-0 INT_MAX +incr clamp: no signed-overflow UB) rt-ok clear
+
+% integer_t, negative increment -> clamp via (updated_control + 1)
+-2147483648 -1 -2147483648 { 2147483647 eq { exit } if } for
+true (flow:1-0 INT_MIN -incr clamp: no signed-overflow UB) rt-ok clear
+
+% long_t, positive increment
+9223372036854775807L 1L 9223372036854775807L { -9223372036854775808L eq { exit } if } for
+true (flow:1-0 LLONG_MAX +incr clamp: no signed-overflow UB) rt-ok clear
+
+% long_t, negative increment
+-9223372036854775808L -1L -9223372036854775808L { 9223372036854775807L eq { exit } if } for
+true (flow:1-0 LLONG_MIN -incr clamp: no signed-overflow UB) rt-ok clear
+
+% sanity: an ordinary bounded for still clamps/terminates correctly
+/b6sum 0 def
+1 1 5 { b6sum add /b6sum exch def } for
+b6sum 15 eq (flow:1-0 sanity: ordinary for still sums 1..5) rt-ok clear
+
+% ====================================================================
+% SECTION 2: transducer-0 -- forged /xf-scan step must not OOB-read
+% ====================================================================
+% The step tag-name is user-forgeable via `tag`; a payload that is not a
+% 2-element [init, proc] array must raise /type-check, not call
+% array_objects() (which only asserts is_array(), compiled out under NDEBUG).
+
+{ [1 2 3] 42 /xf-scan tag into } try /type-check eq
+(transducer-0: forged /xf-scan with Integer payload -> type-check) rt-ok clear
+
+{ [1 2 3] [ 99 ] /xf-scan tag into } try /type-check eq
+(transducer-0: forged /xf-scan with 1-element array -> type-check) rt-ok clear
+
+% sanity: the real xf-scan builder still works
+[1 2 3 4 5] 0 { add } xf-scan into
+[0 1 3 6 10 15] deep-eq (transducer-0 sanity: real xf-scan running sum) rt-ok clear
+
+% ====================================================================
+% SECTION 3: effect-0 -- perform captures the alloc-routing flag
+% ====================================================================
+% perform inside ${...} (m_curr_alloc_global=true) captures K; resuming K
+% from a LOCAL context must restore the capture-time flag so the resumed
+% body's allocations route to the GLOBAL VM.  Pre-fix the flag was read from
+% uninitialized VM memory; post-fix it is exact, so the resumed array grows
+% the global region.
+
+<< /yield { } >> { ${ /yield perform [ 1 2 3 4 5 6 7 8 ] } } handle-effect
+/k exch def
+//:status:vm-global-used /before exch def
+0 /k load exec pop pop
+//:status:vm-global-used before gt
+(effect-0: perform-in-global K resumes with global alloc routing) rt-ok clear
+
+% ====================================================================
+% SECTION 4: continuation-0 -- abort-exec err-scan skips @end-in-global
+% ====================================================================
+% A ${...} between the abort-exec call site and the matched @handler-scope
+% puts an @end-in-global (1 err companion) on the exec stack.  Pre-fix the
+% err-scan walk skipped it, misaligning every barrier below.  Also exercises
+% unwind_exec_to's @end-in-global handling (alloc-flag restore on the trim).
+
+10 { { ${ 99 exch abort-exec } } capture 5 add } delimit add
+114 eq (continuation-0: abort-exec across 1 @end-in-global) rt-ok clear
+
+10 { { ${ ${ 99 exch abort-exec } } } capture 5 add } delimit add
+114 eq (continuation-0: abort-exec across 2 nested @end-in-global) rt-ok clear
+
+% the trim restored m_curr_alloc_global: AFTER the abort completes, a local
+% alloc must NOT grow the global region.  Baseline is taken AFTER the delimit
+% -- the ${...} inside it legitimately makes some global allocations; what we
+% assert is that the flag is back to local once the abort has unwound.
+10 { { ${ 99 exch abort-exec } } capture 5 add } delimit add
+114 eq (continuation-0: abort across end-in-global resumes correctly) rt-ok clear
+//:status:vm-global-used /g0 exch def
+[ 1 2 3 ] pop
+//:status:vm-global-used g0 eq
+(continuation-0: unwind_exec_to restored the alloc flag post-abort) rt-ok clear
+
+(test_b6_safety: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

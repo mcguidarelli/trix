@@ -1,0 +1,5 @@
+% Phase 10 GC + dlmalloc fastbins: small global allocations
+% (24/32/40/48-byte blocks) churned through GC sweeps populate the
+% fastbins for fast LIFO reuse.  Long is 24 bytes (bin[0]); 16-byte
+% String is 32 (bin[1]).
+${ 1l pop 16 string pop 2l pop } vm-global-gc pop ${ 3l pop }

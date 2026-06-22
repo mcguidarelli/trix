@@ -1,0 +1,1 @@
+<< /y { } >> { /y perform 100 add } handle-effect ${ [ exch ] /h exch def } vm-global-gc pop h 0 get 1 exch exec

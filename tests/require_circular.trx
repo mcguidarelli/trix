@@ -1,0 +1,4 @@
+% require_circular.trx -- test helper for circular require detection
+% Requires itself. Should be a noop on the second call (entry added before run).
+(tests/require_circular.trx) require
+/circular-loaded true def

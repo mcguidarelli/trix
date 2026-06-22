@@ -1,0 +1,355 @@
+% ======================================================================
+%  Village save-anywhere (showcase example)
+%
+%  Composes four layers of Trix's durable process runtime:
+%
+%      actors           -- three NPCs (baker / guard / farmer) each
+%                          run as a coroutine with a mailbox
+%      supervision      -- /one-for-one /transient over the NPCs
+%      reactive cells   -- shared inventory (bread-count, flour-count)
+%                          and a low-stock watcher
+%      snap-shot/thaw   -- at 8 AM the full VM state is written to a
+%                          byte image; two child processes thaw the
+%                          same image and run divergent 8-10 AM
+%                          futures (festival vs. rainstorm)
+%
+%  "Fork the timeline" is the showpiece: identical starting state,
+%  two different stimuli, two different two-hour traces.
+%
+%  Single-coroutine-only note doesn't apply here -- the NPCs are
+%  concurrent actors.  Each NPC uses plain `def`-style locals; the
+%  per-coroutine binding cache keeps each actor's bindings isolated
+%  so cross-actor name collisions are impossible.
+%
+%  Run from the project root:
+%      ./trix examples/village.trx
+% ======================================================================
+
+% ----------------------------------------------------------------------
+%  Cleanup any leftover snapshot / scenario file from a prior run.
+%  These files drive master/child differentiation below.
+% ----------------------------------------------------------------------
+(/tmp/village-snapshot.img) file-exists?
+    { (/tmp/village-snapshot.img) delete-file } if
+(/tmp/trix-scenario.txt) file-exists?
+    { (/tmp/trix-scenario.txt) delete-file } if
+
+% ----------------------------------------------------------------------
+%  log-event -- op-stack-only helper for clock-prefixed event printing.
+%  Called from every NPC; must NOT use def-style locals (shared
+%  between actors, would race across yields per the eqref trap).
+%
+%  Stack effect:  minute message -- minute
+%  Preserves `minute` on the stack so callers can chain time checks.
+% ----------------------------------------------------------------------
+/log-event {
+    exch                                     % message minute
+    dup  60 div  6 add                       % message minute hour
+    ({0:02d}) mark 3 -1 roll print-fmt pop pop
+    (:) print
+    dup  60 mod                              % message minute mm
+    ({0:02d}) mark 3 -1 roll print-fmt pop pop
+    (  ) print
+    exch print                               % print message, leaves minute
+    nl flush
+} def
+
+% ----------------------------------------------------------------------
+%  at-time? -- does the current minute match `target`?  Preserves
+%  minute on the stack so callers can chain multiple `N at-time?`
+%  tests without re-fetching.
+%
+%  Stack effect:  minute target -- minute bool
+% ----------------------------------------------------------------------
+/at-time? { 1 index eq } def
+
+% ----------------------------------------------------------------------
+%  Scenario tag.  Overwritten by each thawed child to the string
+%  "festival" or "rainstorm"; stays "none" in the master process.
+%  NPCs branch on this during 8 AM - 10 AM ticks.
+% ----------------------------------------------------------------------
+/scenario (none) def
+
+% ----------------------------------------------------------------------
+%  Reactive cells: shared inventory.  Villagers read and write these;
+%  the watcher fires on low-stock and sellout transitions.
+% ----------------------------------------------------------------------
+/bread-count  0 cell def
+/flour-count  0 cell def
+
+bread-count {
+    /w-new exch def
+    /w-old exch def
+    w-old 3 gt  w-new 3 le  and  w-new 0 gt  and
+        { (      [!] bread stocks low: {0} loaves\n)
+          mark w-new print-fmt pop pop flush } if
+    w-old 0 gt  w-new 0 le  and
+        { (      [!] bread sold out\n) print flush } if
+} watch
+
+% ----------------------------------------------------------------------
+%  NPC bodies.  Each actor has its own binding cache, so idiomatic
+%  `def`-style locals (/msg) are safe -- no cross-actor clobber even
+%  when three actors all bind /msg across yields.
+% ----------------------------------------------------------------------
+
+% ---- Baker body ----
+/baker-body {
+    {
+        /msg actor-recv def
+        msg /stop tag?
+        { pop exit }
+        { msg /tick tag?
+            { msg tag-value                                 % minute
+                % ---- Baseline (6 AM - 8 AM) ----
+                0   at-time? { (  [baker] stokes the oven for the morning bake) log-event } if
+                30  at-time? { (  [baker] sweeps the shop floor) log-event } if
+                75  at-time? { (  [baker] mixes dough from the fresh flour) log-event } if
+                90  at-time? { (  [baker] slides eight loaves into the oven) log-event } if
+                105 at-time? { bread-count cell-get 8 add bread-count cell-set
+                               (  [baker] pulls eight warm loaves out) log-event } if
+                120 at-time? { (  [baker] hangs the OPEN sign, bread is ready) log-event } if
+
+                % ---- Festival timeline (8 AM - 10 AM) ----
+                scenario (festival) eq
+                {
+                    135 at-time? { bread-count cell-get 16 add bread-count cell-set
+                                   (  [baker] kneads a second batch, 16 loaves for the festival) log-event } if
+                    180 at-time? { bread-count cell-get  6 sub bread-count cell-set
+                                   (  [baker] sells six loaves to the first wave of revelers) log-event } if
+                    195 at-time? { bread-count cell-get 12 add bread-count cell-set
+                                   (  [baker] pulls the festival batch from the oven) log-event } if
+                    210 at-time? { bread-count cell-get 12 sub bread-count cell-set
+                                   (  [baker] trades twelve loaves for handfuls of coin) log-event } if
+                    225 at-time? { bread-count cell-get 16 sub bread-count cell-set
+                                   (  [baker] meets the closing rush of hungry dancers) log-event } if
+                    240 at-time? { bread-count cell-get  2 sub bread-count cell-set
+                                   (  [baker] bolts the shop door, heading for the square) log-event } if
+                } if
+
+                % ---- Rainstorm timeline (8 AM - 10 AM) ----
+                scenario (rainstorm) eq
+                {
+                    150 at-time? { (  [baker] shutters the shop against the rising wind) log-event } if
+                    195 at-time? { bread-count cell-get 1 sub bread-count cell-set
+                                   (  [baker] sells one loaf to a soaked traveler) log-event } if
+                    225 at-time? { (  [baker] tends the hearth as rain drums the roof) log-event } if
+                    240 at-time? { (  [baker] reopens the shutters on a rain-washed village) log-event } if
+                } if
+
+                pop                                         % drop minute
+            } if
+        } if-else
+    } loop
+} def
+
+% ---- Guard body ----
+/guard-body {
+    {
+        /msg actor-recv def
+        msg /stop tag?
+        { pop exit }
+        { msg /tick tag?
+            { msg tag-value
+                % ---- Baseline (6 AM - 8 AM) ----
+                15  at-time? { (  [guard] begins morning patrol at the gate) log-event } if
+                45  at-time? { (  [guard] checks the west watchtower) log-event } if
+                90  at-time? { (  [guard] reports the streets are clear) log-event } if
+                120 at-time? { (  [guard] stops by the bakery for a fresh loaf) log-event } if
+
+                % ---- Festival timeline (8 AM - 10 AM) ----
+                scenario (festival) eq
+                {
+                    165 at-time? { (  [guard] dons the silver helm kept for feast days) log-event } if
+                    210 at-time? { (  [guard] waves the incoming caravans past the gate) log-event } if
+                    240 at-time? { (  [guard] marches in the festival procession) log-event } if
+                } if
+
+                % ---- Rainstorm timeline (8 AM - 10 AM) ----
+                scenario (rainstorm) eq
+                {
+                    165 at-time? { (  [guard] helps lash down the barn doors) log-event } if
+                    210 at-time? { (  [guard] calms spooked horses in the stable) log-event } if
+                    240 at-time? { (  [guard] resumes patrol through rain-fresh streets) log-event } if
+                } if
+
+                pop
+            } if
+        } if-else
+    } loop
+} def
+
+% ---- Farmer body ----
+/farmer-body {
+    {
+        /msg actor-recv def
+        msg /stop tag?
+        { pop exit }
+        { msg /tick tag?
+            { msg tag-value
+                % ---- Baseline (6 AM - 8 AM) ----
+                30 at-time? { (  [farmer] walks out to the wheat field) log-event } if
+                45 at-time? { (  [farmer] harvests a full cart of wheat) log-event } if
+                60 at-time? { flour-count cell-get 5 add flour-count cell-set
+                              (  [farmer] delivers fresh flour to the baker) log-event } if
+                90 at-time? { (  [farmer] takes a short rest at home) log-event } if
+
+                % ---- Festival timeline (8 AM - 10 AM) ----
+                scenario (festival) eq
+                {
+                    150 at-time? { (  [farmer] brings garlands of wildflowers into the square) log-event } if
+                    195 at-time? { (  [farmer] sets up the farm-stand with jars of preserves) log-event } if
+                    240 at-time? { (  [farmer] dances a jig with his two daughters) log-event } if
+                } if
+
+                % ---- Rainstorm timeline (8 AM - 10 AM) ----
+                scenario (rainstorm) eq
+                {
+                    135 at-time? { (  [farmer] rushes to cover the wheat before the storm hits) log-event } if
+                    180 at-time? { (  [farmer] shelters in the barn as rain sheets down) log-event } if
+                    210 at-time? { (  [farmer] checks on the cattle after a thunderclap) log-event } if
+                    240 at-time? { (  [farmer] walks the muddy paths, counting the damage) log-event } if
+                } if
+
+                pop
+            } if
+        } if-else
+    } loop
+} def
+
+% ----------------------------------------------------------------------
+%  Supervisor: /one-for-one /transient over the three NPCs.  A real
+%  game would restart a crashed NPC; here, the supervisor's role is
+%  structural (it makes the NPCs part of a named tree that survives
+%  snap-shot intact).
+% ----------------------------------------------------------------------
+/sup
+<<
+    /strategy   /one-for-one
+    /intensity  5
+    /period     30000
+    /children   [
+        << /id /baker   /start { baker-body  }  /restart /transient >>
+        << /id /guard-child   /start { guard-body  }  /restart /transient >>
+        << /id /farmer  /start { farmer-body }  /restart /transient >>
+    ]
+>> supervisor def
+
+/baker  sup /baker  supervisor-get-child pop def
+/guard-child  sup /guard-child  supervisor-get-child pop def
+/farmer sup /farmer supervisor-get-child pop def
+
+% ----------------------------------------------------------------------
+%  tick-all -- broadcast a /tick{minute} to every NPC, then yield so
+%  each actor's message is processed before the next minute advances.
+%  Stack effect:  minute --
+% ----------------------------------------------------------------------
+/tick-all {
+    /tick-m exch def
+    tick-m /tick tag baker  actor-send
+    tick-m /tick tag guard-child  actor-send
+    tick-m /tick tag farmer actor-send
+    0 coroutine-sleep
+} def
+
+% ----------------------------------------------------------------------
+%  run-clock -- master clock loop from `lo` to `hi` minutes (inclusive
+%  start, inclusive end).  Each tick triggers one round of NPC action.
+%  Stack effect:  lo hi --
+% ----------------------------------------------------------------------
+/run-clock {
+    /clk-hi exch def
+    /clk-lo exch def
+    clk-lo 1 clk-hi { tick-all } for
+} def
+
+% ----------------------------------------------------------------------
+%  Baseline simulation: 6 AM (minute 0) through 8 AM (minute 120).
+% ----------------------------------------------------------------------
+(\n=== Village morning, 6 AM to 8 AM ===\n) print flush
+
+0 120 run-clock
+
+(\n-- end of baseline sim --\n) print
+(    flour in stock : {0}\n) mark flour-count cell-get print-fmt pop pop
+(    bread in stock : {0}\n) mark bread-count cell-get print-fmt pop pop
+flush
+
+% ----------------------------------------------------------------------
+%  stop-and-join-npcs -- shared cleanup used by both master and each
+%  thawed child.  The NPCs are parked in actor-recv when snap-shot
+%  fires; /stop wakes them and lets their coroutines end cleanly.
+% ----------------------------------------------------------------------
+/stop-and-join-npcs {
+    null /stop tag baker  actor-send
+    null /stop tag guard-child  actor-send
+    null /stop tag farmer actor-send
+    baker  coroutine-join pop pop
+    guard-child  coroutine-join pop pop
+    farmer coroutine-join pop pop
+} def
+
+% ----------------------------------------------------------------------
+%  Snap-shot at 8 AM.  NPCs are alive and paused in actor-recv; the
+%  image captures the entire VM -- mailboxes, coroutine stacks,
+%  reactive cells, RNG state -- verbatim.
+% ----------------------------------------------------------------------
+(\n=== 8 AM -- snap-shotting village state ===\n) print flush
+(/tmp/village-snapshot.img) snap-shot
+
+% ----------------------------------------------------------------------
+%  Post-snap-shot branch.  Runs in the master process AND in each
+%  thawed child.  Differentiates by the presence of the scenario
+%  file: master creates it right before each shell-out; children
+%  read it to pick their scenario.
+% ----------------------------------------------------------------------
+(/tmp/trix-scenario.txt) file-exists?
+{
+    % ---- Thawed child: read scenario, drive clock 8 AM - 10 AM ----
+    /sc-strm (/tmp/trix-scenario.txt) (r)#b stream def
+    /sc-name sc-strm read-all trim-right def
+    sc-strm close-stream
+    /scenario sc-name def
+
+    (\n  [thawed child] resuming village under the `{0}` timeline\n)
+    mark sc-name print-fmt pop pop flush
+
+    121 240 run-clock
+
+    (\n  -- end of {0} timeline --\n)
+    mark sc-name print-fmt pop pop
+    (    bread remaining : {0}\n) mark bread-count cell-get print-fmt pop pop
+    flush
+
+    stop-and-join-npcs
+}
+{
+    % ---- Master: fork two divergent timelines ----
+    % Re-exec THIS binary (executable-path), not a hard-coded `./trix`, so the
+    % child thaws the snapshot with the SAME build that wrote it.  A debug vs
+    % optimized mismatch would otherwise be rejected by the image's operator-
+    % table signature, and an installed `trix` has no `./trix` in the cwd.
+    (\n=== Fork the timeline: same snapshot, two futures ===\n) print flush
+
+    (\n--- Timeline A: festival day ---\n) print flush
+    /wf-strm (/tmp/trix-scenario.txt) (w)#b stream def
+    wf-strm (festival) write-string
+    wf-strm close-stream
+    executable-path ( --image /tmp/village-snapshot.img) concat shell
+    pop print flush
+
+    (\n--- Timeline B: rainstorm day ---\n) print flush
+    /wf-strm (/tmp/trix-scenario.txt) (w)#b stream def
+    wf-strm (rainstorm) write-string
+    wf-strm close-stream
+    executable-path ( --image /tmp/village-snapshot.img) concat shell
+    pop print flush
+
+    (/tmp/trix-scenario.txt)    delete-file
+    (/tmp/village-snapshot.img) delete-file
+
+    stop-and-join-npcs
+}
+if-else
+
+nl

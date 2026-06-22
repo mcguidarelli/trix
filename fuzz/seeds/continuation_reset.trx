@@ -1,0 +1,1 @@
+{ 1 { { 5 exch exec } capture } delimit 3 add } delimit

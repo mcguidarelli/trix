@@ -1,0 +1,15 @@
+% backtrace_operands.trx
+% Demonstrates the operand-stack snapshot in the backtrace.
+%
+% Pushes seven values of different types before triggering an error.
+% The snapshot shows the top 8 operands with their type names and
+% compact values, ordered top-of-stack first.
+
+/boom { 1 0 div } def
+true
+42
+3.14
+(hello)
+/aname
+[ 1 2 3 ]
+boom

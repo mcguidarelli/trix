@@ -1,0 +1,203 @@
+% ====================================================================
+% test_global_record_alloc_honor.trx -- Phase 1 of plan_alloc_walker_audit
+% ====================================================================
+% Several Record-family ops allocated their result Object array (and
+% sometimes per-row RecordInstance) via bare vm_alloc / vm_alloc_n,
+% IGNORING m_curr_alloc_global.  Inside ${...} the result therefore
+% landed in LOCAL VM and was reclaimed at the next save/restore --
+% silently producing dangling Objects on globally-rooted dicts.
+%
+% Audited & fixed (2026-05-09):
+%   * record_schema_op       -- result Object array
+%   * record_zip_op          -- result Object array + per-row RecordInstance
+%   * record_values_op       -- result Object array
+%   * record_map_op          -- per-record RecordInstance
+%   * record_merge_op        -- merged RecordSchema + RecordInstance
+%   * record_select_op       -- selected RecordInstance
+%   * record_from_dict_op    -- constructed RecordInstance
+%   * record_to_dict_op      -- result Dict (post-audit follow-up 2026-05-11)
+%
+% Each section below: globally root the result inside ${...}, save +
+% restore, then verify the result is still readable.  If the alloc
+% had landed in local VM, restore would reclaim it and the read
+% would error or return garbage.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% Pre-intern all schema names at BASE so subsequent ${...} blocks
+% don't mint name records below the save level.
+/x null def
+/y null def
+/z null def
+/a null def
+/b null def
+/c null def
+/q null def
+
+% --------------------------------------------------------------------
+% SECTION 1: record-schema (returns name array)
+% --------------------------------------------------------------------
+${ 4 dict } /g1 exch def
+
+save /sv1 exch def
+${
+    [/x /y /z] record-type /pt3-1 exch def
+    g1 /pt-instance 10 20 30 pt3-1 put
+    g1 /pt-names g1 /pt-instance get record-schema put
+}
+sv1 restore
+
+g1 /pt-names get length 3 eq          (1: schema names length=3 post-restore) rt-ok
+g1 /pt-names get 0 get /x eq           (1: schema names[0]=/x post-restore) rt-ok
+g1 /pt-names get 1 get /y eq           (1: schema names[1]=/y post-restore) rt-ok
+g1 /pt-names get 2 get /z eq           (1: schema names[2]=/z post-restore) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 2: record-values (returns value array)
+% --------------------------------------------------------------------
+${ 4 dict } /g2 exch def
+
+save /sv2 exch def
+${
+    [/a /b /c] record-type /trip-2 exch def
+    g2 /trip 100 200 300 trip-2 put
+    g2 /vals g2 /trip get record-values put
+}
+sv2 restore
+
+g2 /vals get length 3 eq              (2: values length=3 post-restore) rt-ok
+g2 /vals get 0 get 100 eq              (2: values[0]=100 post-restore) rt-ok
+g2 /vals get 1 get 200 eq              (2: values[1]=200 post-restore) rt-ok
+g2 /vals get 2 get 300 eq              (2: values[2]=300 post-restore) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 3: record-zip (result array + per-row instances)
+% --------------------------------------------------------------------
+${ 4 dict } /g3 exch def
+
+save /sv3 exch def
+${
+    [ [1 2 3] [10 20 30] ] [/a /b] record-zip
+    g3 exch /rows exch put
+}
+sv3 restore
+
+g3 /rows get length 3 eq              (3: zip rows length=3 post-restore) rt-ok
+g3 /rows get 0 get /a get 1 eq         (3: zip row0.a=1 post-restore) rt-ok
+g3 /rows get 0 get /b get 10 eq        (3: zip row0.b=10 post-restore) rt-ok
+g3 /rows get 2 get /a get 3 eq         (3: zip row2.a=3 post-restore) rt-ok
+g3 /rows get 2 get /b get 30 eq        (3: zip row2.b=30 post-restore) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 4: record-map (returns new record instance)
+% --------------------------------------------------------------------
+${ 4 dict } /g4 exch def
+
+save /sv4 exch def
+${
+    [/x /y /z] record-type /trip-4 exch def
+    g4 /orig 1 2 3 trip-4 put
+    g4 /doubled g4 /orig get { 2 mul } record-map put
+}
+sv4 restore
+
+g4 /doubled get /x get 2 eq                  (4: map doubled.x=2 post-restore) rt-ok
+g4 /doubled get /y get 4 eq                  (4: map doubled.y=4 post-restore) rt-ok
+g4 /doubled get /z get 6 eq                  (4: map doubled.z=6 post-restore) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 5: record-merge (merged schema + instance)
+% --------------------------------------------------------------------
+${ 4 dict } /g5 exch def
+
+save /sv5 exch def
+${
+    [/a /b] record-type /pair-5 exch def
+    [/b /c] record-type /pair-5b exch def
+    g5 /m1 1 2 pair-5 put
+    g5 /m2 99 3 pair-5b put
+    g5 /merged g5 /m1 get g5 /m2 get record-merge put
+}
+sv5 restore
+
+g5 /merged get /a get 1 eq                   (5: merge merged.a=1 post-restore) rt-ok
+g5 /merged get /b get 99 eq                  (5: merge merged.b=99 (override) post-restore) rt-ok
+g5 /merged get /c get 3 eq                   (5: merge merged.c=3 post-restore) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 6: record-select (selected instance)
+% --------------------------------------------------------------------
+${ 4 dict } /g6 exch def
+
+save /sv6 exch def
+${
+    [/x /y /z /q] record-type /quad-6 exch def
+    g6 /full 11 22 33 44 quad-6 put
+    g6 /pick g6 /full get [/x /z] record-select put
+}
+sv6 restore
+
+g6 /pick get /x get 11 eq                    (6: select pick.x=11 post-restore) rt-ok
+g6 /pick get /z get 33 eq                    (6: select pick.z=33 post-restore) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 7: record-from-dict (constructed instance)
+% --------------------------------------------------------------------
+${ 4 dict } /g7 exch def
+
+save /sv7 exch def
+${
+    g7 /src << /a 7 /b 8 /c 9 >>#$ put
+    g7 /built g7 /src get [/a /b /c] record-from-dict put
+}
+sv7 restore
+
+g7 /built get /a get 7 eq                    (7: from-dict built.a=7 post-restore) rt-ok
+g7 /built get /b get 8 eq                    (7: from-dict built.b=8 post-restore) rt-ok
+g7 /built get /c get 9 eq                    (7: from-dict built.c=9 post-restore) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 8: record-to-dict (Dict allocated in global VM)
+% --------------------------------------------------------------------
+% record-to-dict's previous code path called Dict::create_or_recycle
+% directly, which pulls from the local-VM pool or falls through to
+% local-VM Dict::create_dict.  Inside ${...} the resulting Dict
+% landed in LOCAL VM and was reclaimed at the next restore.
+% After the fix, m_curr_alloc_global routes to Dict::create_global_dict.
+${ 4 dict } /g8 exch def
+
+save /sv8 exch def
+${
+    [/a /b /c] record-type /trip-8 exch def
+    g8 /rec 11 22 33 trip-8 put
+    g8 /asdict g8 /rec get record-to-dict put
+}
+sv8 restore
+
+g8 /asdict get /a get 11 eq                  (8: to-dict asdict.a=11 post-restore) rt-ok
+g8 /asdict get /b get 22 eq                  (8: to-dict asdict.b=22 post-restore) rt-ok
+g8 /asdict get /c get 33 eq                  (8: to-dict asdict.c=33 post-restore) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 9: vm-global-gc reachability after all the above
+% --------------------------------------------------------------------
+% After all sections, the retained globally-rooted dicts should keep
+% their nested arrays + records reachable through gc_mark_object's
+% local + global Dict walkers.  Run a GC and verify no spurious
+% counts (probe should show >0 marked).
+
+vm-global-gc-probe /probe-final exch def
+probe-final /live get 0 gt                    (9: probe sees >0 live retained) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_global_record_alloc_honor: ALL TESTS PASSED) =
+(__test_ok__) =

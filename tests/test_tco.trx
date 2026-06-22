@@ -1,0 +1,762 @@
+% ====================================================================
+% test_tco.trx -- Tail Call Optimization tests
+% ====================================================================
+% Verifies that named tail calls in execute_name() reuse the @call
+% frame instead of pushing a new one, allowing unbounded recursion
+% depth for properly tail-recursive functions.
+%
+% Coverage:
+%   Sections 1-14:  Core patterns (direct, mutual, N-way, accumulator,
+%                   exec, load+exec, dup-exec, ExtValue, Collatz, GCD)
+%   Sections 15-18: Edge cases (if-branch, mixed, exec variants, Long/Double)
+%   Sections 19-22: Barriers (loop/repeat/for block TCO; save/restore, N-way cycle)
+%   Sections 23-24: Instrumentation (max-exec-depth, exec-top-is-call, call-depth)
+%   Sections 25-31: External barriers (try, nested-try, stopped, dip, finally,
+%                   with-stream -- all allow recursive TCO at 100K depth)
+%   Section 29:     Closure TCO (@end-locals above @call, optimized)
+%   Section 29c:    Closure TCO preserves caller's frame when tail callee has no |locals|
+%   Sections 32-33: Value correctness through barriers, closure+try composition
+%
+% Coroutine TCO is tested separately in test_coroutine.trx (sections 21-22).
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Basic tail recursion -- countdown
+% ====================================================================
+% Without TCO this would exhaust the exec stack at ~128 depth.
+% With TCO the @call frame is reused each iteration.
+
+/countdown { dup 0 le { pop } { 1 sub countdown } if-else } def
+
+1000 countdown count 0 eq     (tco: countdown 1000 stack empty) rt-ok clear
+10000 countdown count 0 eq    (tco: countdown 10000 stack empty) rt-ok clear
+100000 countdown count 0 eq   (tco: countdown 100000 stack empty) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Tail-recursive accumulator (factorial)
+% ====================================================================
+
+/fact-acc {
+  % n acc -- result
+  exch dup 1 le { pop } { dup rot mul exch 1 sub exch fact-acc } if-else
+} def
+
+1 1 fact-acc 1 eq          (tco: fact-acc 1 = 1) rt-ok clear
+5 1 fact-acc 120 eq        (tco: fact-acc 5 = 120) rt-ok clear
+10 1 fact-acc 3628800 eq   (tco: fact-acc 10 = 3628800) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Mutual tail recursion
+% ====================================================================
+% is-even? and is-odd? call each other in tail position.
+% Without TCO: 2 * N depth. With TCO: constant depth.
+
+/is-even-tco {
+  dup 0 eq { pop true } { 1 sub is-odd-tco } if-else
+} def
+
+/is-odd-tco {
+  dup 0 eq { pop false } { 1 sub is-even-tco } if-else
+} def
+
+0 is-even-tco true eq       (tco: 0 is even) rt-ok clear
+1 is-even-tco false eq      (tco: 1 is not even) rt-ok clear
+10 is-even-tco true eq      (tco: 10 is even) rt-ok clear
+15 is-odd-tco true eq       (tco: 15 is odd) rt-ok clear
+5000 is-even-tco true eq    (tco: mutual 5000 is even) rt-ok clear
+5001 is-odd-tco true eq     (tco: mutual 5001 is odd) rt-ok clear
+10000 is-even-tco true eq   (tco: mutual 10000 is even) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Tail call through various control flow
+% ====================================================================
+
+% Tail call through single-branch if
+/skip-to-zero {
+  dup 0 gt { 1 sub skip-to-zero } if
+} def
+
+5000 skip-to-zero 0 eq  (tco: if-branch tail call 5000) rt-ok clear
+
+% Tail call at end of a multi-step proc body
+/multi-step {
+  % n -- 0
+  dup 0 le { } {
+    dup pop    % dummy work
+    dup pop    % more dummy work
+    1 sub multi-step
+  } if-else
+} def
+
+5000 multi-step 0 eq  (tco: multi-step tail call 5000) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Non-tail recursion is NOT optimized
+% ====================================================================
+% Verify that non-tail patterns still exhaust the exec stack.
+
+% Pattern: recursive call followed by another operation
+/non-tail { dup 0 le { } { 1 sub non-tail 1 pop } if-else } def
+{ 1000 non-tail } try /execstack-overflow eq  (tco: non-tail overflows) rt-ok clear
+
+% Pattern: recursive call is not the last proc element
+/non-tail2 { dup 0 le { } { 1 sub non-tail2 pop 0 } if-else } def
+{ 1000 non-tail2 } try /execstack-overflow eq  (tco: non-tail2 overflows) rt-ok clear
+
+% ====================================================================
+% SECTION 6: TCO does NOT cross barrier boundaries
+% ====================================================================
+
+% Verify non-tail recursion still overflows (control test).
+% The 1 pop after the recursive call prevents tail position.
+% Depth threshold sized to overflow the default exec-depth=2048 -- the
+% TCO sections above prove tail-call recursion stays O(1) at 100K depth,
+% so anything that overflows here is non-TCO behavior by construction.
+/barrier-test { dup 0 le { } { 1 sub barrier-test 1 pop } if-else } def
+{ 2500 barrier-test } try /execstack-overflow eq  (tco: non-tail still overflows) rt-ok clear
+
+% Two calls in same branch: neither is in tail position because the
+% proc tail ({pop}) remains on exec stack when each name executes.
+/double-call { dup 0 le { } { 1 sub double-call double-call pop } if-else } def
+{ 2500 double-call } try /execstack-overflow eq  (tco: double call non-tail overflows) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Tail-recursive GCD (Euclidean algorithm)
+% ====================================================================
+
+/gcd-tco {
+  % a b -- gcd(a,b)
+  % Base: b=0 -> return a.  Step: gcd(a,b) = gcd(b, a mod b)
+  dup 0 eq { pop } { exch over mod gcd-tco } if-else
+} def
+
+48 18 gcd-tco 6 eq        (tco: gcd(48,18) = 6) rt-ok clear
+100 75 gcd-tco 25 eq       (tco: gcd(100,75) = 25) rt-ok clear
+17 13 gcd-tco 1 eq         (tco: gcd(17,13) = 1 coprime) rt-ok clear
+0 5 gcd-tco 5 eq           (tco: gcd(0,5) = 5) rt-ok clear
+12345 6789 gcd-tco 3 eq    (tco: gcd(12345,6789) = 3) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Tail-recursive sum with accumulator
+% ====================================================================
+
+/sum-acc {
+  % n acc -- sum(1..n)
+  exch dup 0 le { pop } { dup rot add exch 1 sub exch sum-acc } if-else
+} def
+
+100 0 sum-acc 5050 eq      (tco: sum 1..100 = 5050) rt-ok clear
+1000 0 sum-acc 500500 eq   (tco: sum 1..1000 = 500500) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Tail-recursive Fibonacci with accumulator
+% ====================================================================
+% Uses /n /a /b def for clarity; tail call is still in tail position.
+
+/fib-acc {
+  % n a b -- fib(n)
+  /b exch def /a exch def /n exch def
+  n 0 eq { a } { n 1 sub  b  a b add  fib-acc } if-else
+} def
+
+0 0 1 fib-acc 0 eq         (tco: fib(0) = 0) rt-ok clear
+1 0 1 fib-acc 1 eq         (tco: fib(1) = 1) rt-ok clear
+10 0 1 fib-acc 55 eq       (tco: fib(10) = 55) rt-ok clear
+20 0 1 fib-acc 6765 eq     (tco: fib(20) = 6765) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Stress -- deep tail recursion
+% ====================================================================
+% These depths would be impossible without TCO.
+
+/deep-count {
+  dup 0 le { pop true } { 1 sub deep-count } if-else
+} def
+
+500 deep-count true eq      (tco: deep 500) rt-ok clear
+5000 deep-count true eq     (tco: deep 5000) rt-ok clear
+50000 deep-count true eq    (tco: deep 50000) rt-ok clear
+100000 deep-count true eq   (tco: deep 100000) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Mutual recursion stress
+% ====================================================================
+
+/ping { dup 0 le { pop (done) } { 1 sub pong } if-else } def
+/pong { dup 0 le { pop (done) } { 1 sub ping } if-else } def
+
+10000 ping (done) eq   (tco: mutual stress 10000 ping-pong) rt-ok clear
+10001 pong (done) eq   (tco: mutual stress 10001 pong-ping) rt-ok clear
+
+% ====================================================================
+% SECTION 12: TCO with different callable types
+% ====================================================================
+
+% Tail call to a different function each time (not self-recursion)
+/step-a { dup 0 le { pop (a) } { 1 sub step-b } if-else } def
+/step-b { dup 0 le { pop (b) } { 1 sub step-c } if-else } def
+/step-c { dup 0 le { pop (c) } { 1 sub step-a } if-else } def
+
+3000 step-a (a) eq   (tco: 3-way cycle 3000 ends at a) rt-ok clear
+3001 step-a (b) eq   (tco: 3-way cycle 3001 ends at b) rt-ok clear
+3002 step-a (c) eq   (tco: 3-way cycle 3002 ends at c) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Edge cases
+% ====================================================================
+
+% Zero iterations (base case only)
+0 countdown count 0 eq   (tco: countdown 0 no recursion) rt-ok clear
+
+% Single iteration
+1 countdown count 0 eq   (tco: countdown 1 single step) rt-ok clear
+
+% Tail call returning a value
+/tc-identity { dup 0 le { } { 1 sub tc-identity } if-else } def
+0 tc-identity 0 eq   (tco: identity base 0) rt-ok clear
+1 tc-identity 0 eq   (tco: identity recurse to 0) rt-ok clear
+
+% ====================================================================
+% SECTION 14: Correctness -- values preserved through TCO
+% ====================================================================
+
+% Build a result via accumulator, verify final value
+/collatz-len {
+  % steps n -- steps (Collatz sequence length)
+  dup 1 le {
+    pop
+  } {
+    dup 2 mod 0 eq { 2 div } { 3 mul 1 add } if-else
+    exch 1 add exch collatz-len
+  } if-else
+} def
+
+0 1 collatz-len 0 eq       (tco: collatz(1) = 0 steps) rt-ok clear
+0 2 collatz-len 1 eq       (tco: collatz(2) = 1 step) rt-ok clear
+0 6 collatz-len 8 eq       (tco: collatz(6) = 8 steps) rt-ok clear
+0 27 collatz-len 111 eq    (tco: collatz(27) = 111 steps) rt-ok clear
+
+% ====================================================================
+% SECTION 15: TCO with if (single branch)
+% ====================================================================
+
+/skip-evens {
+  % n -- first-odd (skips even numbers via tail recursion)
+  dup 2 mod 0 eq { 1 add skip-evens } if
+} def
+
+4 skip-evens 5 eq   (tco: skip-evens 4 -> 5) rt-ok clear
+7 skip-evens 7 eq   (tco: skip-evens 7 -> 7 already odd) rt-ok clear
+100 skip-evens 101 eq  (tco: skip-evens 100 -> 101) rt-ok clear
+0 skip-evens 1 eq   (tco: skip-evens 0 -> 1) rt-ok clear
+
+% ====================================================================
+% SECTION 16: Mixed tail and non-tail in same function
+% ====================================================================
+% Only the tail branch gets TCO; the non-tail branch still works correctly.
+
+/mixed-rec {
+  % n mode -- result
+  % mode=0: tail-recursive countdown
+  % mode=1: non-tail (returns sum)
+  exch dup 0 le {
+    pop pop 0
+  } {
+    over 0 eq {
+      % tail path: just count down
+      1 sub exch mixed-rec
+    } {
+      % non-tail path: accumulate
+      dup 1 sub 1 mixed-rec rot pop add
+    } if-else
+  } if-else
+} def
+
+1000 0 mixed-rec 0 eq   (tco: mixed tail path 1000) rt-ok clear
+10 1 mixed-rec 55 eq     (tco: mixed non-tail path sum 1..10) rt-ok clear
+
+% ====================================================================
+% SECTION 17: TCO via exec
+% ====================================================================
+% exec pushes a proc to the exec stack without an @call frame.
+% The tail name inside the proc sees the enclosing @call -> TCO applies.
+
+/exec-countdown {
+    dup 0 le { pop } { 1 sub { exec-countdown } exec } if-else
+} def
+
+10000 exec-countdown count 0 eq
+(tco: exec-countdown 10000 stack empty) rt-ok clear
+
+% exec with load: /name load exec in tail position
+/load-exec-countdown {
+    dup 0 le { pop } { 1 sub /load-exec-countdown load exec } if-else
+} def
+
+10000 load-exec-countdown count 0 eq
+(tco: load-exec-countdown 10000 stack empty) rt-ok clear
+
+% Anonymous self-recursion via dup exec (no @call frames at all)
+% Stack convention: n proc -- ...
+% proc body uses exch to access n, then dup exec to recurse.
+50000 { exch dup 0 le { pop pop } { 1 sub exch dup exec } if-else } dup exec
+count 0 eq
+(tco: dup exec 50000 stack empty) rt-ok clear
+
+% ====================================================================
+% SECTION 18: TCO with ExtValue types (Long/Double)
+% ====================================================================
+% Verify that Long and Double arguments survive deep tail recursion
+% without leaking or corrupting ExtValues.
+
+/long-countdown {
+    dup 0l eq { } { 1l sub long-countdown } if-else
+} def
+
+10000l long-countdown
+0l eq                               (tco: Long countdown 10K result is 0l) rt-ok
+clear
+
+% Long accumulator: sum 1..N as Long
+/long-sum-acc {
+    % n acc -- sum
+    exch dup 0l eq { pop } { dup rot add exch 1l sub exch long-sum-acc } if-else
+} def
+
+save
+100l 0l long-sum-acc 5050l eq       (tco: Long sum 1..100 = 5050l) rt-ok
+1000l 0l long-sum-acc 500500l eq    (tco: Long sum 1..1000 = 500500l) rt-ok
+restore clear
+
+% Double accumulator: multiply chain
+/double-mul-acc {
+    % n acc -- result
+    exch dup 0l eq { pop } { exch 2.0d mul exch 1l sub exch double-mul-acc } if-else
+} def
+
+save
+10l 1.0d double-mul-acc 1024.0d eq  (tco: Double 2^10 = 1024.0d) rt-ok
+20l 1.0d double-mul-acc 1048576.0d eq (tco: Double 2^20 = 1048576.0d) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 19: TCO does NOT apply inside loop/repeat/for bodies
+% ====================================================================
+% Loop control ops leave barriers on exec stack, preventing TCO.
+% These verify the barriers work correctly (recursion inside loop
+% bodies is non-tail and should overflow).
+
+% Recursion inside repeat body is non-tail (barrier present)
+/repeat-recurse { 1 { repeat-recurse } repeat } def
+{ repeat-recurse } try /execstack-overflow eq
+(tco: recursion inside repeat is non-tail) rt-ok clear
+
+% Recursion inside for body is non-tail (barrier present)
+/for-recurse { 1 1 1 { pop for-recurse } for } def
+{ for-recurse } try /execstack-overflow eq
+(tco: recursion inside for is non-tail) rt-ok clear
+
+% Recursion inside loop body is non-tail (barrier present)
+/loop-recurse { { loop-recurse } loop } def
+{ loop-recurse } try /execstack-overflow eq
+(tco: recursion inside loop is non-tail) rt-ok clear
+
+% ====================================================================
+% SECTION 20: Deep mutual recursion with ExtValues
+% ====================================================================
+% Two functions passing Long values back and forth.
+
+/long-ping {
+    dup 0l le { pop (ping) } { 1l sub long-pong } if-else
+} def
+
+/long-pong {
+    dup 0l le { pop (pong) } { 1l sub long-ping } if-else
+} def
+
+save
+10000l long-ping (ping) eq          (tco: Long mutual 10000 ping) rt-ok
+10001l long-ping (pong) eq          (tco: Long mutual 10001 pong) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 21: TCO with save/restore inside recursion
+% ====================================================================
+% Each recursive call does a save/restore — TCO should still apply
+% for the outer tail call.
+
+/save-restore-countdown {
+    dup 0 le { pop } {
+        save restore   % save/restore for side effect
+        1 sub save-restore-countdown
+    } if-else
+} def
+
+5000 save-restore-countdown count 0 eq
+(tco: save/restore inside TCO 5000) rt-ok clear
+
+% ====================================================================
+% SECTION 22: N-way cycle with ExtValues
+% ====================================================================
+% 4-way cycle passing Long arguments.
+
+/cycle-a { dup 0l le { pop (a) } { 1l sub cycle-b } if-else } def
+/cycle-b { dup 0l le { pop (b) } { 1l sub cycle-c } if-else } def
+/cycle-c { dup 0l le { pop (c) } { 1l sub cycle-d } if-else } def
+/cycle-d { dup 0l le { pop (d) } { 1l sub cycle-a } if-else } def
+
+save
+10000l cycle-a (a) eq               (tco: 4-way Long cycle 10000 -> a) rt-ok
+10001l cycle-a (b) eq               (tco: 4-way Long cycle 10001 -> b) rt-ok
+10002l cycle-a (c) eq               (tco: 4-way Long cycle 10002 -> c) rt-ok
+10003l cycle-a (d) eq               (tco: 4-way Long cycle 10003 -> d) rt-ok
+restore clear
+
+% ====================================================================
+% SECTION 23: Verify limits via //:status:
+% ====================================================================
+
+% Verify max-exec-depth is queryable and reasonable
+//:status:max-exec-depth 0 gt         (tco: max-exec-depth > 0) rt-ok clear
+
+% Non-tail overflow is bounded by max-exec-depth (no hardcoded 256)
+/overflow-test { overflow-test 1 pop } def
+{ overflow-test } try /execstack-overflow eq
+(tco: non-tail overflows within max-exec-depth) rt-ok clear
+
+% ====================================================================
+% SECTION 24: Direct @call frame verification via query-status
+% ====================================================================
+% query-status resolves at runtime, so exec-top-is-call accurately
+% reflects the exec stack during tail-recursive execution.
+
+% Direct tail call — @call is exposed at the tail position
+/verify-call-direct {
+    dup 0 le {
+        pop /exec-top-is-call query-status
+    } { 1 sub verify-call-direct } if-else
+} def
+
+1000 verify-call-direct true eq        (tco: @call exposed in direct tail) rt-ok clear
+
+% Mutual tail call — @call is exposed at each handoff
+/verify-call-a {
+    dup 0 le { pop /exec-top-is-call query-status } { 1 sub verify-call-b } if-else
+} def
+/verify-call-b {
+    dup 0 le { pop /exec-top-is-call query-status } { 1 sub verify-call-a } if-else
+} def
+
+1000 verify-call-a true eq            (tco: @call exposed in mutual tail even) rt-ok clear
+1001 verify-call-a true eq            (tco: @call exposed in mutual tail odd) rt-ok clear
+
+% Non-tail position — @call is NOT exposed (proc body elements remain)
+/verify-call-nontail {
+    /exec-top-is-call query-status
+    (dummy) pop
+} def
+
+verify-call-nontail false eq          (tco: @call NOT exposed in non-tail) rt-ok clear
+
+% Deep recursion — @call stays exposed through 10K iterations
+/verify-call-deep {
+    dup 0 le {
+        pop /exec-top-is-call query-status
+    } { 1 sub verify-call-deep } if-else
+} def
+
+10000 verify-call-deep true eq         (tco: @call exposed through 10K depth) rt-ok clear
+
+% ====================================================================
+% SECTION 25: TCO works through external barriers (try)
+% ====================================================================
+% @try-barrier is placed BELOW the function's @call frame.
+% The initial call from try's body to the function doesn't get TCO
+% (barrier is on top), but recursive tail calls WITHIN the function
+% see @call on top and get TCO normally.
+
+/try-countdown { dup 0 le { pop } { 1 sub try-countdown } if-else } def
+
+% Recursive calls inside the function get TCO
+//:status:tco-count
+{ 10000 try-countdown } try pop
+//:status:tco-count
+exch sub 10000ul eq                          (tco-try: recursive calls get TCO) rt-ok clear
+
+% Deep recursion succeeds (proves TCO is active for recursive calls)
+{ 100000 try-countdown } try /no-error eq    (tco-try: 100K depth inside try) rt-ok clear
+
+% ====================================================================
+% SECTION 26: TCO works through external barriers (nested try)
+% ====================================================================
+% Nested try blocks still allow TCO for recursive calls.
+
+/try2-countdown { dup 0 le { pop } { 1 sub try2-countdown } if-else } def
+
+//:status:tco-count
+{ { 10000 try2-countdown } try pop } try pop
+//:status:tco-count
+exch sub 10000ul eq                          (tco-nested-try: recursive calls get TCO) rt-ok clear
+
+{ { 100000 try2-countdown } try pop } try /no-error eq
+                                             (tco-nested-try: 100K depth succeeds) rt-ok clear
+
+% ====================================================================
+% SECTION 27: TCO works through external barriers (stopped)
+% ====================================================================
+
+/stopped-countdown { dup 0 le { pop } { 1 sub stopped-countdown } if-else } def
+
+//:status:tco-count
+{ 10000 stopped-countdown } stopped pop
+//:status:tco-count
+exch sub 10000ul eq                          (tco-stopped: recursive calls get TCO) rt-ok clear
+
+{ 100000 stopped-countdown } stopped not     (tco-stopped: 100K depth succeeds) rt-ok clear
+
+% ====================================================================
+% SECTION 28: TCO works through external barriers (dip)
+% ====================================================================
+% dip hides a value, executes proc, restores value.  @dip barrier
+% is placed below the function's @call frame.
+
+/dip-countdown { dup 0 le { pop } { 1 sub dip-countdown } if-else } def
+
+//:status:tco-count
+99 { 10000 dip-countdown } dip pop
+//:status:tco-count
+exch sub 10000ul eq                          (tco-dip: recursive calls get TCO) rt-ok clear
+
+99 { 100000 dip-countdown } dip
+99 eq                                        (tco-dip: hidden value restored after 100K) rt-ok clear
+
+% ====================================================================
+% SECTION 29: Closure TCO (@end-locals above @call)
+% ====================================================================
+% |x| pushes @end-locals on exec stack ABOVE @call.  Closure-aware TCO
+% detects this pattern, executes @end-locals cleanup early (pops locals
+% dict, clears bindings, recycles), then reuses the @call frame.
+% Single-layer closures now get full TCO.
+
+/closure-countdown { |n| n 0 le { } { n 1 sub closure-countdown } if-else } def
+
+% Verify tco-count DOES increment (closure TCO active)
+//:status:tco-count
+500 closure-countdown
+//:status:tco-count
+exch sub 500ul eq                            (tco-closure: 500 tail calls optimized) rt-ok clear
+
+% Deep closure recursion (would overflow dict stack without closure TCO)
+10000 closure-countdown count 0 eq           (tco-closure: 10K depth succeeds) rt-ok clear
+
+% Very deep closure recursion
+100000 closure-countdown count 0 eq          (tco-closure: 100K depth succeeds) rt-ok clear
+
+% Closure TCO with accumulator
+/closure-sum { |n acc| n 0 le { acc } { n 1 sub n acc add closure-sum } if-else } def
+1000 0 closure-sum 500500 eq                 (tco-closure: sum 1..1000 = 500500) rt-ok clear
+
+% Mutual closure recursion
+/closure-ping { |n| n 0 le { (ping) } { n 1 sub closure-pong } if-else } def
+/closure-pong { |n| n 0 le { (pong) } { n 1 sub closure-ping } if-else } def
+10000 closure-ping (ping) eq                 (tco-closure: mutual 10K ping) rt-ok clear
+10001 closure-ping (pong) eq                 (tco-closure: mutual 10001 pong) rt-ok clear
+
+% Closure TCO with ExtValues (Long arguments through closure recursion)
+save
+/closure-long-cd { |n| n 0l le { (done) } { n 1l sub closure-long-cd } if-else } def
+10000l closure-long-cd (done) eq             (tco-closure: Long 10K closure) rt-ok
+restore clear
+
+% Closure TCO with return value preserved
+/closure-fib { |n a b| n 0 eq { a } { n 1 sub b a b add closure-fib } if-else } def
+20 0 1 closure-fib 6765 eq                   (tco-closure: fib(20) = 6765) rt-ok clear
+
+% Verify @call frame via query-status during closure recursion
+/closure-verify-call {
+    |n| n 0 le {
+        /exec-top-is-call query-status
+    } { n 1 sub closure-verify-call } if-else
+} def
+
+% Note: exec-top-is-call sees @end-locals on top (closure TCO pops it
+% only when the tail call fires, not during query-status mid-body).
+% The closure body is still executing, so @end-locals is present.
+% Just verify the function completes at deep depth.
+1000 closure-verify-call pop                 % discard the query result
+true                                         (tco-closure: 1K depth with query-status) rt-ok clear
+
+% Control: plain (non-closure) TCO still works
+/plain-countdown { dup 0 le { pop } { 1 sub plain-countdown } if-else } def
+
+//:status:tco-count
+500 plain-countdown
+//:status:tco-count
+exch sub 500ul eq                            (tco-closure: control -- plain gets 500 TCOs) rt-ok clear
+
+% ====================================================================
+% SECTION 29b: Nested closures do NOT get closure TCO
+% ====================================================================
+% Two layers of |x| push two @end-locals above @call.  Closure TCO
+% only handles a single @end-locals, so nested closures still overflow
+% the dict stack.
+
+/nested-closure-cd { |n| { |m| m 0 le { } { m 1 sub nested-closure-cd } if-else } n exch exec } def
+
+% Verify nested closures overflow dict stack (each call pushes 2 dicts).
+% Depth threshold sized to overflow the default dict-depth=64 -- 40 calls
+% push 80 dicts, well past the cap.
+{ 40 nested-closure-cd } try /dictstack-overflow eq
+                                             (tco-nested-closure: 2-layer overflows) rt-ok clear
+
+% Verify single-layer closure of SAME function does NOT overflow
+% (control: single |n| at 50+ depth succeeds — proves it's the nesting, not depth)
+50 closure-countdown count 0 eq              (tco-nested-closure: single-layer 50 OK) rt-ok clear
+
+% ====================================================================
+% SECTION 29c: Closure TCO preserves caller's frame across non-locals tail callees
+% ====================================================================
+% When proc A has |locals| and its tail call is to a proc B that does NOT
+% have |locals|, the TCO gate preserves A's frame across the call so
+% that B can read+update A's locals via lookup/store.  Recursive closures
+% (B has |locals|, including self-recursion) still pop eagerly so the
+% dict stack stays bounded.
+%
+% Phase C of Wart 02 (def-skips-frame): `def` no longer lands in a
+% frame even when one is on top, so frame preservation is now observed
+% via `store` -- which still finds and updates an existing binding
+% wherever it lives (including frames).
+%
+% Regression for the wart found during the minidb cascade
+% (feedback_tco_frame_exposure.md, fixed 2026-04-24).
+
+% Tail-callee `store` updates caller's frame slot.
+/tco-callee-store {
+    % Callee has no |locals|.  /v exists in the caller's frame dict
+    % (tco-caller's |x|#4 below); `store` finds and updates it there.
+    /v 99 store
+    v
+} def
+/tco-caller {
+    |x|#4
+    /v 0 local-def
+    % Tail position: the gate must preserve x's frame across tco-callee-store.
+    tco-callee-store
+} def
+1 tco-caller 99 eq
+    (tco-closure-preserve: tail-callee store updates caller frame) rt-ok clear
+
+% After tco-caller returns, /v must be gone (its frame dict was popped).
+{ v } try /undefined eq
+    (tco-closure-preserve: caller frame torn down on return) rt-ok clear
+
+% Chain of non-locals tail callees all preserve the original caller's frame.
+/tco-chain-3 { /w-chain w-chain 1 add store w-chain } def
+/tco-chain-2 { tco-chain-3 } def
+/tco-chain-1 { tco-chain-2 } def
+/tco-chain-root {
+    |seed|#4
+    /w-chain seed local-def
+    tco-chain-1
+} def
+10 tco-chain-root 11 eq
+    (tco-closure-preserve: 3-deep chain reads/writes root's frame) rt-ok clear
+{ w-chain } try /undefined eq
+    (tco-closure-preserve: chain teardown complete) rt-ok clear
+
+% Recursive |locals| self-call still gets eager pop (dict stack stays bounded).
+% Reuse closure-countdown to confirm 100K depth still works after the gate.
+100000 closure-countdown count 0 eq
+    (tco-closure-preserve: recursive closure 100K still bounded) rt-ok clear
+
+% Deep chain of non-locals tail callees with one locals root: dict stack
+% stays at 1 extra layer (the root's frame) regardless of chain length.
+/tco-deep-tail { dup 0 le { pop } { 1 sub tco-deep-tail } if-else } def
+/tco-deep-root { |x|#2 x tco-deep-tail } def
+5000 tco-deep-root count 0 eq
+    (tco-closure-preserve: non-locals chain of 5000 OK under locals root) rt-ok clear
+
+% ====================================================================
+% SECTION 30: TCO works through external barriers (finally)
+% ====================================================================
+
+/fin-countdown { dup 0 le { pop } { 1 sub fin-countdown } if-else } def
+
+//:status:tco-count
+{ 10000 fin-countdown } { } finally
+//:status:tco-count
+exch sub 10000ul eq                          (tco-finally: recursive calls get TCO) rt-ok clear
+
+{ 100000 fin-countdown } { } finally count 0 eq
+                                             (tco-finally: 100K depth succeeds) rt-ok clear
+
+% NOTE: TCO in coroutines is tested in test_coroutine.trx (sections 38-39).
+% Coroutine exec stacks are at different VM addresses, which would corrupt
+% the main exec-high-water metric if tested here.
+
+% ====================================================================
+% SECTION 31: TCO works through external barriers (with-stream)
+% ====================================================================
+% @with-stream barrier is placed below the function's @call frame.
+
+/ws-countdown { dup 0 le { pop } { 1 sub ws-countdown } if-else } def
+
+//:status:tco-count
+(/dev/null) (w)#b { pop 10000 ws-countdown } with-stream
+//:status:tco-count
+exch sub 10000ul eq                          (tco-with-stream: recursive calls get TCO) rt-ok clear
+
+(/dev/null) (w)#b { pop 100000 ws-countdown } with-stream
+count 0 eq                                   (tco-with-stream: 100K depth succeeds) rt-ok clear
+
+% ====================================================================
+% SECTION 32: TCO correctness — values through external barriers
+% ====================================================================
+% Functions called inside barriers still compute correctly at deep depths.
+
+% Factorial inside try (non-tail recursive, but correct at shallow depth)
+/fact-rec { dup 1 le { } { dup 1 sub fact-rec mul } if-else } def
+{ 10 fact-rec } try pop
+3628800 eq                                   (tco-barrier-val: factorial inside try) rt-ok clear
+
+% Sum inside stopped
+/sum-acc {
+    dup 0 le { pop } { dup 3 -1 roll add exch 1 sub sum-acc } if-else
+} def
+{ 0 1000 sum-acc } stopped pop
+500500 eq                                    (tco-barrier-val: sum 1..1000 inside stopped) rt-ok clear
+
+% ====================================================================
+% SECTION 33: Closure with external barrier — both effects compose
+% ====================================================================
+% Closure TCO works even when wrapped in an external barrier (try).
+% @end-locals above @call is handled by closure-aware TCO, and the
+% external @try-barrier below is irrelevant to recursive calls.
+
+/closure-try-cd { |n| n 0 le { } { n 1 sub closure-try-cd } if-else } def
+
+% Closure TCO fires inside try
+//:status:tco-count
+{ 500 closure-try-cd } try pop
+//:status:tco-count
+exch sub 500ul eq                            (tco-closure-try: 500 TCOs inside try) rt-ok clear
+
+% Deep closure recursion inside try succeeds
+{ 100000 closure-try-cd } try /no-error eq
+                                             (tco-closure-try: 100K depth inside try) rt-ok clear
+
+% exec stack frame integrity after all TCO tests
+//:status:exec-validate                          (tco: exec-validate after all TCO tests) rt-ok clear
+
+(Tail Call Optimization tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

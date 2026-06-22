@@ -1,0 +1,78 @@
+% examples/log-timestamp.trx -- showcase for the chrono Tier 1 surface.
+%
+% Run:
+%   ./trix examples/log-timestamp.trx
+%
+% Demonstrates:
+%   - epoch-time + :I / :Il PrintFmt format-spec for UTC/local timestamps
+%   - instant-weekday via the /chrono dict's short name `weekday`
+%   - /chrono convenience dict via begin/end (short names)
+%
+% Output is a five-line "log" of synthetic events whose timestamps span
+% a five-second window starting now.  Each line shows UTC and local
+% formatting side by side, plus a weekday tally at the end.
+
+% Five fake events, captured at one-second intervals from "now".
+/now-ts epoch-time def
+
+/events 16 dynamic-dict def
+/log-event {
+    /label exch def
+    /ts exch def
+    events label ts put
+} def
+
+now-ts           (server-start)  log-event
+now-ts 1000ul add (request-A)    log-event
+now-ts 2000ul add (request-B)    log-event
+now-ts 3000ul add (request-C)    log-event
+now-ts 4000ul add (server-stop)  log-event
+
+% Print each event as: "[UTC: 2026-04-30T12:34:56Z]  (local: 08:34:56 EDT)  label"
+%
+% The :I template is whole-second UTC; :Il switches to local zone for the
+% bracketed local time.  Width prefix on :I right-pads to a fixed column.
+
+(--- log timestamps ---) =
+
+events {
+    % stack: label ts (key value pairs from for-all)
+    exch /label exch def
+    /ts exch def
+    256 string ([UTC: {0:I%Y-%m-%dT%H:%M:%SZ}]  (local: {0:Il%H:%M:%S %Z})  {1:s})
+    mark ts label sprint-fmt pop =
+} for-all
+
+() =
+
+% Weekday tally: count events per UTC weekday using /chrono short names.
+% Both UTC and local-zone day-of-week are useful in practice; we use UTC here
+% so the demo is reproducible regardless of where the user runs it.
+
+(--- weekday breakdown (UTC) ---) =
+
+/tally 16 dynamic-dict def
+
+% bump-tally: ts -- (uses /chrono short-name `weekday` inside begin/end)
+/bump-tally {
+    //:systemdict:chrono begin
+        weekday   % ts -- /weekday-name
+    end
+    /key exch def
+    /tally-count
+        tally key known? { tally key get 1 add } { 1 } if-else
+    def
+    tally key tally-count put
+} def
+
+events {
+    exch pop  % drop label; only ts is needed
+    bump-tally
+} for-all
+
+tally {
+    exch /day exch def
+    /tally-count exch def
+    256 string ({0:s}: {1:d})
+    mark day tally-count sprint-fmt pop =
+} for-all

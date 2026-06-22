@@ -1,0 +1,77 @@
+% ====================================================================
+% test_stream_putn_boundary.trx -- regression for Stream::putn pointer
+% advance after a flush.
+%
+% Bug (fixed): putn copied n bytes from the input pointer into the
+% stream buffer, advanced the buffer write pointer, but failed to
+% advance the input pointer.  When a single write-string call's data
+% spanned a buffer flush (i.e., the data was larger than the stream
+% buffer or the stream buffer was already partially filled), bytes
+% after the flush were re-emitted from the START of the input buffer
+% instead of continuing where they left off.  Symptom on file streams
+% with default 4 KiB buffers: at the first 4 KiB boundary in the file,
+% the bytes from input_buffer[0..flush_overflow_count] would clobber
+% the expected continuation bytes.
+%
+% This test exercises the boundary by writing a 41-byte "header" then
+% a 7206-byte payload with byte i = (i mod 256) so any duplication
+% from the start of the payload is visible at the 4096 file offset
+% (input offset 4055 = 4055 mod 256 = 0xD7).  Pre-fix, file[4096] was
+% 0x00 (= payload[0]) instead of 0xD7.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- setup: write 41-byte header then 7206-byte payload ---
+/path (/tmp/trix_putn_boundary.bin) def
+
+/header 41 string def
+0 1 40 {|i| header i  i 256 mod /byte-type cast  put} for
+
+/payload 7206 string def
+0 1 7205 {|i| payload i  i 256 mod /byte-type cast  put} for
+
+/fs path (w)#b stream def
+fs header write-string
+fs payload write-string
+fs close-stream
+
+% --- read back and verify byte-for-byte ---
+/r path (r)#b stream def
+/contents r read-all def
+r close-stream
+
+contents length 7247 eq    (length: 41 + 7206 = 7247) rt-ok clear
+
+% Header bytes at offsets 0..40
+/header-ok true def
+0 1 40 {|i|
+    contents i get  i 256 mod /byte-type cast  ne
+    { /header-ok false store } if
+} for
+header-ok    (header bytes intact) rt-ok clear
+
+% Payload bytes at offsets 41..7246 must equal (offset - 41) mod 256.
+% The bug specifically corrupted bytes near file offset 4096 (= 41 + 4055):
+% verify that boundary explicitly first, then the rest.
+contents 4095 get  4054 256 mod /byte-type cast  eq    (file[4095] correct) rt-ok clear
+contents 4096 get  4055 256 mod /byte-type cast  eq    (file[4096] correct -- 4 KiB boundary) rt-ok clear
+contents 4097 get  4056 256 mod /byte-type cast  eq    (file[4097] correct) rt-ok clear
+
+/payload-ok true def
+41 1 7246 {|i|
+    contents i get  i 41 sub 256 mod /byte-type cast  ne
+    { /payload-ok false store } if
+} for
+payload-ok   (entire 7206-byte payload intact) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

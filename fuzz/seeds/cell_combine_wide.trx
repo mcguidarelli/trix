@@ -1,0 +1,3 @@
+% cell-combine over a wide cell array (count-narrowing shapes).
+mark 64 { 1 cell } repeat array-from-mark { mark 64 { dup } repeat array-from-mark length } cell-combine
+cell-get

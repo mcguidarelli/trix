@@ -1,0 +1,233 @@
+% ====================================================================
+% test_fpops.trx -- tests for FP manipulation and classification ops
+% ====================================================================
+% Part A: fmax, fmin, ldexp, nearby-int, trunc, round, log10
+% Part B: finite?, inf?, nan?, normal?, sign-bit
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% helper: approximate equality for floats
+% usage: val expected tolerance approx-eq -> bool
+/approx-eq {
+  3 1 roll   % tol val expected
+  sub abs    % tol |val - expected|
+  ge         % tol >= |val - expected|
+} def
+
+% aliases for special values
+/real-NaN      //:systemdict:numbers:real-type:quiet-NaN      def
+/real-Inf      //:systemdict:numbers:real-type:infinity        def
+/real-denorm   //:systemdict:numbers:real-type:denorm-min      def
+/double-NaN    //:systemdict:numbers:double-type:quiet-NaN     def
+/double-Inf    //:systemdict:numbers:double-type:infinity      def
+/double-denorm //:systemdict:numbers:double-type:denorm-min    def
+
+% ====================================================================
+% SECTION 1: fmax
+% ====================================================================
+
+1.0 2.0 fmax 2.0 eq               (fmax: 1.0 2.0 -> 2.0) rt-ok clear
+-1.0 1.0 fmax 1.0 eq              (fmax: -1.0 1.0 -> 1.0) rt-ok clear
+0.0 0.0 fmax 0.0 eq               (fmax: 0.0 0.0 -> 0.0) rt-ok clear
+//real-NaN 1.0 fmax 1.0 eq        (fmax: NaN 1.0 -> 1.0) rt-ok clear
+1.0 //real-NaN fmax 1.0 eq        (fmax: 1.0 NaN -> 1.0) rt-ok clear
+
+% double variants
+1.0d 2.0d fmax 2.0d eq            (fmax: 1.0d 2.0d -> 2.0d) rt-ok clear
+//double-NaN 1.0d fmax 1.0d eq    (fmax: dNaN 1.0d -> 1.0d) rt-ok clear
+1.0d //double-NaN fmax 1.0d eq    (fmax: 1.0d dNaN -> 1.0d) rt-ok clear
+
+% return type matches input
+1.0 2.0 fmax type /real-type eq    (fmax: returns real) rt-ok clear
+1.0d 2.0d fmax type /double-type eq (fmax: returns double) rt-ok clear
+
+% ====================================================================
+% SECTION 2: fmin
+% ====================================================================
+
+1.0 2.0 fmin 1.0 eq               (fmin: 1.0 2.0 -> 1.0) rt-ok clear
+-1.0 1.0 fmin -1.0 eq             (fmin: -1.0 1.0 -> -1.0) rt-ok clear
+0.0 0.0 fmin 0.0 eq               (fmin: 0.0 0.0 -> 0.0) rt-ok clear
+//real-NaN 1.0 fmin 1.0 eq        (fmin: NaN 1.0 -> 1.0) rt-ok clear
+1.0 //real-NaN fmin 1.0 eq        (fmin: 1.0 NaN -> 1.0) rt-ok clear
+
+% double variants
+1.0d 2.0d fmin 1.0d eq            (fmin: 1.0d 2.0d -> 1.0d) rt-ok clear
+//double-NaN 1.0d fmin 1.0d eq    (fmin: dNaN 1.0d -> 1.0d) rt-ok clear
+
+% ====================================================================
+% SECTION 3: ldexp
+% ====================================================================
+
+1.0 3 ldexp 8.0 eq                (ldexp: 1.0 3 -> 8.0) rt-ok clear
+0.5 1 ldexp 1.0 eq                (ldexp: 0.5 1 -> 1.0) rt-ok clear
+1.0 0 ldexp 1.0 eq                (ldexp: 1.0 0 -> 1.0) rt-ok clear
+1.0 -1 ldexp 0.5 eq               (ldexp: 1.0 -1 -> 0.5) rt-ok clear
+
+% double variants
+1.0d 3 ldexp 8.0d eq              (ldexp: 1.0d 3 -> 8.0d) rt-ok clear
+0.5d 1 ldexp 1.0d eq              (ldexp: 0.5d 1 -> 1.0d) rt-ok clear
+
+% return type matches first operand
+1.0 3 ldexp type /real-type eq     (ldexp: returns real) rt-ok clear
+1.0d 3 ldexp type /double-type eq  (ldexp: returns double) rt-ok clear
+
+% ====================================================================
+% SECTION 4: nearby-int (banker's rounding: round half to even)
+% ====================================================================
+
+1.5 nearby-int 2.0 eq              (nearby-int: 1.5 -> 2.0) rt-ok clear
+2.5 nearby-int 2.0 eq              (nearby-int: 2.5 -> 2.0 bankers) rt-ok clear
+-1.5 nearby-int -2.0 eq            (nearby-int: -1.5 -> -2.0) rt-ok clear
+-2.5 nearby-int -2.0 eq            (nearby-int: -2.5 -> -2.0 bankers) rt-ok clear
+0.0 nearby-int 0.0 eq              (nearby-int: 0.0 -> 0.0) rt-ok clear
+3.0 nearby-int 3.0 eq              (nearby-int: 3.0 -> 3.0) rt-ok clear
+
+% double variants
+1.5d nearby-int 2.0d eq            (nearby-int: 1.5d -> 2.0d) rt-ok clear
+2.5d nearby-int 2.0d eq            (nearby-int: 2.5d -> 2.0d bankers) rt-ok clear
+
+% ====================================================================
+% SECTION 5: trunc
+% ====================================================================
+
+1.9 trunc 1.0 eq                  (trunc: 1.9 -> 1.0) rt-ok clear
+-1.9 trunc -1.0 eq                (trunc: -1.9 -> -1.0) rt-ok clear
+0.0 trunc 0.0 eq                  (trunc: 0.0 -> 0.0) rt-ok clear
+2.0 trunc 2.0 eq                  (trunc: 2.0 -> 2.0) rt-ok clear
+-0.5 trunc 0.0 0.001 approx-eq   (trunc: -0.5 -> 0.0) rt-ok clear
+
+% double variants
+1.9d trunc 1.0d eq                (trunc: 1.9d -> 1.0d) rt-ok clear
+-1.9d trunc -1.0d eq              (trunc: -1.9d -> -1.0d) rt-ok clear
+
+% ====================================================================
+% SECTION 6: round (round half away from zero)
+% ====================================================================
+
+1.5 round 2.0 eq                  (round: 1.5 -> 2.0) rt-ok clear
+2.5 round 3.0 eq                  (round: 2.5 -> 3.0) rt-ok clear
+-1.5 round -2.0 eq                (round: -1.5 -> -2.0) rt-ok clear
+0.0 round 0.0 eq                  (round: 0.0 -> 0.0) rt-ok clear
+3.0 round 3.0 eq                  (round: 3.0 -> 3.0) rt-ok clear
+0.4 round 0.0 0.001 approx-eq    (round: 0.4 -> 0.0) rt-ok clear
+
+% double variants
+1.5d round 2.0d eq                (round: 1.5d -> 2.0d) rt-ok clear
+2.5d round 3.0d eq                (round: 2.5d -> 3.0d) rt-ok clear
+
+% ====================================================================
+% SECTION 7: log10
+% ====================================================================
+
+1.0 log10 0.0 eq                  (log10: 1.0 -> 0.0) rt-ok clear
+10.0 log10 1.0 0.001 approx-eq   (log10: 10.0 -> 1.0) rt-ok clear
+100.0 log10 2.0 0.001 approx-eq  (log10: 100.0 -> 2.0) rt-ok clear
+1000.0 log10 3.0 0.001 approx-eq (log10: 1000.0 -> 3.0) rt-ok clear
+
+% double variants
+1.0d log10 0.0d eq                (log10: 1.0d -> 0.0d) rt-ok clear
+10.0d log10 1.0d 0.001d approx-eq (log10: 10.0d -> 1.0d) rt-ok clear
+100.0d log10 2.0d 0.001d approx-eq (log10: 100.0d -> 2.0d) rt-ok clear
+
+% type check
+{ 1 log10 } try /type-check eq   (log10: int type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 8: finite?
+% ====================================================================
+
+1.0 finite? true eq              (finite?: 1.0 -> true) rt-ok clear
+0.0 finite? true eq              (finite?: 0.0 -> true) rt-ok clear
+-1.0 finite? true eq             (finite?: -1.0 -> true) rt-ok clear
+//real-Inf finite? false eq      (finite?: Inf -> false) rt-ok clear
+//real-NaN finite? false eq      (finite?: NaN -> false) rt-ok clear
+
+% double variants
+1.0d finite? true eq             (finite?: 1.0d -> true) rt-ok clear
+//double-Inf finite? false eq    (finite?: dInf -> false) rt-ok clear
+//double-NaN finite? false eq    (finite?: dNaN -> false) rt-ok clear
+
+% ====================================================================
+% SECTION 9: inf?
+% ====================================================================
+
+//real-Inf inf? true eq          (inf?: Inf -> true) rt-ok clear
+//real-Inf neg inf? true eq      (inf?: -Inf -> true) rt-ok clear
+1.0 inf? false eq                (inf?: 1.0 -> false) rt-ok clear
+//real-NaN inf? false eq         (inf?: NaN -> false) rt-ok clear
+0.0 inf? false eq                (inf?: 0.0 -> false) rt-ok clear
+
+% double variants
+//double-Inf inf? true eq        (inf?: dInf -> true) rt-ok clear
+//double-Inf neg inf? true eq    (inf?: -dInf -> true) rt-ok clear
+1.0d inf? false eq               (inf?: 1.0d -> false) rt-ok clear
+//double-NaN inf? false eq       (inf?: dNaN -> false) rt-ok clear
+
+% ====================================================================
+% SECTION 10: nan?
+% ====================================================================
+
+//real-NaN nan? true eq          (nan?: NaN -> true) rt-ok clear
+1.0 nan? false eq                (nan?: 1.0 -> false) rt-ok clear
+//real-Inf nan? false eq         (nan?: Inf -> false) rt-ok clear
+0.0 nan? false eq                (nan?: 0.0 -> false) rt-ok clear
+
+% double variants
+//double-NaN nan? true eq        (nan?: dNaN -> true) rt-ok clear
+1.0d nan? false eq               (nan?: 1.0d -> false) rt-ok clear
+//double-Inf nan? false eq       (nan?: dInf -> false) rt-ok clear
+
+% ====================================================================
+% SECTION 11: normal?
+% ====================================================================
+
+1.0 normal? true eq              (normal?: 1.0 -> true) rt-ok clear
+0.0 normal? false eq             (normal?: 0.0 -> false) rt-ok clear
+//real-Inf normal? false eq      (normal?: Inf -> false) rt-ok clear
+//real-NaN normal? false eq      (normal?: NaN -> false) rt-ok clear
+//real-denorm normal? false eq   (normal?: denorm -> false) rt-ok clear
+
+% double variants
+1.0d normal? true eq             (normal?: 1.0d -> true) rt-ok clear
+0.0d normal? false eq            (normal?: 0.0d -> false) rt-ok clear
+//double-Inf normal? false eq    (normal?: dInf -> false) rt-ok clear
+//double-NaN normal? false eq    (normal?: dNaN -> false) rt-ok clear
+//double-denorm normal? false eq (normal?: ddenorm -> false) rt-ok clear
+
+% ====================================================================
+% SECTION 12: sign-bit
+% ====================================================================
+
+1.0 sign-bit false eq              (sign-bit: 1.0 -> false) rt-ok clear
+-1.0 sign-bit true eq              (sign-bit: -1.0 -> true) rt-ok clear
+0.0 sign-bit false eq              (sign-bit: 0.0 -> false) rt-ok clear
+-0.0 sign-bit true eq              (sign-bit: -0.0 -> true) rt-ok clear
+
+% double variants
+1.0d sign-bit false eq             (sign-bit: 1.0d -> false) rt-ok clear
+-1.0d sign-bit true eq             (sign-bit: -1.0d -> true) rt-ok clear
+0.0d sign-bit false eq             (sign-bit: 0.0d -> false) rt-ok clear
+-0.0d sign-bit true eq             (sign-bit: -0.0d -> true) rt-ok clear
+
+% ====================================================================
+% SECTION 13: type errors for classification ops
+% ====================================================================
+
+{ 1 finite? } try /type-check eq (type-err: finite? int) rt-ok clear
+{ 1 inf? } try /type-check eq   (type-err: inf? int) rt-ok clear
+{ 1 nan? } try /type-check eq   (type-err: nan? int) rt-ok clear
+{ 1 normal? } try /type-check eq (type-err: normal? int) rt-ok clear
+{ 1 sign-bit } try /type-check eq (type-err: sign-bit int) rt-ok clear
+
+(FP operation tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

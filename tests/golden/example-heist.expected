@@ -1,0 +1,65 @@
+
+=========================================================
+   The Aurora Casino Vault
+=========================================================
+Required: {{/distraction /demolitions /hacker /transportation /casino-floor /lockpick /leadership (cardistry)#lr}}
+Roster:   11 operatives
+
+---- GREEDY (min team size)         ----
+    (size 6, fee $26):
+  specialist  Rourke       $2
+    {{/mechanic /transportation}}
+  specialist  Dane         $5
+    {{/planning /leadership /distraction /charm}}
+  anchor      Marlowe      $9
+    {{/distraction /casino-floor (cardistry)#lr}}
+  specialist  Bram         $4
+    {{/electronics /demolitions}}
+  specialist  Hux          $4
+    {{(retina-spoof-card)#lr /hacker /electronics}}
+  specialist  Fitch        $2
+    {{/lockpick /pickpocket}}
+
+---- OPTIMAL (min team size)        ----
+    (size 6, fee $26):
+  specialist  Rourke       $2
+    {{/mechanic /transportation}}
+  anchor      Marlowe      $9
+    {{/distraction /casino-floor (cardistry)#lr}}
+  specialist  Dane         $5
+    {{/planning /leadership /distraction /charm}}
+  specialist  Bram         $4
+    {{/electronics /demolitions}}
+  specialist  Hux          $4
+    {{(retina-spoof-card)#lr /hacker /electronics}}
+  specialist  Fitch        $2
+    {{/lockpick /pickpocket}}
+    visited 2^N = 2048 subsets
+
+---- OPTIMAL (min total fee)        ----
+    (size 7, fee $21):
+  specialist  Rourke       $2
+    {{/mechanic /transportation}}
+  redundant   Dane         $5
+    {{/planning /leadership /distraction /charm}}
+  specialist  Nadia        $3
+    {{/planning (silver-tongue)#lr /casino-floor}}
+  specialist  Bram         $4
+    {{/electronics /demolitions}}
+  specialist  Hux          $4
+    {{(retina-spoof-card)#lr /hacker /electronics}}
+  specialist  Iggy         $1
+    {{(cardistry)#lr}}
+  specialist  Fitch        $2
+    {{/lockpick /pickpocket}}
+    visited 2^N = 2048 subsets
+
+---- DIFFERENCES (greedy vs min-fee) ----
+    greedy − optimal-fee : {{/Marlowe}}
+    optimal-fee − greedy : {{/Iggy /Nadia}}
+    symmetric-difference : {{/Iggy /Nadia /Marlowe}}
+
+
+Try `--analyze Fitch` to see substitutability / redundancy / uniqueness;
+    `--budget 18` for a fee-capped optimal; `--no-pair Rourke,Rye`
+    for an antipathy-constrained optimal; `--all-jobs` for a sweep.

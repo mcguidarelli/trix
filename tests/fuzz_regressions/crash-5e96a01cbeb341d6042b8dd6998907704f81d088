@@ -1,0 +1,8 @@
+<< /a 2]#w ÒÂÂÂÂÂíÂÂÂÂ% ct } capture ÂÂ2<< /a 22<< 2]#w ÂÂÂÂÂÂ1 >>#=Ù]#w +1 >>#=¸íi% ct } capture } delimit /k exch def 98 /k load exec
+{ |a b| { a b add } capture } delimit 3 4 2 roll exec
+{ { |x| /§!:y x def { x y a;dd } capture x 10 munn%r ad} ded } captuystemdict:op
+5limit /k exch def 98 / userdict /k gk load exec
+{ |a b| { a b add } capture } delimit 3 4 2 roll exec
+{ { |x| /y x def { x y a;dd } capture x 10 munn%r add } captuystemdict:op
+5 userdict /k get ict /et ict /kk get exe get exec
+c

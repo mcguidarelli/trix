@@ -1,0 +1,112 @@
+% ====================================================================
+% Mirror of test_tier1_gaps.trx long/ulong cases for Int128/UInt128.
+%
+% tier1_gaps exercises stack-manipulation operators that must copy,
+% reorder, and compare Objects blindly (nip, tuck, dip, bi, dup-n,
+% pop-n, swap-at, put-interval, homogeneous?). Each of these goes
+% through Object *copy* paths that must handle WideValue cells
+% correctly (allocate a fresh cell on dup, free old cell on pop,
+% etc.). This mirror re-runs the key patterns with 128-bit operands.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: nip -- ( a b :- b )
+% ====================================================================
+
+100q 200q nip 200q deep-eq              (nip: int128 keeps top) rt-ok clear
+100uq 200uq nip 200uq deep-eq           (nip: uint128 keeps top) rt-ok clear
+
+% ====================================================================
+% SECTION 2: tuck -- ( a b :- b a b )
+% ====================================================================
+
+100q 200q tuck
+    200q deep-eq                        (tuck: int128 top) rt-ok
+    100q deep-eq                        (tuck: int128 middle) rt-ok
+    200q deep-eq                        (tuck: int128 copy) rt-ok clear
+
+% ====================================================================
+% SECTION 3: dip -- execute proc with top object set aside, then restore
+% ====================================================================
+
+100q 200q { 1q add } dip
+    200q deep-eq                        (dip: int128 restored) rt-ok
+    101q deep-eq                        (dip: int128 add below) rt-ok clear
+
+% ====================================================================
+% SECTION 4: bi -- apply two procs to the same value
+% ====================================================================
+
+100q { 1q add } { 2q mul } bi
+    200q deep-eq                        (bi: int128 mul) rt-ok
+    101q deep-eq                        (bi: int128 add) rt-ok clear
+
+100uq { 1uq add } { 2uq mul } bi
+    200uq deep-eq                       (bi: uint128 mul) rt-ok
+    101uq deep-eq                       (bi: uint128 add) rt-ok clear
+
+% ====================================================================
+% SECTION 5: dup-n -- duplicate top N items
+% ====================================================================
+
+100q 200q 2 dup-n
+    200q deep-eq                        (dup-n: int128 top copy) rt-ok
+    100q deep-eq                        (dup-n: int128 second copy) rt-ok
+    200q deep-eq                        (dup-n: int128 original top) rt-ok
+    100q deep-eq                        (dup-n: int128 original second) rt-ok clear
+
+% ====================================================================
+% SECTION 6: pop-n -- drop top N items
+% ====================================================================
+
+100q 200q 300q 3 pop-n
+count 0 eq                              (pop-n: int128 drops all 3) rt-ok clear
+
+% ====================================================================
+% SECTION 7: swap-at -- swap two array elements
+% ====================================================================
+
+[100q 200q 300q] dup 0 2 swap-at
+    dup 0 get 300q deep-eq              (swap-at: int128 first) rt-ok
+    dup 2 get 100q deep-eq              (swap-at: int128 last) rt-ok
+    1 get 200q deep-eq                  (swap-at: int128 middle preserved) rt-ok clear
+
+% ====================================================================
+% SECTION 8: put-interval -- overwrite slice with 128-bit values
+% ====================================================================
+
+[0q 0q 0q] dup 0 [100q 200q] put-interval
+    dup 0 get 100q deep-eq              (put-interval: int128 [0]) rt-ok
+    dup 1 get 200q deep-eq              (put-interval: int128 [1]) rt-ok
+        2 get 0q deep-eq                (put-interval: int128 [2] unchanged) rt-ok clear
+
+% ====================================================================
+% SECTION 9: homogeneous?
+% ====================================================================
+
+[100q 200q] homogeneous?                (homogeneous?: int128+int128 true) rt-ok clear
+[100uq 200uq] homogeneous?              (homogeneous?: uint128+uint128 true) rt-ok clear
+[100q 200uq] homogeneous? not           (homogeneous?: int128+uint128 false) rt-ok clear
+[100q 3.14d] homogeneous? not           (homogeneous?: int128+double false) rt-ok clear
+[100q 100l] homogeneous? not            (homogeneous?: int128+long false) rt-ok clear
+
+% ====================================================================
+% SECTION 10: mixed-type nip
+% ====================================================================
+
+42u 42q nip 42q deep-eq                 (fuzz: nip uint+int128) rt-ok clear
+42ul 42uq nip 42uq deep-eq              (fuzz: nip ulong+uint128) rt-ok clear
+
+(test_int128_tier1_mirror.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

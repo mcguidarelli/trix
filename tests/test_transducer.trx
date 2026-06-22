@@ -1,0 +1,350 @@
+% ====================================================================
+% test_transducer.trx -- xf-map, xf-filter, xf-take, xf-drop,
+%                        xf-scan, xf-flatten, xf-distinct,
+%                        xf-compose, into, lazy-into, pipe-into,
+%                        xf-reduce
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% =================================================================
+% SECTION 1: HAPPY PATH -- xf-map + into (eager array)
+% =================================================================
+
+[1 2 3 4 5] { 2 mul } xf-map into
+[2 4 6 8 10] deep-eq                       (into: xf-map doubles) rt-ok  clear
+
+% =================================================================
+% SECTION 2: HAPPY PATH -- xf-filter + into
+% =================================================================
+
+[1 2 3 4 5 6] { 2 mod 0 eq } xf-filter into
+[2 4 6] deep-eq                             (into: xf-filter evens) rt-ok  clear
+
+% =================================================================
+% SECTION 3: HAPPY PATH -- xf-take + into
+% =================================================================
+
+[10 20 30 40 50] 3 xf-take into
+[10 20 30] deep-eq                          (into: xf-take 3) rt-ok  clear
+
+% =================================================================
+% SECTION 4: HAPPY PATH -- xf-drop + into
+% =================================================================
+
+[10 20 30 40 50] 2 xf-drop into
+[30 40 50] deep-eq                          (into: xf-drop 2) rt-ok  clear
+
+% =================================================================
+% SECTION 5: HAPPY PATH -- xf-flatten + into
+% =================================================================
+
+[[1 2] [3 4] [5]] xf-flatten into
+[1 2 3 4 5] deep-eq                         (into: xf-flatten) rt-ok  clear
+
+% =================================================================
+% SECTION 6: HAPPY PATH -- xf-distinct + into
+% =================================================================
+
+[1 1 2 2 3 3 1] xf-distinct into
+[1 2 3 1] deep-eq                           (into: xf-distinct consecutive) rt-ok  clear
+
+% =================================================================
+% SECTION 7: HAPPY PATH -- xf-compose (two steps)
+% =================================================================
+
+/xf { 2 mod 0 eq } xf-filter { 3 mul } xf-map xf-compose def
+[1 2 3 4 5 6] xf into
+[6 12 18] deep-eq                           (into: compose filter+map) rt-ok  clear
+
+% =================================================================
+% SECTION 8: HAPPY PATH -- xf-compose (three steps)
+% =================================================================
+
+/xf3 { 2 mod 0 eq } xf-filter { 10 mul } xf-map 2 xf-take xf-compose xf-compose def
+[1 2 3 4 5 6 7 8] xf3 into
+[20 40] deep-eq                             (into: compose filter+map+take) rt-ok  clear
+
+% =================================================================
+% SECTION 9: HAPPY PATH -- single step without compose
+% =================================================================
+
+[1 2 3] { 1 add } xf-map into
+[2 3 4] deep-eq                             (into: single xf-map no compose) rt-ok  clear
+
+% =================================================================
+% SECTION 10: HAPPY PATH -- lazy-into (xf-map)
+% =================================================================
+
+1 lazy-from { 2 mul } xf-map lazy-into 5 lazy-take lazy-to-array
+[2 4 6 8 10] deep-eq                       (lazy-into: xf-map) rt-ok  clear
+
+% =================================================================
+% SECTION 11: HAPPY PATH -- lazy-into (xf-filter)
+% =================================================================
+
+1 lazy-from { 2 mod 0 eq } xf-filter lazy-into 3 lazy-take lazy-to-array
+[2 4 6] deep-eq                             (lazy-into: xf-filter) rt-ok  clear
+
+% =================================================================
+% SECTION 12: HAPPY PATH -- lazy-into (compose)
+% =================================================================
+
+1 lazy-from xf lazy-into 3 lazy-take lazy-to-array
+[6 12 18] deep-eq                           (lazy-into: compose filter+map) rt-ok  clear
+
+% =================================================================
+% SECTION 13: HAPPY PATH -- xf-reduce
+% =================================================================
+
+[1 2 3 4 5 6] 0 { 2 mod 0 eq } xf-filter { add } xf-reduce
+12 eq                                       (xf-reduce: filter+sum) rt-ok  clear
+
+% =================================================================
+% SECTION 14: HAPPY PATH -- xf-scan + into
+% =================================================================
+
+[1 2 3 4 5] 0 { add } xf-scan into
+[0 1 3 6 10 15] deep-eq                     (into: xf-scan running sum) rt-ok  clear
+
+% =================================================================
+% SECTION 15: SAD PATH -- unknown xf tag
+% =================================================================
+
+{ [1 2 3] 42 /unknown-xf tag into } try /type-check eq
+                                            (sad: unknown xf tag) rt-ok  clear
+
+% =================================================================
+% SECTION 16: SAD PATH -- xf-compose non-transducer
+% =================================================================
+
+{ 42 { 1 add } xf-map xf-compose } try /type-check eq
+                                            (sad: compose with integer) rt-ok  clear
+
+% =================================================================
+% SECTION 17: STRESS -- many compose steps
+% =================================================================
+
+/xf5
+  { 1 add } xf-map
+  { 2 mul } xf-map xf-compose
+  { 1 sub } xf-map xf-compose
+  { 3 add } xf-map xf-compose
+  { 2 mod 0 eq } xf-filter xf-compose
+def
+
+[0 1 2 3 4 5 6 7 8 9] xf5 into
+length 10 eq                                (stress: 5-step compose) rt-ok  clear
+
+% =================================================================
+% SECTION 18: STRESS -- large array
+% =================================================================
+
+% Build array [0..99], filter evens, map double, take 10
+0 100 1 lazy-range lazy-to-array
+{ 2 mod 0 eq } xf-filter { 2 mul } xf-map 10 xf-take xf-compose xf-compose into
+dup length 10 eq                            (stress: 100 elements) rt-ok
+0 get 0 eq                                  (stress: first even*2 = 0) rt-ok  clear
+
+% =================================================================
+% SECTION 19: BOUNDARY -- empty source array
+% =================================================================
+
+[] { 2 mul } xf-map into
+length 0 eq                                 (boundary: empty array) rt-ok  clear
+
+% =================================================================
+% SECTION 20: BOUNDARY -- xf-take larger than array
+% =================================================================
+
+% Note: array take is strict (count must not exceed length).
+% This tests take with exact length.
+[1 2 3] 3 xf-take into
+[1 2 3] deep-eq                             (boundary: take exact length) rt-ok  clear
+
+% =================================================================
+% SECTION 21: BOUNDARY -- xf-drop entire array
+% =================================================================
+
+% Note: array drop is strict (count must not exceed length).
+[1 2 3] 3 xf-drop into
+length 0 eq                                 (boundary: drop all) rt-ok  clear
+
+% =================================================================
+% SECTION 22: BOUNDARY -- identity transducer (map with identity)
+% =================================================================
+
+[1 2 3] { } xf-map into
+[1 2 3] deep-eq                             (boundary: identity map) rt-ok  clear
+
+% =================================================================
+% SECTION 23: BOUNDARY -- filter nothing passes
+% =================================================================
+
+[1 2 3] { pop false } xf-filter into
+length 0 eq                                 (boundary: filter none) rt-ok  clear
+
+% =================================================================
+% SECTION 24: BOUNDARY -- filter everything passes
+% =================================================================
+
+[1 2 3] { pop true } xf-filter into
+[1 2 3] deep-eq                             (boundary: filter all) rt-ok  clear
+
+% =================================================================
+% SECTION 25: HAPPY PATH -- dedupe standalone
+% =================================================================
+
+[1 1 2 2 3 3 1] dedupe
+[1 2 3 1] deep-eq                           (dedupe: consecutive) rt-ok  clear
+
+[1 2 3 4 5] dedupe
+[1 2 3 4 5] deep-eq                         (dedupe: no dups) rt-ok  clear
+
+[7 7 7 7] dedupe
+[7] deep-eq                                 (dedupe: all same) rt-ok  clear
+
+[42] dedupe
+[42] deep-eq                                (dedupe: single element) rt-ok  clear
+
+[] dedupe
+length 0 eq                                 (dedupe: empty) rt-ok  clear
+
+% =================================================================
+% SECTION 26: HAPPY PATH -- lazy-into with xf-take
+% =================================================================
+
+1 lazy-from 5 xf-take lazy-into lazy-to-array
+[1 2 3 4 5] deep-eq                         (lazy-into: xf-take 5) rt-ok  clear
+
+% =================================================================
+% SECTION 27: HAPPY PATH -- lazy-into with xf-drop
+% =================================================================
+
+1 lazy-from 3 xf-drop lazy-into 5 lazy-take lazy-to-array
+[4 5 6 7 8] deep-eq                         (lazy-into: xf-drop 3) rt-ok  clear
+
+% =================================================================
+% SECTION 28: HAPPY PATH -- lazy-into with xf-distinct
+% =================================================================
+
+% xf-distinct with lazy: map to create consecutive dups, then dedupe
+% [1,2,3,...] -> [0,1,1,2,2,3,...] via { 2 div } then dedupe removes consecutive
+1 lazy-from { 1 sub 2 div } xf-map xf-distinct xf-compose lazy-into 4 lazy-take lazy-to-array
+[0 1 2 3] deep-eq                           (lazy-into: xf-distinct) rt-ok  clear
+
+% =================================================================
+% SECTION 29: HAPPY PATH -- lazy-into with xf-scan
+% =================================================================
+
+1 lazy-from 0 { add } xf-scan lazy-into 5 lazy-take lazy-to-array
+[0 1 3 6 10] deep-eq                        (lazy-into: xf-scan sum) rt-ok  clear
+
+% =================================================================
+% SECTION 30: HAPPY PATH -- xf-reduce with composed xf
+% =================================================================
+
+[1 2 3 4 5 6 7 8 9 10] 0 { 2 mod 0 eq } xf-filter { 1 add } xf-map xf-compose { add } xf-reduce
+35 eq                                       (xf-reduce: filter+map+sum) rt-ok  clear
+
+% =================================================================
+% SECTION 31: HAPPY PATH -- xf-distinct no consecutive dups
+% =================================================================
+
+[1 2 3 4 5] xf-distinct into
+[1 2 3 4 5] deep-eq                         (into: xf-distinct no dups) rt-ok  clear
+
+% =================================================================
+% SECTION 32: HAPPY PATH -- xf-distinct all same
+% =================================================================
+
+[9 9 9 9 9] xf-distinct into
+[9] deep-eq                                 (into: xf-distinct all same) rt-ok  clear
+
+% =================================================================
+% SECTION 33: HAPPY PATH -- xf-flatten with empty sub-arrays
+% =================================================================
+
+[[] [1] [] [2 3] []] xf-flatten into
+[1 2 3] deep-eq                             (into: xf-flatten empty subs) rt-ok  clear
+
+% =================================================================
+% SECTION 34: SAD PATH -- xf-scan not supported for pipe
+% =================================================================
+
+{ 0 { add } xf-scan } try
+/no-error eq                                (sad: xf-scan creates ok) rt-ok  clear
+
+% =================================================================
+% SECTION 35: SAD PATH -- xf-take not supported for pipe
+% =================================================================
+
+{ [1 2 3] 5 xf-take pipe-into } try /type-check eq
+                                            (sad: pipe-into type check) rt-ok  clear
+
+% =================================================================
+% SECTION 36: BOUNDARY -- xf-take 0
+% =================================================================
+
+[1 2 3] 0 xf-take into
+length 0 eq                                 (boundary: take 0) rt-ok  clear
+
+% =================================================================
+% SECTION 37: BOUNDARY -- xf-drop 0
+% =================================================================
+
+[1 2 3] 0 xf-drop into
+[1 2 3] deep-eq                             (boundary: drop 0) rt-ok  clear
+
+% =================================================================
+% SECTION 38: BOUNDARY -- single element array through compose
+% =================================================================
+
+[42] { 1 add } xf-map { pop true } xf-filter xf-compose into
+[43] deep-eq                                (boundary: single elem compose) rt-ok  clear
+
+% =================================================================
+% SECTION 39: STRESS -- same transducer applied twice
+% =================================================================
+
+/xf-reuse { 2 mul } xf-map 3 xf-take xf-compose def
+[1 2 3 4 5] xf-reuse into
+[2 4 6] deep-eq                             (stress: reuse xf first) rt-ok  clear
+
+[10 20 30 40 50] xf-reuse into
+[20 40 60] deep-eq                          (stress: reuse xf second) rt-ok  clear
+
+% =================================================================
+% SECTION 40: STRESS -- deeply composed transducer (6 steps)
+% =================================================================
+
+{ 1 add } xf-map
+{ 2 mul } xf-map xf-compose
+{ 100 lt } xf-filter xf-compose
+{ 10 gt } xf-filter xf-compose
+xf-distinct xf-compose
+3 xf-take xf-compose
+/xf-deep exch def
+
+[0 0 1 1 2 2 3 3 10 10 20 20 30 30] xf-deep into
+dup length 3 eq                             (stress: 6-step length) rt-ok
+0 get 22 eq                                 (stress: 6-step first) rt-ok  clear
+
+% =================================================================
+% INTEGRITY
+% =================================================================
+
+/vm-validate query-status                    (integrity: vm-validate) rt-ok  clear
+/extvalue-validate query-status              (integrity: extvalue-validate) rt-ok  clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_transducer: ALL TESTS PASSED) =
+(__test_ok__) =

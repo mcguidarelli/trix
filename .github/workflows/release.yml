@@ -1,0 +1,200 @@
+name: Release
+
+# Trigger a release build by pushing a semver tag:
+#   git tag -a v0.9.0 -m "Trix 0.9.0"
+#   git push origin v0.9.0
+#
+# The workflow builds a Release binary (no sanitizers), strips it,
+# packages trix + LICENSE + README.md into a tarball, computes a
+# SHA256 checksum, and attaches both to a GitHub Release for the tag.
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write  # required to create/update releases
+
+jobs:
+  linux-x86_64:
+    name: Build Linux x86_64 binary
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout (with tag history)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install gcc-15
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install -y gcc-15 g++-15
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get install -y \
+            libreadline-dev zlib1g-dev \
+            cmake ninja-build
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure (Release, no sanitizers)
+        env:
+          CC: gcc-15
+          CXX: g++-15
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DTRIX_SANITIZERS=OFF
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Strip binary
+        run: strip build/trix
+
+      - name: Verify binary runs
+        run: build/trix --version
+
+      - name: Stage artifact (versioned + latest-alias names)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          STAGE="trix-v${VERSION}-linux-x86_64"
+          mkdir -p "$STAGE"
+          cp build/trix "$STAGE/"
+          # NOTICE.md must accompany any distribution (Apache License 4(d)).
+          cp LICENSE NOTICE.md README.md "$STAGE/"
+          tar czf "${STAGE}.tar.gz" "$STAGE"
+          # Upload an arch-only alias too so README install commands don't
+          # need to change each release.
+          cp "${STAGE}.tar.gz" trix-linux-x86_64.tar.gz
+          sha256sum "${STAGE}.tar.gz" trix-linux-x86_64.tar.gz > trix-linux-x86_64.sha256
+          ls -la *.tar.gz *.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: Trix v${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: |
+            trix-v${{ steps.version.outputs.version }}-linux-x86_64.tar.gz
+            trix-linux-x86_64.tar.gz
+            trix-linux-x86_64.sha256
+
+  linux-arm64:
+    name: Build Linux arm64 binary
+    runs-on: ubuntu-24.04-arm
+    # Serialize after the x86_64 job so the Release already exists; this job only
+    # appends its assets (avoids a concurrent action-gh-release create race).
+    needs: linux-x86_64
+    steps:
+      - name: Checkout (with tag history)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install gcc-15
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install -y gcc-15 g++-15
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get install -y \
+            libreadline-dev zlib1g-dev \
+            cmake ninja-build
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure (Release, no sanitizers)
+        env:
+          CC: gcc-15
+          CXX: g++-15
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DTRIX_SANITIZERS=OFF
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Strip binary
+        run: strip build/trix
+
+      - name: Verify binary runs
+        run: build/trix --version
+
+      - name: Stage artifact (versioned + latest-alias names)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          STAGE="trix-v${VERSION}-linux-arm64"
+          mkdir -p "$STAGE"
+          cp build/trix "$STAGE/"
+          # NOTICE.md must accompany any distribution (Apache License 4(d)).
+          cp LICENSE NOTICE.md README.md "$STAGE/"
+          tar czf "${STAGE}.tar.gz" "$STAGE"
+          cp "${STAGE}.tar.gz" trix-linux-arm64.tar.gz
+          sha256sum "${STAGE}.tar.gz" trix-linux-arm64.tar.gz > trix-linux-arm64.sha256
+          ls -la *.tar.gz *.sha256
+
+      # Append-only: the Release already exists (created by linux-x86_64), so do
+      # NOT regenerate notes -- just add the arm64 assets.
+      - name: Attach arm64 assets to the Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            trix-v${{ steps.version.outputs.version }}-linux-arm64.tar.gz
+            trix-linux-arm64.tar.gz
+            trix-linux-arm64.sha256
+
+  docker:
+    name: Build + push image (ghcr.io)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write  # push to ghcr.io
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU (arm64 emulation for the multi-arch build)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Derive tags from the git tag: 0.9.0 and 0.9, plus :latest only on a
+      # stable release (a tag without a -prerelease suffix).
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/trix
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Build + push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

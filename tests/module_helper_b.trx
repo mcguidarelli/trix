@@ -1,0 +1,8 @@
+% module_helper_b.trx -- defines module /test-mod-b, requires test-mod-a
+
+(tests/module_helper_a.trx) require
+
+/test-mod-b {
+    /double { |x| x 2 mul } def
+    /uses-a-square { |x| x /test-mod-a module-dict /square get exec } def
+} module

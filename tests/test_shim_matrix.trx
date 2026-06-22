@@ -1,0 +1,1596 @@
+% ====================================================================
+% test_shim_matrix.trx -- operand-type x VM-region matrix for the
+% shim-dispatched operators (Phase-3 P1).
+%
+% Every op is driven through each accepted operand-type arm (operands
+% type-matched per the AllMustMatch contract), once in the local VM and
+% once under `true set-global` so ExtValue (l/ul/d/a) and WideValue
+% (q/uq) traffic lands in the global region.  Sad arms assert
+% /type-check on a mismatched pair and an out-of-domain operand.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% a b feq: compare in the double domain with 1e-3 absolute tolerance
+% (covers Real-arm precision over the value range used here, O(0.1..30)).
+/feq {
+    /double-type cast exch /double-type cast
+    sub abs 1.0e-3d le
+} def
+
+% ---- sin ----
+0.5 sin 0.47942553860420301d feq (sin: r arm) rt-ok clear
+0.5d sin 0.47942553860420301d feq (sin: d arm) rt-ok clear
+true set-global
+0.5 sin 0.47942553860420301d feq (sin: r arm g) rt-ok clear
+0.5d sin 0.47942553860420301d feq (sin: d arm g) rt-ok clear
+false set-global
+
+% ---- cos ----
+0.5 cos 0.87758256189037276d feq (cos: r arm) rt-ok clear
+0.5d cos 0.87758256189037276d feq (cos: d arm) rt-ok clear
+true set-global
+0.5 cos 0.87758256189037276d feq (cos: r arm g) rt-ok clear
+0.5d cos 0.87758256189037276d feq (cos: d arm g) rt-ok clear
+false set-global
+
+% ---- tan ----
+0.5 tan 0.54630248984379048d feq (tan: r arm) rt-ok clear
+0.5d tan 0.54630248984379048d feq (tan: d arm) rt-ok clear
+true set-global
+0.5 tan 0.54630248984379048d feq (tan: r arm g) rt-ok clear
+0.5d tan 0.54630248984379048d feq (tan: d arm g) rt-ok clear
+false set-global
+
+% ---- asin ----
+0.5 asin 0.52359877559829893d feq (asin: r arm) rt-ok clear
+0.5d asin 0.52359877559829893d feq (asin: d arm) rt-ok clear
+true set-global
+0.5 asin 0.52359877559829893d feq (asin: r arm g) rt-ok clear
+0.5d asin 0.52359877559829893d feq (asin: d arm g) rt-ok clear
+false set-global
+
+% ---- acos ----
+0.5 acos 1.0471975511965979d feq (acos: r arm) rt-ok clear
+0.5d acos 1.0471975511965979d feq (acos: d arm) rt-ok clear
+true set-global
+0.5 acos 1.0471975511965979d feq (acos: r arm g) rt-ok clear
+0.5d acos 1.0471975511965979d feq (acos: d arm g) rt-ok clear
+false set-global
+
+% ---- atan ----
+0.5 atan 0.46364760900080609d feq (atan: r arm) rt-ok clear
+0.5d atan 0.46364760900080609d feq (atan: d arm) rt-ok clear
+true set-global
+0.5 atan 0.46364760900080609d feq (atan: r arm g) rt-ok clear
+0.5d atan 0.46364760900080609d feq (atan: d arm g) rt-ok clear
+false set-global
+
+% ---- sinh ----
+0.5 sinh 0.52109530549374738d feq (sinh: r arm) rt-ok clear
+0.5d sinh 0.52109530549374738d feq (sinh: d arm) rt-ok clear
+true set-global
+0.5 sinh 0.52109530549374738d feq (sinh: r arm g) rt-ok clear
+0.5d sinh 0.52109530549374738d feq (sinh: d arm g) rt-ok clear
+false set-global
+
+% ---- cosh ----
+0.5 cosh 1.1276259652063807d feq (cosh: r arm) rt-ok clear
+0.5d cosh 1.1276259652063807d feq (cosh: d arm) rt-ok clear
+true set-global
+0.5 cosh 1.1276259652063807d feq (cosh: r arm g) rt-ok clear
+0.5d cosh 1.1276259652063807d feq (cosh: d arm g) rt-ok clear
+false set-global
+
+% ---- tanh ----
+0.5 tanh 0.46211715726000974d feq (tanh: r arm) rt-ok clear
+0.5d tanh 0.46211715726000974d feq (tanh: d arm) rt-ok clear
+true set-global
+0.5 tanh 0.46211715726000974d feq (tanh: r arm g) rt-ok clear
+0.5d tanh 0.46211715726000974d feq (tanh: d arm g) rt-ok clear
+false set-global
+
+% ---- asinh ----
+0.5 asinh 0.48121182505960347d feq (asinh: r arm) rt-ok clear
+0.5d asinh 0.48121182505960347d feq (asinh: d arm) rt-ok clear
+true set-global
+0.5 asinh 0.48121182505960347d feq (asinh: r arm g) rt-ok clear
+0.5d asinh 0.48121182505960347d feq (asinh: d arm g) rt-ok clear
+false set-global
+
+% ---- acosh ----
+1.5 acosh 0.96242365011920694d feq (acosh: r arm) rt-ok clear
+1.5d acosh 0.96242365011920694d feq (acosh: d arm) rt-ok clear
+true set-global
+1.5 acosh 0.96242365011920694d feq (acosh: r arm g) rt-ok clear
+1.5d acosh 0.96242365011920694d feq (acosh: d arm g) rt-ok clear
+false set-global
+
+% ---- atanh ----
+0.5 atanh 0.54930614433405478d feq (atanh: r arm) rt-ok clear
+0.5d atanh 0.54930614433405478d feq (atanh: d arm) rt-ok clear
+true set-global
+0.5 atanh 0.54930614433405478d feq (atanh: r arm g) rt-ok clear
+0.5d atanh 0.54930614433405478d feq (atanh: d arm g) rt-ok clear
+false set-global
+
+% ---- exp ----
+0.5 exp 1.6487212707001282d feq (exp: r arm) rt-ok clear
+0.5d exp 1.6487212707001282d feq (exp: d arm) rt-ok clear
+true set-global
+0.5 exp 1.6487212707001282d feq (exp: r arm g) rt-ok clear
+0.5d exp 1.6487212707001282d feq (exp: d arm g) rt-ok clear
+false set-global
+
+% ---- exp2 ----
+0.5 exp2 1.4142135623730951d feq (exp2: r arm) rt-ok clear
+0.5d exp2 1.4142135623730951d feq (exp2: d arm) rt-ok clear
+true set-global
+0.5 exp2 1.4142135623730951d feq (exp2: r arm g) rt-ok clear
+0.5d exp2 1.4142135623730951d feq (exp2: d arm g) rt-ok clear
+false set-global
+
+% ---- expm1 ----
+0.5 expm1 0.64872127070012819d feq (expm1: r arm) rt-ok clear
+0.5d expm1 0.64872127070012819d feq (expm1: d arm) rt-ok clear
+true set-global
+0.5 expm1 0.64872127070012819d feq (expm1: r arm g) rt-ok clear
+0.5d expm1 0.64872127070012819d feq (expm1: d arm g) rt-ok clear
+false set-global
+
+% ---- log ----
+0.5 log -0.69314718055994529d feq (log: r arm) rt-ok clear
+0.5d log -0.69314718055994529d feq (log: d arm) rt-ok clear
+true set-global
+0.5 log -0.69314718055994529d feq (log: r arm g) rt-ok clear
+0.5d log -0.69314718055994529d feq (log: d arm g) rt-ok clear
+false set-global
+
+% ---- log2 ----
+0.5 log2 -1.0d feq (log2: r arm) rt-ok clear
+0.5d log2 -1.0d feq (log2: d arm) rt-ok clear
+true set-global
+0.5 log2 -1.0d feq (log2: r arm g) rt-ok clear
+0.5d log2 -1.0d feq (log2: d arm g) rt-ok clear
+false set-global
+
+% ---- log10 ----
+0.5 log10 -0.3010299956639812d feq (log10: r arm) rt-ok clear
+0.5d log10 -0.3010299956639812d feq (log10: d arm) rt-ok clear
+true set-global
+0.5 log10 -0.3010299956639812d feq (log10: r arm g) rt-ok clear
+0.5d log10 -0.3010299956639812d feq (log10: d arm g) rt-ok clear
+false set-global
+
+% ---- log1p ----
+0.5 log1p 0.40546510810816438d feq (log1p: r arm) rt-ok clear
+0.5d log1p 0.40546510810816438d feq (log1p: d arm) rt-ok clear
+true set-global
+0.5 log1p 0.40546510810816438d feq (log1p: r arm g) rt-ok clear
+0.5d log1p 0.40546510810816438d feq (log1p: d arm g) rt-ok clear
+false set-global
+
+% ---- sqrt ----
+0.5 sqrt 0.70710678118654757d feq (sqrt: r arm) rt-ok clear
+0.5d sqrt 0.70710678118654757d feq (sqrt: d arm) rt-ok clear
+true set-global
+0.5 sqrt 0.70710678118654757d feq (sqrt: r arm g) rt-ok clear
+0.5d sqrt 0.70710678118654757d feq (sqrt: d arm g) rt-ok clear
+false set-global
+
+% ---- cbrt ----
+0.5 cbrt 0.79370052598409979d feq (cbrt: r arm) rt-ok clear
+0.5d cbrt 0.79370052598409979d feq (cbrt: d arm) rt-ok clear
+true set-global
+0.5 cbrt 0.79370052598409979d feq (cbrt: r arm g) rt-ok clear
+0.5d cbrt 0.79370052598409979d feq (cbrt: d arm g) rt-ok clear
+false set-global
+
+% ---- erf ----
+0.5 erf 0.52049987781304652d feq (erf: r arm) rt-ok clear
+0.5d erf 0.52049987781304652d feq (erf: d arm) rt-ok clear
+true set-global
+0.5 erf 0.52049987781304652d feq (erf: r arm g) rt-ok clear
+0.5d erf 0.52049987781304652d feq (erf: d arm g) rt-ok clear
+false set-global
+
+% ---- erfc ----
+0.5 erfc 0.47950012218695348d feq (erfc: r arm) rt-ok clear
+0.5d erfc 0.47950012218695348d feq (erfc: d arm) rt-ok clear
+true set-global
+0.5 erfc 0.47950012218695348d feq (erfc: r arm g) rt-ok clear
+0.5d erfc 0.47950012218695348d feq (erfc: d arm g) rt-ok clear
+false set-global
+
+% ---- lgamma ----
+0.5 lgamma 0.57236494292470042d feq (lgamma: r arm) rt-ok clear
+0.5d lgamma 0.57236494292470042d feq (lgamma: d arm) rt-ok clear
+true set-global
+0.5 lgamma 0.57236494292470042d feq (lgamma: r arm g) rt-ok clear
+0.5d lgamma 0.57236494292470042d feq (lgamma: d arm g) rt-ok clear
+false set-global
+
+% ---- tgamma ----
+0.5 tgamma 1.7724538509055159d feq (tgamma: r arm) rt-ok clear
+0.5d tgamma 1.7724538509055159d feq (tgamma: d arm) rt-ok clear
+true set-global
+0.5 tgamma 1.7724538509055159d feq (tgamma: r arm g) rt-ok clear
+0.5d tgamma 1.7724538509055159d feq (tgamma: d arm g) rt-ok clear
+false set-global
+
+% ---- ceil ----
+1.75 ceil 2.0d feq (ceil: r arm) rt-ok clear
+1.75d ceil 2.0d feq (ceil: d arm) rt-ok clear
+true set-global
+1.75 ceil 2.0d feq (ceil: r arm g) rt-ok clear
+1.75d ceil 2.0d feq (ceil: d arm g) rt-ok clear
+false set-global
+
+% ---- floor ----
+1.75 floor 1.0d feq (floor: r arm) rt-ok clear
+1.75d floor 1.0d feq (floor: d arm) rt-ok clear
+true set-global
+1.75 floor 1.0d feq (floor: r arm g) rt-ok clear
+1.75d floor 1.0d feq (floor: d arm g) rt-ok clear
+false set-global
+
+% ---- trunc ----
+1.75 trunc 1.0d feq (trunc: r arm) rt-ok clear
+1.75d trunc 1.0d feq (trunc: d arm) rt-ok clear
+true set-global
+1.75 trunc 1.0d feq (trunc: r arm g) rt-ok clear
+1.75d trunc 1.0d feq (trunc: d arm g) rt-ok clear
+false set-global
+
+% ---- round ----
+1.75 round 2.0d feq (round: r arm) rt-ok clear
+1.75d round 2.0d feq (round: d arm) rt-ok clear
+true set-global
+1.75 round 2.0d feq (round: r arm g) rt-ok clear
+1.75d round 2.0d feq (round: d arm g) rt-ok clear
+false set-global
+
+% ---- rint ----
+1.75 rint 2.0d feq (rint: r arm) rt-ok clear
+1.75d rint 2.0d feq (rint: d arm) rt-ok clear
+true set-global
+1.75 rint 2.0d feq (rint: r arm g) rt-ok clear
+1.75d rint 2.0d feq (rint: d arm g) rt-ok clear
+false set-global
+
+% ---- nearby-int ----
+1.75 nearby-int 2.0d feq (nearby-int: r arm) rt-ok clear
+1.75d nearby-int 2.0d feq (nearby-int: d arm) rt-ok clear
+true set-global
+1.75 nearby-int 2.0d feq (nearby-int: r arm g) rt-ok clear
+1.75d nearby-int 2.0d feq (nearby-int: d arm g) rt-ok clear
+false set-global
+
+% ---- round-even ----
+1.75 round-even 2.0d feq (round-even: r arm) rt-ok clear
+1.75d round-even 2.0d feq (round-even: d arm) rt-ok clear
+true set-global
+1.75 round-even 2.0d feq (round-even: r arm g) rt-ok clear
+1.75d round-even 2.0d feq (round-even: d arm g) rt-ok clear
+false set-global
+
+% ---- logb ----
+0.5 logb -1.0d feq (logb: r arm) rt-ok clear
+0.5d logb -1.0d feq (logb: d arm) rt-ok clear
+true set-global
+0.5 logb -1.0d feq (logb: r arm g) rt-ok clear
+0.5d logb -1.0d feq (logb: d arm g) rt-ok clear
+false set-global
+
+% ---- degrees-to-radians ----
+90.0 degrees-to-radians 1.5707963267948966d feq (degrees-to-radians: r arm) rt-ok clear
+90.0d degrees-to-radians 1.5707963267948966d feq (degrees-to-radians: d arm) rt-ok clear
+true set-global
+90.0 degrees-to-radians 1.5707963267948966d feq (degrees-to-radians: r arm g) rt-ok clear
+90.0d degrees-to-radians 1.5707963267948966d feq (degrees-to-radians: d arm g) rt-ok clear
+false set-global
+
+% ---- radians-to-degrees ----
+0.5 radians-to-degrees 28.647889756541161d feq (radians-to-degrees: r arm) rt-ok clear
+0.5d radians-to-degrees 28.647889756541161d feq (radians-to-degrees: d arm) rt-ok clear
+true set-global
+0.5 radians-to-degrees 28.647889756541161d feq (radians-to-degrees: r arm g) rt-ok clear
+0.5d radians-to-degrees 28.647889756541161d feq (radians-to-degrees: d arm g) rt-ok clear
+false set-global
+
+% ---- riemann-zeta ----
+2.0 riemann-zeta 1.6449340668482264d feq (riemann-zeta: r arm) rt-ok clear
+2.0d riemann-zeta 1.6449340668482264d feq (riemann-zeta: d arm) rt-ok clear
+true set-global
+2.0 riemann-zeta 1.6449340668482264d feq (riemann-zeta: r arm g) rt-ok clear
+2.0d riemann-zeta 1.6449340668482264d feq (riemann-zeta: d arm g) rt-ok clear
+false set-global
+
+% ---- expint ----
+0.5 expint 0.5d expint feq (expint: arms agree) rt-ok clear
+true set-global
+0.5 expint 0.5d expint feq (expint: arms agree g) rt-ok clear
+false set-global
+
+% ---- comp-ellint-1 ----
+0.5 comp-ellint-1 0.5d comp-ellint-1 feq (comp-ellint-1: arms agree) rt-ok clear
+true set-global
+0.5 comp-ellint-1 0.5d comp-ellint-1 feq (comp-ellint-1: arms agree g) rt-ok clear
+false set-global
+
+% ---- comp-ellint-2 ----
+0.5 comp-ellint-2 0.5d comp-ellint-2 feq (comp-ellint-2: arms agree) rt-ok clear
+true set-global
+0.5 comp-ellint-2 0.5d comp-ellint-2 feq (comp-ellint-2: arms agree g) rt-ok clear
+false set-global
+
+% ---- finite? ----
+0.5 finite? true eq (finite?: r arm) rt-ok clear
+0.5d finite? true eq (finite?: d arm) rt-ok clear
+true set-global
+0.5 finite? true eq (finite?: r arm g) rt-ok clear
+0.5d finite? true eq (finite?: d arm g) rt-ok clear
+false set-global
+
+% ---- inf? ----
+0.5 inf? false eq (inf?: r arm) rt-ok clear
+0.5d inf? false eq (inf?: d arm) rt-ok clear
+true set-global
+0.5 inf? false eq (inf?: r arm g) rt-ok clear
+0.5d inf? false eq (inf?: d arm g) rt-ok clear
+false set-global
+
+% ---- nan? ----
+0.5 nan? false eq (nan?: r arm) rt-ok clear
+0.5d nan? false eq (nan?: d arm) rt-ok clear
+true set-global
+0.5 nan? false eq (nan?: r arm g) rt-ok clear
+0.5d nan? false eq (nan?: d arm g) rt-ok clear
+false set-global
+
+% ---- normal? ----
+0.5 normal? true eq (normal?: r arm) rt-ok clear
+0.5d normal? true eq (normal?: d arm) rt-ok clear
+true set-global
+0.5 normal? true eq (normal?: r arm g) rt-ok clear
+0.5d normal? true eq (normal?: d arm g) rt-ok clear
+false set-global
+
+% ---- sign-bit ----
+0.5 sign-bit false eq (sign-bit: r arm) rt-ok clear
+0.5d sign-bit false eq (sign-bit: d arm) rt-ok clear
+true set-global
+0.5 sign-bit false eq (sign-bit: r arm g) rt-ok clear
+0.5d sign-bit false eq (sign-bit: d arm g) rt-ok clear
+false set-global
+
+% ---- atan2 ----
+0.75 0.5 atan2 0.98279372324732905d feq (atan2: r arm) rt-ok clear
+0.75d 0.5d atan2 0.98279372324732905d feq (atan2: d arm) rt-ok clear
+true set-global
+0.75 0.5 atan2 0.98279372324732905d feq (atan2: r arm g) rt-ok clear
+0.75d 0.5d atan2 0.98279372324732905d feq (atan2: d arm g) rt-ok clear
+false set-global
+
+% ---- hypot ----
+0.75 0.5 hypot 0.90138781886599728d feq (hypot: r arm) rt-ok clear
+0.75d 0.5d hypot 0.90138781886599728d feq (hypot: d arm) rt-ok clear
+true set-global
+0.75 0.5 hypot 0.90138781886599728d feq (hypot: r arm g) rt-ok clear
+0.75d 0.5d hypot 0.90138781886599728d feq (hypot: d arm g) rt-ok clear
+false set-global
+
+% ---- fmod ----
+0.75 0.5 fmod 0.25d feq (fmod: r arm) rt-ok clear
+0.75d 0.5d fmod 0.25d feq (fmod: d arm) rt-ok clear
+true set-global
+0.75 0.5 fmod 0.25d feq (fmod: r arm g) rt-ok clear
+0.75d 0.5d fmod 0.25d feq (fmod: d arm g) rt-ok clear
+false set-global
+
+% ---- remainder ----
+0.75 0.5 remainder -0.25d feq (remainder: r arm) rt-ok clear
+0.75d 0.5d remainder -0.25d feq (remainder: d arm) rt-ok clear
+true set-global
+0.75 0.5 remainder -0.25d feq (remainder: r arm g) rt-ok clear
+0.75d 0.5d remainder -0.25d feq (remainder: d arm g) rt-ok clear
+false set-global
+
+% ---- copy-sign ----
+0.75 0.5 copy-sign 0.75d feq (copy-sign: r arm) rt-ok clear
+0.75d 0.5d copy-sign 0.75d feq (copy-sign: d arm) rt-ok clear
+true set-global
+0.75 0.5 copy-sign 0.75d feq (copy-sign: r arm g) rt-ok clear
+0.75d 0.5d copy-sign 0.75d feq (copy-sign: d arm g) rt-ok clear
+false set-global
+
+% ---- fdim ----
+0.75 0.5 fdim 0.25d feq (fdim: r arm) rt-ok clear
+0.75d 0.5d fdim 0.25d feq (fdim: d arm) rt-ok clear
+true set-global
+0.75 0.5 fdim 0.25d feq (fdim: r arm g) rt-ok clear
+0.75d 0.5d fdim 0.25d feq (fdim: d arm g) rt-ok clear
+false set-global
+
+% ---- fmax ----
+0.75 0.5 fmax 0.75d feq (fmax: r arm) rt-ok clear
+0.75d 0.5d fmax 0.75d feq (fmax: d arm) rt-ok clear
+true set-global
+0.75 0.5 fmax 0.75d feq (fmax: r arm g) rt-ok clear
+0.75d 0.5d fmax 0.75d feq (fmax: d arm g) rt-ok clear
+false set-global
+
+% ---- fmin ----
+0.75 0.5 fmin 0.5d feq (fmin: r arm) rt-ok clear
+0.75d 0.5d fmin 0.5d feq (fmin: d arm) rt-ok clear
+true set-global
+0.75 0.5 fmin 0.5d feq (fmin: r arm g) rt-ok clear
+0.75d 0.5d fmin 0.5d feq (fmin: d arm g) rt-ok clear
+false set-global
+
+% ---- fmax-mag ----
+0.75 0.5 fmax-mag 0.75d feq (fmax-mag: r arm) rt-ok clear
+0.75d 0.5d fmax-mag 0.75d feq (fmax-mag: d arm) rt-ok clear
+true set-global
+0.75 0.5 fmax-mag 0.75d feq (fmax-mag: r arm g) rt-ok clear
+0.75d 0.5d fmax-mag 0.75d feq (fmax-mag: d arm g) rt-ok clear
+false set-global
+
+% ---- fmin-mag ----
+0.75 0.5 fmin-mag 0.5d feq (fmin-mag: r arm) rt-ok clear
+0.75d 0.5d fmin-mag 0.5d feq (fmin-mag: d arm) rt-ok clear
+true set-global
+0.75 0.5 fmin-mag 0.5d feq (fmin-mag: r arm g) rt-ok clear
+0.75d 0.5d fmin-mag 0.5d feq (fmin-mag: d arm g) rt-ok clear
+false set-global
+
+% ---- pow ----
+0.75 0.5 pow 0.8660254037844386d feq (pow: r arm) rt-ok clear
+0.75d 0.5d pow 0.8660254037844386d feq (pow: d arm) rt-ok clear
+true set-global
+0.75 0.5 pow 0.8660254037844386d feq (pow: r arm g) rt-ok clear
+0.75d 0.5d pow 0.8660254037844386d feq (pow: d arm g) rt-ok clear
+false set-global
+
+% ---- beta ----
+0.75 0.5 beta 2.3962804694711841d feq (beta: r arm) rt-ok clear
+0.75d 0.5d beta 2.3962804694711841d feq (beta: d arm) rt-ok clear
+true set-global
+0.75 0.5 beta 2.3962804694711841d feq (beta: r arm g) rt-ok clear
+0.75d 0.5d beta 2.3962804694711841d feq (beta: d arm g) rt-ok clear
+false set-global
+
+% ---- cyl-bessel-i ----
+0.5 0.7 cyl-bessel-i 0.5d 0.7d cyl-bessel-i feq (cyl-bessel-i: arms agree) rt-ok clear
+true set-global
+0.5 0.7 cyl-bessel-i 0.5d 0.7d cyl-bessel-i feq (cyl-bessel-i: arms agree g) rt-ok clear
+false set-global
+
+% ---- cyl-bessel-j ----
+0.5 0.7 cyl-bessel-j 0.5d 0.7d cyl-bessel-j feq (cyl-bessel-j: arms agree) rt-ok clear
+true set-global
+0.5 0.7 cyl-bessel-j 0.5d 0.7d cyl-bessel-j feq (cyl-bessel-j: arms agree g) rt-ok clear
+false set-global
+
+% ---- cyl-bessel-k ----
+0.5 0.7 cyl-bessel-k 0.5d 0.7d cyl-bessel-k feq (cyl-bessel-k: arms agree) rt-ok clear
+true set-global
+0.5 0.7 cyl-bessel-k 0.5d 0.7d cyl-bessel-k feq (cyl-bessel-k: arms agree g) rt-ok clear
+false set-global
+
+% ---- cyl-neumann ----
+0.5 0.7 cyl-neumann 0.5d 0.7d cyl-neumann feq (cyl-neumann: arms agree) rt-ok clear
+true set-global
+0.5 0.7 cyl-neumann 0.5d 0.7d cyl-neumann feq (cyl-neumann: arms agree g) rt-ok clear
+false set-global
+
+% ---- ellint-1 ----
+0.5 0.7 ellint-1 0.5d 0.7d ellint-1 feq (ellint-1: arms agree) rt-ok clear
+true set-global
+0.5 0.7 ellint-1 0.5d 0.7d ellint-1 feq (ellint-1: arms agree g) rt-ok clear
+false set-global
+
+% ---- ellint-2 ----
+0.5 0.7 ellint-2 0.5d 0.7d ellint-2 feq (ellint-2: arms agree) rt-ok clear
+true set-global
+0.5 0.7 ellint-2 0.5d 0.7d ellint-2 feq (ellint-2: arms agree g) rt-ok clear
+false set-global
+
+% ---- comp-ellint-3 ----
+0.5 0.7 comp-ellint-3 0.5d 0.7d comp-ellint-3 feq (comp-ellint-3: arms agree) rt-ok clear
+true set-global
+0.5 0.7 comp-ellint-3 0.5d 0.7d comp-ellint-3 feq (comp-ellint-3: arms agree g) rt-ok clear
+false set-global
+
+% ---- less? ----
+0.75 0.5 less? false eq (less?: r arm) rt-ok clear
+0.75d 0.5d less? false eq (less?: d arm) rt-ok clear
+true set-global
+0.75 0.5 less? false eq (less?: r arm g) rt-ok clear
+0.75d 0.5d less? false eq (less?: d arm g) rt-ok clear
+false set-global
+
+% ---- less-equal? ----
+0.75 0.5 less-equal? false eq (less-equal?: r arm) rt-ok clear
+0.75d 0.5d less-equal? false eq (less-equal?: d arm) rt-ok clear
+true set-global
+0.75 0.5 less-equal? false eq (less-equal?: r arm g) rt-ok clear
+0.75d 0.5d less-equal? false eq (less-equal?: d arm g) rt-ok clear
+false set-global
+
+% ---- greater? ----
+0.75 0.5 greater? true eq (greater?: r arm) rt-ok clear
+0.75d 0.5d greater? true eq (greater?: d arm) rt-ok clear
+true set-global
+0.75 0.5 greater? true eq (greater?: r arm g) rt-ok clear
+0.75d 0.5d greater? true eq (greater?: d arm g) rt-ok clear
+false set-global
+
+% ---- greater-equal? ----
+0.75 0.5 greater-equal? true eq (greater-equal?: r arm) rt-ok clear
+0.75d 0.5d greater-equal? true eq (greater-equal?: d arm) rt-ok clear
+true set-global
+0.75 0.5 greater-equal? true eq (greater-equal?: r arm g) rt-ok clear
+0.75d 0.5d greater-equal? true eq (greater-equal?: d arm g) rt-ok clear
+false set-global
+
+% ---- less-greater? ----
+0.75 0.5 less-greater? true eq (less-greater?: r arm) rt-ok clear
+0.75d 0.5d less-greater? true eq (less-greater?: d arm) rt-ok clear
+true set-global
+0.75 0.5 less-greater? true eq (less-greater?: r arm g) rt-ok clear
+0.75d 0.5d less-greater? true eq (less-greater?: d arm g) rt-ok clear
+false set-global
+
+% ---- unordered? ----
+0.75 0.5 unordered? false eq (unordered?: r arm) rt-ok clear
+0.75d 0.5d unordered? false eq (unordered?: d arm) rt-ok clear
+true set-global
+0.75 0.5 unordered? false eq (unordered?: r arm g) rt-ok clear
+0.75d 0.5d unordered? false eq (unordered?: d arm g) rt-ok clear
+false set-global
+
+% ---- total-order? ----
+0.75 0.5 total-order? false eq (total-order?: r arm) rt-ok clear
+0.75d 0.5d total-order? false eq (total-order?: d arm) rt-ok clear
+true set-global
+0.75 0.5 total-order? false eq (total-order?: r arm g) rt-ok clear
+0.75d 0.5d total-order? false eq (total-order?: d arm g) rt-ok clear
+false set-global
+
+% ---- total-order-mag? ----
+0.75 0.5 total-order-mag? false eq (total-order-mag?: r arm) rt-ok clear
+0.75d 0.5d total-order-mag? false eq (total-order-mag?: d arm) rt-ok clear
+true set-global
+0.75 0.5 total-order-mag? false eq (total-order-mag?: r arm g) rt-ok clear
+0.75d 0.5d total-order-mag? false eq (total-order-mag?: d arm g) rt-ok clear
+false set-global
+
+% ---- ilogb ----
+0.75 ilogb -1 eq (ilogb: r arm) rt-ok clear
+0.75d ilogb -1 eq (ilogb: d arm) rt-ok clear
+true set-global
+0.75 ilogb -1 eq (ilogb: r arm g) rt-ok clear
+0.75d ilogb -1 eq (ilogb: d arm g) rt-ok clear
+false set-global
+
+% ---- modf ----
+1.75 modf 1.0d feq exch 0.75d feq and (modf: r arm) rt-ok clear
+1.75d modf 1.0d feq exch 0.75d feq and (modf: d arm) rt-ok clear
+true set-global
+1.75 modf 1.0d feq exch 0.75d feq and (modf: r arm g) rt-ok clear
+1.75d modf 1.0d feq exch 0.75d feq and (modf: d arm g) rt-ok clear
+false set-global
+
+% ---- frexp ----
+0.75 frexp 0 eq exch 0.75d feq and (frexp: r arm) rt-ok clear
+0.75d frexp 0 eq exch 0.75d feq and (frexp: d arm) rt-ok clear
+true set-global
+0.75 frexp 0 eq exch 0.75d feq and (frexp: r arm g) rt-ok clear
+0.75d frexp 0 eq exch 0.75d feq and (frexp: d arm g) rt-ok clear
+false set-global
+
+% ---- rem-quo ----
+0.75 0.5 rem-quo 2 eq exch -0.25d feq and (rem-quo: r arm) rt-ok clear
+0.75d 0.5d rem-quo 2 eq exch -0.25d feq and (rem-quo: d arm) rt-ok clear
+true set-global
+0.75 0.5 rem-quo 2 eq exch -0.25d feq and (rem-quo: r arm g) rt-ok clear
+0.75d 0.5d rem-quo 2 eq exch -0.25d feq and (rem-quo: d arm g) rt-ok clear
+false set-global
+
+% ---- ldexp ----
+0.75 2 ldexp 3.0d feq (ldexp: r arm) rt-ok clear
+0.75d 2 ldexp 3.0d feq (ldexp: d arm) rt-ok clear
+true set-global
+0.75 2 ldexp 3.0d feq (ldexp: r arm g) rt-ok clear
+0.75d 2 ldexp 3.0d feq (ldexp: d arm g) rt-ok clear
+false set-global
+
+% ---- scalbn ----
+0.75 2 scalbn 3.0d feq (scalbn: r arm) rt-ok clear
+0.75d 2 scalbn 3.0d feq (scalbn: d arm) rt-ok clear
+true set-global
+0.75 2 scalbn 3.0d feq (scalbn: r arm g) rt-ok clear
+0.75d 2 scalbn 3.0d feq (scalbn: d arm g) rt-ok clear
+false set-global
+
+% ---- next-after ----
+0.75 0.5 next-after 0.75d exch /double-type cast exch lt (next-after: r arm below) rt-ok clear
+0.75 0.5 next-after 0.73999999999999999d exch /double-type cast exch gt (next-after: r arm near) rt-ok clear
+0.75d 0.5d next-after 0.75d exch /double-type cast exch lt (next-after: d arm below) rt-ok clear
+0.75d 0.5d next-after 0.73999999999999999d exch /double-type cast exch gt (next-after: d arm near) rt-ok clear
+true set-global
+0.75 0.5 next-after 0.75d exch /double-type cast exch lt (next-after: r arm below g) rt-ok clear
+0.75 0.5 next-after 0.73999999999999999d exch /double-type cast exch gt (next-after: r arm near g) rt-ok clear
+0.75d 0.5d next-after 0.75d exch /double-type cast exch lt (next-after: d arm below g) rt-ok clear
+0.75d 0.5d next-after 0.73999999999999999d exch /double-type cast exch gt (next-after: d arm near g) rt-ok clear
+false set-global
+
+% ---- next-toward ----
+0.75 0.5 next-toward 0.75d exch /double-type cast exch lt (next-toward: r arm below) rt-ok clear
+0.75 0.5 next-toward 0.73999999999999999d exch /double-type cast exch gt (next-toward: r arm near) rt-ok clear
+0.75d 0.5d next-toward 0.75d exch /double-type cast exch lt (next-toward: d arm below) rt-ok clear
+0.75d 0.5d next-toward 0.73999999999999999d exch /double-type cast exch gt (next-toward: d arm near) rt-ok clear
+true set-global
+0.75 0.5 next-toward 0.75d exch /double-type cast exch lt (next-toward: r arm below g) rt-ok clear
+0.75 0.5 next-toward 0.73999999999999999d exch /double-type cast exch gt (next-toward: r arm near g) rt-ok clear
+0.75d 0.5d next-toward 0.75d exch /double-type cast exch lt (next-toward: d arm below g) rt-ok clear
+0.75d 0.5d next-toward 0.73999999999999999d exch /double-type cast exch gt (next-toward: d arm near g) rt-ok clear
+false set-global
+
+% ---- ulp ----
+0.5 ulp /double-type cast 0.0d gt (ulp: r arm positive) rt-ok clear
+0.5 ulp /double-type cast 0.001d lt (ulp: r arm tiny) rt-ok clear
+0.5d ulp /double-type cast 0.0d gt (ulp: d arm positive) rt-ok clear
+0.5d ulp /double-type cast 0.001d lt (ulp: d arm tiny) rt-ok clear
+true set-global
+0.5 ulp /double-type cast 0.0d gt (ulp: r arm positive g) rt-ok clear
+0.5 ulp /double-type cast 0.001d lt (ulp: r arm tiny g) rt-ok clear
+0.5d ulp /double-type cast 0.0d gt (ulp: d arm positive g) rt-ok clear
+0.5d ulp /double-type cast 0.001d lt (ulp: d arm tiny g) rt-ok clear
+false set-global
+
+% ---- fma ----
+0.75 0.5 0.25 fma 0.625d feq (fma: r arm) rt-ok clear
+0.75d 0.5d 0.25d fma 0.625d feq (fma: d arm) rt-ok clear
+true set-global
+0.75 0.5 0.25 fma 0.625d feq (fma: r arm g) rt-ok clear
+0.75d 0.5d 0.25d fma 0.625d feq (fma: d arm g) rt-ok clear
+false set-global
+
+% ---- lerp ----
+1.0 2.0 0.5 lerp 1.5d feq (lerp: r arm) rt-ok clear
+1.0d 2.0d 0.5d lerp 1.5d feq (lerp: d arm) rt-ok clear
+true set-global
+1.0 2.0 0.5 lerp 1.5d feq (lerp: r arm g) rt-ok clear
+1.0d 2.0d 0.5d lerp 1.5d feq (lerp: d arm g) rt-ok clear
+false set-global
+
+% ---- ellint-3 ----
+0.5 0.25 0.7 ellint-3 0.5d 0.25d 0.7d ellint-3 feq (ellint-3: arms agree) rt-ok clear
+true set-global
+0.5 0.25 0.7 ellint-3 0.5d 0.25d 0.7d ellint-3 feq (ellint-3: arms agree g) rt-ok clear
+false set-global
+
+% ---- hermite ----
+2u 0.5 hermite -1.0d feq (hermite: r arm) rt-ok clear
+2u 0.5d hermite -1.0d feq (hermite: d arm) rt-ok clear
+true set-global
+2u 0.5 hermite -1.0d feq (hermite: r arm g) rt-ok clear
+2u 0.5d hermite -1.0d feq (hermite: d arm g) rt-ok clear
+false set-global
+
+% ---- laguerre ----
+2u 0.5 laguerre 0.125d feq (laguerre: r arm) rt-ok clear
+2u 0.5d laguerre 0.125d feq (laguerre: d arm) rt-ok clear
+true set-global
+2u 0.5 laguerre 0.125d feq (laguerre: r arm g) rt-ok clear
+2u 0.5d laguerre 0.125d feq (laguerre: d arm g) rt-ok clear
+false set-global
+
+% ---- legendre ----
+2u 0.5 legendre -0.125d feq (legendre: r arm) rt-ok clear
+2u 0.5d legendre -0.125d feq (legendre: d arm) rt-ok clear
+true set-global
+2u 0.5 legendre -0.125d feq (legendre: r arm g) rt-ok clear
+2u 0.5d legendre -0.125d feq (legendre: d arm g) rt-ok clear
+false set-global
+
+% ---- sph-bessel ----
+2u 1.5 sph-bessel 2u 1.5d sph-bessel feq (sph-bessel: arms agree) rt-ok clear
+true set-global
+2u 1.5 sph-bessel 2u 1.5d sph-bessel feq (sph-bessel: arms agree g) rt-ok clear
+false set-global
+
+% ---- sph-neumann ----
+2u 1.5 sph-neumann 2u 1.5d sph-neumann feq (sph-neumann: arms agree) rt-ok clear
+true set-global
+2u 1.5 sph-neumann 2u 1.5d sph-neumann feq (sph-neumann: arms agree g) rt-ok clear
+false set-global
+
+% ---- assoc-laguerre ----
+2u 1u 0.5 assoc-laguerre 2u 1u 0.5d assoc-laguerre feq (assoc-laguerre: arms agree) rt-ok clear
+true set-global
+2u 1u 0.5 assoc-laguerre 2u 1u 0.5d assoc-laguerre feq (assoc-laguerre: arms agree g) rt-ok clear
+false set-global
+
+% ---- assoc-legendre ----
+2u 1u 0.5 assoc-legendre 2u 1u 0.5d assoc-legendre feq (assoc-legendre: arms agree) rt-ok clear
+true set-global
+2u 1u 0.5 assoc-legendre 2u 1u 0.5d assoc-legendre feq (assoc-legendre: arms agree g) rt-ok clear
+false set-global
+
+% ---- sph-legendre ----
+2u 1u 0.5 sph-legendre 2u 1u 0.5d sph-legendre feq (sph-legendre: arms agree) rt-ok clear
+true set-global
+2u 1u 0.5 sph-legendre 2u 1u 0.5d sph-legendre feq (sph-legendre: arms agree g) rt-ok clear
+false set-global
+
+% ---- pop-count ----
+5b pop-count 2 eq (pop-count: b arm) rt-ok clear
+5u pop-count 2 eq (pop-count: u arm) rt-ok clear
+5ul pop-count 2 eq (pop-count: ul arm) rt-ok clear
+5uq pop-count 2 eq (pop-count: uq arm) rt-ok clear
+true set-global
+5b pop-count 2 eq (pop-count: b arm g) rt-ok clear
+5u pop-count 2 eq (pop-count: u arm g) rt-ok clear
+5ul pop-count 2 eq (pop-count: ul arm g) rt-ok clear
+5uq pop-count 2 eq (pop-count: uq arm g) rt-ok clear
+false set-global
+
+% ---- bit-width ----
+5b bit-width 3 eq (bit-width: b arm) rt-ok clear
+5u bit-width 3 eq (bit-width: u arm) rt-ok clear
+5ul bit-width 3 eq (bit-width: ul arm) rt-ok clear
+5uq bit-width 3 eq (bit-width: uq arm) rt-ok clear
+true set-global
+5b bit-width 3 eq (bit-width: b arm g) rt-ok clear
+5u bit-width 3 eq (bit-width: u arm g) rt-ok clear
+5ul bit-width 3 eq (bit-width: ul arm g) rt-ok clear
+5uq bit-width 3 eq (bit-width: uq arm g) rt-ok clear
+false set-global
+
+% ---- countr-zero ----
+8b countr-zero 3 eq (countr-zero: b arm) rt-ok clear
+8u countr-zero 3 eq (countr-zero: u arm) rt-ok clear
+8ul countr-zero 3 eq (countr-zero: ul arm) rt-ok clear
+8uq countr-zero 3 eq (countr-zero: uq arm) rt-ok clear
+true set-global
+8b countr-zero 3 eq (countr-zero: b arm g) rt-ok clear
+8u countr-zero 3 eq (countr-zero: u arm g) rt-ok clear
+8ul countr-zero 3 eq (countr-zero: ul arm g) rt-ok clear
+8uq countr-zero 3 eq (countr-zero: uq arm g) rt-ok clear
+false set-global
+
+% ---- countr-one ----
+7b countr-one 3 eq (countr-one: b arm) rt-ok clear
+7u countr-one 3 eq (countr-one: u arm) rt-ok clear
+7ul countr-one 3 eq (countr-one: ul arm) rt-ok clear
+7uq countr-one 3 eq (countr-one: uq arm) rt-ok clear
+true set-global
+7b countr-one 3 eq (countr-one: b arm g) rt-ok clear
+7u countr-one 3 eq (countr-one: u arm g) rt-ok clear
+7ul countr-one 3 eq (countr-one: ul arm g) rt-ok clear
+7uq countr-one 3 eq (countr-one: uq arm g) rt-ok clear
+false set-global
+
+% ---- countl-zero ----
+5b countl-zero 5 eq (countl-zero: b arm) rt-ok clear
+5u countl-zero 29 eq (countl-zero: u arm) rt-ok clear
+5ul countl-zero 61 eq (countl-zero: ul arm) rt-ok clear
+5uq countl-zero 125 eq (countl-zero: uq arm) rt-ok clear
+true set-global
+5b countl-zero 5 eq (countl-zero: b arm g) rt-ok clear
+5u countl-zero 29 eq (countl-zero: u arm g) rt-ok clear
+5ul countl-zero 61 eq (countl-zero: ul arm g) rt-ok clear
+5uq countl-zero 125 eq (countl-zero: uq arm g) rt-ok clear
+false set-global
+
+% ---- countl-one ----
+255b countl-one 8 eq (countl-one: b arm) rt-ok clear
+4294967295u countl-one 32 eq (countl-one: u arm) rt-ok clear
+18446744073709551615ul countl-one 64 eq (countl-one: ul arm) rt-ok clear
+340282366920938463463374607431768211455uq countl-one 128 eq (countl-one: uq arm) rt-ok clear
+true set-global
+255b countl-one 8 eq (countl-one: b arm g) rt-ok clear
+4294967295u countl-one 32 eq (countl-one: u arm g) rt-ok clear
+18446744073709551615ul countl-one 64 eq (countl-one: ul arm g) rt-ok clear
+340282366920938463463374607431768211455uq countl-one 128 eq (countl-one: uq arm g) rt-ok clear
+false set-global
+
+% ---- bit-ceil ----
+5b bit-ceil 8b eq (bit-ceil: b arm) rt-ok clear
+5u bit-ceil 8u eq (bit-ceil: u arm) rt-ok clear
+5ul bit-ceil 8ul eq (bit-ceil: ul arm) rt-ok clear
+5uq bit-ceil 8uq eq (bit-ceil: uq arm) rt-ok clear
+true set-global
+5b bit-ceil 8b eq (bit-ceil: b arm g) rt-ok clear
+5u bit-ceil 8u eq (bit-ceil: u arm g) rt-ok clear
+5ul bit-ceil 8ul eq (bit-ceil: ul arm g) rt-ok clear
+5uq bit-ceil 8uq eq (bit-ceil: uq arm g) rt-ok clear
+false set-global
+
+% ---- bit-floor ----
+5b bit-floor 4b eq (bit-floor: b arm) rt-ok clear
+5u bit-floor 4u eq (bit-floor: u arm) rt-ok clear
+5ul bit-floor 4ul eq (bit-floor: ul arm) rt-ok clear
+5uq bit-floor 4uq eq (bit-floor: uq arm) rt-ok clear
+true set-global
+5b bit-floor 4b eq (bit-floor: b arm g) rt-ok clear
+5u bit-floor 4u eq (bit-floor: u arm g) rt-ok clear
+5ul bit-floor 4ul eq (bit-floor: ul arm g) rt-ok clear
+5uq bit-floor 4uq eq (bit-floor: uq arm g) rt-ok clear
+false set-global
+
+% ---- single-bit? ----
+4b single-bit? true eq (single-bit?: b arm true) rt-ok clear
+5b single-bit? false eq (single-bit?: b arm false) rt-ok clear
+4u single-bit? true eq (single-bit?: u arm true) rt-ok clear
+5u single-bit? false eq (single-bit?: u arm false) rt-ok clear
+4ul single-bit? true eq (single-bit?: ul arm true) rt-ok clear
+5ul single-bit? false eq (single-bit?: ul arm false) rt-ok clear
+4uq single-bit? true eq (single-bit?: uq arm true) rt-ok clear
+5uq single-bit? false eq (single-bit?: uq arm false) rt-ok clear
+true set-global
+4b single-bit? true eq (single-bit?: b arm true g) rt-ok clear
+5b single-bit? false eq (single-bit?: b arm false g) rt-ok clear
+4u single-bit? true eq (single-bit?: u arm true g) rt-ok clear
+5u single-bit? false eq (single-bit?: u arm false g) rt-ok clear
+4ul single-bit? true eq (single-bit?: ul arm true g) rt-ok clear
+5ul single-bit? false eq (single-bit?: ul arm false g) rt-ok clear
+4uq single-bit? true eq (single-bit?: uq arm true g) rt-ok clear
+5uq single-bit? false eq (single-bit?: uq arm false g) rt-ok clear
+false set-global
+
+% ---- shift-left ----
+5b 2 shift-left 20b eq (shift-left: b arm) rt-ok clear
+5u 2 shift-left 20u eq (shift-left: u arm) rt-ok clear
+5ul 2 shift-left 20ul eq (shift-left: ul arm) rt-ok clear
+5uq 2 shift-left 20uq eq (shift-left: uq arm) rt-ok clear
+true set-global
+5b 2 shift-left 20b eq (shift-left: b arm g) rt-ok clear
+5u 2 shift-left 20u eq (shift-left: u arm g) rt-ok clear
+5ul 2 shift-left 20ul eq (shift-left: ul arm g) rt-ok clear
+5uq 2 shift-left 20uq eq (shift-left: uq arm g) rt-ok clear
+false set-global
+
+% ---- shift-right ----
+20b 2 shift-right 5b eq (shift-right: b arm) rt-ok clear
+20u 2 shift-right 5u eq (shift-right: u arm) rt-ok clear
+20ul 2 shift-right 5ul eq (shift-right: ul arm) rt-ok clear
+20uq 2 shift-right 5uq eq (shift-right: uq arm) rt-ok clear
+true set-global
+20b 2 shift-right 5b eq (shift-right: b arm g) rt-ok clear
+20u 2 shift-right 5u eq (shift-right: u arm g) rt-ok clear
+20ul 2 shift-right 5ul eq (shift-right: ul arm g) rt-ok clear
+20uq 2 shift-right 5uq eq (shift-right: uq arm g) rt-ok clear
+false set-global
+
+% ---- rotate-left ----
+5b 2 rotate-left 20b eq (rotate-left: b arm) rt-ok clear
+5u 2 rotate-left 20u eq (rotate-left: u arm) rt-ok clear
+5ul 2 rotate-left 20ul eq (rotate-left: ul arm) rt-ok clear
+5uq 2 rotate-left 20uq eq (rotate-left: uq arm) rt-ok clear
+true set-global
+5b 2 rotate-left 20b eq (rotate-left: b arm g) rt-ok clear
+5u 2 rotate-left 20u eq (rotate-left: u arm g) rt-ok clear
+5ul 2 rotate-left 20ul eq (rotate-left: ul arm g) rt-ok clear
+5uq 2 rotate-left 20uq eq (rotate-left: uq arm g) rt-ok clear
+false set-global
+
+% ---- rotate-right ----
+20b 2 rotate-right 5b eq (rotate-right: b arm) rt-ok clear
+20u 2 rotate-right 5u eq (rotate-right: u arm) rt-ok clear
+20ul 2 rotate-right 5ul eq (rotate-right: ul arm) rt-ok clear
+20uq 2 rotate-right 5uq eq (rotate-right: uq arm) rt-ok clear
+true set-global
+20b 2 rotate-right 5b eq (rotate-right: b arm g) rt-ok clear
+20u 2 rotate-right 5u eq (rotate-right: u arm g) rt-ok clear
+20ul 2 rotate-right 5ul eq (rotate-right: ul arm g) rt-ok clear
+20uq 2 rotate-right 5uq eq (rotate-right: uq arm g) rt-ok clear
+false set-global
+
+% ---- gcd ----
+6b 4b gcd 2b eq (gcd: b arm) rt-ok clear
+6 4 gcd 2 eq (gcd: i arm) rt-ok clear
+6u 4u gcd 2u eq (gcd: u arm) rt-ok clear
+6l 4l gcd 2l eq (gcd: l arm) rt-ok clear
+6ul 4ul gcd 2ul eq (gcd: ul arm) rt-ok clear
+6q 4q gcd 2q eq (gcd: q arm) rt-ok clear
+6uq 4uq gcd 2uq eq (gcd: uq arm) rt-ok clear
+true set-global
+6b 4b gcd 2b eq (gcd: b arm g) rt-ok clear
+6 4 gcd 2 eq (gcd: i arm g) rt-ok clear
+6u 4u gcd 2u eq (gcd: u arm g) rt-ok clear
+6l 4l gcd 2l eq (gcd: l arm g) rt-ok clear
+6ul 4ul gcd 2ul eq (gcd: ul arm g) rt-ok clear
+6q 4q gcd 2q eq (gcd: q arm g) rt-ok clear
+6uq 4uq gcd 2uq eq (gcd: uq arm g) rt-ok clear
+false set-global
+
+% ---- lcm ----
+6b 4b lcm 12b eq (lcm: b arm) rt-ok clear
+6 4 lcm 12 eq (lcm: i arm) rt-ok clear
+6u 4u lcm 12u eq (lcm: u arm) rt-ok clear
+6l 4l lcm 12l eq (lcm: l arm) rt-ok clear
+6ul 4ul lcm 12ul eq (lcm: ul arm) rt-ok clear
+6q 4q lcm 12q eq (lcm: q arm) rt-ok clear
+6uq 4uq lcm 12uq eq (lcm: uq arm) rt-ok clear
+true set-global
+6b 4b lcm 12b eq (lcm: b arm g) rt-ok clear
+6 4 lcm 12 eq (lcm: i arm g) rt-ok clear
+6u 4u lcm 12u eq (lcm: u arm g) rt-ok clear
+6l 4l lcm 12l eq (lcm: l arm g) rt-ok clear
+6ul 4ul lcm 12ul eq (lcm: ul arm g) rt-ok clear
+6q 4q lcm 12q eq (lcm: q arm g) rt-ok clear
+6uq 4uq lcm 12uq eq (lcm: uq arm g) rt-ok clear
+false set-global
+
+% ---- mod ----
+6b 4b mod 2b eq (mod: b arm) rt-ok clear
+6 4 mod 2 eq (mod: i arm) rt-ok clear
+6u 4u mod 2u eq (mod: u arm) rt-ok clear
+6l 4l mod 2l eq (mod: l arm) rt-ok clear
+6ul 4ul mod 2ul eq (mod: ul arm) rt-ok clear
+6q 4q mod 2q eq (mod: q arm) rt-ok clear
+6uq 4uq mod 2uq eq (mod: uq arm) rt-ok clear
+true set-global
+6b 4b mod 2b eq (mod: b arm g) rt-ok clear
+6 4 mod 2 eq (mod: i arm g) rt-ok clear
+6u 4u mod 2u eq (mod: u arm g) rt-ok clear
+6l 4l mod 2l eq (mod: l arm g) rt-ok clear
+6ul 4ul mod 2ul eq (mod: ul arm g) rt-ok clear
+6q 4q mod 2q eq (mod: q arm g) rt-ok clear
+6uq 4uq mod 2uq eq (mod: uq arm g) rt-ok clear
+false set-global
+
+% ---- nCr ----
+6b 4b nCr 15b eq (nCr: b arm) rt-ok clear
+6 4 nCr 15 eq (nCr: i arm) rt-ok clear
+6u 4u nCr 15u eq (nCr: u arm) rt-ok clear
+6l 4l nCr 15l eq (nCr: l arm) rt-ok clear
+6ul 4ul nCr 15ul eq (nCr: ul arm) rt-ok clear
+6q 4q nCr 15q eq (nCr: q arm) rt-ok clear
+6uq 4uq nCr 15uq eq (nCr: uq arm) rt-ok clear
+true set-global
+6b 4b nCr 15b eq (nCr: b arm g) rt-ok clear
+6 4 nCr 15 eq (nCr: i arm g) rt-ok clear
+6u 4u nCr 15u eq (nCr: u arm g) rt-ok clear
+6l 4l nCr 15l eq (nCr: l arm g) rt-ok clear
+6ul 4ul nCr 15ul eq (nCr: ul arm g) rt-ok clear
+6q 4q nCr 15q eq (nCr: q arm g) rt-ok clear
+6uq 4uq nCr 15uq eq (nCr: uq arm g) rt-ok clear
+false set-global
+
+% ---- quot-rem ----
+7 3 quot-rem 1 eq exch 2 eq and (quot-rem: i arm) rt-ok clear
+7l 3l quot-rem 1l eq exch 2l eq and (quot-rem: l arm) rt-ok clear
+7q 3q quot-rem 1q eq exch 2q eq and (quot-rem: q arm) rt-ok clear
+true set-global
+7 3 quot-rem 1 eq exch 2 eq and (quot-rem: i arm g) rt-ok clear
+7l 3l quot-rem 1l eq exch 2l eq and (quot-rem: l arm g) rt-ok clear
+7q 3q quot-rem 1q eq exch 2q eq and (quot-rem: q arm g) rt-ok clear
+false set-global
+
+% ---- abs ----
+-5 abs 5 eq (abs: i arm) rt-ok clear
+-5l abs 5l eq (abs: l arm) rt-ok clear
+-5q abs 5q eq (abs: q arm) rt-ok clear
+-0.5 abs 0.5 eq (abs: r arm) rt-ok clear
+-0.5d abs 0.5d eq (abs: d arm) rt-ok clear
+true set-global
+-5 abs 5 eq (abs: i arm g) rt-ok clear
+-5l abs 5l eq (abs: l arm g) rt-ok clear
+-5q abs 5q eq (abs: q arm g) rt-ok clear
+-0.5 abs 0.5 eq (abs: r arm g) rt-ok clear
+-0.5d abs 0.5d eq (abs: d arm g) rt-ok clear
+false set-global
+
+% ---- neg ----
+5 neg -5 eq (neg: i arm) rt-ok clear
+5l neg -5l eq (neg: l arm) rt-ok clear
+5q neg -5q eq (neg: q arm) rt-ok clear
+0.5 neg -0.5 eq (neg: r arm) rt-ok clear
+0.5d neg -0.5d eq (neg: d arm) rt-ok clear
+true set-global
+5 neg -5 eq (neg: i arm g) rt-ok clear
+5l neg -5l eq (neg: l arm g) rt-ok clear
+5q neg -5q eq (neg: q arm g) rt-ok clear
+0.5 neg -0.5 eq (neg: r arm g) rt-ok clear
+0.5d neg -0.5d eq (neg: d arm g) rt-ok clear
+false set-global
+
+% ---- byte-swap ----
+5b byte-swap 5b eq (byte-swap: b arm) rt-ok clear
+5 byte-swap 83886080 eq (byte-swap: i arm) rt-ok clear
+5u byte-swap 83886080u eq (byte-swap: u arm) rt-ok clear
+5l byte-swap 360287970189639680l eq (byte-swap: l arm) rt-ok clear
+5ul byte-swap 360287970189639680ul eq (byte-swap: ul arm) rt-ok clear
+5q byte-swap 6646139978924579364519035301401722880q eq (byte-swap: q arm) rt-ok clear
+5uq byte-swap 6646139978924579364519035301401722880uq eq (byte-swap: uq arm) rt-ok clear
+0.5 byte-swap byte-swap 0.5 eq (byte-swap: r arm roundtrip) rt-ok clear
+0.5d byte-swap byte-swap 0.5d eq (byte-swap: d arm roundtrip) rt-ok clear
+true set-global
+5b byte-swap 5b eq (byte-swap: b arm g) rt-ok clear
+5 byte-swap 83886080 eq (byte-swap: i arm g) rt-ok clear
+5u byte-swap 83886080u eq (byte-swap: u arm g) rt-ok clear
+5l byte-swap 360287970189639680l eq (byte-swap: l arm g) rt-ok clear
+5ul byte-swap 360287970189639680ul eq (byte-swap: ul arm g) rt-ok clear
+5q byte-swap 6646139978924579364519035301401722880q eq (byte-swap: q arm g) rt-ok clear
+5uq byte-swap 6646139978924579364519035301401722880uq eq (byte-swap: uq arm g) rt-ok clear
+0.5 byte-swap byte-swap 0.5 eq (byte-swap: r arm roundtrip g) rt-ok clear
+0.5d byte-swap byte-swap 0.5d eq (byte-swap: d arm roundtrip g) rt-ok clear
+false set-global
+
+% ---- add ----
+5b 3b add 8b eq (add: b arm) rt-ok clear
+5 3 add 8 eq (add: i arm) rt-ok clear
+5u 3u add 8u eq (add: u arm) rt-ok clear
+5l 3l add 8l eq (add: l arm) rt-ok clear
+5ul 3ul add 8ul eq (add: ul arm) rt-ok clear
+5q 3q add 8q eq (add: q arm) rt-ok clear
+5uq 3uq add 8uq eq (add: uq arm) rt-ok clear
+5.0 3.0 add 8.0d feq (add: r arm) rt-ok clear
+5.0d 3.0d add 8.0d feq (add: d arm) rt-ok clear
+true set-global
+5b 3b add 8b eq (add: b arm g) rt-ok clear
+5 3 add 8 eq (add: i arm g) rt-ok clear
+5u 3u add 8u eq (add: u arm g) rt-ok clear
+5l 3l add 8l eq (add: l arm g) rt-ok clear
+5ul 3ul add 8ul eq (add: ul arm g) rt-ok clear
+5q 3q add 8q eq (add: q arm g) rt-ok clear
+5uq 3uq add 8uq eq (add: uq arm g) rt-ok clear
+5.0 3.0 add 8.0d feq (add: r arm g) rt-ok clear
+5.0d 3.0d add 8.0d feq (add: d arm g) rt-ok clear
+false set-global
+
+% ---- sub ----
+5b 3b sub 2b eq (sub: b arm) rt-ok clear
+5 3 sub 2 eq (sub: i arm) rt-ok clear
+5u 3u sub 2u eq (sub: u arm) rt-ok clear
+5l 3l sub 2l eq (sub: l arm) rt-ok clear
+5ul 3ul sub 2ul eq (sub: ul arm) rt-ok clear
+5q 3q sub 2q eq (sub: q arm) rt-ok clear
+5uq 3uq sub 2uq eq (sub: uq arm) rt-ok clear
+5.0 3.0 sub 2.0d feq (sub: r arm) rt-ok clear
+5.0d 3.0d sub 2.0d feq (sub: d arm) rt-ok clear
+true set-global
+5b 3b sub 2b eq (sub: b arm g) rt-ok clear
+5 3 sub 2 eq (sub: i arm g) rt-ok clear
+5u 3u sub 2u eq (sub: u arm g) rt-ok clear
+5l 3l sub 2l eq (sub: l arm g) rt-ok clear
+5ul 3ul sub 2ul eq (sub: ul arm g) rt-ok clear
+5q 3q sub 2q eq (sub: q arm g) rt-ok clear
+5uq 3uq sub 2uq eq (sub: uq arm g) rt-ok clear
+5.0 3.0 sub 2.0d feq (sub: r arm g) rt-ok clear
+5.0d 3.0d sub 2.0d feq (sub: d arm g) rt-ok clear
+false set-global
+
+% ---- mul ----
+5b 3b mul 15b eq (mul: b arm) rt-ok clear
+5 3 mul 15 eq (mul: i arm) rt-ok clear
+5u 3u mul 15u eq (mul: u arm) rt-ok clear
+5l 3l mul 15l eq (mul: l arm) rt-ok clear
+5ul 3ul mul 15ul eq (mul: ul arm) rt-ok clear
+5q 3q mul 15q eq (mul: q arm) rt-ok clear
+5uq 3uq mul 15uq eq (mul: uq arm) rt-ok clear
+5.0 3.0 mul 15.0d feq (mul: r arm) rt-ok clear
+5.0d 3.0d mul 15.0d feq (mul: d arm) rt-ok clear
+true set-global
+5b 3b mul 15b eq (mul: b arm g) rt-ok clear
+5 3 mul 15 eq (mul: i arm g) rt-ok clear
+5u 3u mul 15u eq (mul: u arm g) rt-ok clear
+5l 3l mul 15l eq (mul: l arm g) rt-ok clear
+5ul 3ul mul 15ul eq (mul: ul arm g) rt-ok clear
+5q 3q mul 15q eq (mul: q arm g) rt-ok clear
+5uq 3uq mul 15uq eq (mul: uq arm g) rt-ok clear
+5.0 3.0 mul 15.0d feq (mul: r arm g) rt-ok clear
+5.0d 3.0d mul 15.0d feq (mul: d arm g) rt-ok clear
+false set-global
+
+% ---- div ----
+5b 3b div 1b eq (div: b arm) rt-ok clear
+5 3 div 1 eq (div: i arm) rt-ok clear
+5u 3u div 1u eq (div: u arm) rt-ok clear
+5l 3l div 1l eq (div: l arm) rt-ok clear
+5ul 3ul div 1ul eq (div: ul arm) rt-ok clear
+5q 3q div 1q eq (div: q arm) rt-ok clear
+5uq 3uq div 1uq eq (div: uq arm) rt-ok clear
+5.0 3.0 div 1.6666666666666667d feq (div: r arm) rt-ok clear
+5.0d 3.0d div 1.6666666666666667d feq (div: d arm) rt-ok clear
+true set-global
+5b 3b div 1b eq (div: b arm g) rt-ok clear
+5 3 div 1 eq (div: i arm g) rt-ok clear
+5u 3u div 1u eq (div: u arm g) rt-ok clear
+5l 3l div 1l eq (div: l arm g) rt-ok clear
+5ul 3ul div 1ul eq (div: ul arm g) rt-ok clear
+5q 3q div 1q eq (div: q arm g) rt-ok clear
+5uq 3uq div 1uq eq (div: uq arm g) rt-ok clear
+5.0 3.0 div 1.6666666666666667d feq (div: r arm g) rt-ok clear
+5.0d 3.0d div 1.6666666666666667d feq (div: d arm g) rt-ok clear
+false set-global
+
+% ---- midpoint ----
+5b 3b midpoint 4b eq (midpoint: b arm) rt-ok clear
+5 3 midpoint 4 eq (midpoint: i arm) rt-ok clear
+5u 3u midpoint 4u eq (midpoint: u arm) rt-ok clear
+5l 3l midpoint 4l eq (midpoint: l arm) rt-ok clear
+5ul 3ul midpoint 4ul eq (midpoint: ul arm) rt-ok clear
+5q 3q midpoint 4q eq (midpoint: q arm) rt-ok clear
+5uq 3uq midpoint 4uq eq (midpoint: uq arm) rt-ok clear
+5.0 3.0 midpoint 4.0d feq (midpoint: r arm) rt-ok clear
+5.0d 3.0d midpoint 4.0d feq (midpoint: d arm) rt-ok clear
+true set-global
+5b 3b midpoint 4b eq (midpoint: b arm g) rt-ok clear
+5 3 midpoint 4 eq (midpoint: i arm g) rt-ok clear
+5u 3u midpoint 4u eq (midpoint: u arm g) rt-ok clear
+5l 3l midpoint 4l eq (midpoint: l arm g) rt-ok clear
+5ul 3ul midpoint 4ul eq (midpoint: ul arm g) rt-ok clear
+5q 3q midpoint 4q eq (midpoint: q arm g) rt-ok clear
+5uq 3uq midpoint 4uq eq (midpoint: uq arm g) rt-ok clear
+5.0 3.0 midpoint 4.0d feq (midpoint: r arm g) rt-ok clear
+5.0d 3.0d midpoint 4.0d feq (midpoint: d arm g) rt-ok clear
+false set-global
+
+% ---- lt ----
+5b 3b lt false eq (lt: b arm) rt-ok clear
+5 3 lt false eq (lt: i arm) rt-ok clear
+5u 3u lt false eq (lt: u arm) rt-ok clear
+5l 3l lt false eq (lt: l arm) rt-ok clear
+5ul 3ul lt false eq (lt: ul arm) rt-ok clear
+5q 3q lt false eq (lt: q arm) rt-ok clear
+5uq 3uq lt false eq (lt: uq arm) rt-ok clear
+5.0 3.0 lt false eq (lt: r arm) rt-ok clear
+5.0d 3.0d lt false eq (lt: d arm) rt-ok clear
+5a 3a lt false eq (lt: a arm) rt-ok clear
+(apple) (banana) lt true eq (lt: s arm) rt-ok clear
+true set-global
+5b 3b lt false eq (lt: b arm g) rt-ok clear
+5 3 lt false eq (lt: i arm g) rt-ok clear
+5u 3u lt false eq (lt: u arm g) rt-ok clear
+5l 3l lt false eq (lt: l arm g) rt-ok clear
+5ul 3ul lt false eq (lt: ul arm g) rt-ok clear
+5q 3q lt false eq (lt: q arm g) rt-ok clear
+5uq 3uq lt false eq (lt: uq arm g) rt-ok clear
+5.0 3.0 lt false eq (lt: r arm g) rt-ok clear
+5.0d 3.0d lt false eq (lt: d arm g) rt-ok clear
+5a 3a lt false eq (lt: a arm g) rt-ok clear
+(apple) (banana) lt true eq (lt: s arm g) rt-ok clear
+false set-global
+
+% ---- le ----
+5b 3b le false eq (le: b arm) rt-ok clear
+5 3 le false eq (le: i arm) rt-ok clear
+5u 3u le false eq (le: u arm) rt-ok clear
+5l 3l le false eq (le: l arm) rt-ok clear
+5ul 3ul le false eq (le: ul arm) rt-ok clear
+5q 3q le false eq (le: q arm) rt-ok clear
+5uq 3uq le false eq (le: uq arm) rt-ok clear
+5.0 3.0 le false eq (le: r arm) rt-ok clear
+5.0d 3.0d le false eq (le: d arm) rt-ok clear
+5a 3a le false eq (le: a arm) rt-ok clear
+(apple) (banana) le true eq (le: s arm) rt-ok clear
+true set-global
+5b 3b le false eq (le: b arm g) rt-ok clear
+5 3 le false eq (le: i arm g) rt-ok clear
+5u 3u le false eq (le: u arm g) rt-ok clear
+5l 3l le false eq (le: l arm g) rt-ok clear
+5ul 3ul le false eq (le: ul arm g) rt-ok clear
+5q 3q le false eq (le: q arm g) rt-ok clear
+5uq 3uq le false eq (le: uq arm g) rt-ok clear
+5.0 3.0 le false eq (le: r arm g) rt-ok clear
+5.0d 3.0d le false eq (le: d arm g) rt-ok clear
+5a 3a le false eq (le: a arm g) rt-ok clear
+(apple) (banana) le true eq (le: s arm g) rt-ok clear
+false set-global
+
+% ---- gt ----
+5b 3b gt true eq (gt: b arm) rt-ok clear
+5 3 gt true eq (gt: i arm) rt-ok clear
+5u 3u gt true eq (gt: u arm) rt-ok clear
+5l 3l gt true eq (gt: l arm) rt-ok clear
+5ul 3ul gt true eq (gt: ul arm) rt-ok clear
+5q 3q gt true eq (gt: q arm) rt-ok clear
+5uq 3uq gt true eq (gt: uq arm) rt-ok clear
+5.0 3.0 gt true eq (gt: r arm) rt-ok clear
+5.0d 3.0d gt true eq (gt: d arm) rt-ok clear
+5a 3a gt true eq (gt: a arm) rt-ok clear
+(apple) (banana) gt false eq (gt: s arm) rt-ok clear
+true set-global
+5b 3b gt true eq (gt: b arm g) rt-ok clear
+5 3 gt true eq (gt: i arm g) rt-ok clear
+5u 3u gt true eq (gt: u arm g) rt-ok clear
+5l 3l gt true eq (gt: l arm g) rt-ok clear
+5ul 3ul gt true eq (gt: ul arm g) rt-ok clear
+5q 3q gt true eq (gt: q arm g) rt-ok clear
+5uq 3uq gt true eq (gt: uq arm g) rt-ok clear
+5.0 3.0 gt true eq (gt: r arm g) rt-ok clear
+5.0d 3.0d gt true eq (gt: d arm g) rt-ok clear
+5a 3a gt true eq (gt: a arm g) rt-ok clear
+(apple) (banana) gt false eq (gt: s arm g) rt-ok clear
+false set-global
+
+% ---- ge ----
+5b 3b ge true eq (ge: b arm) rt-ok clear
+5 3 ge true eq (ge: i arm) rt-ok clear
+5u 3u ge true eq (ge: u arm) rt-ok clear
+5l 3l ge true eq (ge: l arm) rt-ok clear
+5ul 3ul ge true eq (ge: ul arm) rt-ok clear
+5q 3q ge true eq (ge: q arm) rt-ok clear
+5uq 3uq ge true eq (ge: uq arm) rt-ok clear
+5.0 3.0 ge true eq (ge: r arm) rt-ok clear
+5.0d 3.0d ge true eq (ge: d arm) rt-ok clear
+5a 3a ge true eq (ge: a arm) rt-ok clear
+(apple) (banana) ge false eq (ge: s arm) rt-ok clear
+true set-global
+5b 3b ge true eq (ge: b arm g) rt-ok clear
+5 3 ge true eq (ge: i arm g) rt-ok clear
+5u 3u ge true eq (ge: u arm g) rt-ok clear
+5l 3l ge true eq (ge: l arm g) rt-ok clear
+5ul 3ul ge true eq (ge: ul arm g) rt-ok clear
+5q 3q ge true eq (ge: q arm g) rt-ok clear
+5uq 3uq ge true eq (ge: uq arm g) rt-ok clear
+5.0 3.0 ge true eq (ge: r arm g) rt-ok clear
+5.0d 3.0d ge true eq (ge: d arm g) rt-ok clear
+5a 3a ge true eq (ge: a arm g) rt-ok clear
+(apple) (banana) ge false eq (ge: s arm g) rt-ok clear
+false set-global
+
+% ---- min ----
+5b 3b min 3b eq (min: b arm) rt-ok clear
+5 3 min 3 eq (min: i arm) rt-ok clear
+5u 3u min 3u eq (min: u arm) rt-ok clear
+5l 3l min 3l eq (min: l arm) rt-ok clear
+5ul 3ul min 3ul eq (min: ul arm) rt-ok clear
+5q 3q min 3q eq (min: q arm) rt-ok clear
+5uq 3uq min 3uq eq (min: uq arm) rt-ok clear
+5.0 3.0 min 3.0 eq (min: r arm) rt-ok clear
+5.0d 3.0d min 3.0d eq (min: d arm) rt-ok clear
+5a 3a min 3a eq (min: a arm) rt-ok clear
+(apple) (banana) min (apple) eq (min: s arm) rt-ok clear
+true set-global
+5b 3b min 3b eq (min: b arm g) rt-ok clear
+5 3 min 3 eq (min: i arm g) rt-ok clear
+5u 3u min 3u eq (min: u arm g) rt-ok clear
+5l 3l min 3l eq (min: l arm g) rt-ok clear
+5ul 3ul min 3ul eq (min: ul arm g) rt-ok clear
+5q 3q min 3q eq (min: q arm g) rt-ok clear
+5uq 3uq min 3uq eq (min: uq arm g) rt-ok clear
+5.0 3.0 min 3.0 eq (min: r arm g) rt-ok clear
+5.0d 3.0d min 3.0d eq (min: d arm g) rt-ok clear
+5a 3a min 3a eq (min: a arm g) rt-ok clear
+(apple) (banana) min (apple) eq (min: s arm g) rt-ok clear
+false set-global
+
+% ---- max ----
+5b 3b max 5b eq (max: b arm) rt-ok clear
+5 3 max 5 eq (max: i arm) rt-ok clear
+5u 3u max 5u eq (max: u arm) rt-ok clear
+5l 3l max 5l eq (max: l arm) rt-ok clear
+5ul 3ul max 5ul eq (max: ul arm) rt-ok clear
+5q 3q max 5q eq (max: q arm) rt-ok clear
+5uq 3uq max 5uq eq (max: uq arm) rt-ok clear
+5.0 3.0 max 5.0 eq (max: r arm) rt-ok clear
+5.0d 3.0d max 5.0d eq (max: d arm) rt-ok clear
+5a 3a max 5a eq (max: a arm) rt-ok clear
+(apple) (banana) max (banana) eq (max: s arm) rt-ok clear
+true set-global
+5b 3b max 5b eq (max: b arm g) rt-ok clear
+5 3 max 5 eq (max: i arm g) rt-ok clear
+5u 3u max 5u eq (max: u arm g) rt-ok clear
+5l 3l max 5l eq (max: l arm g) rt-ok clear
+5ul 3ul max 5ul eq (max: ul arm g) rt-ok clear
+5q 3q max 5q eq (max: q arm g) rt-ok clear
+5uq 3uq max 5uq eq (max: uq arm g) rt-ok clear
+5.0 3.0 max 5.0 eq (max: r arm g) rt-ok clear
+5.0d 3.0d max 5.0d eq (max: d arm g) rt-ok clear
+5a 3a max 5a eq (max: a arm g) rt-ok clear
+(apple) (banana) max (banana) eq (max: s arm g) rt-ok clear
+false set-global
+
+% ---- clamp ----
+5b 1b 4b clamp 4b eq (clamp: b arm) rt-ok clear
+5 1 4 clamp 4 eq (clamp: i arm) rt-ok clear
+5u 1u 4u clamp 4u eq (clamp: u arm) rt-ok clear
+5l 1l 4l clamp 4l eq (clamp: l arm) rt-ok clear
+5ul 1ul 4ul clamp 4ul eq (clamp: ul arm) rt-ok clear
+5q 1q 4q clamp 4q eq (clamp: q arm) rt-ok clear
+5uq 1uq 4uq clamp 4uq eq (clamp: uq arm) rt-ok clear
+5.0 1.0 4.0 clamp 4.0 eq (clamp: r arm) rt-ok clear
+5.0d 1.0d 4.0d clamp 4.0d eq (clamp: d arm) rt-ok clear
+5a 1a 4a clamp 4a eq (clamp: a arm) rt-ok clear
+(mango) (apple) (zebra) clamp (mango) eq (clamp: s arm) rt-ok clear
+true set-global
+5b 1b 4b clamp 4b eq (clamp: b arm g) rt-ok clear
+5 1 4 clamp 4 eq (clamp: i arm g) rt-ok clear
+5u 1u 4u clamp 4u eq (clamp: u arm g) rt-ok clear
+5l 1l 4l clamp 4l eq (clamp: l arm g) rt-ok clear
+5ul 1ul 4ul clamp 4ul eq (clamp: ul arm g) rt-ok clear
+5q 1q 4q clamp 4q eq (clamp: q arm g) rt-ok clear
+5uq 1uq 4uq clamp 4uq eq (clamp: uq arm g) rt-ok clear
+5.0 1.0 4.0 clamp 4.0 eq (clamp: r arm g) rt-ok clear
+5.0d 1.0d 4.0d clamp 4.0d eq (clamp: d arm g) rt-ok clear
+5a 1a 4a clamp 4a eq (clamp: a arm g) rt-ok clear
+(mango) (apple) (zebra) clamp (mango) eq (clamp: s arm g) rt-ok clear
+false set-global
+
+% ---- and ----
+6b 3b and 2b eq (and: b arm) rt-ok clear
+6u 3u and 2u eq (and: u arm) rt-ok clear
+6ul 3ul and 2ul eq (and: ul arm) rt-ok clear
+6uq 3uq and 2uq eq (and: uq arm) rt-ok clear
+6a 3a and 2a eq (and: a arm) rt-ok clear
+true false and false eq (and: bool arm) rt-ok clear
+true set-global
+6b 3b and 2b eq (and: b arm g) rt-ok clear
+6u 3u and 2u eq (and: u arm g) rt-ok clear
+6ul 3ul and 2ul eq (and: ul arm g) rt-ok clear
+6uq 3uq and 2uq eq (and: uq arm g) rt-ok clear
+6a 3a and 2a eq (and: a arm g) rt-ok clear
+true false and false eq (and: bool arm g) rt-ok clear
+false set-global
+
+% ---- or ----
+6b 3b or 7b eq (or: b arm) rt-ok clear
+6u 3u or 7u eq (or: u arm) rt-ok clear
+6ul 3ul or 7ul eq (or: ul arm) rt-ok clear
+6uq 3uq or 7uq eq (or: uq arm) rt-ok clear
+6a 3a or 7a eq (or: a arm) rt-ok clear
+true false or true eq (or: bool arm) rt-ok clear
+true set-global
+6b 3b or 7b eq (or: b arm g) rt-ok clear
+6u 3u or 7u eq (or: u arm g) rt-ok clear
+6ul 3ul or 7ul eq (or: ul arm g) rt-ok clear
+6uq 3uq or 7uq eq (or: uq arm g) rt-ok clear
+6a 3a or 7a eq (or: a arm g) rt-ok clear
+true false or true eq (or: bool arm g) rt-ok clear
+false set-global
+
+% ---- xor ----
+6b 3b xor 5b eq (xor: b arm) rt-ok clear
+6u 3u xor 5u eq (xor: u arm) rt-ok clear
+6ul 3ul xor 5ul eq (xor: ul arm) rt-ok clear
+6uq 3uq xor 5uq eq (xor: uq arm) rt-ok clear
+6a 3a xor 5a eq (xor: a arm) rt-ok clear
+true false xor true eq (xor: bool arm) rt-ok clear
+true set-global
+6b 3b xor 5b eq (xor: b arm g) rt-ok clear
+6u 3u xor 5u eq (xor: u arm g) rt-ok clear
+6ul 3ul xor 5ul eq (xor: ul arm g) rt-ok clear
+6uq 3uq xor 5uq eq (xor: uq arm g) rt-ok clear
+6a 3a xor 5a eq (xor: a arm g) rt-ok clear
+true false xor true eq (xor: bool arm g) rt-ok clear
+false set-global
+
+% ---- not ----
+6b not 249b eq (not: b arm) rt-ok clear
+6u not 4294967289u eq (not: u arm) rt-ok clear
+6ul not 18446744073709551609ul eq (not: ul arm) rt-ok clear
+6uq not 340282366920938463463374607431768211449uq eq (not: uq arm) rt-ok clear
+6a not 18446744073709551609a eq (not: a arm) rt-ok clear
+true not false eq (not: bool arm) rt-ok clear
+true set-global
+6b not 249b eq (not: b arm g) rt-ok clear
+6u not 4294967289u eq (not: u arm g) rt-ok clear
+6ul not 18446744073709551609ul eq (not: ul arm g) rt-ok clear
+6uq not 340282366920938463463374607431768211449uq eq (not: uq arm g) rt-ok clear
+6a not 18446744073709551609a eq (not: a arm g) rt-ok clear
+true not false eq (not: bool arm g) rt-ok clear
+false set-global
+
+% ====================================================================
+% Sad arms: mismatched pairs (AllMustMatch) and out-of-domain operands
+% ====================================================================
+
+{ (x) sin } try /type-check eq (sin: string operand) rt-ok clear
+{ (x) cos } try /type-check eq (cos: string operand) rt-ok clear
+{ (x) tan } try /type-check eq (tan: string operand) rt-ok clear
+{ (x) asin } try /type-check eq (asin: string operand) rt-ok clear
+{ (x) acos } try /type-check eq (acos: string operand) rt-ok clear
+{ (x) atan } try /type-check eq (atan: string operand) rt-ok clear
+{ (x) sinh } try /type-check eq (sinh: string operand) rt-ok clear
+{ (x) cosh } try /type-check eq (cosh: string operand) rt-ok clear
+{ (x) tanh } try /type-check eq (tanh: string operand) rt-ok clear
+{ (x) asinh } try /type-check eq (asinh: string operand) rt-ok clear
+{ (x) acosh } try /type-check eq (acosh: string operand) rt-ok clear
+{ (x) atanh } try /type-check eq (atanh: string operand) rt-ok clear
+{ (x) exp } try /type-check eq (exp: string operand) rt-ok clear
+{ (x) exp2 } try /type-check eq (exp2: string operand) rt-ok clear
+{ (x) expm1 } try /type-check eq (expm1: string operand) rt-ok clear
+{ (x) log } try /type-check eq (log: string operand) rt-ok clear
+{ (x) log2 } try /type-check eq (log2: string operand) rt-ok clear
+{ (x) log10 } try /type-check eq (log10: string operand) rt-ok clear
+{ (x) log1p } try /type-check eq (log1p: string operand) rt-ok clear
+{ (x) sqrt } try /type-check eq (sqrt: string operand) rt-ok clear
+{ (x) cbrt } try /type-check eq (cbrt: string operand) rt-ok clear
+{ (x) erf } try /type-check eq (erf: string operand) rt-ok clear
+{ (x) erfc } try /type-check eq (erfc: string operand) rt-ok clear
+{ (x) lgamma } try /type-check eq (lgamma: string operand) rt-ok clear
+{ (x) tgamma } try /type-check eq (tgamma: string operand) rt-ok clear
+{ (x) ceil } try /type-check eq (ceil: string operand) rt-ok clear
+{ (x) floor } try /type-check eq (floor: string operand) rt-ok clear
+{ (x) trunc } try /type-check eq (trunc: string operand) rt-ok clear
+{ (x) round } try /type-check eq (round: string operand) rt-ok clear
+{ (x) rint } try /type-check eq (rint: string operand) rt-ok clear
+{ (x) nearby-int } try /type-check eq (nearby-int: string operand) rt-ok clear
+{ (x) round-even } try /type-check eq (round-even: string operand) rt-ok clear
+{ (x) logb } try /type-check eq (logb: string operand) rt-ok clear
+{ (x) degrees-to-radians } try /type-check eq (degrees-to-radians: string operand) rt-ok clear
+{ (x) radians-to-degrees } try /type-check eq (radians-to-degrees: string operand) rt-ok clear
+{ (x) riemann-zeta } try /type-check eq (riemann-zeta: string operand) rt-ok clear
+{ (x) expint } try /type-check eq (expint: string operand) rt-ok clear
+{ (x) comp-ellint-1 } try /type-check eq (comp-ellint-1: string operand) rt-ok clear
+{ (x) comp-ellint-2 } try /type-check eq (comp-ellint-2: string operand) rt-ok clear
+{ (x) finite? } try /type-check eq (finite?: string operand) rt-ok clear
+{ (x) inf? } try /type-check eq (inf?: string operand) rt-ok clear
+{ (x) nan? } try /type-check eq (nan?: string operand) rt-ok clear
+{ (x) normal? } try /type-check eq (normal?: string operand) rt-ok clear
+{ (x) sign-bit } try /type-check eq (sign-bit: string operand) rt-ok clear
+{ 0.75 0.5d atan2 } try /type-check eq (atan2: mismatched float pair) rt-ok clear
+{ (x) (x) atan2 } try /type-check eq (atan2: string operand) rt-ok clear
+{ 0.75 0.5d hypot } try /type-check eq (hypot: mismatched float pair) rt-ok clear
+{ (x) (x) hypot } try /type-check eq (hypot: string operand) rt-ok clear
+{ 0.75 0.5d fmod } try /type-check eq (fmod: mismatched float pair) rt-ok clear
+{ (x) (x) fmod } try /type-check eq (fmod: string operand) rt-ok clear
+{ 0.75 0.5d remainder } try /type-check eq (remainder: mismatched float pair) rt-ok clear
+{ (x) (x) remainder } try /type-check eq (remainder: string operand) rt-ok clear
+{ 0.75 0.5d copy-sign } try /type-check eq (copy-sign: mismatched float pair) rt-ok clear
+{ (x) (x) copy-sign } try /type-check eq (copy-sign: string operand) rt-ok clear
+{ 0.75 0.5d fdim } try /type-check eq (fdim: mismatched float pair) rt-ok clear
+{ (x) (x) fdim } try /type-check eq (fdim: string operand) rt-ok clear
+{ 0.75 0.5d fmax } try /type-check eq (fmax: mismatched float pair) rt-ok clear
+{ (x) (x) fmax } try /type-check eq (fmax: string operand) rt-ok clear
+{ 0.75 0.5d fmin } try /type-check eq (fmin: mismatched float pair) rt-ok clear
+{ (x) (x) fmin } try /type-check eq (fmin: string operand) rt-ok clear
+{ 0.75 0.5d fmax-mag } try /type-check eq (fmax-mag: mismatched float pair) rt-ok clear
+{ (x) (x) fmax-mag } try /type-check eq (fmax-mag: string operand) rt-ok clear
+{ 0.75 0.5d fmin-mag } try /type-check eq (fmin-mag: mismatched float pair) rt-ok clear
+{ (x) (x) fmin-mag } try /type-check eq (fmin-mag: string operand) rt-ok clear
+{ 0.75 0.5d pow } try /type-check eq (pow: mismatched float pair) rt-ok clear
+{ (x) (x) pow } try /type-check eq (pow: string operand) rt-ok clear
+{ 0.75 0.5d beta } try /type-check eq (beta: mismatched float pair) rt-ok clear
+{ (x) (x) beta } try /type-check eq (beta: string operand) rt-ok clear
+{ 0.75 0.5d cyl-bessel-i } try /type-check eq (cyl-bessel-i: mismatched float pair) rt-ok clear
+{ (x) (x) cyl-bessel-i } try /type-check eq (cyl-bessel-i: string operand) rt-ok clear
+{ 0.75 0.5d cyl-bessel-j } try /type-check eq (cyl-bessel-j: mismatched float pair) rt-ok clear
+{ (x) (x) cyl-bessel-j } try /type-check eq (cyl-bessel-j: string operand) rt-ok clear
+{ 0.75 0.5d cyl-bessel-k } try /type-check eq (cyl-bessel-k: mismatched float pair) rt-ok clear
+{ (x) (x) cyl-bessel-k } try /type-check eq (cyl-bessel-k: string operand) rt-ok clear
+{ 0.75 0.5d cyl-neumann } try /type-check eq (cyl-neumann: mismatched float pair) rt-ok clear
+{ (x) (x) cyl-neumann } try /type-check eq (cyl-neumann: string operand) rt-ok clear
+{ 0.75 0.5d ellint-1 } try /type-check eq (ellint-1: mismatched float pair) rt-ok clear
+{ (x) (x) ellint-1 } try /type-check eq (ellint-1: string operand) rt-ok clear
+{ 0.75 0.5d ellint-2 } try /type-check eq (ellint-2: mismatched float pair) rt-ok clear
+{ (x) (x) ellint-2 } try /type-check eq (ellint-2: string operand) rt-ok clear
+{ 0.75 0.5d comp-ellint-3 } try /type-check eq (comp-ellint-3: mismatched float pair) rt-ok clear
+{ (x) (x) comp-ellint-3 } try /type-check eq (comp-ellint-3: string operand) rt-ok clear
+{ 0.75 0.5d less? } try /type-check eq (less?: mismatched float pair) rt-ok clear
+{ (x) (x) less? } try /type-check eq (less?: string operand) rt-ok clear
+{ 0.75 0.5d less-equal? } try /type-check eq (less-equal?: mismatched float pair) rt-ok clear
+{ (x) (x) less-equal? } try /type-check eq (less-equal?: string operand) rt-ok clear
+{ 0.75 0.5d greater? } try /type-check eq (greater?: mismatched float pair) rt-ok clear
+{ (x) (x) greater? } try /type-check eq (greater?: string operand) rt-ok clear
+{ 0.75 0.5d greater-equal? } try /type-check eq (greater-equal?: mismatched float pair) rt-ok clear
+{ (x) (x) greater-equal? } try /type-check eq (greater-equal?: string operand) rt-ok clear
+{ 0.75 0.5d less-greater? } try /type-check eq (less-greater?: mismatched float pair) rt-ok clear
+{ (x) (x) less-greater? } try /type-check eq (less-greater?: string operand) rt-ok clear
+{ 0.75 0.5d unordered? } try /type-check eq (unordered?: mismatched float pair) rt-ok clear
+{ (x) (x) unordered? } try /type-check eq (unordered?: string operand) rt-ok clear
+{ 0.75 0.5d total-order? } try /type-check eq (total-order?: mismatched float pair) rt-ok clear
+{ (x) (x) total-order? } try /type-check eq (total-order?: string operand) rt-ok clear
+{ 0.75 0.5d total-order-mag? } try /type-check eq (total-order-mag?: mismatched float pair) rt-ok clear
+{ (x) (x) total-order-mag? } try /type-check eq (total-order-mag?: string operand) rt-ok clear
+{ (x) ilogb } try /type-check eq (ilogb: string operand) rt-ok clear
+{ (x) modf } try /type-check eq (modf: string operand) rt-ok clear
+{ (x) frexp } try /type-check eq (frexp: string operand) rt-ok clear
+{ 0.75 0.5d rem-quo } try /type-check eq (rem-quo: mismatched float pair) rt-ok clear
+{ (x) (x) rem-quo } try /type-check eq (rem-quo: string operand) rt-ok clear
+{ 0.75 2.0 ldexp } try /type-check eq (ldexp: real exponent) rt-ok clear
+{ (x) 2 ldexp } try /type-check eq (ldexp: string operand) rt-ok clear
+{ 0.75 2.0 scalbn } try /type-check eq (scalbn: real exponent) rt-ok clear
+{ (x) 2 scalbn } try /type-check eq (scalbn: string operand) rt-ok clear
+{ 0.75 0.5d next-after } try /type-check eq (next-after: mismatched float pair) rt-ok clear
+{ (x) (x) next-after } try /type-check eq (next-after: string operand) rt-ok clear
+{ 0.75 0.5d next-toward } try /type-check eq (next-toward: mismatched float pair) rt-ok clear
+{ (x) (x) next-toward } try /type-check eq (next-toward: string operand) rt-ok clear
+{ (x) ulp } try /type-check eq (ulp: string operand) rt-ok clear
+{ 0.75 0.5d 0.25 fma } try /type-check eq (fma: mismatched triple) rt-ok clear
+{ (x) (x) (x) fma } try /type-check eq (fma: string operand) rt-ok clear
+{ 1.0 2.0d 0.5 lerp } try /type-check eq (lerp: mismatched triple) rt-ok clear
+{ (x) (x) (x) lerp } try /type-check eq (lerp: string operand) rt-ok clear
+{ 0.5 0.25d 0.7 ellint-3 } try /type-check eq (ellint-3: mismatched triple) rt-ok clear
+{ (x) (x) (x) ellint-3 } try /type-check eq (ellint-3: string operand) rt-ok clear
+{ 2 0.5 hermite } try /type-check eq (hermite: signed n) rt-ok clear
+{ 2u (x) hermite } try /type-check eq (hermite: string x) rt-ok clear
+{ 2 0.5 laguerre } try /type-check eq (laguerre: signed n) rt-ok clear
+{ 2u (x) laguerre } try /type-check eq (laguerre: string x) rt-ok clear
+{ 2 0.5 legendre } try /type-check eq (legendre: signed n) rt-ok clear
+{ 2u (x) legendre } try /type-check eq (legendre: string x) rt-ok clear
+{ 2 1.5 sph-bessel } try /type-check eq (sph-bessel: signed n) rt-ok clear
+{ 2u (x) sph-bessel } try /type-check eq (sph-bessel: string x) rt-ok clear
+{ 2 1.5 sph-neumann } try /type-check eq (sph-neumann: signed n) rt-ok clear
+{ 2u (x) sph-neumann } try /type-check eq (sph-neumann: string x) rt-ok clear
+{ 2 1u 0.5 assoc-laguerre } try /type-check eq (assoc-laguerre: signed n) rt-ok clear
+{ 2u 1u (x) assoc-laguerre } try /type-check eq (assoc-laguerre: string x) rt-ok clear
+{ 2 1u 0.5 assoc-legendre } try /type-check eq (assoc-legendre: signed n) rt-ok clear
+{ 2u 1u (x) assoc-legendre } try /type-check eq (assoc-legendre: string x) rt-ok clear
+{ 2 1u 0.5 sph-legendre } try /type-check eq (sph-legendre: signed n) rt-ok clear
+{ 2u 1u (x) sph-legendre } try /type-check eq (sph-legendre: string x) rt-ok clear
+{ (x) pop-count } try /type-check eq (pop-count: string operand) rt-ok clear
+{ (x) bit-width } try /type-check eq (bit-width: string operand) rt-ok clear
+{ (x) countr-zero } try /type-check eq (countr-zero: string operand) rt-ok clear
+{ (x) countr-one } try /type-check eq (countr-one: string operand) rt-ok clear
+{ (x) countl-zero } try /type-check eq (countl-zero: string operand) rt-ok clear
+{ (x) countl-one } try /type-check eq (countl-one: string operand) rt-ok clear
+{ (x) bit-ceil } try /type-check eq (bit-ceil: string operand) rt-ok clear
+{ (x) bit-floor } try /type-check eq (bit-floor: string operand) rt-ok clear
+{ (x) single-bit? } try /type-check eq (single-bit?: string operand) rt-ok clear
+{ 5u 2u shift-left } try /type-check eq (shift-left: unsigned count) rt-ok clear
+{ (x) 2 shift-left } try /type-check eq (shift-left: string operand) rt-ok clear
+{ 20u 2u shift-right } try /type-check eq (shift-right: unsigned count) rt-ok clear
+{ (x) 2 shift-right } try /type-check eq (shift-right: string operand) rt-ok clear
+{ 5u 2u rotate-left } try /type-check eq (rotate-left: unsigned count) rt-ok clear
+{ (x) 2 rotate-left } try /type-check eq (rotate-left: string operand) rt-ok clear
+{ 20u 2u rotate-right } try /type-check eq (rotate-right: unsigned count) rt-ok clear
+{ (x) 2 rotate-right } try /type-check eq (rotate-right: string operand) rt-ok clear
+{ 6 4l gcd } try /type-check eq (gcd: mismatched pair) rt-ok clear
+{ 6.0 4.0 gcd } try /type-check eq (gcd: real operand) rt-ok clear
+{ 6 4l lcm } try /type-check eq (lcm: mismatched pair) rt-ok clear
+{ 6.0 4.0 lcm } try /type-check eq (lcm: real operand) rt-ok clear
+{ 6 4l mod } try /type-check eq (mod: mismatched pair) rt-ok clear
+{ 6.0 4.0 mod } try /type-check eq (mod: real operand) rt-ok clear
+{ 6 4l nCr } try /type-check eq (nCr: mismatched pair) rt-ok clear
+{ 6.0 4.0 nCr } try /type-check eq (nCr: real operand) rt-ok clear
+{ 7 3l quot-rem } try /type-check eq (quot-rem: mismatched pair) rt-ok clear
+{ 7u 3u quot-rem } try /type-check eq (quot-rem: unsigned operands) rt-ok clear
+{ (x) abs } try /type-check eq (abs: string operand) rt-ok clear
+{ (x) neg } try /type-check eq (neg: string operand) rt-ok clear
+{ (x) byte-swap } try /type-check eq (byte-swap: string operand) rt-ok clear
+{ 5 3l add } try /type-check eq (add: mismatched pair) rt-ok clear
+{ (x) (x) add } try /type-check eq (add: string operand) rt-ok clear
+{ 5 3l sub } try /type-check eq (sub: mismatched pair) rt-ok clear
+{ (x) (x) sub } try /type-check eq (sub: string operand) rt-ok clear
+{ 5 3l mul } try /type-check eq (mul: mismatched pair) rt-ok clear
+{ (x) (x) mul } try /type-check eq (mul: string operand) rt-ok clear
+{ 5 3l div } try /type-check eq (div: mismatched pair) rt-ok clear
+{ (x) (x) div } try /type-check eq (div: string operand) rt-ok clear
+{ 5 3l midpoint } try /type-check eq (midpoint: mismatched pair) rt-ok clear
+{ (x) (x) midpoint } try /type-check eq (midpoint: string operand) rt-ok clear
+{ 5 3l lt } try /type-check eq (lt: mismatched pair) rt-ok clear
+{ true true lt } try /type-check eq (lt: boolean operands) rt-ok clear
+{ 5 3l le } try /type-check eq (le: mismatched pair) rt-ok clear
+{ true true le } try /type-check eq (le: boolean operands) rt-ok clear
+{ 5 3l gt } try /type-check eq (gt: mismatched pair) rt-ok clear
+{ true true gt } try /type-check eq (gt: boolean operands) rt-ok clear
+{ 5 3l ge } try /type-check eq (ge: mismatched pair) rt-ok clear
+{ true true ge } try /type-check eq (ge: boolean operands) rt-ok clear
+{ 5 3l min } try /type-check eq (min: mismatched pair) rt-ok clear
+{ true false min } try /type-check eq (min: boolean operands) rt-ok clear
+{ 5 3l max } try /type-check eq (max: mismatched pair) rt-ok clear
+{ true false max } try /type-check eq (max: boolean operands) rt-ok clear
+{ 5 1l 4 clamp } try /type-check eq (clamp: mismatched triple) rt-ok clear
+{ true false true clamp } try /type-check eq (clamp: boolean operands) rt-ok clear
+{ 6b 3u and } try /type-check eq (and: mismatched pair) rt-ok clear
+{ (x) (x) and } try /type-check eq (and: string operand) rt-ok clear
+{ 6b 3u or } try /type-check eq (or: mismatched pair) rt-ok clear
+{ (x) (x) or } try /type-check eq (or: string operand) rt-ok clear
+{ 6b 3u xor } try /type-check eq (xor: mismatched pair) rt-ok clear
+{ (x) (x) xor } try /type-check eq (xor: string operand) rt-ok clear
+{ (x) not } try /type-check eq (not: string operand) rt-ok clear
+
+% ====================================================================
+% Done
+% ====================================================================
+
+(Shim matrix tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

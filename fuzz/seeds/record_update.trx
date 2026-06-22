@@ -1,0 +1,3 @@
+/box [ /w /h ] record-type def
+10 20 box /b exch def
+b /w 99 record-update

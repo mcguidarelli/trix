@@ -1,0 +1,73 @@
+name: clang-tidy
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: clang-tidy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clang-tidy:
+    name: clang-tidy static analysis
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install gcc-15 (for the build)
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install -y gcc-15 g++-15
+
+      - name: Install clang-tidy-20 and build deps
+        run: |
+          sudo apt-get install -y \
+            clang-tidy-20 \
+            libreadline-dev \
+            cmake ninja-build
+          # Call clang-tidy-20 explicitly below: the runner preinstalls
+          # clang-tidy-18, and the unversioned `clang-tidy` resolves to it
+          # (update-alternatives does not reliably switch it), so the run
+          # used an 18 that rejects clang-19 features ([[assume]],
+          # __builtin_clzg) and fails to parse the TU.
+          clang-tidy-20 --version
+
+      # Configure with CMAKE_EXPORT_COMPILE_COMMANDS so clang-tidy can
+      # pick up trix.cpp's include paths and compile flags.  Sanitizers
+      # off because clang-tidy doesn't use them and they slow the
+      # companion build.
+      - name: Configure
+        env:
+          CC: gcc-15
+          CXX: g++-15
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          -DTRIX_SANITIZERS=OFF
+
+      - name: Build
+        run: cmake --build build
+
+      # Trix is a single translation unit: trix.cpp includes trix.h
+      # which includes every .inl fragment.  One clang-tidy invocation
+      # covers the entire codebase.  --extra-arg suppresses clang's
+      # own front-end warnings that overlap with gcc's stricter
+      # -Wconversion (already enforced by the build matrix) and the
+      # anonymous-nested-union extension (GCC-accepted, clang-warned,
+      # intentional in object.inl).
+      - name: Run clang-tidy
+        run: >
+          clang-tidy-20 -p build
+          --extra-arg=-Wno-unknown-warning-option
+          --extra-arg=-Wno-nested-anon-types
+          --extra-arg=-Wno-sign-conversion
+          --extra-arg=-Wno-double-promotion
+          trix.cpp

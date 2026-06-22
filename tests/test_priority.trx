@@ -1,0 +1,305 @@
+% ====================================================================
+% Priority Scheduling Tests (Phase 4 Scheduler)
+% ====================================================================
+% Tests two-tier ready queue: high-priority coroutines scheduled before
+% normal-priority ones.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: coroutine-priority operator basics
+% ====================================================================
+
+% Set priority to high and verify no error
+/s1-ok false def
+[
+    { coroutine-self 1 coroutine-priority
+      /s1-ok true def
+    }
+    coroutine-launch
+coroutine-join pop pop
+s1-ok                                     (priority: set to high succeeds) rt-ok
+
+% Set priority to normal (0) -- no-op on fresh coroutine
+/s2-ok false def
+[
+    { coroutine-self 0 coroutine-priority
+      /s2-ok true def
+    }
+    coroutine-launch
+coroutine-join pop pop
+s2-ok                                     (priority: set to normal succeeds) rt-ok
+
+% ====================================================================
+% SECTION 2: High-priority runs before normal-priority
+% ====================================================================
+
+% Use a global counter to track run order.
+% After all three coroutines yield, high should run before normal.
+/run-seq 0 def
+/high-seq 0 def
+/norm-seq 0 def
+
+/normal-c [
+    { 50 coroutine-quantum
+      0 coroutine-sleep
+      /run-seq run-seq 1 add def
+      /norm-seq run-seq def
+    }
+    coroutine-launch def
+
+/high-c [
+    { coroutine-self 1 coroutine-priority
+      50 coroutine-quantum
+      0 coroutine-sleep
+      /run-seq run-seq 1 add def
+      /high-seq run-seq def
+    }
+    coroutine-launch def
+
+% Observer yields twice to ensure both run
+[
+    { 50 coroutine-quantum
+      0 coroutine-sleep
+      0 coroutine-sleep
+    }
+    coroutine-launch
+
+coroutine-join pop pop
+high-c coroutine-join pop pop
+normal-c coroutine-join pop pop
+
+high-seq 0 gt                             (order: high ran) rt-ok
+norm-seq 0 gt                             (order: normal ran) rt-ok
+high-seq norm-seq lt                      (order: high ran before normal) rt-ok
+
+% ====================================================================
+% SECTION 3: Multiple high-priority before any normal
+% ====================================================================
+
+/run-seq3 0 def
+/h3a-seq 0 def
+/h3b-seq 0 def
+/n3-seq 0 def
+
+/n3 [
+    { 50 coroutine-quantum
+      0 coroutine-sleep
+      /run-seq3 run-seq3 1 add def
+      /n3-seq run-seq3 def
+    }
+    coroutine-launch def
+
+/h3a [
+    { coroutine-self 1 coroutine-priority
+      50 coroutine-quantum
+      0 coroutine-sleep
+      /run-seq3 run-seq3 1 add def
+      /h3a-seq run-seq3 def
+    }
+    coroutine-launch def
+
+/h3b [
+    { coroutine-self 1 coroutine-priority
+      50 coroutine-quantum
+      0 coroutine-sleep
+      /run-seq3 run-seq3 1 add def
+      /h3b-seq run-seq3 def
+    }
+    coroutine-launch def
+
+[
+    { 50 coroutine-quantum
+      0 coroutine-sleep
+      0 coroutine-sleep
+      0 coroutine-sleep
+    }
+    coroutine-launch
+
+coroutine-join pop pop
+h3b coroutine-join pop pop
+h3a coroutine-join pop pop
+n3 coroutine-join pop pop
+
+h3a-seq 0 gt                              (multi-high: h3a ran) rt-ok
+h3b-seq 0 gt                              (multi-high: h3b ran) rt-ok
+n3-seq 0 gt                               (multi-high: normal ran) rt-ok
+h3a-seq n3-seq lt                         (multi-high: h3a ran before normal) rt-ok
+h3b-seq n3-seq lt                         (multi-high: h3b ran before normal) rt-ok
+
+% ====================================================================
+% SECTION 4: Priority change from main (elevate waiting coroutine)
+% ====================================================================
+
+/s4-seq 0 def
+/s4-target-seq 0 def
+/s4-witness-seq 0 def
+
+/target4 [
+    { 50 coroutine-quantum
+      0 coroutine-sleep
+      /s4-seq s4-seq 1 add def
+      /s4-target-seq s4-seq def
+    }
+    coroutine-launch def
+
+/witness4 [
+    { 50 coroutine-quantum
+      0 coroutine-sleep
+      /s4-seq s4-seq 1 add def
+      /s4-witness-seq s4-seq def
+    }
+    coroutine-launch def
+
+% Elevate target4 to high priority before it runs (it's in the ready queue now)
+target4 1 coroutine-priority
+
+% Observer
+[
+    { 50 coroutine-quantum
+      0 coroutine-sleep
+      0 coroutine-sleep
+    }
+    coroutine-launch
+
+coroutine-join pop pop
+witness4 coroutine-join pop pop
+target4 coroutine-join pop pop
+
+s4-target-seq 0 gt                        (requeue: target ran) rt-ok
+s4-witness-seq 0 gt                       (requeue: witness ran) rt-ok
+s4-target-seq s4-witness-seq lt           (requeue: elevated target ran before witness) rt-ok
+
+% ====================================================================
+% SECTION 5: Priority survives suspend/resume
+% ====================================================================
+
+% Verify that a suspended high-priority coroutine retains its priority
+% after resume and still runs before normal-priority coroutines.
+
+/s5-seq 0 def
+/s5-high-seq 0 def
+/s5-norm-seq 0 def
+
+% Launch coroutine, then set high priority and immediately suspend it
+/s5-high [
+    { 50 coroutine-quantum
+      0 coroutine-sleep
+      /s5-seq s5-seq 1 add def
+      /s5-high-seq s5-seq def
+    }
+    coroutine-launch def
+
+% Set high priority and suspend before it can run
+s5-high 1 coroutine-priority
+s5-high coroutine-suspend
+
+% Launch normal-priority coroutine
+/s5-normal [
+    { 50 coroutine-quantum
+      0 coroutine-sleep
+      /s5-seq s5-seq 1 add def
+      /s5-norm-seq s5-seq def
+    }
+    coroutine-launch def
+
+% Resume the high-priority one -- should retain high priority
+s5-high coroutine-resume
+
+% Observer to let everyone finish
+[
+    { 50 coroutine-quantum
+      0 coroutine-sleep
+      0 coroutine-sleep
+      0 coroutine-sleep
+    }
+    coroutine-launch
+
+coroutine-join pop pop
+s5-normal coroutine-join pop pop
+s5-high coroutine-join pop pop
+
+s5-high-seq 0 gt                          (suspend-priority: high ran) rt-ok
+s5-norm-seq 0 gt                          (suspend-priority: normal ran) rt-ok
+s5-high-seq s5-norm-seq lt                (suspend-priority: high ran first after resume) rt-ok
+
+% ====================================================================
+% SECTION 6: Priority with quantum interleaving
+% ====================================================================
+
+% High-priority coroutine with quantum: after auto-yield, it should
+% be re-scheduled before normal-priority coroutines.
+/s6-high-count 0 def
+/s6-norm-count 0 def
+/s6-snap-h 0 def
+/s6-snap-n 0 def
+
+[
+    { coroutine-self 1 coroutine-priority
+      200 coroutine-quantum
+      500 { /s6-high-count s6-high-count 1 add def } repeat
+    }
+    coroutine-launch
+[
+    { 200 coroutine-quantum
+      500 { /s6-norm-count s6-norm-count 1 add def } repeat
+    }
+    coroutine-launch
+
+% Snapshot after some work
+[
+    { 200 coroutine-quantum
+      150 { } repeat
+      /s6-snap-h s6-high-count def
+      /s6-snap-n s6-norm-count def
+    }
+    coroutine-launch
+
+coroutine-join pop pop
+coroutine-join pop pop
+coroutine-join pop pop
+
+s6-high-count 500 eq                      (quantum-priority: high completed all) rt-ok
+s6-norm-count 500 eq                      (quantum-priority: normal completed all) rt-ok
+% High-priority should have more progress at snapshot time
+s6-snap-h s6-snap-n ge                    (quantum-priority: high had >= progress at snapshot) rt-ok
+
+% ====================================================================
+% SECTION 7: Error cases
+% ====================================================================
+
+/s7-c [
+    { /s7-dummy true def }
+    coroutine-launch def
+
+% Priority out of range (operator pops both args before range check, stack is clean)
+{ s7-c 2 coroutine-priority } try /range-check eq (error: priority 2 raises range-check) rt-ok
+{ s7-c -1 coroutine-priority } try /range-check eq (error: priority -1 raises range-check) rt-ok
+
+% Non-integer priority (verify fires before pops, so debris remains on stack)
+% Use /s7-err variable to capture the error name, then clear stack debris
+{ s7-c (hi) coroutine-priority } try
+/s7-err exch def clear
+s7-err /type-check eq                     (error: string priority raises type-check) rt-ok
+
+s7-c coroutine-join pop pop
+
+% Priority on dead coroutine
+/dead-c [
+    { /s7-dead true def }
+    coroutine-launch def
+dead-c coroutine-join pop pop
+{ dead-c 1 coroutine-priority } try /invalid-access eq (error: priority on dead raises invalid-access) rt-ok
+
+clear
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_priority: ALL TESTS PASSED) =
+(__test_ok__) =

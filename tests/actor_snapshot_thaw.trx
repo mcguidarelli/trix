@@ -1,0 +1,3 @@
+% actor_snapshot_thaw.trx -- phase 2: thaw the actor snapshot.
+% Run test_actor_snapshot.trx first to produce tests/actor_snapshot.img.
+(tests/actor_snapshot.img) thaw

@@ -1,0 +1,59 @@
+% ====================================================================
+% test_snapshot_errors.trx -- Phase-3 snapshot bucket: the snap-shot /
+% thaw error arms reachable in-process without crafted images.  The
+% adversarial-image matrix (header/section corruption, checksum and
+% sentinel patches, cross-binary useroperator mismatch) lives in
+% tests/run_snapshot_tests.sh "adversarial images" group, driven by
+% tests/snapshot/patch_image.py.  Every trigger and error name was
+% probed live before being pinned.  Contract: trix-reference.md 3.16
+% (snap-shot/thaw), docs/snapshots.md.
+%
+% Accepted-uncovered arms (rationale): snap-shot/thaw write/seek errno
+% arms need EIO injection; stream-path-too-long arms are unreachable
+% (a >=PATH_MAX file cannot be opened to begin with); "temporary
+% allocations are active" is defensive (no user op leaves the temp
+% region active across a statement).
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% target path >= PATH_MAX rejected before any filesystem work
+/longpath 5000 string def
+{ longpath snap-shot } try
+/file-open-error eq (snap: target path beyond PATH_MAX rejected) rt-ok clear
+{ longpath thaw } try
+/file-open-error eq (thaw: source path beyond PATH_MAX rejected) rt-ok clear
+
+% unopenable snap-shot target (the temp file open fails)
+{ (/nonexistent-dir/x.snap) snap-shot } try
+/file-open-error eq (snap: unopenable target directory rejected) rt-ok clear
+
+% rename-over-a-directory: the temp file writes fine, the final
+% atomic rename onto an existing directory fails
+{ (/tmp/trix-snap-rename-dir) mkdir } try pop
+{ (/tmp/trix-snap-rename-dir) snap-shot } try
+/io-write-error eq (snap: rename onto existing directory rejected) rt-ok clear
+(/tmp/trix-snap-rename-dir) rmdir
+
+% thaw of a file that is not a snap-shot image (bad magic/version),
+% and of a missing file -- both catchable, VM state untouched
+{ (tests/cli/ok.trx) thaw } try
+/invalid-image-file eq (thaw: non-image file rejected) rt-ok clear
+{ (/tmp/no-such-image.img) thaw } try
+/file-open-error eq (thaw: missing image file rejected) rt-ok clear
+
+% the failed thaws above must not have disturbed the live VM
+1 2 add 3 eq (thaw: failed thaw leaves the running VM intact) rt-ok clear
+
+(Snapshot error tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

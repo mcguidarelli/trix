@@ -1,0 +1,9 @@
+% |locals|#N capacity suffix: parameter-binding dict with extra slots
+% for body-local /name def working variables.
+{ |a b|#8 /t a b add def /u a b mul def t u mul } 3 4 rot exec
+{ |n|#4 /acc 1 def n 0 gt { acc n mul } { acc } if-else } 5 exch exec
+{ |a|#1000 /z 42 def a z add } 5 exch exec
+{ |a b|#2 a b add } 10 20 rot exec
+{ ({ |a b|#1 1 }) token } try clear
+{ ({ |a|#65536 1 }) token } try clear
+{ ({ |a|# 1 }) token } try clear

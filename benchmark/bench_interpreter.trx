@@ -1,0 +1,14 @@
+% bench_interpreter.trx -- main interpreter-loop dispatch throughput.
+%
+% Each inner iteration executes four operators that all dispatch through
+% the main interpreter loop: push integer(1), push integer(2), add, pop.
+% The integer adds exercise the arithmetic shim as well as the dispatch
+% proper, so the number is a fair "what is a representative op/sec" figure
+% rather than a best-case empty dispatch.
+%
+% Outer `repeat` drives the work.  Total operators executed per run =
+% 4 * N (plus a tiny constant for the repeat/def setup).  Tweak N to aim
+% at a ~3-5 second wall-clock run on target hardware.
+
+/N 25000000 def
+N { 1 2 add pop } repeat

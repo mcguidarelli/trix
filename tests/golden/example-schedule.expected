@@ -1,0 +1,14 @@
+Rule:    the last Friday of every month
+Start:   2026-01-01 (Thu)
+End:     after 6 occurrence(s)
+
+   #  Date        Day  +days
+----  ----------  ---  -----
+   1  2026-01-30  Fri     29
+   2  2026-02-27  Fri     57
+   3  2026-03-27  Fri     85
+   4  2026-04-24  Fri    113
+   5  2026-05-29  Fri    148
+   6  2026-06-26  Fri    176
+
+Total: 6 occurrence(s) spanning 147 day(s).

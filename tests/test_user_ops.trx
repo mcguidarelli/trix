@@ -1,0 +1,21 @@
+% Test user operators: my-square and my-clamp
+
+% my-square
+5 my-square =                   % 25
+-3 my-square =                  % 9
+0 my-square =                   % 0
+
+% my-clamp: value min max my-clamp
+3 1 10 my-clamp =               % 3  (in range)
+15 1 10 my-clamp =              % 10 (clamped to max)
+-5 1 10 my-clamp =              % 1  (clamped to min)
+1 1 10 my-clamp =               % 1  (at lower bound)
+10 1 10 my-clamp =              % 10 (at upper bound)
+
+% type-check error (expect TypeCheck — caught by try-catch)
+<< /type-check { pop (my-square type error caught) = } >>
+{ 3.14 my-square }
+try-catch
+
+clear
+(__test_ok__) =

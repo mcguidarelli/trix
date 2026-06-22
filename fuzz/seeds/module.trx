@@ -1,0 +1,5 @@
+/m { /x 42 def /sq { dup mul } def } module
+/m module-dict /d exch def
+d /x get =
+/m /x 1 import
+x =

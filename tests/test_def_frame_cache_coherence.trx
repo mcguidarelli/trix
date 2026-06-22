@@ -1,0 +1,68 @@
+% ====================================================================
+% test_def_frame_cache_coherence.trx -- regression for engine bug #21
+% ====================================================================
+% def / override / def-persist(sl=0) / import / bind-into-dict wrote a
+% NON-topmost dict (the first non-frame dict, or an off-stack operand
+% dict) with BindingMode::Bind, which repointed the per-Name m_binding
+% cache at that lower-priority entry EVEN WHEN a |...| frame above
+% shadowed the name.  Consequence: a frameless helper's `/x v def`
+% HIJACKED a caller's frame-local `x` (the caller read the helper's
+% userdict value, not its own frame value), defeating the documented
+% "use |locals|" mitigation for userdict collisions; bind-into-dict into
+% an off-stack dict corrupted the userdict cache for the same name.
+% Fix: those writers use BindingMode::NoBinding (clear), so the next
+% lookup re-walks the dict stack and caches the true topmost binding.
+% Frame writers (begin-locals / local-def / bind-locals / let /
+% destructure) and `store` (writes the resolved binder) keep Bind.
+
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% CASE A: a frameless helper's `def` must NOT hijack a caller's frame local
+% ====================================================================
+
+/helperA { /ca 999 def } def              % frameless: writes userdict /ca
+/callerA {|ca| helperA ca } def           % frame-local ca, read after the helper runs
+2 callerA 2 eq         (A: frameless helper def does not hijack caller frame local)        rt-ok
+ca 999 eq              (A: the helper's def did land in userdict)                           rt-ok
+
+% ====================================================================
+% CASE B: `def` inside a frame writes userdict; the frame local still wins on read
+% ====================================================================
+
+/cbProc {|cb| /cb 5 def cb } def
+99 cbProc 99 eq        (B: def inside a frame does not overwrite the frame local on read)   rt-ok
+cb 5 eq                (B: the def landed in userdict, readable after the frame pops)       rt-ok
+
+% ====================================================================
+% CASE C: bind-into-dict into an OFF-STACK dict must not corrupt the userdict cache
+% ====================================================================
+
+/cc 1 def
+cc 1 eq                (C: userdict cc=1 before bind-into-dict)                             rt-ok
+5 [/cc] 1 dict bind-into-dict
+cc 1 eq                (C: off-stack bind-into-dict did not corrupt userdict cc)            rt-ok
+
+% ====================================================================
+% CASE D: local-def keeps each frame's var isolated across a helper call
+% (the documented mitigation -- reliable again post-fix)
+% ====================================================================
+
+/dHelper {||#3 /dshared 222 local-def dshared } def
+/dCaller {||#3 /dshared 111 local-def dHelper pop dshared } def
+dCaller 111 eq         (D: local-def isolates each frame's var across a helper call)        rt-ok
+
+% ====================================================================
+% CASE E: a frameless `override` must not hijack a caller's frame local either
+% (same write path as def; runs last -- leaves userdict /count shadowing the op)
+% ====================================================================
+
+/ovHelper { /count 999 override } def
+/ovCaller {|count| ovHelper count } def
+0 ovCaller 0 eq        (E: frameless override does not hijack caller frame local 'count')   rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_def_frame_cache_coherence: ALL TESTS PASSED) =
+(__test_ok__) =

@@ -1,0 +1,213 @@
+% test_field_access.trx -- field-access sugar: a.name -> a /name get
+%
+% The scanner reclassifies '.' as a delimiter.  `foo.bar` rewrites to
+% `foo /bar get`; chained `a.b.c` rewrites to `a /b get /c get`.  The
+% sugar is polymorphic via the existing `get` operator, so it works on
+% records, dicts (with name keys), arrays (with integer-valued names --
+% nonsensical but mechanically consistent), and anything else `get`
+% handles.  `get` itself is a well-known name, so the sugar is truly
+% "rewrite-and-dispatch" -- no new runtime path.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Record field access (the primary motivation)
+% ====================================================================
+
+/point [ /x /y ] record-type def
+
+3 4 point /pt exch def
+
+% basic field access
+pt .x 3 eq (field: record .x) rt-ok clear
+pt .y 4 eq (field: record .y) rt-ok clear
+
+% classic form still works (sugar is just a rewrite)
+pt /x get 3 eq (field: classic /x get) rt-ok clear
+pt /y get 4 eq (field: classic /y get) rt-ok clear
+
+% mixed use in expressions
+pt .x pt .y add 7 eq (field: .x + .y) rt-ok clear
+
+% ====================================================================
+% SECTION 1b: Tagged-value accessor (.tag and .value pseudo-fields)
+% ====================================================================
+
+% Tagged exposes two pseudo-fields via `get` polymorphism: /tag returns the
+% tag Name, /value returns the payload.  Equivalent to tag-name/tag-value but
+% via the uniform dotted syntax.
+
+42 /down tag /t exch def
+
+t .tag /down eq (tagged: .tag returns tag name) rt-ok clear
+t .value 42 eq (tagged: .value returns payload) rt-ok clear
+
+% consistent with tag-name / tag-value operators
+t tag-name /down eq (tagged: .tag == tag-name) rt-ok clear
+t tag-value 42 eq (tagged: .value == tag-value) rt-ok clear
+
+% various payload types
+(hello) /greeting tag .value (hello) eq (tagged: string payload) rt-ok clear
+[1 2 3] /nums tag .value length 3 eq (tagged: array payload) rt-ok clear
+<< /k 1 >> /cfg tag .value /k get 1 eq (tagged: dict payload) rt-ok clear
+
+% chain: tagged-of-tagged
+42 /inner tag /outer tag .value .tag /inner eq (tagged: chain via .value) rt-ok clear
+
+% chain: tagged-of-record
+/point [ /x /y ] record-type def
+3 4 point /pt-tag tag .value .x 3 eq (tagged: .value then record .x) rt-ok clear
+
+% error: unknown field name on tagged
+<< /undefined { clear true } >> { 1 /tag-name tag .other } try-catch
+    (tagged: .other -> undefined) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Dict field access with name keys
+% ====================================================================
+
+<< /name (Alice) /age 30 /city (Boston) >> /d exch def
+
+d .name (Alice) eq (field: dict .name) rt-ok clear
+d .age 30 eq (field: dict .age) rt-ok clear
+d .city (Boston) eq (field: dict .city) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Chained access (a.b.c.d)
+% ====================================================================
+
+<< /user << /name (Bob) /addr << /city (Seattle) /zip 98101 >> >> >> /nested exch def
+
+nested .user .name (Bob) eq (chain: two deep) rt-ok clear
+nested .user .addr .city (Seattle) eq (chain: three deep) rt-ok clear
+nested .user .addr .zip 98101 eq (chain: three deep integer) rt-ok clear
+
+% chain with mixed classic form
+nested /user get .name (Bob) eq (chain: mixed classic/sugar) rt-ok clear
+nested .user /name get (Bob) eq (chain: sugar then classic) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Access inside procedures (point-free accessors)
+% ====================================================================
+
+/get-name { .name } def
+/get-age  { .age } def
+
+<< /name (Carol) /age 42 >> get-name (Carol) eq (proc: point-free .name) rt-ok clear
+<< /name (Dave) /age 55 >> get-age 55 eq (proc: point-free .age) rt-ok clear
+
+% chained point-free
+/get-city { .user .addr .city } def
+nested get-city (Seattle) eq (proc: point-free chain) rt-ok clear
+
+% sugar inside an inline proc body (W07: use map, not for-all -- body produces 1 per iter)
+[pt pt pt] { .x } map sum 9 eq (proc: sugar in map body) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Mixed with $(...) infix expressions
+% ====================================================================
+
+% infix works on named values; sugar result can feed into infix
+/a 10 def
+/b 20 def
+$(a + b) 30 eq (infix: basic) rt-ok clear
+
+% sugar outside $(...), value fed in
+pt .x pt .y $(a + b) add add 37 eq
+    (infix: sugar + $() compose) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Number-adjacent cases (preserve number parsing)
+% ====================================================================
+
+% .5 is a real literal (0.5), not field access
+.5 0.5 eq (num: .5 is real) rt-ok clear
+-.5 -0.5 eq (num: -.5 is negative real) rt-ok clear
++.002 0.002 eq (num: +.002 is real) rt-ok clear
+
+% decimal interior dots continue to work
+3.14 3.14 eq (num: 3.14 unchanged) rt-ok clear
+1.5e10 15000000000.0 eq (num: 1.5e10 unchanged) rt-ok clear
+
+% hex float interior dots
+0x1.0p0 1.0 eq (num: 0x1.0p0 hex-float) rt-ok clear
+0x1.Fp4 31.0 eq (num: 0x1.Fp4 hex-float) rt-ok clear
+
+% trailing dot stays a real
+3. type /real-type eq (num: 3. is real-type) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Number followed by sugar (requires whitespace)
+% ====================================================================
+
+% Digit-led tokens absorb '.' as number-interior -- so "3.foo" becomes
+% the name "3.foo" (not a number), NOT [3, /foo get].  To apply sugar
+% to a numeric value, push the number first then access the field.
+% This is a deliberate trade-off that keeps hex float syntax (0x1.Fp4)
+% working without context-dependent lookahead.
+
+% value-then-sugar with whitespace works fine
+<< /len 42 >> /cfg exch def
+cfg .len 42 eq (mixed: dict.field) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Error cases
+% ====================================================================
+
+% Lone '.' with nothing after -- token returns false (scanner-level error
+% swallowed and signalled as absence of a token).
+(.) token false eq (err: lone '.' -> no token) rt-ok clear
+
+% get failure on missing field (runtime, not scan-time)
+<< /undefined { clear true } >> { << /a 1 >> .missing } try-catch
+    (err: dict missing field -> undefined) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Packed-array roundtrip (sugar inside {...})
+% ====================================================================
+
+% Proc bodies store as packed arrays.  Verify the sugar tokens survive
+% pack/unpack intact -- executing the proc should produce the same
+% result every time.
+
+<< /name (Eve) >> /rec exch def
+
+/accessor { .name } def
+//accessor type /packed-type eq (pack: proc body is packed) rt-ok clear
+
+rec accessor (Eve) eq (pack: roundtrip 1) rt-ok clear
+rec accessor (Eve) eq (pack: roundtrip 2) rt-ok clear
+rec accessor (Eve) eq (pack: roundtrip 3) rt-ok clear
+
+% Chained sugar in a proc body
+<< /outer << /inner << /leaf 99 >> >> >> /deep exch def
+/deep-leaf { .outer .inner .leaf } def
+deep deep-leaf 99 eq (pack: chain roundtrip 1) rt-ok clear
+deep deep-leaf 99 eq (pack: chain roundtrip 2) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Sugar with 'get' alias equivalence
+% ====================================================================
+
+% The sugar emits `get` as its operator.  Since `get` works on arrays
+% with integer keys too, technically `arr .0` would work -- but there's
+% no reason to prefer it over the clearer `arr 0 get`.  Confirm that
+% dict/record paths (the intended targets) work as expected.
+
+<< /x 1 /y 2 /z 3 >> dup .x 1 eq (equiv: .x on dict) rt-ok clear
+<< /x 1 /y 2 /z 3 >> dup /x get 1 eq (equiv: /x get on dict) rt-ok clear
+
+3 4 point dup .x 3 eq (equiv: .x on record) rt-ok clear
+3 4 point dup /x get 3 eq (equiv: /x get on record) rt-ok clear
+
+(test_field_access.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

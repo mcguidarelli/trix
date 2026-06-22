@@ -1,0 +1,213 @@
+% ====================================================================
+% test_dict_errors.trx -- Phase-3 P3 batch 6: dict.inl / ops_dict.inl
+% sad paths (creation caps, dictstack, load, null keys, fixed-set
+% capacity, the -persist family's barrier and read-only arms, and the
+% read-only-frame arms).  Targets enumerated from per-line gcov;
+% every trigger and error name
+% was probed live before being pinned.  Contracts: trix-reference.md
+% 3.11 (dict), 3.12 (set).
+%
+% Companion: test_dict_expand_max.trx (standalone, --vm-size=8M) pins
+% the expansion-at-65535 arms -- they need a full 65,535-entry fill.
+%
+% Accepted-uncovered defensive arms:
+%   - Dict recycle/reinit InternalError guards (corruption tripwires)
+%   - zero-capacity expand arms: only DYNAMIC containers expand, and
+%     ReadWriteDynamic creation rounds capacity 0 up to 4; ReadWrite /
+%     ReadOnly (fixed) pin at 0 but never reach expand -- their put
+%     raises the fixed-capacity dict-full arm (pinned below)
+%   - Dict::copy_dict / copy_set DictFull (the copy op pre-checks
+%     remaining capacity with the same comparison; reachable only via
+%     dynamic-expansion VM starvation -> stress bucket)
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: creation caps and dictstack
+% ====================================================================
+
+{ 70000 dict } try
+/limit-check eq (dict: capacity beyond 65535 rejected) rt-ok clear
+{ 70000 dynamic-dict } try
+/limit-check eq (dynamic-dict: capacity beyond 65535 rejected) rt-ok clear
+
+% zero capacity: ReadWriteDynamic rounds 0 -> 4; fixed (ReadWrite /
+% ReadOnly) pins at 0 and any put raises the fixed-capacity arm
+0 dynamic-dict max-length 4 eq
+(dynamic-dict: capacity 0 rounds up to 4) rt-ok clear
+0 dict max-length 0 eq
+(dict: fixed capacity 0 pins at 0) rt-ok clear
+{ 0 dict /a 1 put } try
+/dict-full eq (dict: put into fixed zero-capacity raises) rt-ok clear
+
+{ 1 array dictstack } try
+/range-check eq (dictstack: array shorter than depth rejected) rt-ok clear
+count-dictstack array dictstack
+length count-dictstack eq (dictstack: adequate array filled) rt-ok clear
+
+{ /zz-no-such-name-zz load } try
+/undefined eq (load: missing key raises undefined) rt-ok clear
+
+% ====================================================================
+% SECTION 2: null-key arms (dict and set, journaled and -persist)
+% ====================================================================
+
+/d4 4 dict def
+d4 /a 1 put
+{ d4 null undef } try
+/type-check eq (undef: null key rejected) rt-ok clear
+{ d4 null undef-persist } try
+/type-check eq (undef-persist: null key rejected) rt-ok clear
+/s4 {{ 1 2 }} def
+{ s4 null set-remove } try
+/type-check eq (set-remove: null key rejected) rt-ok clear
+{ s4 null set-remove-persist } try
+/type-check eq (set-remove-persist: null key rejected) rt-ok clear
+
+% ====================================================================
+% SECTION 3: fixed-set capacity.  {{...}} literals are ReadWriteFixed
+% with capacity rounded up from the element count ({{ 9 }} -> 4); the
+% set-add beyond the rounded capacity raises dict-full.
+% ====================================================================
+
+/sfix {{ 9 }} def
+sfix 101 set-add pop
+sfix 102 set-add pop
+sfix 103 set-add pop
+sfix length 4 eq (set: literal rounds capacity up to 4) rt-ok clear
+{ sfix 104 set-add } try
+/dict-full eq (set-add: fixed literal set at capacity raises) rt-ok clear
+
+% control: `N set` is dynamic and grows past its initial capacity
+/sdyn 2 set def
+0 1 9 { sdyn exch set-add pop } for
+sdyn length 10 eq (set: dynamic set grows past initial capacity) rt-ok clear
+
+% control: dynamic dict doubles (4 -> 8) when filled
+/gdyn 4 dynamic-dict def
+0 1 5 { /i exch def gdyn i i put } for
+gdyn max-length 8 eq (dict: dynamic dict doubled capacity) rt-ok clear
+
+% ====================================================================
+% SECTION 4: def-persist barrier and access arms.  At sl=0 def-persist
+% degrades to def's semantics; the above-barrier arms need an active
+% save and a key/value whose STORAGE was allocated above the barrier
+% (runtime concat -- scan-time literals sit below the barrier).
+% ====================================================================
+
+<< /a 1 >> make-readonly begin
+{ /b 2 def-persist } try
+/read-only eq (def-persist: read-only current dict rejected) rt-ok clear
+end
+
+save
+/rtkey (k) (2) concat def
+{ rtkey 7 def-persist } try
+/above-barrier eq (def-persist: key above the save barrier) rt-ok clear
+-1 restore
+
+save
+/rtval (v) (2) concat def
+{ /pk rtval def-persist } try
+/above-barrier eq (def-persist: value above the save barrier) rt-ok clear
+-1 restore
+
+% (The sl=0 degrade control lives in test_dict_expand_max.trx: this
+% file runs inside test_all's run-test save wrapper, so the suite is
+% never at sl=0 here and def-persist takes the persist path.)
+
+% ====================================================================
+% SECTION 5: update-persist arms
+% ====================================================================
+
+/ud 4 dict def
+ud /k 1 put
+
+save
+/upkey (u) (k) concat def
+{ ud upkey { pop 2 } update-persist } try
+/above-barrier eq (update-persist: key above the save barrier) rt-ok clear
+-1 restore
+
+% missing key: under an active save the persist path reports it as
+% above-barrier (allocating a fresh entry would dangle on restore);
+% the sl=0 degrade variant (plain /undefined) is pinned in
+% test_dict_expand_max.trx where the run really is at sl=0
+save
+{ ud /missing { pop 2 } update-persist } try
+/above-barrier eq (update-persist: missing key under save) rt-ok clear
+-1 restore
+
+% @at-update-persist: the proc removes the key out from under the
+% pending re-store
+save
+{ ud /k { pop ud /k undef-persist 42 } update-persist } try
+/above-barrier eq (update-persist: key removed during proc) rt-ok clear
+-1 restore
+
+% control: update-persist applies the proc under an active save
+ud /k 1 put
+save
+ud /k { 10 mul } update-persist
+ud /k get 10 eq (update-persist: control applies proc) rt-ok clear
+-1 restore
+
+% ====================================================================
+% SECTION 6: read-only FRAME arms.  Frames enter the dict stack only
+% via |...| binding, but dictstack exposes the frame dict object and
+% make-readonly flips value-level access -- so local-def and
+% bind-locals can meet a read-only frame.
+% ====================================================================
+
+1 { |a|
+    4 array dictstack /ds exch def
+    ds ds length 1 sub get make-readonly pop
+    { /b 2 local-def } try
+    /read-only eq (local-def: read-only frame rejected) rt-ok clear
+    { 5 [ /c ] bind-locals } try
+    /read-only eq (bind-locals: read-only frame rejected) rt-ok clear
+} exec
+
+% ====================================================================
+% SECTION 7: global-VM region pass
+% ====================================================================
+
+${
+    { 70000 dict } try
+    /limit-check eq (global: dict capacity cap) rt-ok clear
+    /gs {{ 9 }} def
+    gs 201 set-add pop  gs 202 set-add pop  gs 203 set-add pop
+    { gs 204 set-add } try
+    /dict-full eq (global: fixed set at capacity raises) rt-ok clear
+    /gd4 4 dict def
+    { gd4 null undef } try
+    /type-check eq (global: undef null key rejected) rt-ok clear
+}
+
+% R6 container guard: while a save is active, a LOCAL-VM name key may
+% not enter a GLOBAL dict (its storage would be restore-fragile while
+% the dict lives on); a $/-interned global name passes
+save
+{ gd4 /localkey 1 put } try
+/invalid-access eq (global dict: local name key under save rejected) rt-ok clear
+{ gd4 $/globalkey 1 put } try
+/no-error eq (global dict: global name key under save accepted) rt-ok clear
+-1 restore
+
+% ====================================================================
+% Done
+% ====================================================================
+
+(Dict error tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

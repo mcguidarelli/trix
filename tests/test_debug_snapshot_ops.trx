@@ -1,0 +1,328 @@
+% test_debug_snapshot_ops.trx -- regression suite for the Phase C
+% introspection ops added in plan_debugger_tui.md:
+%   op-stack-snapshot, exec-stack-snapshot, dict-stack-snapshot,
+%   err-stack-snapshot, proc-disasm, format-object.
+%
+% Snapshot lifetime semantics: arrays allocate in local VM at the
+% current save level; the Phase D UI re-snapshots on every halt.
+
+/passed 0 def
+/failed 0 def
+/total  0 def
+/expect {                           % cond label --
+    total 1 add /total exch def
+    exch
+    { pop passed 1 add /passed exch def }
+    { (FAILED: ) print = failed 1 add /failed exch def }
+    if-else
+} def
+
+% --- SECTION 1: op-stack-snapshot --------------------------------------
+
+% Empty stack -> empty snapshot.
+op-stack-snapshot dup length 0 eq               (op-snap: empty -> length 0) expect
+pop
+
+% Three integers -> length-3 snapshot with values in stack order.
+1 2 3 op-stack-snapshot
+dup length 3 eq                                 (op-snap: 3 ints -> length 3) expect
+dup 0 get 1 eq                                  (op-snap: index 0 = bottom) expect
+dup 1 get 2 eq                                  (op-snap: index 1 = middle) expect
+dup 2 get 3 eq                                  (op-snap: index 2 = top) expect
+pop
+clear
+
+% The snapshot itself ends up on TOP of the operand stack and reflects
+% the state IMMEDIATELY BEFORE its push -- so mutating the stack after
+% the snapshot does NOT alter the captured array.
+1 2 op-stack-snapshot              % snap = [1 2]
+exch pop                           % stack = [snap]; consumed the 2
+dup length 2 eq                    (op-snap: immune to later pops) expect
+dup 1 get 2 eq                     (op-snap: top slot still 2 in snap) expect
+pop
+
+% --- SECTION 2: exec-stack-snapshot -----------------------------------
+
+% Top-level: exec-stack-snapshot returns a small fixed set of @run
+% companions (sid != INVALID once the @run frame is pushed).  We just
+% sanity-check it returns an array of non-zero length and is consistent
+% across two consecutive calls in the same dispatch.
+exec-stack-snapshot
+dup length 0 gt                                 (exec-snap: top-level len > 0) expect
+/snap1-len exch length def
+exec-stack-snapshot length snap1-len eq         (exec-snap: stable across two calls) expect
+
+% Inside a proc, exec depth grows.
+/inner { exec-stack-snapshot length } def
+inner snap1-len gt                              (exec-snap: deeper inside proc) expect
+
+% --- SECTION 3: dict-stack-snapshot -----------------------------------
+
+% Top-level dict stack has at least systemdict + userdict.
+dict-stack-snapshot
+dup length 2 ge                                 (dict-snap: top-level >= 2) expect
+% All entries are Dicts.
+dup 0 get type /dict-type eq                    (dict-snap: bottom is Dict) expect
+dup -1 get type /dict-type eq                   (dict-snap: top is Dict) expect
+pop
+
+% --- SECTION 4: err-stack-snapshot ------------------------------------
+
+% Top-level err stack is empty.
+err-stack-snapshot length 0 eq                  (err-snap: top-level empty) expect
+
+% Inside a `try-catch` block, err-stack carries the catch-handler dict.
+% (`try` alone pushes to exec, not err.)  Stack order is dict-then-proc.
+<<>>
+{ err-stack-snapshot length 0 gt
+    (err-snap: inside try-catch -> non-empty) expect } try-catch
+clear
+
+% --- SECTION 5: proc-disasm -------------------------------------------
+
+% Disassemble a simple proc.  Body is `1 1 add` => 3 rows.
+/sample { 1 1 add } def
+/sample load proc-disasm
+dup length 3 eq                                 (disasm: sample has 3 rows) expect
+
+% Each row is a 5-element [sid line col name preview] array.
+dup 0 get length 5 eq                           (disasm: row is 5 elements) expect
+
+% Row 0 (integer literal 1): name field is "integer".
+dup 0 get 3 get (integer) eq                    (disasm: row 0 name = integer) expect
+
+% Row 2 (executable name \add): name starts with backslash.
+dup 2 get 3 get (\\add) eq                      (disasm: row 2 name = \add) expect
+
+pop
+
+% Packed-form proc: { 2 3 mul }  --> 3 rows.
+{ 2 3 mul } proc-disasm
+dup length 3 eq                                 (disasm: packed proc -> 3 rows) expect
+dup 0 get 3 get (integer) eq                    (disasm: packed row 0 name) expect
+dup -1 get 3 get (\\mul) eq                     (disasm: packed last row name) expect
+pop
+
+% Empty proc: zero rows.
+/empty { } def
+/empty load proc-disasm
+dup length 0 eq                                 (disasm: empty proc -> 0 rows) expect
+pop
+
+% --- SECTION 6: format-object ------------------------------------------
+
+% Tiny integer fits within 10 chars.
+42 10 format-object
+dup (42i) eq                                    (fmt: integer fits) expect
+pop
+
+% Small string fits.  `==` form includes the (...)#access-tag suffix.
+(hi) 20 format-object
+dup (\(hi\)#lw) eq                              (fmt: short string fits) expect
+pop
+
+% Oversize composite gets truncated with "...".
+[1 2 3 4 5 6 7 8 9 10] 10 format-object
+dup length 10 eq                                (fmt: width cap honored) expect
+dup dup length 3 sub 3 get-interval (...) eq    (fmt: truncation marker present) expect
+pop
+
+% Width >= full output: no truncation marker.
+1 50 format-object
+dup (1i) eq                                     (fmt: integer compact form) expect
+pop
+
+% Width must be positive (>= 1).
+{ 1 0 format-object } try
+/range-check eq                                 (fmt: zero width rejects) expect
+clear
+
+% --- SECTION 7: debug-breakpoints (Phase D-2 Slice C) -------------------
+
+debug-breakpoints length 0 eq                   (debug-breakpoints: initially empty) expect
+
+/sample-bp-a debug-break
+/sample-bp-b debug-break
+debug-breakpoints length 2 eq                   (debug-breakpoints: 2 after 2 sets) expect
+/sample-bp-a debug-unbreak
+/sample-bp-b debug-unbreak
+debug-continue
+
+debug-breakpoints length 0 eq                   (debug-breakpoints: empty after clear) expect
+
+% --- SECTION 8: stream-name (Phase D-2 Slice C) -------------------------
+
+% sid 1 is stdin (stdio, not in inuse list) -> null
+1 stream-name null eq                           (stream-name: stdin -> null) expect
+
+% Open a real file; resolve its name by scanning sids 7..50 looking for
+% a stream whose name contains "test_debug_snapshot".
+(tests/test_debug_snapshot_ops.trx) 114b stream /sn-stream exch def
+/found-name () def
+7 1 50
+{
+    /sid exch def
+    sid stream-name dup null eq
+    { pop }
+    {
+        dup (test_debug_snapshot) count-substring 0 gt
+        { /found-name exch store exit }
+        { pop }
+        if-else
+    }
+    if-else
+} for
+found-name length 0 gt                          (stream-name: opened-file resolves) expect
+sn-stream close-stream
+
+% Range check: negative sid rejected (VerifyNotNegative)
+{ -1 stream-name } try
+/range-check eq                                 (stream-name: negative rejected) expect
+clear
+
+% --- SECTION 9: persistent sid -> path cache (Phase F) -----------------
+%
+% After Phase F, file-stream opens populate a sid -> path Dict in global
+% VM.  stream-name returns the cached path even after the originating
+% stream is closed.
+
+% Open a fresh file, find its sid, capture the resolved name.
+(tests/test_debug_snapshot_ops.trx) 114b stream /closed-stream exch def
+/closed-sid -1 def
+7 1 60
+{
+    /sid exch def
+    sid stream-name dup null eq
+    { pop }
+    {
+        dup (test_debug_snapshot) count-substring 0 gt
+        { pop /closed-sid sid store exit }
+        { pop }
+        if-else
+    }
+    if-else
+} for
+closed-sid -1 ne                                (sid-cache: opened-sid found)         expect
+/name-while-open closed-sid stream-name def
+name-while-open length 0 gt                     (sid-cache: name resolves while open) expect
+
+% Close the stream; cache should still resolve the sid.
+closed-stream close-stream
+
+/name-after-close closed-sid stream-name def
+name-after-close null eq not                    (sid-cache: name resolves after close) expect
+name-after-close (test_debug_snapshot) count-substring 0 gt
+                                                (sid-cache: cached name matches)       expect
+
+% --- SECTION 10: proc-disasm line annotation (Phase F) -----------------
+
+% A multi-line proc.  Each body element should report its scan-time
+% line number.  Note: scan_procedure captures m_line_number AFTER each
+% token completes, so each token reports the line where it ENDED.  For
+% single-line tokens this is also the line where the token started.
+
+/disasm-target
+{
+    1 2 add
+    3 4 mul
+    5 6 sub
+} def
+
+/disasm-rows /disasm-target load proc-disasm def
+
+% Body should have 9 elements (1, 2, add, 3, 4, mul, 5, 6, sub).
+disasm-rows length 9 eq                      (proc-disasm: 9 body elements)         expect
+
+% Capture the line for each element.  Body started 3 lines below this
+% comment block, so the exact line numbers depend on this file's layout.
+% Instead, assert RELATIVE: the line for token 0 (== 1) equals the line
+% for token 2 (== add), and lines should be monotonically non-decreasing.
+/lines [] def
+/i 0 def
+{
+    i disasm-rows length ge { exit } if
+    /lines lines disasm-rows i get 1 get append def
+    /i i 1 add def
+} loop
+
+lines 0 get lines 2 get eq                   (proc-disasm: same-line tokens match)  expect
+lines 2 get lines 5 get lt                   (proc-disasm: lines increase across rows) expect
+lines 5 get lines 8 get lt                   (proc-disasm: lines keep increasing)   expect
+
+% First three tokens (1 2 add) live on the same line; next three (3 4
+% mul) on the next line; final three (5 6 sub) on the line after.
+lines 0 get lines 1 get eq                   (proc-disasm: literal lines on same line) expect
+lines 3 get lines 4 get eq                   (proc-disasm: second-row literals on same line) expect
+lines 6 get lines 7 get eq                   (proc-disasm: third-row literals on same line) expect
+
+clear
+
+% --- SECTION 11: line annotation survives save/restore -----------------
+
+% A proc defined at sl=0 lives forever; its line entries must not be
+% pruned by an inner save/restore cycle.
+/sl0-target { 11 22 add } def
+/sl0-line /sl0-target load proc-disasm 0 get 1 get def
+
+save /sv1 exch def
+% Define a scoped proc; just exercises the map across save level changes.
+/scoped { 88 99 add } def
+sv1 restore
+
+% After restore, the sl=0 proc's lines should still be there.
+/sl0-line-post /sl0-target load proc-disasm 0 get 1 get def
+sl0-line sl0-line-post eq                    (proc-disasm: sl=0 lines survive restore) expect
+
+% --- SECTION 12: |locals| inner-body line annotation -------------------
+
+/locals-target {|a b|#+2
+    /sum a b add local-def
+    /diff a b sub local-def
+    sum diff
+} def
+
+% proc-disasm auto-unwraps the |locals| outer body, returning rows for
+% the inner user body directly.  Inner body is:
+%   /sum a b add local-def   /diff a b sub local-def   sum diff
+% That's 12 elements.
+/inner-rows /locals-target load proc-disasm def
+inner-rows length 12 eq                      (locals-inner: 12 inner ops after auto-unwrap) expect
+
+% First 5 elements (sum-binding row): /sum a b add local-def -- same line
+inner-rows 0 get 1 get 0 gt                  (locals-inner: row 0 line non-zero)     expect
+inner-rows 0 get 1 get inner-rows 1 get 1 get eq
+                                             (locals-inner: row 0 == row 1 line)    expect
+inner-rows 0 get 1 get inner-rows 4 get 1 get eq
+                                             (locals-inner: row 0 == row 4 line)    expect
+
+% Second 5 elements (diff-binding): different line.
+inner-rows 5 get 1 get inner-rows 0 get 1 get gt
+                                             (locals-inner: row 5 line > row 0)     expect
+inner-rows 5 get 1 get inner-rows 9 get 1 get eq
+                                             (locals-inner: row 5 == row 9 line)    expect
+
+% Final 2 elements (sum diff): third line.
+inner-rows 10 get 1 get inner-rows 5 get 1 get gt
+                                             (locals-inner: row 10 line > row 5)    expect
+inner-rows 10 get 1 get inner-rows 11 get 1 get eq
+                                             (locals-inner: row 10 == row 11 line)  expect
+
+clear
+
+% --- SECTION 12b: auto-unwrap leaves non-|locals| procs alone -----------
+
+/plain-target { 1 2 add 3 4 mul } def
+/plain-rows /plain-target load proc-disasm def
+plain-rows length 6 eq                       (auto-unwrap: plain proc unchanged)     expect
+
+clear
+
+% --- Wrap up -----------------------------------------------------------
+
+(passed: ) print passed = clear
+(failed: ) print failed = clear
+(total:  ) print total  = clear
+
+failed 0 eq                                     (test-debug-snapshot-ops: all green) expect
+
+(__test_ok__) =

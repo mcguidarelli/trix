@@ -1,0 +1,4 @@
+8 alloc /addr exch def
+42l addr poke
+addr /long-type peek
+addr free

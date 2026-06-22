@@ -1,0 +1,866 @@
+% ====================================================================
+% Test: Set type
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- construction ---
+{{ /a /b /c }} type /set-type eq (set: type) rt-ok clear
+{{ /a /b /c }} length 3 eq (set: length 3) rt-ok clear
+{{ }} length 0 eq (set: empty length 0) rt-ok clear
+4 set type /set-type eq (set: operator creates set) rt-ok clear
+4 set length 0 eq (set: operator creates empty) rt-ok clear
+
+% --- is-set type predicate ---
+{{ /a /b /c }} is-set                  (is-set: true for set) rt-ok clear
+{{ }} is-set                           (is-set: true for empty set) rt-ok clear
+4 set is-set                           (is-set: true for set-operator result) rt-ok clear
+42 is-set not                          (is-set: false for integer) rt-ok clear
+(hi) is-set not                        (is-set: false for string) rt-ok clear
+[1 2 3] is-set not                     (is-set: false for array) rt-ok clear
+<< /a 1 >> is-set not                  (is-set: false for dict) rt-ok clear
+/n is-set not                          (is-set: false for name) rt-ok clear
+
+% --- 0 set clamps to MinDynamicDictCapacity and stays growable ---
+% Sets are dynamic; an empty one (0 set, or an internally-built empty result like
+% set-filter on an empty set) is clamped capacity 0 -> 4 so set-add can grow it.
+% (Pre-fix a 0-capacity set errored on the very first set-add.)
+/s0cap 0 set def
+0 1 5 { /i exch def s0cap i set-add pop } for
+s0cap length 6 eq (set: 0-cap grows past clamp to hold 6) rt-ok clear
+s0cap 3 set-member? (set: 0-cap grown member? 3) rt-ok clear
+% the internal empty-result path: set-filter on an empty set returns a 0-cap dynamic
+% set (ops_set.inl create_set(.., 0, ReadWriteDynamic)); it must accept later adds
+0 set { pop true } set-filter /sf exch def
+sf 99 set-add 99 set-member? (set: empty set-filter result is growable) rt-ok clear
+
+% --- suffixes ---
+{{ /x }}#r type /set-type eq (set: #r suffix) rt-ok clear
+{{ /x }}#w type /set-type eq (set: #w suffix) rt-ok clear
+{{ /x }}#= type /set-type eq (set: #= suffix) rt-ok clear
+
+% --- dedup ---
+{{ /a /a /b }} length 2 eq (set: dedup in literal) rt-ok clear
+
+% --- set inside procedure ---
+{ {{ /a /b }} } exec type /set-type eq (set: inside proc type) rt-ok clear
+{ {{ /a /b }} } exec length 2 eq (set: inside proc length) rt-ok clear
+
+% --- set-add ---
+{{ /a /b }} /c set-add length 3 eq (set-add: length grows) rt-ok clear
+{{ /a /b }} /c set-add /c set-member? (set-add: member after add) rt-ok clear
+{{ /a /b }} /a set-add length 2 eq (set-add: no-op for existing) rt-ok clear
+
+% --- set-remove ---
+{{ /a /b /c }} /b set-remove length 2 eq (set-remove: length shrinks) rt-ok clear
+{{ /a /b /c }} /b set-remove /b set-member? not (set-remove: gone after remove) rt-ok clear
+
+% --- set-remove error ---
+<< /undefined { clear true } >> { {{ /a }} /z set-remove } try-catch
+(set-remove: error on missing) rt-ok clear
+
+% --- set-member? ---
+{{ /a /b /c }} /a set-member? (set-member?: present) rt-ok clear
+{{ /a /b /c }} /z set-member? not (set-member?: absent) rt-ok clear
+{{ }} /x set-member? not (set-member?: empty set) rt-ok clear
+
+% --- set-union ---
+{{ /a /b /c }} {{ /b /c /d }} set-union length 4 eq (set-union: length) rt-ok clear
+{{ /a /b /c }} {{ /b /c /d }} set-union /a set-member? (set-union: has a) rt-ok clear
+{{ /a /b /c }} {{ /b /c /d }} set-union /d set-member? (set-union: has d) rt-ok clear
+{{ }} {{ /a }} set-union length 1 eq (set-union: empty + non-empty) rt-ok clear
+{{ }} {{ }} set-union length 0 eq (set-union: empty + empty) rt-ok clear
+
+% --- set-intersection ---
+{{ /a /b /c }} {{ /b /c /d }} set-intersection length 2 eq (set-intersection: length) rt-ok clear
+{{ /a /b /c }} {{ /b /c /d }} set-intersection /b set-member? (set-intersection: has b) rt-ok clear
+{{ /a /b /c }} {{ /b /c /d }} set-intersection /a set-member? not (set-intersection: no a) rt-ok clear
+{{ /a }} {{ /b }} set-intersection length 0 eq (set-intersection: disjoint) rt-ok clear
+
+% --- set-difference ---
+{{ /a /b /c }} {{ /b /c /d }} set-difference length 1 eq (set-difference: length) rt-ok clear
+{{ /a /b /c }} {{ /b /c /d }} set-difference /a set-member? (set-difference: has a) rt-ok clear
+{{ /a /b /c }} {{ /b /c /d }} set-difference /b set-member? not (set-difference: no b) rt-ok clear
+{{ /a /b }} {{ /a /b }} set-difference length 0 eq (set-difference: identical) rt-ok clear
+
+% --- subset? ---
+{{ /a /b }} {{ /a /b /c }} subset? (subset?: true) rt-ok clear
+{{ /a /b /d }} {{ /a /b /c }} subset? not (subset?: false) rt-ok clear
+{{ }} {{ /a /b /c }} subset? (subset?: empty is subset) rt-ok clear
+{{ /a }} {{ /a }} subset? (subset?: equal is subset) rt-ok clear
+
+% --- members ---
+{{ /x /y /z }} members type /array-type eq (members: returns array) rt-ok clear
+{{ /x /y /z }} members length 3 eq (members: correct length) rt-ok clear
+{{ }} members length 0 eq (members: empty set) rt-ok clear
+
+% --- set-from-array ---
+[/a /b /c] set-from-array type /set-type eq (set-from-array: type) rt-ok clear
+[/a /b /c] set-from-array length 3 eq (set-from-array: length) rt-ok clear
+[/a /b /c] set-from-array /b set-member? (set-from-array: member) rt-ok clear
+[] set-from-array length 0 eq (set-from-array: empty) rt-ok clear
+[/a /a /b] set-from-array length 2 eq (set-from-array: dedup) rt-ok clear
+
+% --- set-from-array accepts any hashable ---
+[1 2 3] set-from-array length 3 eq (set-from-array: integers) rt-ok clear
+[(hello) (world)] set-from-array length 2 eq (set-from-array: strings) rt-ok clear
+[true false] set-from-array length 2 eq (set-from-array: booleans) rt-ok clear
+
+% --- for-all ---
+/cnt 0 def
+{{ /a /b /c }} { pop /cnt cnt 1 add def } for-all
+cnt 3 eq (for-all: visits 3 elements) rt-ok clear
+
+{{ }} { pop } for-all
+true (for-all: empty set is no-op) rt-ok clear
+
+% --- eq (identity) ---
+{{ /a /b }} dup eq (eq: same object) rt-ok clear
+{{ /a /b }} {{ /a /b }} eq not (eq: different objects) rt-ok clear
+
+% --- deep-eq ---
+{{ /a /b /c }} {{ /c /b /a }} deep-eq (deep-eq: same elements, different order) rt-ok clear
+{{ /a /b /c }} {{ /a /b }} deep-eq not (deep-eq: different length) rt-ok clear
+{{ /a /b }} {{ /a /c }} deep-eq not (deep-eq: different elements) rt-ok clear
+{{ }} {{ }} deep-eq (deep-eq: empty sets) rt-ok clear
+{{ /a }} {{ /a }} deep-eq (deep-eq: singleton) rt-ok clear
+
+% --- copy ---
+{{ /a /b /c }} 4 set copy length 3 eq (copy: length matches) rt-ok clear
+{{ /a /b /c }} 4 set copy /a set-member? (copy: member a) rt-ok clear
+{{ /a /b /c }} 4 set copy /b set-member? (copy: member b) rt-ok clear
+{{ /a /b /c }} 4 set copy /c set-member? (copy: member c) rt-ok clear
+
+% --- copy read-only error ---
+<< /read-only { clear true } >> { {{ /a }} {{ }}#r copy } try-catch
+(copy: read-only target error) rt-ok clear
+
+% --- length polymorphism ---
+{{ /a /b /c /d /e }} length 5 eq (length: 5 elements) rt-ok clear
+
+% --- save/restore basic ---
+/sr-set {{ /a /b }} def
+save                           % stack: save_obj
+sr-set /c set-add pop          % mutates set (adds c), pops set copy
+sr-set /c set-member?          % stack: save_obj, true
+exch restore                   % swap save_obj to top, restore
+(save/restore: c present inside save) rt-ok
+sr-set /c set-member? not (save/restore: c gone after restore) rt-ok clear
+
+% --- sad: set-add on read-only ---
+<< /read-only { clear true } >> { {{ /a }}#r /b set-add } try-catch
+(set-add: read-only error) rt-ok clear
+
+% --- sad: set-remove on read-only ---
+<< /read-only { clear true } >> { {{ /a }}#r /a set-remove } try-catch
+(set-remove: read-only error) rt-ok clear
+
+% --- sad: set with negative capacity ---
+<< /range-check { clear true } >> { -1 set } try-catch
+(set: negative capacity error) rt-ok clear
+
+% --- sad: set with zero capacity (should work) ---
+0 set length 0 eq (set: zero capacity ok) rt-ok clear
+
+% --- sad: type mismatch errors ---
+<< /type-check { clear true } >> { 42 /a set-add } try-catch
+(set-add: type mismatch non-set) rt-ok clear
+<< /type-check { clear true } >> { 42 {{ /a }} set-union } try-catch
+(set-union: type mismatch) rt-ok clear
+
+% --- boundary: singleton operations ---
+{{ /a }} {{ /a }} set-union length 1 eq (boundary: union singleton same) rt-ok clear
+{{ /a }} {{ /b }} set-intersection length 0 eq (boundary: intersection disjoint singletons) rt-ok clear
+{{ /a }} {{ /a }} set-difference length 0 eq (boundary: difference self) rt-ok clear
+
+% --- boundary: self operations ---
+{{ /a /b /c }} dup set-union length 3 eq (boundary: union with self) rt-ok clear
+{{ /a /b /c }} dup set-intersection length 3 eq (boundary: intersection with self) rt-ok clear
+{{ /a /b /c }} dup set-difference length 0 eq (boundary: difference with self) rt-ok clear
+{{ /a /b /c }} dup subset? (boundary: self is subset) rt-ok clear
+
+% --- deep-eq with composite elements (O(n^2) scan path) ---
+{{ [1 2] [3 4] }} {{ [3 4] [1 2] }} deep-eq
+  (deep-eq: sets of arrays, different order) rt-ok clear
+{{ [1 2] [3 4] }} {{ [1 2] [3 5] }} deep-eq not
+  (deep-eq: sets of arrays, different content) rt-ok clear
+{{ [1 2] }} {{ [1 2] }} deep-eq
+  (deep-eq: singleton array elements) rt-ok clear
+{{ [[1] [2]] }} {{ [[1] [2]] }} deep-eq
+  (deep-eq: nested arrays in set) rt-ok clear
+{{ << /a 1 >> }} {{ << /a 1 >> }} deep-eq
+  (deep-eq: dict elements in set) rt-ok clear
+
+% --- boundary: deep-eq with non-set ---
+{{ /a }} [/a] deep-eq not (deep-eq: set vs array) rt-ok clear
+{{ /a }} /a deep-eq not (deep-eq: set vs name) rt-ok clear
+
+% --- boundary: deep-ne ---
+{{ /a /b }} {{ /a /b }} deep-ne not (deep-ne: equal sets) rt-ok clear
+{{ /a /b }} {{ /a /c }} deep-ne (deep-ne: different sets) rt-ok clear
+
+% --- boundary: copy into self ---
+{{ /a /b }} dup copy length 2 eq (copy: self-copy no-op) rt-ok clear
+
+% --- boundary: set-from-array with packed ---
+{ /a /b /c } set-from-array length 3 eq (set-from-array: from packed) rt-ok clear
+
+% --- any-hashable key support ---
+{{ 1 2 3 }} length 3 eq (any-key: integer set) rt-ok clear
+{{ 1 2 3 }} 2 set-member? (any-key: integer member) rt-ok clear
+{{ 1 2 3 }} 4 set-member? not (any-key: integer non-member) rt-ok clear
+{{ (hello) (world) }} length 2 eq (any-key: string set) rt-ok clear
+{{ (hello) (world) }} (hello) set-member? (any-key: string member) rt-ok clear
+{{ true false }} length 2 eq (any-key: boolean set) rt-ok clear
+{{ 3.14 2.71 }} length 2 eq (any-key: real set) rt-ok clear
+{{ 1 /a (hello) true }} length 4 eq (any-key: mixed types) rt-ok clear
+{{ 1 2 3 }} {{ 2 3 4 }} set-intersection length 2 eq (any-key: integer intersection) rt-ok clear
+{{ 1 2 3 }} {{ 2 3 4 }} set-union length 4 eq (any-key: integer union) rt-ok clear
+{{ 1 2 3 }} {{ 2 3 4 }} set-difference length 1 eq (any-key: integer difference) rt-ok clear
+{{ 1 2 3 }} {{ 2 3 4 }} set-difference 1 set-member? (any-key: difference has 1) rt-ok clear
+{{ 1 2 }} {{ 1 2 3 }} subset? (any-key: integer subset) rt-ok clear
+{{ 1 2 3 }} members length 3 eq (any-key: integer members) rt-ok clear
+{{ 1 2 3 }} 4 set-add 4 set-member? (any-key: integer add) rt-ok clear
+{{ 1 2 3 }} 2 set-remove 2 set-member? not (any-key: integer remove) rt-ok clear
+{{ 1 2 3 }} {{ 3 2 1 }} deep-eq (any-key: integer deep-eq) rt-ok clear
+/cnt 0 def
+{{ 10 20 30 }} { pop /cnt cnt 1 add def } for-all
+cnt 3 eq (any-key: integer for-all) rt-ok clear
+
+% --- stress: dynamic expansion ---
+2 set
+/s exch def
+s /a set-add pop  s /b set-add pop  s /c set-add pop  s /d set-add pop
+s /e set-add pop  s /f set-add pop  s /g set-add pop  s /h set-add pop
+s length 8 eq (stress: dynamic expansion to 8) rt-ok clear
+
+% --- stress: add/remove cycles ---
+{{ /a /b /c }}
+/cycle-set exch def
+cycle-set /d set-add pop
+cycle-set /a set-remove
+cycle-set /e set-add pop
+cycle-set /b set-remove
+cycle-set length 3 eq (stress: add/remove cycles length) rt-ok
+cycle-set /d set-member? (stress: add/remove has d) rt-ok
+cycle-set /a set-member? not (stress: add/remove no a) rt-ok clear
+
+% --- stress: union of large sets ---
+{{ /a /b /c /d /e /f /g /h /i /j }} {{ /k /l /m /n /o /p /q /r /s /t }} set-union
+length 20 eq (stress: union of 10+10) rt-ok clear
+
+% --- stress: for-all with exit ---
+/exit-count 0 def
+{{ /a /b /c /d /e }} { pop /exit-count exit-count 1 add def exit-count 3 eq { exit } if } for-all
+exit-count 3 eq (stress: for-all with exit at 3) rt-ok clear
+
+% --- stress: large intersection ---
+{{ /a /b /c /d /e /f /g /h /i /j }} {{ /f /g /h /i /j /k /l /m /n /o }} set-intersection
+length 5 eq (stress: large intersection) rt-ok clear
+
+% --- stress: large difference ---
+{{ /a /b /c /d /e /f /g /h /i /j }} {{ /f /g /h /i /j /k /l /m /n /o }} set-difference
+length 5 eq (stress: large difference) rt-ok clear
+
+% ====================================================================
+% SECTION: ExtValue key types (Long, ULong, Double, Address)
+% These allocate heap storage — tests clone/free correctness
+% ====================================================================
+
+% --- Long keys ---
+{{ 1l 2l 3l }} length 3 eq (extval: long set length) rt-ok clear
+{{ 1l 2l 3l }} 2l set-member? (extval: long member) rt-ok clear
+{{ 1l 2l 3l }} 4l set-member? not (extval: long non-member) rt-ok clear
+{{ 1l 2l 3l }} 4l set-add length 4 eq (extval: long add) rt-ok clear
+{{ 1l 2l 3l }} 2l set-remove length 2 eq (extval: long remove) rt-ok clear
+{{ 1l 2l 3l }} {{ 3l 2l 1l }} deep-eq (extval: long deep-eq) rt-ok clear
+
+% --- ULong keys ---
+{{ 1ul 2ul 3ul }} length 3 eq (extval: ulong set length) rt-ok clear
+{{ 1ul 2ul 3ul }} 2ul set-member? (extval: ulong member) rt-ok clear
+
+% --- Double keys ---
+{{ 1.0d 2.0d 3.0d }} length 3 eq (extval: double set length) rt-ok clear
+{{ 1.0d 2.0d 3.0d }} 2.0d set-member? (extval: double member) rt-ok clear
+{{ 1.0d 2.0d }} 3.0d set-add 3.0d set-member? (extval: double add) rt-ok clear
+
+% --- Address keys ---
+{{ 0a 1a 2a }} length 3 eq (extval: address set length) rt-ok clear
+{{ 0a 1a 2a }} 1a set-member? (extval: address member) rt-ok clear
+
+% --- ExtValue set algebra ---
+{{ 1l 2l 3l }} {{ 2l 3l 4l }} set-union length 4 eq (extval: long union) rt-ok clear
+{{ 1l 2l 3l }} {{ 2l 3l 4l }} set-intersection length 2 eq (extval: long intersection) rt-ok clear
+{{ 1l 2l 3l }} {{ 2l 3l 4l }} set-difference length 1 eq (extval: long difference) rt-ok clear
+{{ 1l 2l }} {{ 1l 2l 3l }} subset? (extval: long subset) rt-ok clear
+
+% --- ExtValue members returns correct types ---
+{{ 42l }} members 0 get type /long-type eq (extval: members returns long) rt-ok clear
+{{ 3.14d }} members 0 get type /double-type eq (extval: members returns double) rt-ok clear
+
+% --- ExtValue per-element type check (W07: use members + `all`,
+% not for-all -- `all` requires an array, so materialize the set first.)
+{{ 99l }} members { type /long-type eq } all (extval: for-all yields long) rt-ok clear
+{{ 1.5d }} members { type /double-type eq } all (extval: for-all yields double) rt-ok clear
+
+% --- ExtValue copy ---
+{{ 1l 2l 3l }} 4 set copy length 3 eq (extval: copy length) rt-ok clear
+{{ 1l 2l 3l }} 4 set copy 2l set-member? (extval: copy member) rt-ok clear
+
+% ====================================================================
+% SECTION: String key tests
+% String keys are copied into VM on insert (not shared)
+% ====================================================================
+
+{{ (alpha) (beta) (gamma) }} length 3 eq (string: set length) rt-ok clear
+{{ (alpha) (beta) (gamma) }} (beta) set-member? (string: member) rt-ok clear
+{{ (alpha) (beta) (gamma) }} (delta) set-member? not (string: non-member) rt-ok clear
+{{ (alpha) (beta) }} (gamma) set-add (gamma) set-member? (string: add) rt-ok clear
+{{ (alpha) (beta) (gamma) }} (beta) set-remove (beta) set-member? not (string: remove) rt-ok clear
+{{ (hello) (world) }} {{ (world) (foo) }} set-union length 3 eq (string: union) rt-ok clear
+{{ (hello) (world) }} {{ (world) (foo) }} set-intersection length 1 eq (string: intersection) rt-ok clear
+{{ (a) (b) (c) }} {{ (c) (b) (a) }} deep-eq (string: deep-eq) rt-ok clear
+[(a) (b) (c)] set-from-array length 3 eq (string: set-from-array) rt-ok clear
+{{ (x) (y) }} members length 2 eq (string: members length) rt-ok clear
+
+% --- string for-all yields strings (W07: members + `all`) ---
+{{ (hello) }} members { type /string-type eq } all (string: for-all yields string) rt-ok clear
+
+% ====================================================================
+% SECTION: Mixed-type sets
+% ====================================================================
+
+{{ 1 /a (hello) true 3.14 }} length 5 eq (mixed: 5 different types) rt-ok clear
+{{ 1 /a (hello) true 3.14 }} 1 set-member? (mixed: integer member) rt-ok clear
+{{ 1 /a (hello) true 3.14 }} /a set-member? (mixed: name member) rt-ok clear
+{{ 1 /a (hello) true 3.14 }} (hello) set-member? (mixed: string member) rt-ok clear
+{{ 1 /a (hello) true 3.14 }} true set-member? (mixed: boolean member) rt-ok clear
+{{ 1 /a (hello) true 3.14 }} 3.14 set-member? (mixed: real member) rt-ok clear
+{{ 1 /a (hello) true 3.14 }} 42 set-member? not (mixed: non-member) rt-ok clear
+
+% --- mixed-type set algebra ---
+{{ 1 /a (hello) }} {{ /a (world) 2 }} set-union length 5 eq (mixed: union) rt-ok clear
+{{ 1 /a (hello) }} {{ /a (hello) 2 }} set-intersection length 2 eq (mixed: intersection) rt-ok clear
+{{ 1 /a (hello) }} {{ /a (hello) 2 }} set-difference length 1 eq (mixed: difference) rt-ok clear
+
+% --- mixed deep-eq ---
+{{ 1 /a true }} {{ true /a 1 }} deep-eq (mixed: deep-eq order independent) rt-ok clear
+{{ 1 /a true }} {{ 1 /a false }} deep-eq not (mixed: deep-eq different) rt-ok clear
+
+% ====================================================================
+% SECTION: Byte key type
+% ====================================================================
+
+{{ 0b 1b 255b }} length 3 eq (byte: set length) rt-ok clear
+{{ 0b 1b 255b }} 1b set-member? (byte: member) rt-ok clear
+{{ 0b 1b 255b }} 128b set-member? not (byte: non-member) rt-ok clear
+
+% ====================================================================
+% SECTION: UInteger key type
+% ====================================================================
+
+{{ 1u 2u 3u }} length 3 eq (uint: set length) rt-ok clear
+{{ 1u 2u 3u }} 2u set-member? (uint: member) rt-ok clear
+
+% ====================================================================
+% SECTION: Cross-type identity (types are distinct)
+% ====================================================================
+
+% Integer 1 and Long 1l are different types with different hash/equal
+{{ 1 1l }} length 2 eq (cross-type: int vs long are distinct) rt-ok clear
+{{ 1 1u }} length 2 eq (cross-type: int vs uint are distinct) rt-ok clear
+{{ 1.0 1.0d }} length 2 eq (cross-type: real vs double are distinct) rt-ok clear
+
+% ====================================================================
+% SECTION: Deduplication with same-type same-value
+% ====================================================================
+
+{{ 1 1 1 }} length 1 eq (dedup: repeated integer) rt-ok clear
+{{ (hello) (hello) (hello) }} length 1 eq (dedup: repeated string) rt-ok clear
+{{ true true }} length 1 eq (dedup: repeated boolean) rt-ok clear
+{{ 42l 42l }} length 1 eq (dedup: repeated long) rt-ok clear
+{{ 3.14d 3.14d }} length 1 eq (dedup: repeated double) rt-ok clear
+
+% ====================================================================
+% SECTION: Save/restore with ExtValue keys
+% ====================================================================
+
+/sr-eset {{ 1l 2l }} def
+save
+sr-eset 3l set-add pop
+sr-eset 3l set-member?
+exch restore
+(save/restore: extval key added) rt-ok
+sr-eset 3l set-member? not (save/restore: extval key restored) rt-ok clear
+
+% ====================================================================
+% SECTION: Sad paths — broader key coverage
+% ====================================================================
+
+% set-add on read-only with non-name key
+<< /read-only { clear true } >> { {{ 1 2 }}#r 3 set-add } try-catch
+(sad: read-only add integer) rt-ok clear
+
+% set-remove on read-only with non-name key
+<< /read-only { clear true } >> { {{ 1 2 3 }}#r 2 set-remove } try-catch
+(sad: read-only remove integer) rt-ok clear
+
+% set-remove key not found with non-name key
+<< /undefined { clear true } >> { {{ 1 2 3 }} 99 set-remove } try-catch
+(sad: remove missing integer) rt-ok clear
+
+% set-add with null key via operator
+<< /type-check { clear true } >> { {{ 1 2 }} null set-add } try-catch
+(sad: null key set-add) rt-ok clear
+
+% ====================================================================
+% SECTION: Stress — ExtValue pressure
+% ====================================================================
+
+% many Long adds to test ExtValue allocation
+2 set /stress-set exch def
+0l 1l 49l { stress-set exch set-add pop } for
+stress-set length 50 eq (stress: 50 long keys) rt-ok clear
+
+% many Long add/remove cycles
+2 set /churn-set exch def
+0l 1l 19l { churn-set exch set-add pop } for
+0l 1l 19l { churn-set exch set-remove } for
+churn-set length 0 eq (stress: long add/remove churn empty) rt-ok clear
+
+% large string set
+2 set /str-set exch def
+str-set (aaa) set-add pop  str-set (bbb) set-add pop
+str-set (ccc) set-add pop  str-set (ddd) set-add pop
+str-set (eee) set-add pop  str-set (fff) set-add pop
+str-set (ggg) set-add pop  str-set (hhh) set-add pop
+str-set length 8 eq (stress: 8 string keys) rt-ok clear
+
+% large union with ExtValue keys
+{{ 1l 2l 3l 4l 5l }} {{ 6l 7l 8l 9l 10l }} set-union
+length 10 eq (stress: long union 5+5) rt-ok clear
+
+% large intersection with ExtValue keys
+{{ 1l 2l 3l 4l 5l 6l 7l 8l 9l 10l }} {{ 5l 6l 7l 8l 9l 10l 11l 12l }} set-intersection
+length 6 eq (stress: long intersection) rt-ok clear
+
+% for-all with ExtValue keys collects correctly
+/fa-sum 0l def
+{{ 10l 20l 30l }} { fa-sum add /fa-sum exch def } for-all
+fa-sum 60l eq (stress: for-all sum long keys) rt-ok clear
+
+% deep-eq with large ExtValue sets
+{{ 1l 2l 3l 4l 5l 6l 7l 8l 9l 10l }}
+{{ 10l 9l 8l 7l 6l 5l 4l 3l 2l 1l }} deep-eq
+(stress: deep-eq 10 long keys) rt-ok clear
+
+% copy with ExtValue keys
+{{ 1l 2l 3l }} 4 set copy 2l set-member? (stress: copy long member) rt-ok clear
+{{ 1l 2l 3l }} 4 set copy length 3 eq (stress: copy long length) rt-ok clear
+
+% ====================================================================
+% SECTION: Additional coverage — operator keys
+% ====================================================================
+
+{{ //add //sub //mul }} length 3 eq (operator: set length) rt-ok clear
+{{ //add //sub //mul }} //add set-member? (operator: member present) rt-ok clear
+{{ //add //sub //mul }} //div set-member? not (operator: member absent) rt-ok clear
+{{ //add //sub }} {{ //sub //mul }} set-union length 3 eq (operator: union) rt-ok clear
+{{ //add //sub //mul }} {{ //sub //mul //div }} set-intersection length 2 eq (operator: intersection) rt-ok clear
+
+% ====================================================================
+% SECTION: Additional coverage — mixed ExtValue types in one set
+% ====================================================================
+
+{{ 1l 2.5d 3a }} length 3 eq (mixed-extval: 3 types) rt-ok clear
+{{ 1l 2.5d 3a }} 2.5d set-member? (mixed-extval: double member) rt-ok clear
+{{ 1l 2.5d 3a }} 1l set-member? (mixed-extval: long member) rt-ok clear
+{{ 1l 2.5d 3a }} 3a set-member? (mixed-extval: address member) rt-ok clear
+{{ 1l 2.5d 3a }} 99l set-member? not (mixed-extval: non-member) rt-ok clear
+
+% ====================================================================
+% SECTION: Additional coverage — standalone ExtValue set-member?
+% ====================================================================
+
+{{ 10l 20l 30l }} 20l set-member? (extval: standalone long member) rt-ok clear
+{{ 10l 20l 30l }} 99l set-member? not (extval: standalone long non-member) rt-ok clear
+{{ 1.0d 2.0d 3.0d }} 2.0d set-member? (extval: standalone double member) rt-ok clear
+{{ 0a 100a 200a }} 100a set-member? (extval: standalone address member) rt-ok clear
+{{ 1ul 2ul 3ul }} 2ul set-member? (extval: standalone ulong member) rt-ok clear
+
+% ====================================================================
+% SECTION: Additional coverage — set-remove missing ExtValue key
+% ====================================================================
+
+<< /undefined { clear true } >> { {{ 1l 2l 3l }} 99l set-remove } try-catch
+(sad: remove missing long) rt-ok clear
+<< /undefined { clear true } >> { {{ 1.0d 2.0d }} 99.0d set-remove } try-catch
+(sad: remove missing double) rt-ok clear
+<< /undefined { clear true } >> { {{ 0a 1a }} 99a set-remove } try-catch
+(sad: remove missing address) rt-ok clear
+
+% ====================================================================
+% SECTION: Additional coverage — multi-level save/restore
+% ====================================================================
+
+[1l 2l 3l] set-from-array /sr2-set exch def
+save /sr2-s1 exch def
+sr2-set 4l set-add pop
+sr2-set length 4 eq (save: level 1, length 4) rt-ok
+save /sr2-s2 exch def
+sr2-set 5l set-add pop
+sr2-set length 5 eq (save: level 2, length 5) rt-ok
+sr2-s2 restore
+sr2-set length 4 eq (save: level 2 restore, length 4) rt-ok
+sr2-s1 restore
+sr2-set length 3 eq (save: level 1 restore, length 3) rt-ok clear
+
+% ====================================================================
+% SECTION: Additional coverage — chained removes then algebra
+% ====================================================================
+
+{{ 1 2 3 4 5 }}
+2 set-remove 4 set-remove
+{{ 1 3 5 }} deep-eq (chain: removes then deep-eq) rt-ok clear
+
+{{ 1 2 3 4 5 }}
+2 set-remove 4 set-remove
+{{ 3 5 6 }} set-union length 4 eq (chain: removes then union) rt-ok clear
+
+% ====================================================================
+% SECTION: Additional coverage — independence after algebra
+% ====================================================================
+
+{{ 1 2 }} /ind1 exch def
+{{ 2 3 }} /ind2 exch def
+ind1 ind2 set-union /ind-u exch def
+ind-u 99 set-add pop
+ind1 99 set-member? not (independence: union result is new set) rt-ok
+ind2 99 set-member? not (independence: original unchanged) rt-ok clear
+
+% ====================================================================
+% SECTION: Additional coverage — empty set algebra edge cases
+% ====================================================================
+
+{{ }} {{ }} set-intersection length 0 eq (boundary: empty intersection) rt-ok clear
+{{ }} {{ }} set-difference length 0 eq (boundary: empty difference) rt-ok clear
+{{ 1 2 3 }} {{ }} set-difference length 3 eq (boundary: diff with empty rhs) rt-ok clear
+{{ }} {{ 1 2 3 }} set-difference length 0 eq (boundary: diff with empty lhs) rt-ok clear
+
+% ====================================================================
+% SECTION: Additional coverage — members round-trip
+% ====================================================================
+
+{{ /x /y /z }} members set-from-array {{ /x /y /z }} deep-eq
+(round-trip: members then set-from-array) rt-ok clear
+
+% ====================================================================
+% SECTION: Name/String cross-matching (mirrors Dict behavior)
+% ====================================================================
+
+% Name lookup finds String entry
+{{ (hello) (world) }} /hello set-member? (cross-match: name finds string) rt-ok clear
+
+% String lookup finds Name entry
+{{ /hello /world }} (hello) set-member? (cross-match: string finds name) rt-ok clear
+
+% Dedup across Name and String
+{{ /foo (foo) }} length 1 eq (cross-match: name/string dedup) rt-ok clear
+
+% set-add dedup: adding Name when String present is no-op
+{{ (bar) }} /bar set-add length 1 eq (cross-match: add name to string set) rt-ok clear
+
+% set-add dedup: adding String when Name present is no-op
+{{ /bar }} (bar) set-add length 1 eq (cross-match: add string to name set) rt-ok clear
+
+% set-remove: Name key removes String entry
+{{ (alpha) (beta) }} /alpha set-remove length 1 eq (cross-match: name removes string) rt-ok clear
+
+% set-remove: String key removes Name entry
+{{ /alpha /beta }} (alpha) set-remove length 1 eq (cross-match: string removes name) rt-ok clear
+
+% set algebra with mixed Name/String
+{{ /a /b /c }} {{ (b) (c) (d) }} set-intersection length 2 eq (cross-match: intersection) rt-ok clear
+{{ /a /b }} {{ (a) (b) }} deep-eq (cross-match: deep-eq name vs string) rt-ok clear
+{{ /a /b }} {{ (b) (c) }} set-union length 3 eq (cross-match: union) rt-ok clear
+{{ /a /b /c }} {{ (b) (c) }} set-difference length 1 eq (cross-match: difference) rt-ok clear
+{{ /a /b }} {{ (a) (b) (c) }} subset? (cross-match: subset) rt-ok clear
+
+% ====================================================================
+% SECTION: Additional coverage — larger integer stress
+% ====================================================================
+
+2 set /big-set exch def
+0 1 99 { big-set exch set-add pop } for
+big-set length 100 eq (stress: 100 unique integers) rt-ok clear
+
+% ====================================================================
+% SECTION: symmetric-difference
+% ====================================================================
+
+% basic: elements in either but not both
+{{ /a /b /c }} {{ /b /c /d }} symmetric-difference length 2 eq (sym-diff: length) rt-ok clear
+{{ /a /b /c }} {{ /b /c /d }} symmetric-difference /a set-member? (sym-diff: has a) rt-ok clear
+{{ /a /b /c }} {{ /b /c /d }} symmetric-difference /d set-member? (sym-diff: has d) rt-ok clear
+{{ /a /b /c }} {{ /b /c /d }} symmetric-difference /b set-member? not (sym-diff: no b) rt-ok clear
+
+% identical sets → empty
+{{ /a /b }} {{ /a /b }} symmetric-difference length 0 eq (sym-diff: identical is empty) rt-ok clear
+
+% disjoint sets → union equivalent
+{{ /a /b }} {{ /c /d }} symmetric-difference length 4 eq (sym-diff: disjoint is union) rt-ok clear
+
+% empty sets
+{{ }} {{ /a /b }} symmetric-difference length 2 eq (sym-diff: empty lhs) rt-ok clear
+{{ /a /b }} {{ }} symmetric-difference length 2 eq (sym-diff: empty rhs) rt-ok clear
+{{ }} {{ }} symmetric-difference length 0 eq (sym-diff: both empty) rt-ok clear
+
+% self
+{{ /a /b /c }} dup symmetric-difference length 0 eq (sym-diff: self is empty) rt-ok clear
+
+% ExtValue keys
+{{ 1l 2l 3l }} {{ 2l 3l 4l }} symmetric-difference length 2 eq (sym-diff: long keys) rt-ok clear
+{{ 1l 2l 3l }} {{ 2l 3l 4l }} symmetric-difference 1l set-member? (sym-diff: long has 1l) rt-ok clear
+{{ 1l 2l 3l }} {{ 2l 3l 4l }} symmetric-difference 4l set-member? (sym-diff: long has 4l) rt-ok clear
+
+% mixed types
+{{ 1 /a (hello) }} {{ /a (world) 2 }} symmetric-difference length 4 eq (sym-diff: mixed types) rt-ok clear
+
+% integer keys
+{{ 1 2 3 4 5 }} {{ 3 4 5 6 7 }} symmetric-difference length 4 eq (sym-diff: integers) rt-ok clear
+
+% string keys
+{{ (a) (b) (c) }} {{ (b) (c) (d) }} symmetric-difference length 2 eq (sym-diff: strings) rt-ok clear
+
+% ULong keys
+{{ 1ul 2ul 3ul }} {{ 2ul 3ul 4ul }} symmetric-difference length 2 eq (sym-diff: ulong keys) rt-ok clear
+{{ 1ul 2ul 3ul }} {{ 2ul 3ul 4ul }} symmetric-difference 1ul set-member? (sym-diff: ulong has 1ul) rt-ok clear
+
+% Double keys
+{{ 1.0d 2.0d 3.0d }} {{ 2.0d 3.0d 4.0d }} symmetric-difference length 2 eq (sym-diff: double keys) rt-ok clear
+{{ 1.0d 2.0d 3.0d }} {{ 2.0d 3.0d 4.0d }} symmetric-difference 4.0d set-member? (sym-diff: double has 4.0d) rt-ok clear
+
+% Address keys
+{{ 0a 1a 2a }} {{ 1a 2a 3a }} symmetric-difference length 2 eq (sym-diff: address keys) rt-ok clear
+
+% Byte keys
+{{ 0b 1b 2b }} {{ 1b 2b 3b }} symmetric-difference length 2 eq (sym-diff: byte keys) rt-ok clear
+
+% Name/String cross-matching
+{{ /a /b }} {{ (b) (c) }} symmetric-difference length 2 eq (sym-diff: cross-match name/string) rt-ok clear
+{{ /a /b }} {{ (b) (c) }} symmetric-difference /a set-member? (sym-diff: cross has a) rt-ok clear
+{{ /a /b }} {{ (b) (c) }} symmetric-difference (c) set-member? (sym-diff: cross has c) rt-ok clear
+
+% result independence from operands
+{{ 1 2 3 }} /sd1 exch def
+{{ 2 3 4 }} /sd2 exch def
+sd1 sd2 symmetric-difference /sd-r exch def
+sd-r 99 set-add pop
+sd1 99 set-member? not (sym-diff: independence from set1) rt-ok
+sd2 99 set-member? not (sym-diff: independence from set2) rt-ok clear
+
+% large sets stress
+[1l 2l 3l 4l 5l 6l 7l 8l 9l 10l 11l 12l 13l 14l 15l 16l 17l 18l 19l 20l] set-from-array
+[11l 12l 13l 14l 15l 16l 17l 18l 19l 20l 21l 22l 23l 24l 25l 26l 27l 28l 29l 30l] set-from-array
+symmetric-difference length 20 eq (sym-diff: large long sets) rt-ok clear
+
+% sad: type mismatch
+<< /type-check { clear true } >> { {{ /a }} 42 symmetric-difference } try-catch
+(sym-diff: type mismatch) rt-ok clear
+
+% ====================================================================
+% SECTION: disjoint?
+% ====================================================================
+
+% basic: no common elements
+{{ /a /b }} {{ /c /d }} disjoint? (disjoint: true) rt-ok clear
+
+% basic: common elements
+{{ /a /b /c }} {{ /b /c /d }} disjoint? not (disjoint: false overlap) rt-ok clear
+
+% empty sets are disjoint
+{{ }} {{ /a /b }} disjoint? (disjoint: empty lhs) rt-ok clear
+{{ /a /b }} {{ }} disjoint? (disjoint: empty rhs) rt-ok clear
+{{ }} {{ }} disjoint? (disjoint: both empty) rt-ok clear
+
+% identical → not disjoint
+{{ /a /b }} {{ /a /b }} disjoint? not (disjoint: identical false) rt-ok clear
+
+% single overlap
+{{ /a /b /c }} {{ /c /d /e }} disjoint? not (disjoint: single overlap) rt-ok clear
+
+% self → not disjoint (unless empty)
+{{ /a }} dup disjoint? not (disjoint: self false) rt-ok clear
+{{ }} dup disjoint? (disjoint: empty self true) rt-ok clear
+
+% ExtValue keys
+{{ 1l 2l }} {{ 3l 4l }} disjoint? (disjoint: long true) rt-ok clear
+{{ 1l 2l }} {{ 2l 3l }} disjoint? not (disjoint: long false) rt-ok clear
+
+% integer keys
+{{ 1 2 3 }} {{ 4 5 6 }} disjoint? (disjoint: int true) rt-ok clear
+{{ 1 2 3 }} {{ 3 4 5 }} disjoint? not (disjoint: int false) rt-ok clear
+
+% string keys
+{{ (a) (b) }} {{ (c) (d) }} disjoint? (disjoint: string true) rt-ok clear
+{{ (a) (b) }} {{ (b) (c) }} disjoint? not (disjoint: string false) rt-ok clear
+
+% mixed types
+{{ 1 /a }} {{ (hello) true }} disjoint? (disjoint: mixed true) rt-ok clear
+
+% ULong keys
+{{ 1ul 2ul }} {{ 3ul 4ul }} disjoint? (disjoint: ulong true) rt-ok clear
+{{ 1ul 2ul }} {{ 2ul 3ul }} disjoint? not (disjoint: ulong false) rt-ok clear
+
+% Double keys
+{{ 1.0d 2.0d }} {{ 3.0d 4.0d }} disjoint? (disjoint: double true) rt-ok clear
+{{ 1.0d 2.0d }} {{ 2.0d 3.0d }} disjoint? not (disjoint: double false) rt-ok clear
+
+% Address keys
+{{ 0a 1a }} {{ 2a 3a }} disjoint? (disjoint: address true) rt-ok clear
+{{ 0a 1a }} {{ 1a 2a }} disjoint? not (disjoint: address false) rt-ok clear
+
+% Byte keys
+{{ 0b 1b }} {{ 2b 3b }} disjoint? (disjoint: byte true) rt-ok clear
+{{ 0b 1b }} {{ 1b 2b }} disjoint? not (disjoint: byte false) rt-ok clear
+
+% Name/String cross-match (should detect overlap)
+{{ /a }} {{ (a) }} disjoint? not (disjoint: name/string cross-match) rt-ok clear
+{{ /x }} {{ (a) }} disjoint? (disjoint: name/string no match) rt-ok clear
+
+% large set stress
+[1l 2l 3l 4l 5l 6l 7l 8l 9l 10l 11l 12l 13l 14l 15l 16l 17l 18l 19l 20l] set-from-array
+[21l 22l 23l 24l 25l 26l 27l 28l 29l 30l 31l 32l 33l 34l 35l 36l 37l 38l 39l 40l] set-from-array
+disjoint? (disjoint: large long sets true) rt-ok clear
+
+[1l 2l 3l 4l 5l 6l 7l 8l 9l 10l 11l 12l 13l 14l 15l 16l 17l 18l 19l 20l] set-from-array
+[10l 11l 12l 13l 14l 15l 16l 17l 18l 19l 20l 21l 22l 23l 24l 25l 26l 27l 28l 29l] set-from-array
+disjoint? not (disjoint: large long sets false) rt-ok clear
+
+% sad: type mismatch
+<< /type-check { clear true } >> { {{ /a }} 42 disjoint? } try-catch
+(disjoint: type mismatch) rt-ok clear
+
+% ====================================================================
+% SECTION: set-filter — set proc -- set'
+% ====================================================================
+
+% --- basic: filter names ---
+{{ /a /b /c /d }} { dup /b ne exch /c ne and } set-filter length 2 eq
+(set-filter: keep 2 of 4) rt-ok clear
+
+% --- check retained elements ---
+{{ /a /b /c }} { /a ne } set-filter
+dup /b set-member? (set-filter: has b) rt-ok
+dup /c set-member? (set-filter: has c) rt-ok
+/a set-member? not (set-filter: no a) rt-ok clear
+
+% --- filter to empty ---
+{{ /a /b /c }} { pop false } set-filter length 0 eq
+(set-filter: keep none) rt-ok clear
+
+% --- filter keep all ---
+{{ /a /b /c }} { pop true } set-filter length 3 eq
+(set-filter: keep all) rt-ok clear
+
+% --- empty input ---
+{{ }} { pop true } set-filter length 0 eq
+(set-filter: empty set) rt-ok clear
+
+% --- integer keys ---
+{{ 1 2 3 4 5 }} { 3 gt } set-filter length 2 eq
+(set-filter: integers > 3) rt-ok clear
+{{ 1 2 3 4 5 }} { 3 gt } set-filter 4 set-member?
+(set-filter: has 4) rt-ok clear
+{{ 1 2 3 4 5 }} { 3 gt } set-filter 5 set-member?
+(set-filter: has 5) rt-ok clear
+
+% --- string keys ---
+{{ (aa) (bb) (cc) }} { (bb) ne } set-filter length 2 eq
+(set-filter: string keys) rt-ok clear
+
+% --- ExtValue keys ---
+{{ 1l 2l 3l 4l 5l }} { 3l gt } set-filter length 2 eq
+(set-filter: long keys) rt-ok clear
+{{ 1l 2l 3l 4l 5l }} { 3l gt } set-filter 4l set-member?
+(set-filter: long has 4l) rt-ok clear
+
+% --- result is dynamic ---
+{{ 1 2 3 }} { 2 gt } set-filter 99 set-add length 2 eq
+(set-filter: result is dynamic) rt-ok clear
+
+% --- mixed types ---
+{{ 1 /a (hello) true }} { type /integer-type eq } set-filter length 1 eq
+(set-filter: keep only integers) rt-ok clear
+
+% --- singleton ---
+{{ /x }} { pop true } set-filter length 1 eq
+(set-filter: singleton keep) rt-ok clear
+{{ /x }} { pop false } set-filter length 0 eq
+(set-filter: singleton drop) rt-ok clear
+
+% --- sad: type mismatch ---
+<< /type-check { clear true } >> { 42 { pop true } set-filter } try-catch
+(set-filter: non-set error) rt-ok clear
+
+% ExtValue: Double keys
+{{ 1.0d 2.0d 3.0d 4.0d 5.0d }} { 3.0d gt } set-filter length 2 eq
+(set-filter: double keys) rt-ok clear
+
+% ExtValue: Address keys
+{{ 10a 20a 30a 40a }} { 25a gt } set-filter length 2 eq
+(set-filter: address keys) rt-ok clear
+
+% ExtValue: ULong keys
+{{ 1ul 2ul 3ul 4ul }} { 2ul gt } set-filter length 2 eq
+(set-filter: ulong keys) rt-ok clear
+
+% filter to exactly 1
+{{ 1 2 3 4 5 }} { 3 eq } set-filter length 1 eq
+(set-filter: filter to 1) rt-ok clear
+{{ 1 2 3 4 5 }} { 3 eq } set-filter 3 set-member?
+(set-filter: filter to 1 has 3) rt-ok clear
+
+% large set filter
+2 set /sf-big exch def
+0l 1l 49l { sf-big exch set-add pop } for
+sf-big { 25l ge } set-filter length 25 eq
+(set-filter: large long set) rt-ok clear
+
+% result members round-trip
+{{ 1 2 3 4 5 }} { 3 gt } set-filter members length 2 eq
+(set-filter: members round-trip length) rt-ok clear
+
+% deep-eq on filtered result
+{{ 1 2 3 }} { 1 gt } set-filter {{ 2 3 }} deep-eq
+(set-filter: deep-eq on result) rt-ok clear
+
+% --- set-filter: proc error mid-iteration ---
+<< /type-check { clear true } >> { {{ 1 (hello) 3 }} { 2 gt } set-filter } try-catch
+(set-filter: proc error caught) rt-ok clear
+
+% --- set-filter result used in set algebra ---
+{{ 1 2 3 4 5 }} { 3 gt } set-filter
+{{ 4 5 6 }} set-intersection length 2 eq
+(set-filter: result in intersection) rt-ok clear
+
+% --- symmetric-difference: asymmetric sizes ---
+[1l 2l 3l 4l 5l 6l 7l 8l 9l 10l 11l 12l 13l 14l 15l 16l 17l 18l 19l 20l] set-from-array
+{{ 5l 15l }} symmetric-difference length 18 eq
+(sym-diff: asymmetric 20 vs 2) rt-ok clear
+
+% --- disjoint? type mismatch ---
+<< /type-check { clear true } >> { {{ /a }} [1 2] disjoint? } try-catch
+(disjoint: array type error) rt-ok clear
+
+(Set tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

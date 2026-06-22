@@ -1,0 +1,409 @@
+% test_regex.trx -- comprehensive regex operator tests (POSIX ERE)
+% Run: ./ps test_regex.trx
+
+% --- test infrastructure ---
+/T 0 def /P 0 def
+/S { /T T 1 add def } def
+/OK { S eq { /P P 1 add def } { (FAIL #) print T = } if-else } def
+
+% ============================================================
+%   regex-match: string pattern :- bool
+% ============================================================
+
+% --- happy path ---
+(hello) (hello) regex-match             true OK   % 1: exact match
+(hello world) (hello) regex-match       true OK   % 2: substring match (not anchored)
+(hello) (^hello$) regex-match           true OK   % 3: anchored exact
+(abc123) ([a-z]+[0-9]+) regex-match     true OK   % 4: character classes
+(aab) (a+b) regex-match                 true OK   % 5: quantifiers
+(ab) (a|b) regex-match                  true OK   % 6: alternation
+(abc) (a.c) regex-match                 true OK   % 7: dot wildcard
+() () regex-match                       true OK   % 8: empty pattern matches empty string
+(hello) (.*) regex-match                true OK   % 9: match-all pattern
+(abc) (ABC) regex-match                 false OK  % 10: case sensitive
+(abc) (^abc$) regex-match               true OK   % 11: anchored full match
+(xabcx) (^abc$) regex-match            false OK  % 12: anchored rejects substring
+
+% --- sad path ---
+(hello) (xyz) regex-match               false OK  % 13: no match
+() (a+) regex-match                     false OK  % 14: empty string, non-empty pattern
+(abc) (^$) regex-match                  false OK  % 15: empty anchored vs non-empty
+(abc) (^def) regex-match                false OK  % 16: wrong start
+
+% --- error cases ---
+clear
+{ () ([) regex-match } try              /syntax-error OK  % 17: bad pattern bracket
+{ () (+) regex-match } try              /syntax-error OK  % 18: bad pattern quantifier
+{ 42 (a) regex-match } try             /type-check OK     % 19: non-string operand
+{ (a) 42 regex-match } try             /type-check OK     % 20: non-string pattern
+clear { regex-match } try               /opstack-underflow OK % 21: missing operand
+clear
+
+% --- special characters ---
+(a.b) (a\\.b) regex-match              true OK   % 22: escaped dot
+(a*b) (a\\*b) regex-match              true OK   % 23: escaped star
+(a+b) (a\\+b) regex-match              true OK   % 24: escaped plus
+(a?b) (a\\?b) regex-match              true OK   % 25: escaped question
+(a[b) (a\\[b) regex-match              true OK   % 26: escaped bracket
+
+% --- quantifiers ---
+(aaa) (a{3}) regex-match                true OK   % 27: exact count
+(aa) (a{3}) regex-match                 false OK  % 28: count not met
+(aaa) (a{2,4}) regex-match             true OK   % 29: range quantifier
+(a) (a{2,4}) regex-match               false OK  % 30: below range
+clear
+
+% ============================================================
+%   regex-search: string pattern :- [matches] true | false
+% ============================================================
+
+% --- happy path, no groups ---
+(hello world 42) ([0-9]+) regex-search
+true OK                                           % 31: found
+0 get (42) eq true OK                             % 32: correct match
+clear
+
+(abc def ghi) ([a-z]+) regex-search
+true OK                                           % 33: first match
+0 get (abc) eq true OK                            % 34: first word
+clear
+
+% --- with groups ---
+(2026-03-22) (([0-9]+)-([0-9]+)-([0-9]+)) regex-search
+true OK                                           % 35: found
+dup 0 get (2026-03-22) eq true OK                 % 36: full match
+dup 1 get (2026) eq true OK                       % 37: group 1
+dup 2 get (03) eq true OK                         % 38: group 2
+3 get (22) eq true OK                             % 39: group 3
+clear
+
+% --- nested groups ---
+(abc123) (([a-z]+)([0-9]+)) regex-search
+true OK                                           % 40: found
+dup 0 get (abc123) eq true OK                     % 41: full
+dup 1 get (abc) eq true OK                        % 42: group 1
+2 get (123) eq true OK                            % 43: group 2
+clear
+
+% --- no match ---
+(hello) ([0-9]+) regex-search
+false OK                                          % 44: no match returns false
+clear
+
+% --- empty string ---
+() ([0-9]+) regex-search
+false OK                                          % 45: no match on empty
+clear
+
+% --- single character match ---
+(x) (.) regex-search
+true OK                                           % 46: single char
+0 get (x) eq true OK                              % 47: correct value
+clear
+
+% --- error cases ---
+{ () ([) regex-search } try             /syntax-error OK  % 48: bad pattern
+{ 42 (a) regex-search } try            /type-check OK     % 49: non-string
+clear
+
+% ============================================================
+%   regex-find-all: string pattern :- array
+% ============================================================
+
+% --- no groups ---
+(a1b2c3) ([0-9]) regex-find-all
+dup length 3 OK                                   % 50: three matches
+dup 0 get (1) eq true OK                          % 51: first
+dup 1 get (2) eq true OK                          % 52: second
+2 get (3) eq true OK                              % 53: third
+clear
+
+(hello world foo) ([a-z]+) regex-find-all
+dup length 3 OK                                   % 54: three words
+dup 0 get (hello) eq true OK                      % 55: first word
+dup 1 get (world) eq true OK                      % 56: second word
+2 get (foo) eq true OK                            % 57: third word
+clear
+
+% --- with groups ---
+(a1b2c3) (([a-z])([0-9])) regex-find-all
+dup length 3 OK                                   % 58: three grouped matches
+dup 0 get 0 get (a1) eq true OK                   % 59: first full
+dup 0 get 1 get (a) eq true OK                    % 60: first group 1
+dup 0 get 2 get (1) eq true OK                    % 61: first group 2
+dup 2 get 0 get (c3) eq true OK                   % 62: third full
+2 get 1 get (c) eq true OK                        % 63: third group 1
+clear
+
+% --- no matches ---
+(hello) ([0-9]+) regex-find-all
+length 0 OK                                       % 64: empty array
+clear
+
+% --- single match ---
+(abc) (abc) regex-find-all
+dup length 1 OK                                   % 65: one match
+0 get (abc) eq true OK                            % 66: correct
+clear
+
+% --- overlapping potential ---
+(aaa) (a) regex-find-all
+length 3 OK                                       % 67: each char
+clear
+
+% --- adjacent matches ---
+(123abc456) ([0-9]+) regex-find-all
+dup length 2 OK                                   % 68: two groups
+dup 0 get (123) eq true OK                        % 69: first
+1 get (456) eq true OK                            % 70: second
+clear
+
+% --- empty input ---
+() (a) regex-find-all
+length 0 OK                                       % 71: no matches
+clear
+
+% --- error cases ---
+{ () ([) regex-find-all } try          /syntax-error OK  % 72: bad pattern
+{ 42 (a) regex-find-all } try         /type-check OK     % 73: non-string
+clear
+
+% ============================================================
+%   regex-replace: string pattern replacement :- string
+% ============================================================
+
+% --- happy path ---
+(hello world) (world) (earth) regex-replace
+(hello earth) eq true OK                          % 74: simple replace
+
+(foo bar baz) (ba.) (XX) regex-replace
+(foo XX XX) eq true OK                            % 75: multiple replacements
+
+(a1b2c3) ([0-9]) (#) regex-replace
+(a#b#c#) eq true OK                               % 76: replace digits
+
+% --- no match (unchanged) ---
+(hello) ([0-9]+) (X) regex-replace
+(hello) eq true OK                                % 77: no match, unchanged
+
+% --- empty replacement (deletion) ---
+(a1b2c3) ([0-9]) () regex-replace
+(abc) eq true OK                                  % 78: delete matches
+
+% --- replace all occurrences ---
+(aaa) (a) (bb) regex-replace
+(bbbbbb) eq true OK                               % 79: all replaced
+
+% --- empty string ---
+() (a) (b) regex-replace
+() eq true OK                                     % 80: empty input
+
+% --- special chars in replacement ---
+(hello) (l) (*) regex-replace
+(he**o) eq true OK                                % 81: special char in replacement
+
+% --- whole string match ---
+(abc) (.*) (xyz) regex-replace
+(xyz) eq true OK                                  % 82: replace entire string
+
+% --- error cases ---
+{ () ([) () regex-replace } try        /syntax-error OK  % 83: bad pattern
+{ 42 (a) (b) regex-replace } try      /type-check OK     % 84: non-string
+{ (a) 42 (b) regex-replace } try      /type-check OK     % 85: non-string pattern
+{ (a) (b) 42 regex-replace } try      /type-check OK     % 86: non-string replacement
+clear
+
+% ============================================================
+%   regex-split: string pattern :- array
+% ============================================================
+
+% --- happy path ---
+(a,b,c) (,) regex-split
+dup length 3 OK                                   % 87: three segments
+dup 0 get (a) eq true OK                          % 88: first
+dup 1 get (b) eq true OK                          % 89: second
+2 get (c) eq true OK                              % 90: third
+clear
+
+(hello   world) ( +) regex-split
+dup length 2 OK                                   % 91: split on spaces
+dup 0 get (hello) eq true OK                      % 92: first word
+1 get (world) eq true OK                          % 93: second word
+clear
+
+% --- no match (whole string) ---
+(hello) ([0-9]+) regex-split
+dup length 1 OK                                   % 94: one segment
+0 get (hello) eq true OK                          % 95: whole string
+clear
+
+% --- leading delimiter ---
+(,a,b) (,) regex-split
+dup length 3 OK                                   % 96: three segments
+0 get () eq true OK                               % 97: empty first
+clear
+
+% --- trailing delimiter ---
+(a,b,) (,) regex-split
+dup length 3 OK                                   % 98: three segments
+2 get () eq true OK                               % 99: empty last
+clear
+
+% --- consecutive delimiters ---
+(a,,b) (,) regex-split
+dup length 3 OK                                   % 100: three segments
+1 get () eq true OK                               % 101: empty middle
+clear
+
+% --- complex delimiter ---
+(one123two456three) ([0-9]+) regex-split
+dup length 3 OK                                   % 102: three words
+dup 0 get (one) eq true OK                        % 103: first
+dup 1 get (two) eq true OK                        % 104: second
+2 get (three) eq true OK                          % 105: third
+clear
+
+% --- empty string ---
+() (,) regex-split
+dup length 1 OK                                   % 106: one empty segment
+0 get () eq true OK                               % 107: empty
+clear
+
+% --- error cases ---
+{ () ([) regex-split } try              /syntax-error OK  % 108: bad pattern
+{ 42 (a) regex-split } try            /type-check OK     % 109: non-string
+clear
+
+% ============================================================
+%   Stress / boundary tests
+% ============================================================
+
+% --- long string ---
+(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
+([0-9]+) regex-search
+true OK                                           % 110: match in long string
+0 get (1) eq true OK                              % 111: correct value
+clear
+
+% --- many matches ---
+(1a2a3a4a5a6a7a8a9a0a) ([0-9]) regex-find-all
+length 10 OK                                      % 112: 10 matches
+clear
+
+% --- pattern with many alternations ---
+(xyz) (a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z) regex-match
+true OK                                           % 113: alternation stress
+
+% --- nested quantifiers ---
+(aaabbb) ((a+)(b+)) regex-search
+true OK                                           % 114: found
+dup 1 get (aaa) eq true OK                        % 115: group 1
+2 get (bbb) eq true OK                            % 116: group 2
+clear
+
+% --- greedy matching ---
+(aXbXc) (a(.*)c) regex-search
+true OK                                           % 117: greedy match
+1 get (XbX) eq true OK                            % 118: greedy captures all
+clear
+
+% --- character class edge cases ---
+(abc-def) ([a-z-]+) regex-search
+true OK                                           % 119: dash in char class
+0 get (abc-def) eq true OK                        % 120: includes dash
+clear
+
+% --- whitespace patterns ---
+(hello		world) ([ \t]+) regex-split
+dup length 2 OK                                   % 121: split on whitespace
+dup 0 get (hello) eq true OK                      % 122: first
+1 get (world) eq true OK                          % 123: second
+clear
+
+% --- digit extraction ---
+(price: $42.99 USD) ([0-9]+\\.[0-9]+) regex-search
+true OK                                           % 124: found decimal
+0 get (42.99) eq true OK                          % 125: correct value
+clear
+
+% --- replace with longer string ---
+(ab) (a) (xyz) regex-replace
+(xyzb) eq true OK                                 % 126: longer replacement
+
+% --- replace with shorter string ---
+(abc) (abc) (x) regex-replace
+(x) eq true OK                                    % 127: shorter replacement
+
+% --- multiple groups in find-all ---
+(key1=val1 key2=val2) (([a-z]+[0-9])=([a-z]+[0-9])) regex-find-all
+dup length 2 OK                                   % 128: two kv pairs
+dup 0 get 1 get (key1) eq true OK                 % 129: first key
+dup 0 get 2 get (val1) eq true OK                 % 130: first val
+dup 1 get 1 get (key2) eq true OK                 % 131: second key
+1 get 2 get (val2) eq true OK                     % 132: second val
+clear
+
+% --- split preserves order ---
+(x:y:z) (:) regex-split
+dup 0 get (x) eq true OK                          % 133: first
+dup 1 get (y) eq true OK                          % 134: second
+2 get (z) eq true OK                              % 135: third
+clear
+
+% --- match vs search semantics ---
+(xxxabcxxx) (abc) regex-match true OK             % 136: match finds substring
+(xxxabcxxx) (^abc$) regex-match false OK          % 137: anchored rejects
+
+% --- regex-match on multiline-like data ---
+(line1\nline2) (line1) regex-match true OK        % 138: match first line
+
+% --- composition: search + replace ---
+(Hello World 2026) ([0-9]+) regex-search
+true OK                                           % 139: found year
+0 get (2026) eq true OK                           % 140: correct
+clear
+(Hello World 2026) ([0-9]+) (YEAR) regex-replace
+(Hello World YEAR) eq true OK                     % 141: replaced
+
+% --- composition: find-all + length ---
+(the cat sat on the mat) ([a-z]+at) regex-find-all
+dup length 3 OK                                   % 142: cat, sat, mat
+dup 0 get (cat) eq true OK                        % 143: first
+dup 1 get (sat) eq true OK                        % 144: second
+2 get (mat) eq true OK                            % 145: third
+clear
+
+% --- regex-split then regex-replace on segments ---
+(a1,b2,c3) (,) regex-split
+dup 0 get ([0-9]) () regex-replace (a) eq true OK % 146: strip digits
+1 get ([0-9]) () regex-replace (b) eq true OK     % 147: strip digits
+clear
+
+% --- empty pattern edge cases ---
+(abc) () regex-find-all
+length 0 OK                                       % 148: empty pattern, no zero-length results
+clear
+
+% --- POSIX character classes ---
+(abc123) ([[:alpha:]]+) regex-search
+true OK                                           % 149: POSIX alpha class
+0 get (abc) eq true OK                            % 150: letters only
+clear
+
+(abc123) ([[:digit:]]+) regex-search
+true OK                                           % 151: POSIX digit class
+0 get (123) eq true OK                            % 152: digits only
+clear
+
+% ============================================================
+%   Results
+% ============================================================
+() =
+(===========================) =
+P T eq
+{ (  ALL TESTS PASSED) = (  Total:) print }
+{ (  *** SOME TESTS FAILED ***) = (  Passed:) print P = (  Total:) print }
+if-else
+T =
+(===========================) =
+(__test_ok__) =

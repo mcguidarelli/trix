@@ -1,0 +1,16 @@
+% pty/read_key_timeout.trx -- @read-key-timeout-retry coverage, both
+% wake arms: (1) data arrives before the deadline (poll wake -> byte),
+% (2) deadline expires with no data (timer wake -> false).
+% Driven by tests/run_pty_tests.sh.
+(lib/keys.trx) require
+{
+    8000 read-key-byte-timeout
+    { (t1-byte: ) print = }
+    { (t1-none) = }
+    if-else
+    400 read-key-byte-timeout
+    { (t2-byte: ) print = }
+    { (t2-none) = }
+    if-else
+} with-raw-mode
+(S2-done) =

@@ -1,0 +1,56 @@
+% ====================================================================
+% test_b6_flow_wrap.trx -- B6 group 2 (flow:1-1 for-loop wrap-to-0)
+% ====================================================================
+% flow:1-1  For UNSIGNED for-loops the overflow clamp set limit = updated - 1 on
+%           wrap.  When the control wraps EXACTLY to 0 and the limit is already
+%           the type max, 0 - 1 wraps back to the max -> limit unchanged -> the
+%           loop never exits (infinite).  The signed branch had the symmetric
+%           wrap-to-extreme defect (and updated +/- 1 was also UB).  Fixed: on
+%           wrap, restore the pre-update control and set limit = control -/+ 1, so
+%           the next (control vs limit) test unconditionally fires.
+%
+% Each body increments a counter and self-exits past a small cap, so a regression
+% (the infinite loop) surfaces as a cap-hit assertion failure rather than a hang.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% byte: 255, (255+1 = 256 wraps to 0), limit 255
+% pre-fix: clamp limit = 0 - 1 = 255 (unchanged) -> spins forever (255,0,1,...).
+% post-fix: terminates after iterating [255].
+% ====================================================================
+/n0 0 store
+255b 1b 255b { pop /n0 n0 1 add store n0 100 gt { exit } if } for
+n0 100 le (flow:1-1 byte wrap-to-0 terminates) rt-ok
+n0 1 eq (flow:1-1 byte runs exactly [255]) rt-ok
+
+% ====================================================================
+% uinteger: 0, 2^31, (2^31+2^31 = 2^32 wraps to 0), limit 2^32-1
+% ====================================================================
+/n1 0 store
+0u 2147483648u 4294967295u { pop /n1 n1 1 add store n1 100 gt { exit } if } for
+n1 100 le (flow:1-1 uinteger wrap-to-0 terminates) rt-ok
+n1 2 eq (flow:1-1 uinteger runs exactly [0, 2^31]) rt-ok
+
+% ====================================================================
+% sanity: ordinary unsigned for-loops still run the right number of times
+% ====================================================================
+/n2 0 store
+0u 1u 4u { pop /n2 n2 1 add store } for
+n2 5 eq (flow:1-1 sanity: ordinary uinteger for runs 0..4) rt-ok
+
+/n3 0 store
+1b 1b 9b { pop /n3 n3 1 add store } for
+n3 9 eq (flow:1-1 sanity: ordinary byte for runs 1..9) rt-ok
+
+(test_b6_flow_wrap.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

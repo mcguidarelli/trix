@@ -1,0 +1,5 @@
+% gen-call-timeout reply paths near VM pressure.
+${ mark 20 { 400 string } repeat array-from-mark } pop
+<< /init { 0 } /handle-call { pop exch pop 0 coroutine-sleep dup } >> gen-server /s exch def
+mark s { (m) exch 1 gen-call-timeout pop pop } actor-spawn coroutine-join pop pop
+s /normal gen-stop

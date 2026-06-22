@@ -1,0 +1,3 @@
+% screen-resize at sl=0 succeeds; inside save scope it raises.
+8 24 make-screen /scr exch def scr 16 32 screen-resize pop
+8 24 make-screen /scr exch def save /sv exch def mark { scr 16 32 screen-resize pop } try sv restore

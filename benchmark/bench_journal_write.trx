@@ -1,0 +1,27 @@
+% bench_journal_write.trx -- journal-write hot path throughput.
+%
+% Each inner iteration does:  save  put-on-local-dict  restore
+% so save_data() must journal one entry per iter (the entry's
+% save_level (0) is below curr_save_level (1) inside the save scope).
+%
+% This is exactly the path the Phase 1 short-circuits added a check to:
+% Save::save_data starts with `if (is_global(off)) return nullptr;`
+% which costs one address-range comparison per call -- always FALSE in
+% this benchmark since the dict is local.  PF2 quantifies that cost.
+%
+% Counter: N iters -> N save_data() calls -> N journal entries.
+% Plus N save+restore pairs -- those touch the save journal stack
+% (save() / restore()) but the per-put cost is still the dominant
+% portion of the work.
+
+/N 1000000 def
+32 dict /D exch def
+% Pre-populate one key at BASE so the put inside save mutates an
+% existing entry whose save_level is below current.
+D 0 0 put
+
+N {
+    save
+    D 0 1 put
+    restore
+} repeat

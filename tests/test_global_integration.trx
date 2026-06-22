@@ -1,0 +1,237 @@
+% ====================================================================
+% test_global_integration.trx -- Phase 2 cross-form integration
+% ====================================================================
+% Exercises ${...}, $/foo, $\foo, <lit>#$, set-global, current-global
+% in combination, plus the integration patterns documented in the
+% trix-reference Global VM Allocation section.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: ${...} fully-globalises a dict literal (block + body)
+% ====================================================================
+% Per docs: "${ <</a 1>> }" globalises both Names AND struct.
+% Pure <</a 1>>#$ globalises only the struct.  Verify both.
+
+% Pre-intern names at BASE so subsequent saves don't disturb them
+$/gi-key-x pop  $/gi-key-y pop
+
+save /sv1 exch def
+${
+    << /gi-key-x 11  /gi-key-y 22 >> /gi-fully-global exch def
+}
+gi-fully-global /gi-key-x get 11 eq         (gi1: ${} dict /gi-key-x in-save) rt-ok
+sv1 restore
+
+% gi-fully-global itself was at sl=1 -- gone after restore.  But the
+% global Dict's bytes survived; rebind via a fresh global Dict and
+% verify the keys-as-Names still work (proving they're global too).
+${
+    << /gi-key-x 33 >> /gi-fully-global-b exch def
+}
+gi-fully-global-b /gi-key-x get 33 eq       (gi1: post-restore ${} dict works) rt-ok
+
+% ====================================================================
+% SECTION 2: <lit>#$ vs ${...} contrast
+% ====================================================================
+
+% A bare <</a 1>>#$ at sl > 0 builds a global dict whose body keys
+% are local Names interned at sl=1 -- pre-Phase-8-R6 this silently
+% produced a global dict with a dangling key after restore.  R6
+% pointer hygiene now rejects the put at construction time.
+% Pre-globalise both the dict reference and a control key BEFORE save:
+${ 4 dict } /gi-bare-d-base exch def              % global dict at BASE
+$/gi-control-key pop                              % bind global Name at BASE
+
+save /sv2 exch def
+% Per-op put rejection (runtime, inside try).  Literal <<...>>#$ at
+% sl>0 with bare keys would also reject, but at scan-driver time
+% which try doesn't cover.
+mark { gi-bare-d-base /gi-bare-key 100 put } try
+/invalid-access eq                          (gi2: R6 rejects local Name into #$ dict) rt-ok
+clear
+
+% Working pattern: pre-globalised key works inside save.
+gi-bare-d-base $/gi-control-key 200 put-persist
+gi-bare-d-base $/gi-control-key get 200 eq  (gi2: ${} dict + $/key works at sl>0) rt-ok
+sv2 restore
+gi-bare-d-base $/gi-control-key get 200 eq  (gi2: ${} dict survives restore) rt-ok
+
+% ====================================================================
+% SECTION 3: $/foo and $\foo intern the SAME Name struct
+% ====================================================================
+% Both forms hit the global Name table; same interned string => same
+% Name.  A literal twin and an executable twin look up to the same
+% bucket entry.
+
+${ 8 dict } /gi-d3 exch def
+
+% Scan an executable twin without invoking it (proc body literal):
+{ $\gi-shared } pop
+
+% Now /gi-shared (literal form) should hit the same global Name --
+% put under the literal key, prove the key persists past restore.
+gi-d3 $/gi-shared 777 put
+
+save /sv3 exch def
+sv3 restore
+
+gi-d3 $/gi-shared known? true eq            <(gi3: literal-of-$\foo persists)> rt-ok
+gi-d3 $/gi-shared get 777 eq                <(gi3: literal-of-$\foo value)> rt-ok
+
+% ====================================================================
+% SECTION 4: ${...} nesting + set-global interaction
+% ====================================================================
+
+% Outer ${...} sets flag=true.  set-global-false inside temporarily
+% flips off; ${...}-exit restores from saved Boolean.
+current-global false eq                      (gi4: top flag false) rt-ok
+
+${
+    current-global true eq                   (gi4: ${} sets flag true) rt-ok
+    false set-global
+    current-global false eq                  (gi4: set-global-false works inside) rt-ok
+    true set-global
+    current-global true eq                   (gi4: set-global-true works inside) rt-ok
+}
+
+current-global false eq                      (gi4: outer flag restored after ${}) rt-ok
+
+% ====================================================================
+% SECTION 5: set-global across multiple save/restore levels
+% ====================================================================
+% set-global does NOT save/restore -- it's a direct flag write.
+% Verify the flag IS journal-tracked across save/restore (per spec
+% it shouldn't be -- the Boolean is process-state, not VM-heap).
+
+current-global false eq                      (gi5: flag false at start) rt-ok
+true set-global
+current-global true eq                       (gi5: set-global true sticks) rt-ok
+
+save /sv5 exch def                          % note: flag is true at save
+false set-global
+current-global false eq                      (gi5: false during save scope) rt-ok
+sv5 restore
+
+% Per current impl: m_curr_alloc_global is NOT journaled through
+% save/restore.  After restore the flag stays at whatever it was
+% before -- false in this case.
+current-global false eq                      (gi5: post-restore flag is false (not rolled back)) rt-ok
+
+false set-global                             % cleanup
+
+% ====================================================================
+% SECTION 6: Empty containers with #$
+% ====================================================================
+
+[]#$ /gi-empty-arr exch def
+gi-empty-arr length 0 eq                    (gi6: []#$ length 0) rt-ok
+
+<< >>#$ /gi-empty-dict exch def
+gi-empty-dict length 0 eq                   (gi6: <<>>#$ length 0) rt-ok
+
+{{ }}#$ /gi-empty-set exch def
+gi-empty-set length 0 eq                    (gi6: {{}}#$ length 0) rt-ok
+
+()#$ /gi-empty-str exch def
+gi-empty-str length 0 eq                    (gi6: ()#$ length 0) rt-ok
+
+% After restore: the global structs persist
+save /sv6 exch def
+sv6 restore
+gi-empty-arr length 0 eq                    (gi6: []#$ survives restore) rt-ok
+gi-empty-dict length 0 eq                   (gi6: <<>>#$ survives restore) rt-ok
+gi-empty-set length 0 eq                    (gi6: {{}}#$ survives restore) rt-ok
+gi-empty-str length 0 eq                    (gi6: ()#$ survives restore) rt-ok
+
+% ====================================================================
+% SECTION 7: Nested #$ inside ${...}
+% ====================================================================
+% #$ inside ${...} is redundant-but-harmless (the body is already
+% being scanned with the flag set; #$ routes the make_*_from_mark
+% path explicitly).  Verify both routes produce equivalent dicts.
+
+${
+    << $/gi-n7-key 1 >>#$ /gi-d7-explicit exch def
+    << $/gi-n7-key 1 >>   /gi-d7-implicit exch def
+}
+
+gi-d7-explicit $/gi-n7-key get 1 eq         (gi7: explicit #$ inside ${} works) rt-ok
+gi-d7-implicit $/gi-n7-key get 1 eq         (gi7: implicit (no #$) inside ${} works) rt-ok
+
+save /sv7 exch def
+sv7 restore
+
+gi-d7-explicit $/gi-n7-key get 1 eq         (gi7: explicit survives restore) rt-ok
+gi-d7-implicit $/gi-n7-key get 1 eq         (gi7: implicit survives restore) rt-ok
+
+% ====================================================================
+% SECTION 8: vm-global-used reflects allocations
+% ====================================================================
+% Status reports a non-zero global-used after we've allocated globals.
+
+/vm-global-used query-status /gi-pre-used exch def
+gi-pre-used 0 ge                            (gi8: vm-global-used non-negative) rt-ok
+
+[ 1 2 3 4 5 6 7 8 9 10 ]#$ pop              % allocate ~88 bytes global
+/vm-global-used query-status /gi-post-used exch def
+
+gi-post-used gi-pre-used gt                 (gi8: vm-global-used grew after [arr]#$) rt-ok
+
+% ====================================================================
+% SECTION 9: runtime allocators (array, dict, dynamic-dict, set, string)
+% honor m_curr_alloc_global -- ${ N <op> } produces global containers.
+% ====================================================================
+% This is the unified mechanism that replaced the Phase 1 scaffolding
+% op make-global-dict.  The runtime allocator ops consult the flag
+% and route to global VM; ${...} sets the flag for its body.
+
+${ 256 string } /gi-rt-str exch def
+gi-rt-str length 256 eq                     (gi9: ${ 256 string } length) rt-ok
+
+${ 8 dynamic-dict } /gi-rt-dyndict exch def
+gi-rt-dyndict $/gi-rt-key 1 put
+gi-rt-dyndict length 1 eq                   (gi9: ${ 8 dynamic-dict } populated) rt-ok
+
+${ 16 set } /gi-rt-set exch def
+gi-rt-set $/gi-rt-elem set-add
+gi-rt-set length 1 eq                       (gi9: ${ 16 set } populated) rt-ok
+
+${ 4 array } /gi-rt-arr exch def
+gi-rt-arr 0 99 put
+gi-rt-arr 0 get 99 eq                       (gi9: ${ 4 array } populated) rt-ok
+
+% All four must survive restore (allocated in global VM)
+save /sv9 exch def
+sv9 restore
+
+gi-rt-str length 256 eq                     (gi9: rt-string survives restore) rt-ok
+gi-rt-dyndict length 1 eq                   (gi9: rt-dyndict survives restore) rt-ok
+gi-rt-set length 1 eq                       (gi9: rt-set survives restore) rt-ok
+gi-rt-arr 0 get 99 eq                       (gi9: rt-array survives restore) rt-ok
+
+% Default (no ${...}, flag false): runtime allocators land in LOCAL.
+% Verify by checking they DON'T persist across a save/restore that
+% would reclaim local allocations made at sl=1.
+save /sv9b exch def
+8 dict /gi-rt-local-dict exch def
+gi-rt-local-dict /probe 7 put
+sv9b restore
+
+% gi-rt-local-dict's binding is from sl=1, gone after restore.  So
+% rebinding it to a fresh global one (using ${...}) and verifying.
+${ 8 dict } /gi-rt-local-dict exch def
+gi-rt-local-dict /probe known? false eq     (gi9: fresh ${ 8 dict } empty) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_global_integration: ALL TESTS PASSED) =
+(__test_ok__) =

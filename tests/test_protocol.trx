@@ -1,0 +1,327 @@
+% ====================================================================
+% test_protocol.trx -- def-protocol, def-method, def-default-method,
+%                      extend-protocol, protocol-satisfies?,
+%                      protocol-methods
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% =================================================================
+% SECTION 1: HAPPY PATH -- def-protocol, def-method, basic dispatch
+% =================================================================
+
+% Define a protocol with one method
+[/to-str] /Stringify def-protocol
+
+% Register implementations -- handler receives the value on the operand stack
+{ pop (an-int) }  /to-str /integer-type def-method
+{ pop (a-str) }   /to-str /string-type def-method
+{ pop (a-bool) }  /to-str /boolean-type def-method
+
+% Dispatch
+42 to-str (an-int) eq                       (dispatch: Integer to-str) rt-ok  clear
+(hello) to-str (a-str) eq                   (dispatch: String to-str) rt-ok  clear
+true to-str (a-bool) eq                     (dispatch: Boolean to-str) rt-ok  clear
+
+% =================================================================
+% SECTION 2: HAPPY PATH -- protocol with multiple methods
+% =================================================================
+
+[/describe /category] /Describable def-protocol
+
+{ pop (integer) } /describe /integer-type def-method
+{ pop (string) }  /describe /string-type def-method
+{ pop (num) }     /category /integer-type def-method
+{ pop (text) }    /category /string-type def-method
+
+42 describe (integer) eq                    (multi-method: Integer describe) rt-ok  clear
+(hi) describe (string) eq                   (multi-method: String describe) rt-ok  clear
+42 category (num) eq                        (multi-method: Integer category) rt-ok  clear
+(hi) category (text) eq                     (multi-method: String category) rt-ok  clear
+
+% =================================================================
+% SECTION 3: HAPPY PATH -- def-default-method (fallback)
+% =================================================================
+
+[/show] /Showable def-protocol
+{ pop (unknown) } /show def-default-method
+{ pop (int-val) } /show /integer-type def-method
+
+42 show (int-val) eq                        (default: Integer uses specific) rt-ok  clear
+(hi) show (unknown) eq                      (default: String uses fallback) rt-ok  clear
+true show (unknown) eq                      (default: Boolean uses fallback) rt-ok  clear
+
+% =================================================================
+% SECTION 4: HAPPY PATH -- extend-protocol (batch registration)
+% =================================================================
+
+[/repr] /Repr def-protocol
+<< /repr { pop (real-repr) } >> /real-type /Repr extend-protocol
+<< /repr { pop (double-repr) } >> /double-type /Repr extend-protocol
+
+3.14 repr (real-repr) eq                    (extend: Real repr) rt-ok  clear
+3.14d repr (double-repr) eq                 (extend: Double repr) rt-ok  clear
+
+% =================================================================
+% SECTION 5: HAPPY PATH -- protocol-satisfies?
+% =================================================================
+
+42 /Stringify protocol-satisfies?           (satisfies: Integer Stringify) rt-ok  clear
+(hi) /Stringify protocol-satisfies?         (satisfies: String Stringify) rt-ok  clear
+true /Stringify protocol-satisfies?         (satisfies: Boolean Stringify) rt-ok  clear
+3.14 /Stringify protocol-satisfies? not     (satisfies: Real not Stringify) rt-ok  clear
+
+% With default method, all types satisfy
+42 /Showable protocol-satisfies?            (satisfies: Integer Showable via specific) rt-ok  clear
+(hi) /Showable protocol-satisfies?          (satisfies: String Showable via default) rt-ok  clear
+3.14 /Showable protocol-satisfies?          (satisfies: Real Showable via default) rt-ok  clear
+
+% =================================================================
+% SECTION 6: HAPPY PATH -- protocol-methods (introspection)
+% =================================================================
+
+/Stringify protocol-methods length 1 eq     (methods: Stringify has 1 method) rt-ok  clear
+/Describable protocol-methods length 2 eq   (methods: Describable has 2 methods) rt-ok  clear
+
+% =================================================================
+% SECTION 7: HAPPY PATH -- tagged value dispatch
+% =================================================================
+
+[/fmt-tagged] /TagFmt def-protocol
+{
+    << /ok    { pop (tagged-ok) }
+       /error { pop (tagged-err) }
+    >> tag-match
+} /fmt-tagged /tagged-type def-method
+
+42 /ok tag fmt-tagged (tagged-ok) eq        (tagged: ok dispatch) rt-ok  clear
+(oops) /error tag fmt-tagged (tagged-err) eq (tagged: error dispatch) rt-ok  clear
+
+% =================================================================
+% SECTION 8: SAD PATH -- duplicate protocol name
+% =================================================================
+
+{ [/foo] /Stringify def-protocol } try /protocol eq
+                                            (sad: duplicate protocol name) rt-ok  clear
+
+% =================================================================
+% SECTION 9: SAD PATH -- duplicate method name across protocols
+% =================================================================
+
+{ [/to-str] /OtherProto def-protocol } try /protocol eq
+                                            (sad: method name collision) rt-ok  clear
+
+% =================================================================
+% SECTION 10: SAD PATH -- def-method on non-existent method
+% =================================================================
+
+{ { pop } /nonexistent /integer-type def-method } try /protocol eq
+                                            (sad: def-method unknown method) rt-ok  clear
+
+% =================================================================
+% SECTION 11: SAD PATH -- def-method with invalid type name
+% =================================================================
+
+{ { pop } /to-str /NotAType def-method } try /type-check eq
+                                            (sad: def-method bad type name) rt-ok  clear
+
+% =================================================================
+% SECTION 12: SAD PATH -- protocol-satisfies? on non-existent protocol
+% =================================================================
+
+{ 42 /NoSuchProtocol protocol-satisfies? } try /protocol eq
+                                            (sad: satisfies unknown protocol) rt-ok  clear
+
+% =================================================================
+% SECTION 13: SAD PATH -- dispatch with no implementation
+% =================================================================
+
+[/only-int] /IntOnly def-protocol
+{ pop (int) } /only-int /integer-type def-method
+
+{ 3.14 only-int } try /undefined-case eq   (sad: dispatch no impl for Real) rt-ok  clear
+
+% =================================================================
+% SECTION 14: SAD PATH -- extend-protocol unknown method
+% =================================================================
+
+{ << /nonexistent { pop } >> /integer-type /Stringify extend-protocol } try /protocol eq
+                                            (sad: extend unknown method) rt-ok  clear
+
+% =================================================================
+% SECTION 15: SAD PATH -- extend-protocol unknown protocol
+% =================================================================
+
+{ << /foo { pop } >> /integer-type /NoProto extend-protocol } try /protocol eq
+                                            (sad: extend unknown protocol) rt-ok  clear
+
+% =================================================================
+% SECTION 16: SAD PATH -- empty method-names array
+% =================================================================
+
+{ [] /Empty def-protocol } try /range-check eq
+                                            (sad: empty method names) rt-ok  clear
+
+% =================================================================
+% SECTION 17: STRESS -- many types registered
+% =================================================================
+
+[/typed] /TypedProto def-protocol
+{ pop (byte) }     /typed /byte-type def-method
+{ pop (integer) }  /typed /integer-type def-method
+{ pop (uinteger) } /typed /uinteger-type def-method
+{ pop (long) }     /typed /long-type def-method
+{ pop (ulong) }    /typed /ulong-type def-method
+{ pop (real) }     /typed /real-type def-method
+{ pop (double) }   /typed /double-type def-method
+{ pop (boolean) }  /typed /boolean-type def-method
+{ pop (string) }   /typed /string-type def-method
+{ pop (array) }    /typed /array-type def-method
+{ pop (dict) }     /typed /dict-type def-method
+{ pop (name) }     /typed /name-type def-method
+{ pop (null) }     /typed /null-type def-method
+
+65b typed (byte) eq                         (stress: Byte typed) rt-ok  clear
+42 typed (integer) eq                       (stress: Integer typed) rt-ok  clear
+42u typed (uinteger) eq                     (stress: UInteger typed) rt-ok  clear
+42l typed (long) eq                         (stress: Long typed) rt-ok  clear
+42ul typed (ulong) eq                       (stress: ULong typed) rt-ok  clear
+3.14 typed (real) eq                        (stress: Real typed) rt-ok  clear
+3.14d typed (double) eq                     (stress: Double typed) rt-ok  clear
+true typed (boolean) eq                     (stress: Boolean typed) rt-ok  clear
+(hi) typed (string) eq                      (stress: String typed) rt-ok  clear
+[1 2] typed (array) eq                      (stress: Array typed) rt-ok  clear
+<< /a 1 >> typed (dict) eq                  (stress: Dict typed) rt-ok  clear
+/foo typed (name) eq                        (stress: Name typed) rt-ok  clear
+null typed (null) eq                        (stress: Null typed) rt-ok  clear
+
+% =================================================================
+% SECTION 18: BOUNDARY -- protocol with single method
+% =================================================================
+
+[/single] /Single def-protocol
+{ 1 add } /single /integer-type def-method
+
+41 single 42 eq                             (boundary: single method transforms value) rt-ok  clear
+
+% =================================================================
+% SECTION 19: BOUNDARY -- override method impl for a type
+% =================================================================
+
+{ pop (v2) } /to-str /integer-type def-method
+42 to-str (v2) eq                           (boundary: overridden Integer to-str) rt-ok  clear
+
+% Restore for other tests
+{ pop (an-int) } /to-str /integer-type def-method
+
+% =================================================================
+% SECTION 20: SAD PATH -- def-default-method unknown method
+% =================================================================
+
+{ { pop (dflt) } /no-such-method-xyz def-default-method } try /protocol eq
+                                            (sad: default unknown method) rt-ok  clear
+
+% =================================================================
+% SECTION 21: SAD PATH -- protocol-methods unknown protocol
+% =================================================================
+
+{ /no-such-protocol-xyz protocol-methods } try /protocol eq
+                                            (sad: methods unknown proto) rt-ok  clear
+
+% =================================================================
+% SECTION 22: SAD PATH -- extend with non-proc value
+% =================================================================
+
+{ << /to-str 42 >> /integer-type /Stringify extend-protocol } try /type-check eq
+                                            (sad: extend non-proc value) rt-ok  clear
+
+% =================================================================
+% SECTION 23: SAD PATH -- def-protocol non-name in methods
+% =================================================================
+
+{ [/valid 42] /BadProto def-protocol } try /type-check eq
+                                            (sad: non-name in methods) rt-ok  clear
+
+% =================================================================
+% SECTION 24: HAPPY PATH -- protocol-satisfies? with ExtValue types
+% =================================================================
+
+42l /TypedProto protocol-satisfies?
+true eq                                     (satisfies: Long type) rt-ok  clear
+
+3.14d /TypedProto protocol-satisfies?
+true eq                                     (satisfies: Double type) rt-ok  clear
+
+% =================================================================
+% SECTION 25: HAPPY PATH -- two protocols on same type
+% =================================================================
+
+[/render] /Renderable def-protocol
+{ pop (rendered) } /render /integer-type def-method
+
+42 to-str (an-int) eq                       (multi-proto: Stringify) rt-ok  clear
+42 render (rendered) eq                      (multi-proto: Renderable) rt-ok  clear
+
+% =================================================================
+% SECTION 26: HAPPY PATH -- default method as fallback
+% =================================================================
+
+[/greet] /Greetable def-protocol
+{ pop (default-greeting) } /greet def-default-method
+{ pop (hello-string) } /greet /string-type def-method
+
+(hi) greet (hello-string) eq                (default: specific wins) rt-ok  clear
+42 greet (default-greeting) eq              (default: fallback for int) rt-ok  clear
+true greet (default-greeting) eq            (default: fallback for bool) rt-ok  clear
+
+% =================================================================
+% SECTION 27: HAPPY PATH -- protocol-satisfies? with default
+% =================================================================
+
+42 /Greetable protocol-satisfies?
+true eq                                     (satisfies: via default) rt-ok  clear
+
+% =================================================================
+% SECTION 28: BOUNDARY -- dispatch on Tagged value
+% =================================================================
+
+{ tag-name 20 string to-string } /to-str /tagged-type def-method
+42 /ok tag to-str (ok) eq                   (boundary: tagged dispatch) rt-ok  clear
+
+% =================================================================
+% SECTION 29: STRESS -- many methods in one protocol
+% =================================================================
+
+[/m1 /m2 /m3 /m4 /m5] /ManyMethods def-protocol
+{ pop 1 } /m1 /integer-type def-method
+{ pop 2 } /m2 /integer-type def-method
+{ pop 3 } /m3 /integer-type def-method
+{ pop 4 } /m4 /integer-type def-method
+{ pop 5 } /m5 /integer-type def-method
+
+42 m1 1 eq                                  (stress: m1) rt-ok  clear
+42 m2 2 eq                                  (stress: m2) rt-ok  clear
+42 m3 3 eq                                  (stress: m3) rt-ok  clear
+42 m4 4 eq                                  (stress: m4) rt-ok  clear
+42 m5 5 eq                                  (stress: m5) rt-ok  clear
+
+/ManyMethods protocol-methods length 5 eq   (stress: 5 methods listed) rt-ok  clear
+
+% =================================================================
+% INTEGRITY
+% =================================================================
+
+/vm-validate query-status                    (integrity: vm-validate) rt-ok  clear
+/extvalue-validate query-status              (integrity: extvalue-validate) rt-ok  clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_protocol: ALL TESTS PASSED) =
+(__test_ok__) =

@@ -1,0 +1,3 @@
+% status-stream-buffer.trx -- print the live stream buffer size so
+% run_cli_tests.sh can pin --stream-buffer with a K suffix.
+//:status:stream-buffer-size =

@@ -1,0 +1,830 @@
+% ======================================================================
+%  Showcase: Symbolic differentiation with tag-pattern rewriting
+%  ----------------------------------------------------------------------
+%  Parse infix algebra, build a Tagged AST, differentiate via
+%  tag-dispatched rules, simplify by rewriting to a fixpoint, then
+%  pretty-print the result back to infix form.
+%
+%  This is a *transformer* showcase -- mini-scheme is an interpreter,
+%  minidb is an executor, regex is a matcher.  Trix's Tagged values
+%  give us discriminated unions; tag-dispatched rewrite is then just
+%  one big switch per tag, and the simplifier becomes a list of
+%  pattern-and-rewrite handlers.
+%
+%  Surface syntax (infix, single variable x by convention):
+%
+%      expr   = term (('+'|'-') term)*
+%      term   = factor (('*'|'/') factor)*
+%      factor = unary ('^' factor)?            (right-assoc)
+%      unary  = '-' unary | atom
+%      atom   = number | identifier ('(' args ')')? | '(' expr ')'
+%
+%  AST shape: one Tagged tag per node kind, payload is the operands.
+%  This deviates from the "wrapper /binop" form in the plan -- direct
+%  tagging makes simplifier rules a single tag-name dispatch instead
+%  of a tag-name + sub-tag check.
+%
+%      /num   n                (integer or real)
+%      /var   /name            (Name)
+%      /add   [l r]
+%      /sub   [l r]
+%      /mul   [l r]
+%      /div   [l r]
+%      /pow   [l r]
+%      /neg   inner            (unary minus)
+%      /sin   inner
+%      /cos   inner
+%      /tan   inner
+%      /exp   inner
+%      /log   inner
+%
+%  Run:
+%      ./trix examples/symdiff.trx
+% ======================================================================
+
+clear
+
+
+% ======================================================================
+%  1. AST constructors
+% ======================================================================
+
+/mk-num { |n|#1   n            /num tag } def
+/mk-var { |nm|#1  nm           /var tag } def
+
+/mk-add { |l r|#2 [ l r ]      /add tag } def
+/mk-sub { |l r|#2 [ l r ]      /sub tag } def
+/mk-mul { |l r|#2 [ l r ]      /mul tag } def
+/mk-div { |l r|#2 [ l r ]      /div tag } def
+/mk-pow { |l r|#2 [ l r ]      /pow tag } def
+
+/mk-neg { |a|#1   a            /neg tag } def
+/mk-sin { |a|#1   a            /sin tag } def
+/mk-cos { |a|#1   a            /cos tag } def
+/mk-tan { |a|#1   a            /tan tag } def
+/mk-exp { |a|#1   a            /exp tag } def
+/mk-log { |a|#1   a            /log tag } def
+
+% Convenience constants -- canonical 0 and 1 used by simplifier.
+/zero { 0 mk-num } def
+/one  { 1 mk-num } def
+
+
+% ======================================================================
+%  2. Parser
+%
+%  Recursive-descent over the source string with the parser-state
+%  pattern reused from regex.trx / mini-scheme.trx / minidb.trx.
+%  Whitespace skip on every read.  Identifiers: [A-Za-z][A-Za-z0-9_]*.
+%  Numbers: integer or decimal with optional '.'.
+% ======================================================================
+
+/parser-state << /src null /pos 0 /len 0 >> def
+
+/p-init {
+    % src --
+    parser-state exch /src exch put
+    parser-state /len parser-state /src get length put
+    parser-state /pos 0 put
+} def
+
+/p-eof? { parser-state /pos get parser-state /len get ge } def
+/p-peek { parser-state /src get parser-state /pos get get } def        % byte
+/p-advance { parser-state /pos parser-state /pos get 1 add put } def
+/p-take { p-peek p-advance } def
+
+/p-fail {
+    % message --
+    /symdiff-parse-error exch throw-with
+} def
+
+% Whitespace: space, tab, newline, CR.
+/is-space? {
+    |b|#1
+    b 32b eq b 9b eq or b 10b eq or b 13b eq or
+} def
+
+/p-skip-ws {
+    { p-eof? not { p-peek is-space? } and? } { p-advance } while
+} def
+
+/is-digit? { |b|#1 b 48b ge b 57b le and } def
+/is-alpha? {
+    |b|#1
+    b 65b ge b 90b le and
+    b 97b ge b 122b le and or
+    b 95b eq or
+} def
+/is-alnum? { |b|#1 b is-digit? b is-alpha? or } def
+
+/p-expect {
+    % byte --
+    |b|#2
+    p-skip-ws
+    p-eof? { (unexpected EOF) p-fail } if
+    p-peek b ne {
+        256 string (expected `{0:c}` at pos {1}) mark b parser-state /pos get sprint-fmt pop p-fail
+    } if
+    p-advance
+} def
+
+% --- atoms --------------------------------------------------------------
+
+% Read a digit run, optional fractional part.  Returns Tagged /num.
+% The longest digit run / decimal is collected into a string then
+% converted with cvi or cvr depending on whether a '.' appeared.
+/p-number {
+    ||#4
+    /buf 64 string local-def
+    /n 0 local-def
+    {
+        p-eof? not
+            { p-peek is-digit? p-peek 46b eq or }
+            and?
+    } {
+        buf n p-take put
+        /n n 1 add local-def
+    } while
+    buf 0 n get-interval to-number
+    mk-num
+} def
+
+% Read an identifier; returns the Name (interned).
+/p-ident {
+    ||#8
+    /buf 64 string local-def
+    /n 0 local-def
+    {
+        p-eof? not { p-peek is-alnum? } and?
+    } {
+        buf n p-take put
+        /n n 1 add local-def
+    } while
+    buf 0 n get-interval to-name
+} def
+
+% atom = number | ident-or-call | '(' expr ')'
+/p-atom {
+    ||#4
+    p-skip-ws
+    p-eof? { (unexpected EOF in atom) p-fail } if
+    p-peek 40b eq                                                      % '('
+        { p-advance p-expr p-skip-ws 41b p-expect }
+        {
+            p-peek is-digit? p-peek 46b eq or
+                { p-number }
+                {
+                    p-peek is-alpha?
+                        { p-call-or-var }
+                        { 64 string (unexpected byte `{0:c}` at pos {1}) mark p-peek parser-state /pos get sprint-fmt pop p-fail null }
+                    if-else
+                }
+            if-else
+        }
+    if-else
+} def
+
+% Identifier followed optionally by '(' args ')'.  Single-arg only for
+% now -- our supported functions are all unary.
+/p-call-or-var {
+    ||#4
+    /nm p-ident local-def
+    p-skip-ws
+    p-eof? not { p-peek 40b eq } and?
+        {
+            p-advance
+            p-expr
+            p-skip-ws
+            41b p-expect
+            % nm is the function name; build the right tag.
+            nm /sin eq { mk-sin }
+            {
+            nm /cos eq { mk-cos }
+            {
+            nm /tan eq { mk-tan }
+            {
+            nm /exp eq { mk-exp }
+            {
+            nm /log eq { mk-log }
+            {
+                pop
+                64 string (unknown function `{0}`) mark nm sprint-fmt pop p-fail
+            } if-else } if-else } if-else } if-else } if-else
+        }
+        { nm mk-var }
+    if-else
+} def
+
+% --- precedence climbing ------------------------------------------------
+
+% factor = atom ('^' factor)?    -- right-assoc; pow binds tighter than unary minus
+/p-factor {
+    p-atom
+    p-skip-ws
+    p-eof? not { p-peek 94b eq } and?
+        { p-advance p-factor mk-pow }
+    if
+} def
+
+% unary = '-' unary | factor    -- so '-x^2' parses as -(x^2)
+/p-unary {
+    p-skip-ws
+    p-eof? not { p-peek 45b eq } and?
+        { p-advance p-unary mk-neg }
+        { p-factor }
+    if-else
+} def
+
+% term = factor (('*' | '/') factor)*
+/p-term {
+    p-unary
+    {
+        p-skip-ws
+        p-eof? not
+            { p-peek 42b eq p-peek 47b eq or }
+            and?
+    } {
+        p-peek 42b eq
+            { p-advance p-unary mk-mul }
+            { p-advance p-unary mk-div }
+        if-else
+    } while
+} def
+
+% expr = term (('+' | '-') term)*
+/p-expr {
+    p-term
+    {
+        p-skip-ws
+        p-eof? not
+            { p-peek 43b eq p-peek 45b eq or }
+            and?
+    } {
+        p-peek 43b eq
+            { p-advance p-term mk-add }
+            { p-advance p-term mk-sub }
+        if-else
+    } while
+} def
+
+/parse {
+    % src -- ast
+    p-init
+    p-expr
+    p-skip-ws
+    p-eof? not { (trailing input after expression) p-fail } if
+} def
+
+
+% ======================================================================
+%  3. Pretty-printer with precedence
+%
+%  Numeric precedence (bigger = tighter):
+%
+%      atom                  100
+%      pow  ^   right-assoc   50
+%      neg  -   unary         40
+%      mul/div  left-assoc    30
+%      add/sub  left-assoc    20
+%
+%  print-ast takes (ast min-prec) on the stack.  If the AST node's
+%  own precedence is less than min-prec, we wrap in parens.  For
+%  left-assoc binops we recurse the left child at min=our-prec and
+%  the right at min=our-prec+1 (so a same-prec right child gets
+%  parenthesized -- this preserves associativity in the printed form).
+%  Right-assoc pow flips: left at our-prec+1, right at our-prec.
+% ======================================================================
+
+/print-num {
+    % n --
+    ({0}) mark 3 -1 roll print-fmt pop pop
+} def
+
+/print-name {
+    % name --
+    ({0}) mark 3 -1 roll print-fmt pop pop
+} def
+
+/print-binop {
+    % ast op-str myprec lprec rprec minp --
+    |myprec lprec rprec minp|#8
+    /op exch local-def
+    /ast exch local-def
+
+    /wrap myprec minp lt local-def
+    wrap { (\() print } if
+    /pl ast tag-value local-def
+    pl 0 get lprec print-ast
+    op print
+    pl 1 get rprec print-ast
+    wrap { (\)) print } if
+} def
+
+/print-call {
+    % ast fn-str --
+    |fn|#2
+    /ast exch local-def
+    fn print (\() print
+    ast tag-value 0 print-ast
+    (\)) print
+} def
+
+/print-ast {
+    % ast minp --
+    ||#4
+    /minp exch local-def
+    /ast exch local-def
+    /tn ast tag-name local-def
+
+    tn /num eq {
+        ast tag-value print-num
+    }
+    {
+    tn /var eq {
+        ast tag-value print-name
+    }
+    {
+    tn /add eq {
+        ast ( + ) 20 20 21 minp print-binop
+    }
+    {
+    tn /sub eq {
+        ast ( - ) 20 20 21 minp print-binop
+    }
+    {
+    tn /mul eq {
+        ast (*) 30 30 31 minp print-binop
+    }
+    {
+    tn /div eq {
+        ast (/) 30 30 31 minp print-binop
+    }
+    {
+    tn /pow eq {
+        ast (^) 50 51 50 minp print-binop
+    }
+    {
+    tn /neg eq {
+        40 minp lt { (\() print } if
+        (-) print
+        ast tag-value 41 print-ast
+        40 minp lt { (\)) print } if
+    }
+    {
+    tn /sin eq { ast (sin) print-call }
+    {
+    tn /cos eq { ast (cos) print-call }
+    {
+    tn /tan eq { ast (tan) print-call }
+    {
+    tn /exp eq { ast (exp) print-call }
+    {
+    tn /log eq { ast (log) print-call }
+    {
+        (?) print tn print
+    } if-else
+    } if-else } if-else } if-else } if-else } if-else } if-else
+    } if-else } if-else } if-else } if-else } if-else } if-else
+} def
+
+/print-expr {
+    % ast --
+    0 print-ast
+} def
+
+
+% ======================================================================
+%  4. Differentiator
+%
+%  Returns a fresh AST.  No simplification at this layer -- we want
+%  Phase 4's simplifier to do all the algebraic cleanup, so we can
+%  show the raw vs. cleaned form side by side in the demo.
+%
+%  Conventions:
+%    - `wrt` is a Name (the variable to differentiate against).
+%    - For pow with constant exponent we use the elementary power rule;
+%      general (variable exponent) falls back to the d(e^f) identity.
+%    - For tan we use d(tan e) = d(e) / cos(e)^2.
+% ======================================================================
+
+/diff {
+    % ast wrt -- d-ast
+    |ast wrt|#8
+    /tn ast tag-name local-def
+
+    tn /num eq { zero }
+    {
+    tn /var eq {
+        ast tag-value wrt eq { one } { zero } if-else
+    }
+    {
+    tn /add eq {
+        /pl ast tag-value local-def
+        pl 0 get wrt diff
+        pl 1 get wrt diff
+        mk-add
+    }
+    {
+    tn /sub eq {
+        /pl ast tag-value local-def
+        pl 0 get wrt diff
+        pl 1 get wrt diff
+        mk-sub
+    }
+    {
+    tn /mul eq {
+        /pl ast tag-value local-def
+        /l pl 0 get local-def
+        /r pl 1 get local-def
+        l wrt diff r mk-mul
+        l r wrt diff mk-mul
+        mk-add
+    }
+    {
+    tn /div eq {
+        /pl ast tag-value local-def
+        /l pl 0 get local-def
+        /r pl 1 get local-def
+        l wrt diff r mk-mul
+        l r wrt diff mk-mul
+        mk-sub
+        r r mk-mul
+        mk-div
+    }
+    {
+    tn /pow eq {
+        /pl ast tag-value local-def
+        /l pl 0 get local-def
+        /r pl 1 get local-def
+        r tag-name /num eq {
+            /n r tag-value local-def
+            n mk-num
+            l n 1 sub mk-num mk-pow
+            mk-mul
+            l wrt diff
+            mk-mul
+        }
+        {
+            l r mk-pow
+            r wrt diff l mk-log mk-mul
+            r l wrt diff mk-mul l mk-div
+            mk-add
+            mk-mul
+        }
+        if-else
+    }
+    {
+    tn /neg eq { ast tag-value wrt diff mk-neg }
+    {
+    tn /sin eq {
+        /e ast tag-value local-def
+        e mk-cos e wrt diff mk-mul
+    }
+    {
+    tn /cos eq {
+        /e ast tag-value local-def
+        e mk-sin mk-neg e wrt diff mk-mul
+    }
+    {
+    tn /tan eq {
+        /e ast tag-value local-def
+        e wrt diff
+        e mk-cos 2 mk-num mk-pow
+        mk-div
+    }
+    {
+    tn /exp eq {
+        /e ast tag-value local-def
+        e mk-exp e wrt diff mk-mul
+    }
+    {
+    tn /log eq {
+        /e ast tag-value local-def
+        e wrt diff e mk-div
+    }
+    {
+        (cannot differentiate /) print tn print nl
+        zero
+    } if-else
+    } if-else } if-else } if-else } if-else } if-else } if-else
+    } if-else } if-else } if-else } if-else } if-else } if-else
+} def
+
+
+% ======================================================================
+%  5. Simplifier
+%
+%  Rewrite the AST bottom-up, applying algebraic-identity rules and
+%  constant folding at each node, then loop until the tree stops
+%  changing.  Each rule is a small tag-pattern check + reconstruction.
+%
+%  Predicates and helpers:
+% ======================================================================
+
+/num? { tag-name /num eq } def
+
+/num-zero? { |n|#1 n is-float { n 0.0 eq } { n 0 eq } if-else } def
+/num-one?  { |n|#1 n is-float { n 1.0 eq } { n 1 eq } if-else } def
+
+/ast-zero? { dup num? { tag-value num-zero? } { pop false } if-else } def
+/ast-one?  { dup num? { tag-value num-one?  } { pop false } if-else } def
+
+% Same-type two-/num? -- used to gate constant folding (Trix arithmetic
+% does not auto-promote, so we only fold int+int or float+float).
+/same-type-num? {
+    % a b -- bool
+    |a b|#2
+    a num? b num? and
+        {
+            a tag-value is-float b tag-value is-float
+            eq
+        }
+        { false }
+    if-else
+} def
+
+% Structural AST equality -- needed for the fixpoint loop.
+/ast-eq? {
+    % a b -- bool
+    |a b|#4
+    a tag-name b tag-name eq
+        {
+            /tn a tag-name local-def
+            tn /num eq tn /var eq or
+                { a tag-value b tag-value eq }
+                {
+                    tn /add eq tn /sub eq or tn /mul eq or
+                    tn /div eq or tn /pow eq or
+                    {
+                        a tag-value 0 get b tag-value 0 get ast-eq?
+                            { a tag-value 1 get b tag-value 1 get ast-eq? }
+                            { false }
+                        if-else
+                    }
+                    { a tag-value b tag-value ast-eq? }
+                    if-else
+                }
+            if-else
+        }
+        { false }
+    if-else
+} def
+
+
+% --- root-level rule application (one pass) -----------------------------
+
+/rules-add {
+    % l r -- ast'
+    |l r|#2
+    l ast-zero? { r }
+    {
+    r ast-zero? { l }
+    {
+    %  e + e  -> 2 * e
+    l r ast-eq? { 2 mk-num l mk-mul }
+    {
+    %  e + (-f)  -> e - f
+    r tag-name /neg eq { l r tag-value mk-sub }
+    {
+    %  (-e) + f  -> f - e
+    l tag-name /neg eq { r l tag-value mk-sub }
+    {
+    l r same-type-num? { l tag-value r tag-value add mk-num }
+    { l r mk-add }
+    if-else } if-else } if-else } if-else } if-else } if-else
+} def
+
+/rules-sub {
+    % l r -- ast'
+    |l r|#2
+    r ast-zero? { l }
+    {
+    l ast-zero? { r mk-neg }
+    {
+    %  e - e  -> 0
+    l r ast-eq? { zero }
+    {
+    %  e - (-f)  -> e + f
+    r tag-name /neg eq { l r tag-value mk-add }
+    {
+    l r same-type-num? { l tag-value r tag-value sub mk-num }
+    { l r mk-sub }
+    if-else } if-else } if-else } if-else } if-else
+} def
+
+/rules-mul {
+    % l r -- ast'
+    |l r|#2
+    l ast-zero? r ast-zero? or { zero }
+    {
+    l ast-one? { r }
+    {
+    r ast-one? { l }
+    {
+    %  (-a) * (-b)  -> a*b
+    l tag-name /neg eq r tag-name /neg eq and
+        { l tag-value r tag-value mk-mul }
+    {
+    %  a * (-b)  -> -(a*b)
+    r tag-name /neg eq { l r tag-value mk-mul mk-neg }
+    {
+    %  (-a) * b  -> -(a*b)
+    l tag-name /neg eq { l tag-value r mk-mul mk-neg }
+    {
+    %  c1 * (c2 * e)  -> (c1*c2) * e
+    l num?
+        { r tag-name /mul eq }                         and?
+        { r tag-value 0 get num? }                     and?
+        { l r tag-value 0 get same-type-num? }         and?
+    {
+        l tag-value r tag-value 0 get tag-value mul mk-num
+        r tag-value 1 get
+        mk-mul
+    }
+    {
+    %  (c1 * e) * c2  -> (c1*c2) * e
+    r num?
+        { l tag-name /mul eq }                         and?
+        { l tag-value 0 get num? }                     and?
+        { r l tag-value 0 get same-type-num? }         and?
+    {
+        r tag-value l tag-value 0 get tag-value mul mk-num
+        l tag-value 1 get
+        mk-mul
+    }
+    {
+    l r same-type-num? { l tag-value r tag-value mul mk-num }
+    { l r mk-mul }
+    if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else
+} def
+
+/rules-div {
+    % l r -- ast'
+    |l r|#2
+    r ast-one? { l }
+    {
+        l ast-zero? { zero }
+        { l r mk-div }
+        if-else
+    }
+    if-else
+} def
+
+/rules-pow {
+    % l r -- ast'
+    |l r|#2
+    r ast-zero? { one }
+    {
+    r ast-one? { l }
+    {
+    l ast-zero? { zero }
+    {
+    l ast-one? { one }
+    { l r mk-pow }
+    if-else } if-else } if-else } if-else
+} def
+
+/rules-neg {
+    % inner -- ast'
+    |inner|#1
+    % --e -> e
+    inner tag-name /neg eq { inner tag-value }
+    {
+        inner ast-zero? { zero }
+        {
+            inner num?
+                { 0 inner tag-value sub mk-num }
+                { inner mk-neg }
+            if-else
+        }
+        if-else
+    }
+    if-else
+} def
+
+
+% --- bottom-up walk + apply rules ---------------------------------------
+
+/simplify-tree {
+    % ast -- ast'
+    |ast|#4
+    /tn ast tag-name local-def
+
+    tn /num eq tn /var eq or { ast }
+    {
+    tn /add eq {
+        ast tag-value 0 get simplify-tree
+        ast tag-value 1 get simplify-tree
+        rules-add
+    }
+    {
+    tn /sub eq {
+        ast tag-value 0 get simplify-tree
+        ast tag-value 1 get simplify-tree
+        rules-sub
+    }
+    {
+    tn /mul eq {
+        ast tag-value 0 get simplify-tree
+        ast tag-value 1 get simplify-tree
+        rules-mul
+    }
+    {
+    tn /div eq {
+        ast tag-value 0 get simplify-tree
+        ast tag-value 1 get simplify-tree
+        rules-div
+    }
+    {
+    tn /pow eq {
+        ast tag-value 0 get simplify-tree
+        ast tag-value 1 get simplify-tree
+        rules-pow
+    }
+    {
+    tn /neg eq {
+        ast tag-value simplify-tree
+        rules-neg
+    }
+    {
+    tn /sin eq { ast tag-value simplify-tree mk-sin }
+    {
+    tn /cos eq { ast tag-value simplify-tree mk-cos }
+    {
+    tn /tan eq { ast tag-value simplify-tree mk-tan }
+    {
+    tn /exp eq { ast tag-value simplify-tree mk-exp }
+    {
+    tn /log eq { ast tag-value simplify-tree mk-log }
+    {
+        ast
+    } if-else
+    } if-else } if-else } if-else } if-else } if-else } if-else
+    } if-else } if-else } if-else } if-else } if-else
+} def
+
+/simplify {
+    % ast -- ast'
+    |ast|#4
+    /prev ast local-def
+    /ast prev simplify-tree local-def
+    {
+        ast prev ast-eq? not
+    }
+    {
+        /prev ast local-def
+        /ast prev simplify-tree local-def
+    }
+    while
+    ast
+} def
+
+
+% ======================================================================
+%  6. Demo
+%
+%  Twelve textbook expressions; for each we show the source, the
+%  derivative as it falls out of the rule application (raw), and
+%  the derivative after the simplifier reaches a fixpoint.
+% ======================================================================
+
+/demo-row {
+    % src --
+    |src|#4
+    /raw src parse /x diff local-def
+    /simp raw simplify local-def
+
+    (  f(x) = ) print src print nl
+    (    raw  : ) print raw  print-expr nl
+    (    simp : ) print simp print-expr nl
+    nl
+} def
+
+/run-demo {
+    nl
+    (===========================================================\n) print
+    (  SYMBOLIC DIFFERENTIATION   (variable: x)\n) print
+    (===========================================================\n) print
+    nl
+
+    (x)                          demo-row
+    (x ^ 2)                      demo-row
+    (x ^ 3)                      demo-row
+    (3 * x ^ 2 + 2 * x + 1)      demo-row
+    (sin(x))                     demo-row
+    (cos(x))                     demo-row
+    (tan(x))                     demo-row
+    (exp(x))                     demo-row
+    (log(x))                     demo-row
+    (x * sin(x))                 demo-row
+    (sin(x) / x)                 demo-row
+    (exp(-x ^ 2))                demo-row
+    (log(1 + x ^ 2))             demo-row
+
+    (===========================================================\n) print
+    flush
+} def
+
+run-demo
+
+

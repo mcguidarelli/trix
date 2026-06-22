@@ -1,0 +1,58 @@
+% tests/dwarf_self_peek.trx -- live self-introspection.  Load THIS running trix
+% binary's own DWARF (executable-path) and decode a known debug-only anchor
+% global, g_trix_dwarf_self_probe (defined in trix.cpp under TRX_DEBUG), from
+% live process memory via dwarf-peek-live.  Run by tests/run_dwarf_tests.sh on
+% the debug ./trix (which has -g + the anchor); the optimized binary carries no
+% debug info, so the runner only exercises this on the debug build.
+(lib/dwarf.trx) run
+
+% rt-ok: restore-immune failure counter; the file THROWS at EOF so a print-only
+% failure cannot slip the runner's verdict.   bool (label) rt-ok --
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+executable-path dwarf-load /ctx exch def
+
+% --- live peek: the CURRENT value from this process's own memory, at the
+% --- link-time address relocated by module-load-bias.  TrixDwarfSelfProbe =
+% --- { magic 0xC0FFEE, scale 1.5, count -42, tag 7 }.
+ctx (g_trix_dwarf_self_probe) dwarf-peek-live /lv exch def
+lv is-record (self: dwarf-peek-live returns a Record) rt-ok clear
+lv null eq not {
+    lv /magic get 12648430u eq (self: live magic == 0xC0FFEEu) rt-ok clear
+    lv /scale get 1.5d eq (self: live scale == 1.5d) rt-ok clear
+    lv /count get -42 eq (self: live count == -42 signed) rt-ok clear
+    lv /tag get 7b eq (self: live tag == 7b) rt-ok clear
+} if
+
+% --- static peek of the same global: the file-image initializer must agree with
+% --- the live value (the anchor is never mutated) -- cross-validates both byte
+% --- sources against one target.
+ctx (g_trix_dwarf_self_probe) dwarf-peek /sv exch def
+sv null eq not (self: dwarf-peek (static) also resolves it) rt-ok clear
+sv null eq not  lv null eq not  and {
+    lv /magic get sv /magic get eq (self: live magic == static magic) rt-ok clear
+    lv /count get sv /count get eq (self: live count == static count) rt-ok clear
+    lv /scale get sv /scale get eq (self: live scale == static scale) rt-ok clear
+} if
+
+% --- function lookup on a real ~140K-DIE binary: main must resolve to a low_pc. ---
+ctx (main) dwarf-lookup-fn /mfn exch def
+mfn null eq not (self: dwarf-lookup-fn (main) resolves) rt-ok clear
+mfn null eq not { mfn /address get 0ul gt (self: main low_pc nonzero) rt-ok clear } if
+
+% --- L-22: line table on a real ~140K-DIE binary.  main's entry low_pc -> source
+% --- row; the runner cross-checks file:line against addr2line. ---
+ctx (main) dwarf-line-fn /mloc exch def
+mloc null eq not (self: dwarf-line-fn (main) resolves a source row) rt-ok clear
+mloc null eq not {
+    mloc /line get 0 gt (self: main source line positive) rt-ok clear
+    mloc /file get is-string (self: main source file is a string) rt-ok clear
+    (main-line=) print mloc /line get =        % cross-checked against addr2line by the runner
+    (main-file=) print mloc /file get =        % cross-checked against addr2line by the runner
+} if
+
+(dwarf self-peek tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

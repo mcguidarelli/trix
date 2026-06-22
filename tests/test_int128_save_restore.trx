@@ -1,0 +1,141 @@
+% ====================================================================
+% Save/restore value preservation tests for Int128 / UInt128.
+%
+% test_int128_literal.trx already covers the *counts* (widevalue-active
+% returning to baseline).  This file covers actual *value* preservation
+% across the barrier -- the cells get relocated below the barrier at
+% new VM offsets, and the 16-byte payload must survive intact.  Also
+% covers nesting, mixed ExtValue+WideValue relocation, dict journaling,
+% and skip-level restore.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ---------- Below-barrier values untouched by restore ----------
+/base_v 42q def
+/s save def
+s restore
+base_v 42q deep-eq                  (below-barrier int128 untouched) rt-ok
+
+% ---------- Above-barrier value gets relocated with value intact ----------
+/s2 save def
+99q
+s2 restore
+99q deep-eq                         (relocated int128 preserves value) rt-ok
+
+% ---------- Payload-rich values: ensure the 128-bit word is copied faithfully ----------
+/s3 save def
+16#DEADBEEFCAFEBABE0123456789ABCDEF#uq
+s3 restore
+16#DEADBEEFCAFEBABE0123456789ABCDEF#uq deep-eq
+(relocated uint128 payload (all 128 bits) intact) rt-ok
+
+/s4 save def
+16#80000000000000000000000000000001#uq                  % MSB + LSB set
+s4 restore
+16#80000000000000000000000000000001#uq deep-eq
+(relocated uint128 MSB-and-LSB intact) rt-ok
+
+/s5 save def
+16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q                   % INT128_MAX
+s5 restore
+16#7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#q deep-eq
+(relocated int128 INT128_MAX intact) rt-ok
+
+% ---------- Stack order preserved across relocation ----------
+/s6 save def
+10q 20q 30q 40q 50q
+s6 restore
+50q deep-eq (rel order: top)     rt-ok
+40q deep-eq (rel order: 2nd)     rt-ok
+30q deep-eq (rel order: 3rd)     rt-ok
+20q deep-eq (rel order: 4th)     rt-ok
+10q deep-eq (rel order: bottom)  rt-ok
+clear
+
+% ---------- Nested save/restore ----------
+/base1 1q def
+/s_outer save def
+/mid1 2q def
+/s_inner save def
+3q 33q 333q
+s_inner restore
+333q deep-eq (nested: inner top relocated) rt-ok
+33q deep-eq  (nested: inner mid relocated) rt-ok
+3q deep-eq   (nested: inner bot relocated) rt-ok
+mid1 2q deep-eq (nested: mid survives inner restore) rt-ok
+
+s_outer restore
+base1 1q deep-eq (nested: base survives outer restore) rt-ok
+
+% ---------- Mixed ExtValue + WideValue relocation ----------
+/sM save def
+100l 200q 300.0d 400uq 500ul
+sM restore
+500ul eq     (mixed rel: ulong)   rt-ok
+400uq deep-eq (mixed rel: uint128) rt-ok
+300.0d deep-eq (mixed rel: double) rt-ok
+200q deep-eq (mixed rel: int128)  rt-ok
+100l eq      (mixed rel: long)    rt-ok
+
+% ---------- Skip-level restore collapses intermediate barriers ----------
+/s_a save def
+42q
+/s_b save def
+99q
+/s_c save def
+123q
+s_a restore                                    % restore directly to s_a
+123q deep-eq (skip-level: top from s_c frame) rt-ok
+99q deep-eq  (skip-level: mid from s_b frame) rt-ok
+42q deep-eq  (skip-level: bot from s_a frame) rt-ok
+
+% ---------- Dict mutation rollback preserves int128 values ----------
+<< /k 42q >> /d1 exch def
+/s9 save def
+d1 /k 999q put
+d1 /k get 999q deep-eq (dict int128 updated mid-save)  rt-ok
+s9 restore
+d1 /k get 42q deep-eq  (dict int128 put rolled back)   rt-ok
+
+% ---------- Composite above barrier rejected ----------
+/s_arr save def
+[1q 2q 3q]
+{ s_arr restore } try /invalid-restore eq
+(array of int128 above barrier raises invalid-restore) rt-ok clear
+clear
+
+% ---------- 100-cycle save/restore churn verifies free-list stability ----------
+/churn_vals [ 7q 77q 777q ] def
+/before //:status:widevalue-active def
+
+/churn-one {
+    /s7 save def
+    churn_vals 0 get
+    churn_vals 1 get
+    churn_vals 2 get
+    s7 restore
+    clear
+} def
+
+0 1 99 { pop churn-one } for
+
+//:status:widevalue-active before eq
+(free-list stable after 100 save/restore cycles) rt-ok
+
+% ---------- Free-list integrity ----------
+//:status:widevalue-validate (widevalue free-list integrity OK) rt-ok
+//:status:vm-validate        (vm heap integrity OK)              rt-ok
+//:status:extvalue-validate  (extvalue free-list integrity OK)   rt-ok
+
+(test_int128_save_restore.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

@@ -1,0 +1,102 @@
+% ====================================================================
+% test_b7_restore_r6.trx -- R6 restore-contract guards for global containers
+%                           that hold messages/items reachable from a
+%                           SUSPENDED coroutine (B7 follow-on (b)).
+% ====================================================================
+% A global, journal-skipped container (actor mailbox; pipe stage companion)
+% must not hold a restore-fragile LOCAL value -- one allocated at save level >= 1
+% that a future restore reclaims.  The restore-time coroutine scan walks stacks,
+% NOT container contents, so such a value dangles and a parked coroutine reads
+% freed memory on resume.  The guard is a write-site R6 check (mirrors Dict::put):
+%   * actor-send / @actor-send-retry / actor-broadcast : REJECT (/invalid-access)
+%   * actor-try-send                                    : DROP + return false
+%     (best-effort + has a bool channel to signal the drop)
+% No vm-gc-stress needed -- this is a save/restore-contract bug, not a GC bug.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- actor-send: REJECT a restore-fragile local message ---
+mark { actor-recv } actor-spawn /a exch def
+0 coroutine-sleep                              % let `a` block on actor-recv
+save /tok exch def                             % barrier at level 1
+{ 9999999999l a actor-send } try /invalid-access eq (actor-send rejects fragile-local message) rt-ok
+tok restore clear
+
+% --- actor-send: pure-value (Integer) message under save is restore-immune -> allowed ---
+mark { actor-recv } actor-spawn /b exch def
+0 coroutine-sleep
+save /tok2 exch def
+{ 42 b actor-send } try /no-error eq (actor-send allows pure-int message under save) rt-ok
+tok2 restore clear
+
+% --- actor-send: heap message at BASE (no save) -> allowed (guard is a BASE no-op) ---
+mark { actor-recv } actor-spawn /c exch def
+0 coroutine-sleep
+{ 8888888888l c actor-send } try /no-error eq (actor-send allows heap message at BASE) rt-ok
+clear
+
+% --- actor-try-send: DROP a fragile-local message and return false (no error) ---
+mark { actor-recv } actor-spawn /d exch def
+0 coroutine-sleep
+save /tok3 exch def
+9999999999l d actor-try-send not (try-send drops fragile-local message, returns false) rt-ok
+tok3 restore clear
+
+% --- actor-try-send: pure-value under save -> delivered, returns true ---
+mark { actor-recv } actor-spawn /e exch def
+0 coroutine-sleep
+save /tok4 exch def
+42 e actor-try-send (try-send delivers pure-int under save, returns true) rt-ok
+tok4 restore clear
+
+% --- actor-broadcast: REJECT a fragile-local message (no bool channel to signal a drop) ---
+mark { actor-recv } actor-spawn /f exch def
+0 coroutine-sleep
+save /tok5 exch def
+{ 9999999999l [ f ] actor-broadcast } try /invalid-access eq (broadcast rejects fragile-local message) rt-ok
+tok5 restore clear
+
+% --- genserver sends reach the SAME mailbox R6 reject ---------------------------
+% gen-call/gen-cast/gen-stop/gen-reply build a protocol message then push
+% actor-send, so they funnel through actor_send_complete's R6 guard -- there is no
+% separate genserver store path.  A send issued inside a save block builds its
+% wrapper array above the barrier (restore-fragile local), so the guard rejects it;
+% at BASE the same send is restore-immune and passes.  This locks the genserver
+% delivery path to the mailbox guard (the server need not have processed anything --
+% the reject fires at the actor-send step, before any recv).
+
+% gen-cast inside a save block -> REJECT (the [/gen-cast, msg] wrapper is fragile)
+<< /init { 0 } /handle-cast { pop } >> gen-server /gs exch def
+save /tok6 exch def
+{ gs 42 gen-cast } try /invalid-access eq (gen-cast inside save reaches the mailbox R6 reject) rt-ok
+tok6 restore clear
+
+% gen-cast at BASE -> allowed (guard is a BASE no-op)
+{ gs 7 gen-cast } try /no-error eq (gen-cast at BASE is allowed) rt-ok
+clear
+
+% gen-call inside a save block -> REJECT at the actor-send step (before it blocks on reply)
+<< /init { 0 } /handle-call { 0 swap } >> gen-server /gc exch def
+save /tok7 exch def
+{ gc 42 gen-call } try /invalid-access eq (gen-call inside save reaches the mailbox R6 reject) rt-ok
+tok7 restore clear
+
+% gen-stop inside a save block -> REJECT (the [/gen-stop, reason] wrapper is fragile)
+<< /init { 0 } >> gen-server /gx exch def
+save /tok8 exch def
+{ gx /shutdown gen-stop } try /invalid-access eq (gen-stop inside save reaches the mailbox R6 reject) rt-ok
+tok8 restore clear
+
+gs /done gen-stop  gc /done gen-stop  100 coroutine-sleep clear
+
+(test_b7_restore_r6.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

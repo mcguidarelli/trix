@@ -1,0 +1,2 @@
+42 /int128-type cast 42q /long-type cast
+42l /uint128-type cast 1uq /boolean-type cast

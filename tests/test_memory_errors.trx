@@ -1,0 +1,294 @@
+% ====================================================================
+% test_memory_errors.trx -- Phase-3 P3 batch 3: ops_memory.inl sad
+% paths (peek/poke/alloc/free, pack/unpack/pack-size, deflate/inflate
+% string + stream variants, streaming checksums, make-memory-stream,
+% bit-position ops, binary tokens).  Targets enumerated from per-line
+% gcov; every trigger and error
+% name was probed live before being pinned.  Contracts:
+% trix-reference.md 3.9 (pack/checksums/compression) and 3.20 (VM and
+% memory).
+%
+% Sandbox-mode arms (peek/poke/alloc/free raise /unsupported under
+% --sandbox) live in test_memory_sandbox.trx, which run_all.sh runs
+% with the --sandbox flag.
+%
+% Accepted-uncovered defensive arms (cannot be reached from a script):
+%   - zlib deflateInit2/inflateInit2 failures (bad params / C-heap OOM)
+%   - deflate-stream generic zlib failure (rc outside OK/BUF/END)
+%   - bit-position "must be integer" defaults (verify_operands gates
+%     both operands with VerifyIntegers first; the verify type-check
+%     contract is pinned below instead)
+%   - make_binary_token_string "cannot encode" (to-binary-token's
+%     verify mask excludes every unencodable type; verify type-check
+%     contract pinned below)
+%   - alloc malloc-failure (Linux overcommit makes a deterministic
+%     in-suite trigger impossible; ulimit-based arm belongs to the
+%     stress bucket)
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: pack format-string parse errors.  The parser is shared by
+% pack, unpack, and pack-size (one template instantiation each), so
+% each arm is triggered through all three ops.
+% ====================================================================
+
+{ (70000b) pack-size } try
+/limit-check eq (pack-size: repeat count beyond 65535) rt-ok clear
+{ (4) pack-size } try
+/invalid-format-string eq (pack-size: repeat count without specifier) rt-ok clear
+{ (z) pack-size } try
+/invalid-format-string eq (pack-size: unknown specifier) rt-ok clear
+{ (9000l) pack-size } try
+/limit-check eq (pack-size: format total beyond max string length) rt-ok clear
+
+{ mark (70000b) pack } try
+/limit-check eq (pack: repeat count beyond 65535) rt-ok clear
+{ mark (4) pack } try
+/invalid-format-string eq (pack: repeat count without specifier) rt-ok clear
+{ mark (z) pack } try
+/invalid-format-string eq (pack: unknown specifier) rt-ok clear
+{ mark (9000l) pack } try
+/limit-check eq (pack: format total beyond max string length) rt-ok clear
+
+{ (xy) (70000b) unpack } try
+/limit-check eq (unpack: repeat count beyond 65535) rt-ok clear
+{ (xy) (4) unpack } try
+/invalid-format-string eq (unpack: repeat count without specifier) rt-ok clear
+{ (xy) (z) unpack } try
+/invalid-format-string eq (unpack: unknown specifier) rt-ok clear
+{ (xy) (9000l) unpack } try
+/limit-check eq (unpack: format total beyond max string length) rt-ok clear
+
+% ====================================================================
+% SECTION 2: pack value-extraction errors across the ExtValue (Long)
+% and WideValue (Int128/UInt128) operand kinds
+% ====================================================================
+
+{ mark -1l (B) pack } try
+/range-check eq (pack B: negative Long rejected) rt-ok clear
+{ mark 0x80000000000000000000000000000000#uq (q) pack } try
+/range-check eq (pack q: UInt128 beyond INT128_MAX rejected) rt-ok clear
+{ mark -1 (Q) pack } try
+/range-check eq (pack Q: negative Integer rejected) rt-ok clear
+{ mark -1l (Q) pack } try
+/range-check eq (pack Q: negative Long rejected) rt-ok clear
+{ mark 1.5 (Q) pack } try
+/type-check eq (pack Q: Real operand rejected) rt-ok clear
+{ mark 1.5d (Q) pack } try
+/type-check eq (pack Q: Double operand rejected) rt-ok clear
+{ mark 0x100000000#l (I) pack } try
+/range-check eq (pack I: Long beyond uint32 rejected) rt-ok clear
+
+% control: q/Q round-trip with explicit endianness still works
+mark 12345678901234567890123456789q (>q) pack
+(>q) unpack
+1 eq exch 12345678901234567890123456789q eq and
+(pack/unpack: big-endian q round-trip) rt-ok clear
+
+% ====================================================================
+% SECTION 3: alloc/free/peek/poke.  Real memory access -- peek/poke
+% only ever touch alloc-derived addresses (read-write) or an address
+% parsed from this process's own read-only ELF mapping.
+% ====================================================================
+
+{ 0x100000000#l alloc } try
+/range-check eq (alloc: Long size beyond uint32 rejected) rt-ok clear
+{ 0x100000000000000000000#uq alloc } try
+/range-check eq (alloc: UInt128 size beyond uint32 rejected) rt-ok clear
+{ -1 alloc } try
+/range-check eq (alloc: negative size rejected) rt-ok clear
+{ 0 alloc } try
+/range-check eq (alloc: zero size rejected) rt-ok clear
+
+{ 42 0a poke } try
+/range-check eq (poke: null address rejected) rt-ok clear
+{ 0a /byte-type peek } try
+/range-check eq (peek: null address rejected) rt-ok clear
+
+% round-trip control across narrow / ExtValue / WideValue widths
+/rw-addr 64 alloc def
+rw-addr address-state? /addr-read-write eq exch pop
+(alloc: fresh block probes read-write) rt-ok clear
+123b rw-addr poke
+rw-addr /byte-type peek 123b eq (poke/peek: Byte round-trip) rt-ok clear
+0x123456789AB#l rw-addr poke
+rw-addr /long-type peek 0x123456789AB#l eq
+(poke/peek: Long ExtValue round-trip) rt-ok clear
+3.5d rw-addr poke
+rw-addr /double-type peek 3.5d eq
+(poke/peek: Double ExtValue round-trip) rt-ok clear
+12345678901234567890123456789q rw-addr poke
+rw-addr /int128-type peek 12345678901234567890123456789q eq
+(poke/peek: Int128 WideValue round-trip) rt-ok clear
+rw-addr free
+
+% read-only address: parse the first r--p mapping of this process
+% (the trix binary's own ELF read-only segment) from /proc/self/maps
+/maps (/proc/self/maps) (r)#b stream def
+/buf 512 string def
+/roline () def
+{
+    maps buf read-line
+    {
+        /line exch def
+        line ( r--p ) contains? { /roline line def exit } if
+    } { pop exit } if-else
+} loop
+maps close-stream
+/ro-addr (0x) roline ( ) split 0 get (-) split 0 get concat (#a) concat
+to-number def
+
+ro-addr address-state? /addr-read-only eq exch pop
+(address-state?: ELF r--p mapping probes read-only) rt-ok clear
+{ ro-addr /byte-type peek pop /no-error } try
+/no-error eq (peek: read-only address is readable) rt-ok clear
+{ 42 ro-addr poke } try
+/read-only eq (poke: read-only address rejected) rt-ok clear
+
+% ====================================================================
+% SECTION 4: deflate/inflate output caps.  zlib output is capped at
+% MaxStringLength (the result must fit one string); both directions
+% raise /vm-full when the cap is exceeded.  Caught vm-full still
+% prints its diagnostic line to stderr -- expected noise here.
+% ====================================================================
+
+{ (abc) 10 deflate-level } try
+/range-check eq (deflate-level: level beyond 9 rejected) rt-ok clear
+
+% level-0 stored blocks of a max-length string must exceed the cap
+% (input + per-block header)
+{ (x) 65535 repeat-string 0 deflate-level } try
+/vm-full eq (deflate: level-0 output beyond max string length) rt-ok clear
+
+% compress 120000 compressible bytes via deflate-stream (file ->
+% string-stream), then the one-shot inflate of the ~134-byte result
+% must overflow the 65535-byte output cap
+/blk (a) 60000 repeat-string def
+/zf (/tmp/trix_mem_zeros.bin) (w)#b stream def
+zf blk write-string  zf blk write-string
+zf close-stream
+/zin (/tmp/trix_mem_zeros.bin) (r)#b stream def
+/zout 65000 make-string-stream def
+zin zout deflate-stream
+zin close-stream
+/comp zout get-string-stream def
+zout close-stream
+{ comp inflate } try
+/vm-full eq (inflate: output beyond max string length) rt-ok clear
+
+{ (garbage!) inflate } try
+/range-check eq (inflate: malformed bitstream rejected) rt-ok clear
+
+% ====================================================================
+% SECTION 5: streaming compress/checksum access arms.  A (w)-mode file
+% stream is not readable; a make-memory-stream result is not writable.
+% ====================================================================
+
+/wstream (/tmp/trix_mem_w.bin) (w)#b stream def
+/rstream (abc) make-memory-stream def
+
+{ wstream rstream deflate-stream } try
+/invalid-stream-access eq (deflate-stream: unreadable input rejected) rt-ok clear
+{ rstream rstream deflate-stream } try
+/invalid-stream-access eq (deflate-stream: unwritable output rejected) rt-ok clear
+{ rstream rstream 11 deflate-stream-level } try
+/range-check eq (deflate-stream-level: level beyond 9 rejected) rt-ok clear
+{ wstream rstream 5 deflate-stream-level } try
+/invalid-stream-access eq (deflate-stream-level: unreadable input rejected) rt-ok clear
+{ rstream rstream 5 deflate-stream-level } try
+/invalid-stream-access eq (deflate-stream-level: unwritable output rejected) rt-ok clear
+{ wstream rstream inflate-stream } try
+/invalid-stream-access eq (inflate-stream: unreadable input rejected) rt-ok clear
+{ rstream rstream inflate-stream } try
+/invalid-stream-access eq (inflate-stream: unwritable output rejected) rt-ok clear
+{ wstream adler32-stream } try
+/invalid-stream-access eq (adler32-stream: unreadable stream rejected) rt-ok clear
+{ wstream crc32-stream } try
+/invalid-stream-access eq (crc32-stream: unreadable stream rejected) rt-ok clear
+{ wstream fletcher32-stream } try
+/invalid-stream-access eq (fletcher32-stream: unreadable stream rejected) rt-ok clear
+
+wstream close-stream
+rstream close-stream
+
+% ====================================================================
+% SECTION 6: make-memory-stream slot exhaustion.  try's W04 rollback
+% discards the opened handles, so the harness runs inside save/restore
+% -- Save::restore closes every stream opened above the barrier and
+% the slots recover.
+% ====================================================================
+
+save
+{ { (x) make-memory-stream } loop } try
+/limit-check eq (make-memory-stream: slot exhaustion raises limit-check) rt-ok clear
+-1 restore
+(yz) make-memory-stream dup read-all (yz) eq exch close-stream
+(make-memory-stream: slots recovered after restore) rt-ok clear
+
+% ====================================================================
+% SECTION 7: bit-position ops (bit? / bit-set / bit-clear /
+% bit-toggle).  Position range scales with the value's width: Byte 0-7,
+% Integer 0-31, Long 0-63 (ExtValue), Int128 0-127 (WideValue).
+% ====================================================================
+
+{ 1b 8 bit? } try
+/range-check eq (bit?: position 8 beyond Byte width) rt-ok clear
+{ 1 32 bit-set } try
+/range-check eq (bit-set: position 32 beyond Integer width) rt-ok clear
+{ 1l 64 bit-toggle } try
+/range-check eq (bit-toggle: position 64 beyond Long width) rt-ok clear
+{ 1 /int128-type cast 128 bit-clear } try
+/range-check eq (bit-clear: position 128 beyond Int128 width) rt-ok clear
+{ 1 -1 bit-set } try
+/range-check eq (bit-set: negative position rejected) rt-ok clear
+{ 1 1.5 bit-set } try
+/type-check eq (bit-set: Real position rejected) rt-ok clear
+{ 1.5 1 bit-set } try
+/type-check eq (bit-set: Real value rejected) rt-ok clear
+
+% ====================================================================
+% SECTION 8: binary token encoding
+% ====================================================================
+
+{ /zz-fresh-user-name-zz to-binary-token } try
+/undefined eq (to-binary-token: user name not in system table) rt-ok clear
+{ (a) 65535 repeat-string to-binary-token } try
+/limit-check eq (to-binary-token: max-length string overflows token) rt-ok clear
+{ [1] to-binary-token } try
+/type-check eq (to-binary-token: array rejected) rt-ok clear
+
+% ====================================================================
+% SECTION 9: global-VM region pass -- representative arms with the
+% operands and format strings allocated in the global region
+% ====================================================================
+
+${
+    { mark -1l (B) pack } try
+    /range-check eq (global: pack B negative Long rejected) rt-ok clear
+    { (z) pack-size } try
+    /invalid-format-string eq (global: pack-size unknown specifier) rt-ok clear
+    { 1l 64 bit-toggle } try
+    /range-check eq (global: bit-toggle position beyond Long width) rt-ok clear
+    mark 1 2 (BB) pack (BB) unpack
+    2 eq exch 2b eq and exch 1b eq and
+    (global: pack/unpack round-trip) rt-ok clear
+}
+
+% ====================================================================
+% Done
+% ====================================================================
+
+(Memory error tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

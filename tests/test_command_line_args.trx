@@ -1,0 +1,85 @@
+% test_command_line_args.trx -- exercises the command-line-args op via
+% subprocess invocations of trix against a helper script.  Each scenario
+% spawns ./trix with a different argv tail and asserts that the helper's
+% stdout (one line per element + END marker) matches the expected bytes.
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+% --- in-process op surface checks (no subprocess) ----------------------
+% These cover the static surface: the operator is bound, returns an
+% array, and is sandbox-safe.  Argv content is whatever the test runner
+% itself was launched with -- we don't assert anything about it.
+
+command-line-args is-array (returns array) rt-ok
+command-line-args length 0 ge (length non-negative) rt-ok
+
+% --- subprocess shape checks (host shell) -----------------------------
+% Pattern: assemble a command string, run it via `shell`, assert stdout
+% matches the expected byte sequence exactly.  Exit code must be 0 in
+% every passing case.
+
+/check-shape {
+    % cmd-str expected-str label-str check-shape :- --
+    /lbl exch def
+    /expected exch def
+    /cmd exch def
+    cmd shell           % captured-stdout exit-code
+    /xc exch def
+    /captured exch def
+    captured expected eq xc 0 eq and lbl rt-ok
+} def
+
+% empty tail -> just END marker
+(./trix tests/test_command_line_args_helper.trx)
+(END\n)
+(empty argv tail) check-shape
+
+% single element
+(./trix tests/test_command_line_args_helper.trx --foo)
+(--foo\nEND\n)
+(single arg --foo) check-shape
+
+% multiple elements, including double-dash style
+(./trix tests/test_command_line_args_helper.trx --seed 42 --ai-peek)
+(--seed\n42\n--ai-peek\nEND\n)
+(multi-arg --seed 42 --ai-peek) check-shape
+
+% bare positional + flag mix
+(./trix tests/test_command_line_args_helper.trx alpha beta gamma)
+(alpha\nbeta\ngamma\nEND\n)
+(bare positional triple) check-shape
+
+% sandbox does NOT disable argv (acceptance criterion)
+(./trix --sandbox tests/test_command_line_args_helper.trx --in-sandbox)
+(--in-sandbox\nEND\n)
+(sandbox-mode argv passes through) check-shape
+
+% trix flag BEFORE filename is consumed; flag AFTER filename goes to script
+(./trix -q tests/test_command_line_args_helper.trx --to-script)
+(--to-script\nEND\n)
+(trix opt before, script opt after) check-shape
+
+% --- summary --------------------------------------------------------
+
+(\npassed: ) print passed =
+(failed: ) print failed =
+(total: ) print total =
+flush
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

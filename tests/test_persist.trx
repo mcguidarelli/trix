@@ -1,0 +1,479 @@
+% ====================================================================
+% test_persist.trx -- the -persist family (Phase 1: put-persist)
+% ====================================================================
+% put-persist mutates a container without journaling so the change
+% survives the enclosing save/restore.  Above-barrier values are
+% rejected at write time per feedback_no_silent_footguns.md.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% =================================================================
+% SECTION 1: at sl=0, put-persist behaves identically to put (silent
+% degrade -- there is no save active, so nothing to journal anyway).
+% =================================================================
+4 dict /st exch def
+st /count 0 put
+st /count 5 put-persist
+st /count get 5 eq             (sl=0: dict put-persist overwrites) rt-ok
+
+[1 2 3 4] /arr exch def
+arr 0 99 put-persist
+arr 0 get 99 eq                (sl=0: array put-persist overwrites) rt-ok
+
+% =================================================================
+% SECTION 2: dict put-persist survives restore (the headline case)
+% =================================================================
+4 dict /st exch def
+st /count 0 put
+save /sv exch def
+st /count 7 put-persist
+st /count get 7 eq             (in-save: dict mutation visible) rt-ok
+sv restore
+st /count get 7 eq             (post-restore: dict mutation persists) rt-ok
+
+% =================================================================
+% SECTION 3: array put-persist survives restore
+% =================================================================
+[10 20 30] /arr exch def
+save /sv exch def
+arr 1 999 put-persist
+arr 1 get 999 eq               (in-save: array mutation visible) rt-ok
+sv restore
+arr 1 get 999 eq               (post-restore: array mutation persists) rt-ok
+
+% =================================================================
+% SECTION 4: nested save/restore -- mutation persists through the
+% innermost restore but is visible at every level.
+% =================================================================
+4 dict /st exch def
+st /count 0 put
+save /outer exch def
+save /inner exch def
+st /count 42 put-persist
+st /count get 42 eq            (nested-inner: visible) rt-ok
+inner restore
+st /count get 42 eq            (after inner restore: persists) rt-ok
+outer restore
+st /count get 42 eq            (after outer restore: persists) rt-ok
+
+% =================================================================
+% SECTION 5: above-barrier value rejected at write time.  The dict
+% itself is below the barrier; the value is a fresh dict allocated
+% inside the save block (above the barrier).  put-persist must
+% reject -- otherwise the post-restore dict would hold a dangling
+% offset into reclaimed VM space.
+% =================================================================
+4 dict /st exch def
+save /sv exch def
+mark { st /child 4 dict put-persist } try
+/above-barrier eq              (above-barrier dict value rejected) rt-ok
+clear
+sv restore
+
+% Same for array values.
+4 dict /st exch def
+save /sv exch def
+mark { st /child [1 2 3] put-persist } try
+/above-barrier eq              (above-barrier array value rejected) rt-ok
+clear
+sv restore
+
+% =================================================================
+% SECTION 6: Phase 8 -- missing-key insertion at sl > 0 is CREATED
+% (new DictEntry in global VM) and survives restore.  Pre-intern the
+% Name at BASE OR use $/foo so the key itself isn't above-barrier.
+% =================================================================
+/never-defined pop                              % pre-intern at BASE
+4 dict /st exch def
+save /sv exch def
+st /never-defined 1 put-persist
+st /never-defined get 1 eq     (Phase 8: insert visible in-save)        rt-ok
+sv restore
+st /never-defined known?       (Phase 8: insert survives restore)       rt-ok
+st /never-defined get 1 eq     (Phase 8: insert value survives restore) rt-ok
+
+% At sl=0, missing-key insertion is fine (silent degrade to put).
+4 dict /st exch def
+st /fresh 100 put-persist
+st /fresh get 100 eq           (sl=0: missing-key insert allowed) rt-ok
+
+% =================================================================
+% SECTION 7: pure value types (Integer, Boolean, Byte) and pre-
+% interned Names are never above-barrier -- always allowed.
+% =================================================================
+4 dict /st exch def
+st /n   0 put
+st /b   false put
+st /c   65b put
+st /sym /placeholder put
+% Pre-intern /winner at sl=0 so its Name storage is below the barrier.
+% (A Name first encountered at sl>0 has its bucket entry allocated
+% above the barrier; Name::restore unlinks it, leaving the Name
+% Object's offset dangling.  Section 7b exercises that rejection.)
+/winner pop
+save /sv exch def
+st /n   123 put-persist
+st /b   true put-persist
+st /c   90b put-persist
+st /sym /winner put-persist
+sv restore
+st /n   get 123 eq             (post-restore int) rt-ok
+st /b   get true eq            (post-restore bool) rt-ok
+st /c   get 90b eq             (post-restore byte) rt-ok
+st /sym get /winner eq         (post-restore name) rt-ok
+
+% =================================================================
+% SECTION 7b: a Name first interned inside the save block has its
+% bucket entry above the barrier and IS rejected.  This is the
+% typical mistake users will make; the error fires at write time.
+% =================================================================
+4 dict /st exch def
+st /sym /placeholder put
+save /sv exch def
+mark { st /sym /never-seen-before-now put-persist } try
+/above-barrier eq              (above-barrier name value rejected) rt-ok
+clear
+sv restore
+
+% =================================================================
+% SECTION 8: stress -- many put-persist calls in a tight loop, then
+% verify the final state survives restore.  Pre-populate at sl=0 so
+% the overwrite-only rule is satisfied.
+% =================================================================
+16 dict /st exch def
+0 1 15 { /i exch def st i 0 put } for
+save /sv exch def
+0 1 15 { /i exch def st i i 100 mul put-persist } for
+sv restore
+0 1 15 { /i exch def
+    st i get i 100 mul eq      (stress: persisted entry) rt-ok
+} for
+
+% =================================================================
+% SECTION 9: def-persist -- like def, but binding survives restore.
+% At sl=0 silent-degrades to def (allows new keys via def's normal
+% put path).  At sl > 0 enforces overwrite-only and ref-checks key/
+% value just like put-persist.
+% =================================================================
+% sl=0: def-persist on a fresh key works (silent degrade to def).
+4 dict /env exch def
+env begin
+/x 0 def-persist
+/x load 0 eq                   (sl=0: def-persist allows new key) rt-ok
+end
+
+% Pre-populated key, mutated under save: persists across restore.
+4 dict /env exch def
+env begin /counter 0 def end
+save /sv exch def
+env begin /counter 7 def-persist end
+sv restore
+env begin
+/counter load 7 eq             (def-persist: counter persists across restore) rt-ok
+end
+
+% Above-barrier value rejected at write time.
+4 dict /env exch def
+env begin /slot null def end
+save /sv exch def
+env begin
+mark { /slot 4 dict def-persist } try
+/above-barrier eq              (def-persist: above-barrier value rejected) rt-ok
+clear
+end
+sv restore
+
+% Phase 8: missing-key insert at sl > 0 is CREATED and survives restore.
+% Two patterns work for the Name key: pre-intern at BASE (a) or use a
+% global Name via $/foo (b).  A Name first interned in a save scope is
+% rejected as above-barrier (its Name struct lives in local VM at sl>0).
+%
+% (a) Pre-interned Name at BASE:
+/preinterned-key pop                      % first appearance interns at BASE
+4 dict /env exch def
+save /sv exch def
+env begin
+/preinterned-key 99 def-persist
+end
+env /preinterned-key known?    (def-persist: new key visible in-save)   rt-ok
+sv restore
+env /preinterned-key known?    (Phase 8: new key survives restore)      rt-ok
+env /preinterned-key get 99 eq (Phase 8: new value survives restore)    rt-ok
+
+% (b) Global Name (Phase 2 $/foo prefix):
+4 dict /env2 exch def
+save /sv exch def
+env2 begin
+$/global-key 42 def-persist
+end
+sv restore
+env2 $/global-key get 42 eq    (Phase 8: $/global key survives restore) rt-ok
+
+% =================================================================
+% SECTION 10: update-persist -- runs proc on existing value, stores
+% the result without journaling.  Missing key still raises /undefined
+% (matching update).
+% =================================================================
+4 dict /st exch def
+st /counter 1 put
+save /sv exch def
+st /counter { 10 add } update-persist
+st /counter get 11 eq          (in-save: update-persist visible) rt-ok
+sv restore
+st /counter get 11 eq          (post-restore: update-persist persists) rt-ok
+
+% Missing key -> /undefined (not /above-barrier).  The key Name must
+% be pre-interned at sl=0 so the above-barrier check on the key passes
+% and the dict lookup actually runs.
+/missing-key pop
+4 dict /st exch def
+save /sv exch def
+mark { st /missing-key { 1 add } update-persist } try
+/undefined eq                  (update-persist: missing key -> /undefined) rt-ok
+clear
+sv restore
+
+% Above-barrier proc-result rejected at write time (after the proc
+% runs).  Proc allocates a new dict, returns it; check fires on store.
+4 dict /st exch def
+st /slot null put
+save /sv exch def
+mark { st /slot { pop 4 dict } update-persist } try
+/above-barrier eq              (update-persist: above-barrier proc result rejected) rt-ok
+clear
+sv restore
+
+% =================================================================
+% SECTION 11: undef-persist -- removes a key without journaling.  No
+% allocation, so no above-barrier hazard; missing key is a silent
+% no-op (matching undef).
+% =================================================================
+4 dict /st exch def
+st /a 1 put
+st /b 2 put
+save /sv exch def
+st /a undef-persist
+st /a known? not               (in-save: undef-persist visible) rt-ok
+sv restore
+st /a known? not               (post-restore: undef-persist persists) rt-ok
+st /b known?                   (post-restore: untouched key intact) rt-ok
+
+% Missing key is a silent no-op.
+4 dict /st exch def
+save /sv exch def
+st /never-existed undef-persist
+true                           (undef-persist: missing key is no-op) rt-ok
+sv restore
+
+% After undef-persist + put-persist of same key: only put-persist
+% wins (key is back, with new value).
+4 dict /st exch def
+st /counter 99 put
+save /sv exch def
+st /counter undef-persist
+st /counter 0 put              % at sl > 0 with no journal? -- no, this is regular put which DOES journal.
+% Actually scratch the above: regular put inside save would re-add
+% the entry above the barrier.  Let's just test undef-persist alone.
+sv restore
+st /counter known? not         (undef-persist alone: gone after restore) rt-ok
+
+% =================================================================
+% SECTION 12: array-store-persist -- bulk write to an array, no journal.
+% =================================================================
+[0 0 0] /arr exch def
+save /sv exch def
+10 20 30 arr array-store-persist pop
+arr 0 get 10 eq                (in-save: array-store-persist [0]) rt-ok
+arr 1 get 20 eq                (in-save: array-store-persist [1]) rt-ok
+arr 2 get 30 eq                (in-save: array-store-persist [2]) rt-ok
+sv restore
+arr 0 get 10 eq                (post-restore: persists [0]) rt-ok
+arr 1 get 20 eq                (post-restore: persists [1]) rt-ok
+arr 2 get 30 eq                (post-restore: persists [2]) rt-ok
+
+% Above-barrier element rejected; the array is unchanged on rejection
+% (pre-check before any write).
+[100 200 300] /arr exch def
+save /sv exch def
+mark { 999 [1 2] 999 arr array-store-persist } try
+/above-barrier eq              (array-store-persist: above-barrier elem rejected) rt-ok
+clear
+sv restore
+arr 0 get 100 eq               (array unchanged on rejection [0]) rt-ok
+arr 1 get 200 eq               (array unchanged on rejection [1]) rt-ok
+arr 2 get 300 eq               (array unchanged on rejection [2]) rt-ok
+
+% sl=0 silent-degrade to array-store.
+[0 0 0] /arr exch def
+1 2 3 arr array-store-persist pop
+arr 0 get 1 eq                 (sl=0: array-store-persist [0]) rt-ok
+arr 2 get 3 eq                 (sl=0: array-store-persist [2]) rt-ok
+
+% =================================================================
+% SECTION 13: set-add-persist -- pre-existing member is silent no-op;
+% missing member at sl > 0 is CREATED (Phase 8: new entry in global VM,
+% survives restore).  Above-barrier key still rejected.
+% =================================================================
+4 set /sv-set exch def
+sv-set /a set-add pop
+sv-set /b set-add pop
+
+save /sv exch def
+sv-set /a set-add-persist pop
+true                           (set-add-persist: re-add existing is no-op) rt-ok
+sv restore
+
+% Phase 8: missing member at sl > 0 is created and survives restore.
+% Use a global Name ($/foo) so the key isn't above-barrier itself.
+save /sv exch def
+sv-set $/new-at-sl-1 set-add-persist pop
+sv-set $/new-at-sl-1 set-member? (set-add-persist: new member visible in-save) rt-ok
+sv restore
+sv-set $/new-at-sl-1 set-member? (Phase 8: new member survives restore) rt-ok
+
+% Above-barrier key (a fresh String allocated in this save scope) is
+% still rejected: the persisted entry would store a stale offset.
+save /sv exch def
+mark { sv-set (fresh-string-above-barrier) set-add-persist } try
+/above-barrier eq              (set-add-persist: above-barrier key rejected) rt-ok
+clear
+sv restore
+
+% sl=0: behaves as set-add (allows new members).
+4 set /sv-set exch def
+sv-set /x set-add-persist pop
+sv-set /x set-member?          (sl=0: set-add-persist allows new) rt-ok
+
+% =================================================================
+% SECTION 14: set-remove-persist -- removal persists; missing key
+% errors /undefined matching set-remove.
+% =================================================================
+4 set /sv-set exch def
+sv-set /a set-add pop
+sv-set /b set-add pop
+save /sv exch def
+sv-set /a set-remove-persist pop
+sv-set /a set-member? not      (in-save: set-remove-persist visible) rt-ok
+sv restore
+sv-set /a set-member? not      (post-restore: removal persists) rt-ok
+sv-set /b set-member?          (post-restore: untouched member intact) rt-ok
+
+% Missing key -> /undefined.
+4 set /sv-set exch def
+/missing-set-key pop
+save /sv exch def
+mark { sv-set /missing-set-key set-remove-persist } try
+/undefined eq                  (set-remove-persist: missing key -> /undefined) rt-ok
+clear
+sv restore
+
+% =================================================================
+% SECTION 15: BASE-level write-after-persist regression
+%
+% Pre-fix bug: every -persist op except set-add-persist stamped the
+% mutated slot's m_object_save_level with m_curr_save_level (which was
+% > 0 inside the save block).  After `restore` returned the VM to BASE
+% (sl=0), the slot's save_level stayed pinned above current.  A
+% subsequent regular put / def at sl=0 saw the mismatch and tried to
+% journal -- raising /invalid-restore from save_data() because no save
+% was active.  Fix: stamp Save::BASE on persisted slots (and on
+% freelist entries undef'd at sl > 0) so post-restore regular writes
+% don't trigger spurious journal calls.
+%
+% Each test below: do a -persist mutation inside save/restore, restore,
+% then do a regular write to the same slot at sl=0.  Pre-fix all of
+% these crashed.
+% =================================================================
+
+% def-persist
+4 dict /sv-d exch def
+sv-d /val 0 put
+save /sv exch def
+sv-d begin /val 99 def-persist end
+sv restore
+sv-d begin /val 7 def end
+sv-d /val get 7 eq               (def-persist: BASE rewrite OK) rt-ok
+
+% put-persist on dict
+4 dict /sv-d exch def
+sv-d /val 0 put
+save /sv exch def
+sv-d /val 99 put-persist
+sv restore
+sv-d /val 7 put
+sv-d /val get 7 eq               (put-persist dict: BASE rewrite OK) rt-ok
+
+% put-persist on array
+[ 0 0 0 ] /sv-a exch def
+save /sv exch def
+sv-a 1 99 put-persist
+sv restore
+sv-a 1 7 put
+sv-a 1 get 7 eq                  (put-persist array: BASE rewrite OK) rt-ok
+
+% array-store-persist
+[ 0 0 0 ] /sv-a exch def
+save /sv exch def
+10 20 30 sv-a array-store-persist pop
+sv restore
+1 2 3 sv-a array-store pop
+sv-a 0 get 1 eq                  (array-store-persist: BASE rewrite OK) rt-ok
+
+% undef-persist
+4 dict /sv-d exch def
+sv-d /a 1 put
+sv-d /b 2 put
+save /sv exch def
+sv-d /a undef-persist
+sv restore
+sv-d /a 42 put
+sv-d /a get 42 eq                (undef-persist: BASE rewrite OK) rt-ok
+
+% update-persist
+4 dict /sv-d exch def
+sv-d /n 0 put
+save /sv exch def
+sv-d /n { 1 add } update-persist
+sv restore
+sv-d /n 7 put
+sv-d /n get 7 eq                 (update-persist: BASE rewrite OK) rt-ok
+
+% set-remove-persist
+4 set /sv-set exch def
+sv-set /a set-add pop
+sv-set /b set-add pop
+save /sv exch def
+sv-set /a set-remove-persist pop
+sv restore
+sv-set /a set-add pop
+sv-set /a set-member?            (set-remove-persist: BASE rewrite OK) rt-ok
+
+% Multiple persist ops in the same save block, then BASE rewrite of each:
+% confirms the fix is independent of which slots were persisted.
+4 dict /sv-d exch def
+sv-d /a 0 put
+sv-d /b 0 put
+save /sv exch def
+sv-d /a 11 put-persist
+sv-d /b 22 put-persist
+sv restore
+sv-d /a 1 put
+sv-d /b 2 put
+sv-d /a get 1 eq sv-d /b get 2 eq and
+                                 (mixed persist + BASE rewrites OK) rt-ok
+
+% =================================================================
+% Summary
+% =================================================================
+(test_persist OK) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

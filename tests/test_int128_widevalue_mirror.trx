@@ -1,0 +1,284 @@
+% ====================================================================
+% Mirror of test_extvalue.trx long/ulong cases for Int128/UInt128.
+%
+% WideValue is the 16-byte heap cell used for Int128/UInt128 (analogous
+% to ExtValue's 8-byte cell for Long/ULong/Double/Address). The
+% ExtValue suite exhaustively tortures its heap mechanism; this file
+% mirrors that discipline for WideValue -- stack manipulation, nested
+% arrays, mass creation/clear, free-list recycling, and recovery from
+% errors -- because the feature sprint left several of these paths
+% under-tested.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Basic creation and value preservation
+% ====================================================================
+
+42q type /int128-type eq       (int128: type is int128-type) rt-ok clear
+42q 42q deep-eq                (int128: value preserved) rt-ok clear
+-1q -1q deep-eq                (int128: negative value) rt-ok clear
+0q 0q deep-eq                  (int128: zero) rt-ok clear
+1q 1q deep-eq                  (int128: one) rt-ok clear
+-100q -100q deep-eq            (int128: negative hundred) rt-ok clear
+
+42uq type /uint128-type eq     (uint128: type is uint128-type) rt-ok clear
+42uq 42uq deep-eq              (uint128: value preserved) rt-ok clear
+0uq 0uq deep-eq                (uint128: zero) rt-ok clear
+1uq 1uq deep-eq                (uint128: one) rt-ok clear
+
+170141183460469231731687303715884105727q 170141183460469231731687303715884105727q deep-eq
+    (int128: INT128_MAX preserved) rt-ok clear
+170141183460469231731687303715884105727q //:systemdict:numbers:int128-type:max deep-eq
+    (int128: INT128_MAX matches numbers dict) rt-ok clear
+//:systemdict:numbers:int128-type:min //:systemdict:numbers:int128-type:min deep-eq
+    (int128: INT128_MIN preserved) rt-ok clear
+340282366920938463463374607431768211454uq 340282366920938463463374607431768211454uq deep-eq
+    (uint128: near-max preserved) rt-ok clear
+
+% ====================================================================
+% SECTION 2: dup/copy behavior (independence)
+% ====================================================================
+
+42q dup 42q deep-eq              (dup int128: top copy correct) rt-ok
+    42q deep-eq                  (dup int128: second copy correct) rt-ok clear
+
+42q dup 1q add 43q deep-eq       (dup int128 indep: modified is 43q) rt-ok
+    42q deep-eq                  (dup int128 indep: original is 42q) rt-ok clear
+
+99uq dup 99uq deep-eq            (dup uint128: top copy correct) rt-ok
+    99uq deep-eq                 (dup uint128: second copy correct) rt-ok clear
+
+99uq dup 1uq add 100uq deep-eq   (dup uint128 indep: modified is 100uq) rt-ok
+    99uq deep-eq                 (dup uint128 indep: original is 99uq) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Stack operations with WideValue (exch, roll, index)
+% ====================================================================
+
+1q 2q exch
+    1q deep-eq                   (exch int128: top is 1q) rt-ok
+    2q deep-eq                   (exch int128: second is 2q) rt-ok clear
+
+1q 2q 3q  3 1 roll
+    2q deep-eq                   (roll int128: top is 2q) rt-ok
+    1q deep-eq                   (roll int128: second is 1q) rt-ok
+    3q deep-eq                   (roll int128: third is 3q) rt-ok clear
+
+10q 20q 30q
+    2 index 10q deep-eq          (index int128: [2] is 10q) rt-ok
+    clear
+
+10l 20q
+    1 index 10l eq               (index mixed long+int128: [1] is 10l) rt-ok
+    clear
+
+% ====================================================================
+% SECTION 4: In arrays (including nested)
+% ====================================================================
+
+[10q 20q 30q]
+    dup 0 get 10q deep-eq        (array int128: elem 0) rt-ok
+    dup 2 get 30q deep-eq        (array int128: elem 2) rt-ok
+    pop clear
+
+[[1q 2q] [3q 4q]]
+    dup 0 get 0 get 1q deep-eq   (nested int128: [0][0]) rt-ok
+    dup 0 get 1 get 2q deep-eq   (nested int128: [0][1]) rt-ok
+    dup 1 get 0 get 3q deep-eq   (nested int128: [1][0]) rt-ok
+    dup 1 get 1 get 4q deep-eq   (nested int128: [1][1]) rt-ok
+    pop clear
+
+% Array-copy with WideValue elements
+[10q 20q 30q] 3 array copy
+    dup 0 get 10q deep-eq        (copy array int128: elem 0) rt-ok
+    dup 1 get 20q deep-eq        (copy array int128: elem 1) rt-ok
+    dup 2 get 30q deep-eq        (copy array int128: elem 2) rt-ok
+    pop clear
+
+% exch of two WideValue-containing arrays
+[1q] [2q] exch
+    dup 0 get 1q deep-eq         (exch arrays int128: top has 1q) rt-ok pop
+    dup 0 get 2q deep-eq         (exch arrays int128: second has 2q) rt-ok pop
+    clear
+
+% ====================================================================
+% SECTION 5: In dictionaries as values
+% ====================================================================
+
+<< /a 42q /b 99q >>
+    dup /a get 42q deep-eq       (dict int128 val: /a) rt-ok
+    dup /b get 99q deep-eq       (dict int128 val: /b) rt-ok
+    pop clear
+
+% Overwrite an int128 value with another int128
+<< /x 10q >>
+    dup /x 20q put
+    dup /x get 20q deep-eq       (dict int128 overwrite) rt-ok
+    pop clear
+
+<< /big 999999999999uq >>
+    dup /big get 999999999999uq deep-eq (dict uint128 val) rt-ok
+    pop clear
+
+% Mixed value types (int128 + long + double)
+<< /h 42q /l 42l /d 3.14d /uh 100uq >>
+    dup /h get 42q deep-eq       (dict mixed: int128) rt-ok
+    dup /l get 42l eq            (dict mixed: long coexists) rt-ok
+    dup /d get 3.14d eq          (dict mixed: double coexists) rt-ok
+    dup /uh get 100uq deep-eq    (dict mixed: uint128) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 6: save/restore with scope variables
+% ====================================================================
+
+/sv-int128-val 0q def
+save
+    /sv-int128-val 42q def
+    sv-int128-val 42q deep-eq    (save int128: modified inside save) rt-ok
+restore
+sv-int128-val 0q deep-eq         (restore int128: reverted to 0q) rt-ok clear
+
+/sv-uint128-val 0uq def
+save
+    /sv-uint128-val 999uq def
+    sv-uint128-val 999uq deep-eq (save uint128: modified inside save) rt-ok
+restore
+sv-uint128-val 0uq deep-eq       (restore uint128: reverted to 0uq) rt-ok clear
+
+% ====================================================================
+% SECTION 7: status widevalue-active tracking
+% ====================================================================
+
+/before //:status:widevalue-active def
+1q 2q add pop
+//:status:widevalue-active before eq (status: add/free returns to baseline) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Arithmetic chains
+% ====================================================================
+
+1q 2q add 3q add 4q add 5q add 15q deep-eq
+    (chain add: 1+2+3+4+5=15 int128) rt-ok clear
+
+1uq 2uq mul 3uq mul 4uq mul 24uq deep-eq
+    (chain mul: 1*2*3*4=24 uint128) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Stress / free-list recycling
+% ====================================================================
+
+% Create many 128-bit values via loop, verify they survive in array
+/stress-arr 100 array def
+0 1 99 {
+    dup                              % idx idx
+    /int128-type cast                % idx idx_as_int128
+    1000q mul                        % idx (idx*1000)h
+    stress-arr 3 1 roll put
+} for
+stress-arr 0 get 0q deep-eq          (stress int128: elem 0) rt-ok
+stress-arr 50 get 50000q deep-eq     (stress int128: elem 50) rt-ok
+stress-arr 99 get 99000q deep-eq     (stress int128: elem 99) rt-ok clear
+
+% save / create many / restore / create again (free list recycling)
+save
+    /stress-save-arr 50 array def
+    0 1 49 {
+        dup
+        /int128-type cast
+        100q mul
+        stress-save-arr 3 1 roll put
+    } for
+    stress-save-arr 25 get 2500q deep-eq (stress save: elem 25 before restore) rt-ok
+restore
+
+% After restore, create again to exercise free list
+/stress-recycle-arr 50 array def
+0 1 49 {
+    dup
+    /int128-type cast
+    200q mul
+    stress-recycle-arr 3 1 roll put
+} for
+stress-recycle-arr 25 get 5000q deep-eq (stress recycle: elem 25 after restore) rt-ok clear
+
+% Nested save/restore with int128 at each level
+save
+    /sv-h1 100q def
+    save
+        /sv-h2 200q def
+        save
+            /sv-h3 300q def
+            sv-h3 300q deep-eq   (nested stress: level 3) rt-ok
+        restore
+        sv-h2 200q deep-eq       (nested stress: level 2 after inner) rt-ok
+    restore
+    sv-h1 100q deep-eq           (nested stress: level 1 after mid) rt-ok
+restore
+clear
+
+% Array of 100 int128 values, sort, verify order
+/sort-arr 100 array def
+0 1 99 {
+    dup
+    99 exch sub
+    /int128-type cast
+    sort-arr 3 1 roll put
+} for
+sort-arr sort
+    dup 0 get 0q deep-eq         (sort 100 int128: first is 0q) rt-ok
+    dup 49 get 49q deep-eq       (sort 100 int128: middle is 49q) rt-ok
+    dup 99 get 99q deep-eq       (sort 100 int128: last is 99q) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 10: Mass clear exercises widevalue free-list
+% ====================================================================
+
+1q 2q 3q 4q 5q 6q 7q 8q 9q 10q
+1uq 2uq 3uq 4uq 5uq 6uq 7uq 8uq 9uq 10uq
+count 20 eq                       (mass int128/uint128: 20 on stack) rt-ok
+clear
+count 0 eq                        (mass int128/uint128: empty after clear) rt-ok clear
+
+% ====================================================================
+% SECTION 11: try/catch with WideValue on stack during error
+% ====================================================================
+
+{ 1q 0q div } try /div-by-zero eq (try int128: div by zero caught) rt-ok clear
+{ 1uq 0uq div } try /div-by-zero eq (try uint128: div by zero caught) rt-ok clear
+
+% WideValue still valid and readable after error recovery.
+% W04 (2026-04-28): try rolls the operand stack back to its pre-call
+% depth on error -- residue pushed inside the proc before the failure
+% is discarded.  /error-name lands directly above whatever was on the
+% stack before `try` was invoked.
+10q 20q { 1q 0q div } try
+    /div-by-zero eq             (post-error: error name on top) rt-ok
+    20q deep-eq                 (post-error: 20q preserved (pre-try)) rt-ok
+    10q deep-eq                 (post-error: 10q at bottom (pre-try)) rt-ok
+    clear
+
+% ====================================================================
+% SECTION 12: free-list and VM integrity after stress
+% ====================================================================
+
+//:status:widevalue-validate (widevalue free-list integrity OK) rt-ok
+//:status:vm-validate (vm heap integrity OK) rt-ok
+//:status:extvalue-validate (extvalue free-list integrity OK) rt-ok
+//:status:widevalue-active 0 ge (widevalue-active non-negative) rt-ok clear
+//:status:vm-used 0 gt (vm-used positive) rt-ok clear
+
+(test_int128_widevalue_mirror.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

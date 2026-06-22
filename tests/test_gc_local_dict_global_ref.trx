@@ -1,0 +1,251 @@
+% ====================================================================
+% test_gc_local_dict_global_ref.trx -- Phases A + B regression
+% ====================================================================
+% Phase 10 GC walks the global VM region only.  Pre-Phases-A/B,
+% gc_mark_object silent-skipped any Object whose offset pointed below
+% m_vm_global.  That left a coverage gap: LOCAL Dict / Set / Tagged /
+% Array values holding global refs would have those globals reclaimed
+% mid-iteration once the local container's only outer reference was a
+% global container slot or a Trix root that gc_mark_object passed
+% through.
+%
+% Phases A + B (plan_gc_walks_local_containers.md) plug the gap:
+%   * Phase A: when gc_mark_object's range check fires and the Object is
+%     Dict/Set, dispatch to Dict::gc_walk_contents on the local
+%     payload.
+%   * Phase B: extend the dispatch to local Tagged (2 Objects at
+%     fixed offsets) and local Array (Object[arrays_length()]).
+% An auxiliary visited-offset set (m_gc_local_visited, capacity 1024)
+% breaks cycles across all four kinds -- local blocks have no
+% GvmBlock header so the per-block m_mark_gen short-circuit doesn't
+% apply.  Phase C (local Packed) has its own regression file:
+% test_gc_local_packed_global_ref.trx.
+%
+% This test exercises the paths end-to-end:
+%   * Allocate global Arrays (via `${ ... }`).
+%   * Store each Array into a LOCAL container (Dict, Tagged, or
+%     plain Array; no `${...}` wrap on the container itself).
+%   * Wire the local container up through userdict (global) so it's
+%     reachable from a Trix root.
+%   * Drop every other reference to the global Array.
+%   * GC.
+%   * Force the freed memory to be reissued so a stale offset reads
+%     scratch values, not coincidentally-intact bytes.
+%   * Verify the global Array's payload is still intact (length,
+%     element values).  Without Phase A/B, GC reclaims the Array
+%     and the slot reads return scratch values -- assertions fire.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --------------------------------------------------------------------
+% After GC, forcibly re-use the freed memory.  Phase 10 GC marks
+% blocks free in the allocator but doesn't zero their storage; so a
+% dangling Object that reads its old slot can spuriously look
+% intact until the storage is reused.  Allocating a stream of
+% same-size global Arrays after each GC pass guarantees the freed
+% block gets re-issued -- if the retained Array's slots still read
+% their original values after that, the GC was actually doing its
+% job (i.e., Phase A walked the local container and kept the
+% Array alive).
+% --------------------------------------------------------------------
+/force-reuse {
+    |length|#1
+    0 1 9 {
+        /i exch def
+        ${ length array } /scratch exch def
+        0 1 length 1 sub {
+            /j exch def
+            scratch j j 999 add put-persist
+        } for
+        /scratch null def
+    } for
+} def
+
+% --------------------------------------------------------------------
+% SECTION 1: global Array reachable only through local Dict via userdict
+% --------------------------------------------------------------------
+
+/runs0 //:status:gc-runs def
+
+% Build a 50-element global Array; fill with 0..49.
+${ 50 array } /retain-payload exch def
+0 1 49 {
+    /i exch def
+    retain-payload i i put-persist
+} for
+
+% Build a local Dict (no ${...} wrap; vm_alloc, sub-m_vm_global) and
+% stash the global Array in it.  /local-holder lives in userdict
+% (global), so the chain is: userdict -> local-holder (LOCAL) ->
+% retain-payload (GLOBAL).
+4 dict /local-holder exch def
+local-holder /payload retain-payload put-persist
+
+% Drop the direct top-level handle so the LOCAL dict is the only
+% remaining path to the global Array.
+/retain-payload null def
+
+% Real GC.  Should NOT reclaim the global Array's payload (reachable
+% through the local Dict).  Phase A's local-Dict walk dispatches
+% Dict::gc_walk_contents on the local-holder offset, which calls
+% gc_mark_object on /payload's value -- the global Array -- and marks it
+% live.  Without Phase A, gc_mark_object range-skips the local-holder
+% Dict, the Array goes unmarked, and the sweep frees its block.
+/reclaimed1 vm-global-gc def
+
+% Force any freed 50-element-Array storage to be reissued so a
+% dangling reference manifests as garbage instead of stale-but-
+% intact-by-coincidence values.
+50 force-reuse
+
+% Pull the Array back out and verify length + sampled elements.
+% Phase A's dispatch made the local-holder Dict's contents reachable
+% to gc_mark_object; without it, the Array's block was reclaimed and
+% then overwritten by the force-reuse pass -- the slot reads would
+% return scratch's filled-in `j 999 add` values (or null after
+% scratch's own /scratch null def + the next sweep).
+local-holder /payload get /payload exch def
+payload length 50 eq                          (1: payload length intact post-GC) rt-ok
+payload 0  get 0  eq                          (1: payload[0] intact) rt-ok
+payload 25 get 25 eq                          (1: payload[25] intact) rt-ok
+payload 49 get 49 eq                          (1: payload[49] intact) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 2: nested local Dicts forming a chain to the global ref
+% --------------------------------------------------------------------
+% Two nested local Dicts; the inner one holds the global ref.  The
+% outer one references the inner.  Both are local; outer is rooted
+% in userdict.  Validates that gc_mark_object's local-Dict walk
+% recurses through nested local Dicts (the visited set prevents
+% double-walks but doesn't block the descent).
+
+${ 30 array } /inner-payload exch def
+0 1 29 { /i exch def inner-payload i i 100 add put-persist } for
+
+4 dict /inner-d exch def
+inner-d /payload inner-payload put-persist
+
+4 dict /outer-d exch def
+outer-d /child inner-d put-persist
+
+/inner-payload null def
+/inner-d        null def
+
+vm-global-gc /reclaimed2 exch def
+30 force-reuse
+
+% outer-d is in userdict (global).  Reach the global Array through
+% outer -> child (LOCAL Dict) -> /payload.
+outer-d /child get /payload get /payload exch def
+payload length 30 eq                          (2: nested-walked Array length intact) rt-ok
+payload 0  get 100 eq                         (2: nested payload[0] intact) rt-ok
+payload 15 get 115 eq                         (2: nested payload[15] intact) rt-ok
+payload 29 get 129 eq                         (2: nested payload[29] intact) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 3: cycle between two local Dicts holding a global ref
+% --------------------------------------------------------------------
+% Two local Dicts pointing at each other PLUS one of them holding a
+% global ref.  Tests the visited-set cycle break: without it,
+% gc_mark_object would recurse infinitely through the local-Dict A ->
+% local-Dict B -> local-Dict A -> ... chain.
+
+${ 16 array } /cycle-payload exch def
+0 1 15 { /i exch def cycle-payload i i 200 add put-persist } for
+
+4 dict /cycle-a exch def
+4 dict /cycle-b exch def
+cycle-a /peer cycle-b put-persist
+cycle-b /peer cycle-a put-persist
+cycle-a /payload cycle-payload put-persist
+
+/cycle-payload null def
+/cycle-b        null def
+
+% Run GC.  If the visited set isn't doing its job, this hangs or
+% overflows.  If Phase A isn't walking the local cycle, the global
+% Array is reclaimed and the post-GC access trips an error.
+vm-global-gc /reclaimed3 exch def
+16 force-reuse
+
+% Reach the global Array through the cycle: cycle-a -> /peer
+% (cycle-b) -> /peer (cycle-a) -> /payload.
+cycle-a /peer get /peer get /payload get /payload exch def
+payload length 16 eq                          (3: cyclic-walked Array length intact) rt-ok
+payload 0  get 200 eq                         (3: cyclic payload[0] intact) rt-ok
+payload 8  get 208 eq                         (3: cyclic payload[8] intact) rt-ok
+payload 15 get 215 eq                         (3: cyclic payload[15] intact) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 4: local Tagged value holding a global Array (Phase B)
+% --------------------------------------------------------------------
+% A Tagged value created without `${...}` lands in local VM (its
+% 2-Object payload is vm_alloc'd).  When that Tagged carries a
+% global ref as its value field and is rooted via userdict, GC must
+% walk the Tagged's payload to keep the global alive.  This is the
+% mini-scheme primitives-dict shape: each /primitive-tagged value
+% wraps a global proc body.
+
+${ 24 array } /tagged-payload exch def
+0 1 23 { /i exch def tagged-payload i i 300 add put-persist } for
+
+% `payload /local-bag tag` -- creates a 2-Object Tagged
+% [/local-bag, payload].  Without ${...} prefix, lands in local VM.
+tagged-payload /local-bag tag /local-tag exch def
+/tagged-payload null def
+
+vm-global-gc /reclaimed4 exch def
+24 force-reuse
+
+local-tag tag-value /payload exch def
+payload length 24 eq                          (4: tagged-walked Array length intact) rt-ok
+payload 0  get 300 eq                         (4: tagged payload[0] intact) rt-ok
+payload 12 get 312 eq                         (4: tagged payload[12] intact) rt-ok
+payload 23 get 323 eq                         (4: tagged payload[23] intact) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 5: local Array containing a global Array (Phase B)
+% --------------------------------------------------------------------
+% A local Array (no `${...}`) holding a global Array as element 0.
+% Same shape as Section 4 but using a plain Array as the local
+% container.
+
+${ 18 array } /inner-array exch def
+0 1 17 { /i exch def inner-array i i 400 add put-persist } for
+
+% `1 array` returns a local 1-element Array; put-persist inner-array
+% into slot 0.
+1 array /local-arr exch def
+local-arr 0 inner-array put-persist
+/inner-array null def
+
+vm-global-gc /reclaimed5 exch def
+18 force-reuse
+
+local-arr 0 get /payload exch def
+payload length 18 eq                          (5: array-walked Array length intact) rt-ok
+payload 0  get 400 eq                         (5: array payload[0] intact) rt-ok
+payload 9  get 409 eq                         (5: array payload[9] intact) rt-ok
+payload 17 get 417 eq                         (5: array payload[17] intact) rt-ok
+
+% --------------------------------------------------------------------
+% SECTION 6: probe sees retained globals as live
+% --------------------------------------------------------------------
+% After all the dust settles, the probe should see at least the
+% five retained Array payloads as live.
+
+vm-global-gc-probe /probe-final exch def
+probe-final /live get 5 ge                    (6: probe sees >= 5 live retained) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_gc_local_dict_global_ref: ALL TESTS PASSED) =
+(__test_ok__) =

@@ -1,0 +1,346 @@
+% ====================================================================
+% test_convenience_dicts.trx -- convenience dictionary tests
+% ====================================================================
+% Tests for opt-in short-name convenience dicts: /pipeline, /actors,
+% /lazy, /records, /cells, /genserver, /logic, /supervision.
+% Also tests the dict path shortcut (systemdict fallback).
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: EXISTENCE -- all 8 dicts exist in systemdict
+% ====================================================================
+
+//:systemdict:pipeline is-dict               (exist: /pipeline is dict) rt-ok  clear
+//:systemdict:actors is-dict                 (exist: /actors is dict) rt-ok  clear
+//:systemdict:lazy is-dict                   (exist: /lazy is dict) rt-ok  clear
+//:systemdict:records is-dict                (exist: /records is dict) rt-ok  clear
+//:systemdict:cells is-dict                  (exist: /cells is dict) rt-ok  clear
+//:systemdict:genserver is-dict              (exist: /genserver is dict) rt-ok  clear
+//:systemdict:logic is-dict                  (exist: /logic is dict) rt-ok  clear
+//:systemdict:supervision is-dict            (exist: /supervision is dict) rt-ok  clear
+
+% ====================================================================
+% SECTION 2: SIZE -- each dict has expected entry count
+% ====================================================================
+
+//:systemdict:pipeline length 22 eq          (size: pipeline = 22) rt-ok  clear
+//:systemdict:actors length 19 eq            (size: actors = 19) rt-ok  clear
+//:systemdict:lazy length 48 eq              (size: lazy = 48) rt-ok  clear
+//:systemdict:records length 15 eq           (size: records = 15) rt-ok  clear
+//:systemdict:cells length 21 eq             (size: cells = 21) rt-ok  clear
+//:systemdict:genserver length 6 eq          (size: genserver = 6) rt-ok  clear
+//:systemdict:logic length 17 eq             (size: logic = 17) rt-ok  clear
+//:systemdict:supervision length 15 eq       (size: supervision = 15) rt-ok  clear
+
+% ====================================================================
+% SECTION 3: DICT PATH SHORTCUT -- //:dictname:key resolves operators
+% ====================================================================
+
+//:pipeline:map is-operator                  (path: pipeline:map) rt-ok  clear
+//:actors:spawn is-operator                  (path: actors:spawn) rt-ok  clear
+//:lazy:map is-operator                      (path: lazy:map) rt-ok  clear
+//:records:type is-operator                  (path: records:type) rt-ok  clear
+//:cells:computed is-operator                (path: cells:computed) rt-ok  clear
+//:genserver:call is-operator                (path: genserver:call) rt-ok  clear
+//:logic:var is-operator                     (path: logic:var) rt-ok  clear
+//:supervision:spec is-operator              (path: supervision:spec) rt-ok  clear
+
+% existing systemdict sub-dict still works
+//:numbers:real-type:pi is-real              (path: numbers:pi still works) rt-ok  clear
+
+% ====================================================================
+% SECTION 4: PATH IDENTITY -- short name resolves to same operator
+% ====================================================================
+
+//:pipeline:map //pipe-map eq               (identity: pipeline:map = pipe-map) rt-ok  clear
+//:pipeline:filter //pipe-filter eq         (identity: pipeline:filter = pipe-filter) rt-ok  clear
+//:actors:spawn //actor-spawn eq            (identity: actors:spawn = actor-spawn) rt-ok  clear
+//:actors:send //actor-send eq              (identity: actors:send = actor-send) rt-ok  clear
+//:lazy:head //lazy-head eq                 (identity: lazy:head = lazy-head) rt-ok  clear
+//:lazy:fold //lazy-fold eq                 (identity: lazy:fold = lazy-fold) rt-ok  clear
+//:records:schema //record-schema eq        (identity: records:schema = record-schema) rt-ok  clear
+//:records:merge //record-merge eq          (identity: records:merge = record-merge) rt-ok  clear
+//:cells:computed //cell-computed eq        (identity: cells:computed = cell-computed) rt-ok  clear
+//:cells:get //cell-get eq                  (identity: cells:get = cell-get) rt-ok  clear
+//:genserver:server //gen-server eq         (identity: genserver:server = gen-server) rt-ok  clear
+//:genserver:cast //gen-cast eq             (identity: genserver:cast = gen-cast) rt-ok  clear
+//:logic:var //logic-var eq                 (identity: logic:var = logic-var) rt-ok  clear
+//:logic:choose //choice eq                (identity: logic:choose = choice) rt-ok  clear
+//:supervision:spec //supervisor-spec eq    (identity: supervision:spec = supervisor-spec) rt-ok  clear
+//:supervision:stop //supervisor-stop eq    (identity: supervision:stop = supervisor-stop) rt-ok  clear
+
+% ====================================================================
+% SECTION 5: BEGIN/END -- scoped access to short names
+% ====================================================================
+
+% pipeline: map resolves to pipe-map inside begin/end
+//:systemdict:pipeline begin
+    /map where
+end
+                                              (begin/end: pipeline map found) rt-ok  clear
+
+% actors: self resolves to actor-self
+//:systemdict:actors begin
+    /self where
+end
+                                              (begin/end: actors self found) rt-ok  clear
+
+% records: schema resolves
+10 20 [ /x /y ] record
+//:systemdict:records begin
+    schema length 2 eq
+end
+                                              (begin/end: records schema works) rt-ok  clear
+
+% cells: computed resolves to cell-computed
+/base 10 cell def
+//:systemdict:cells begin
+    { base cell-get 2 mul } computed
+    get 20 eq
+end
+                                              (begin/end: cells computed works) rt-ok  clear
+
+% genserver: call resolves
+//:systemdict:genserver begin
+    /call where
+end
+                                              (begin/end: genserver call found) rt-ok  clear
+
+% lazy: short names resolve inside begin/end
+//:systemdict:lazy begin
+    /map where
+end
+                                              (begin/end: lazy map found) rt-ok  clear
+
+% logic: var resolves to logic-var
+//:systemdict:logic begin
+    var is-logic-var
+end
+                                              (begin/end: logic var works) rt-ok  clear
+
+% supervision: spec resolves
+//:systemdict:supervision begin
+    /spec where
+end
+                                              (begin/end: supervision spec found) rt-ok  clear
+
+% ====================================================================
+% SECTION 6: SHADOWING -- begin shadows, end restores
+% ====================================================================
+
+% verify core map still works before begin
+[1 2 3] { 1 add } map
+2 get 4 eq                                    (shadow: core map before begin) rt-ok  clear
+
+% pipeline begin shadows core map
+//:systemdict:pipeline begin
+    /map where
+end
+                                              (shadow: pipeline map found) rt-ok  clear
+
+% after end, core map is restored
+[1 2 3] { 1 add } map
+2 get 4 eq                                    (shadow: core map after end) rt-ok  clear
+
+% ====================================================================
+% SECTION 7: READONLY -- convenience dicts reject modification
+% ====================================================================
+
+{ //:systemdict:pipeline /x 42 put } try
+/read-only eq                                 (readonly: pipeline rejects put) rt-ok  clear
+
+{ //:systemdict:actors /x 42 put } try
+/read-only eq                                 (readonly: actors rejects put) rt-ok  clear
+
+% ====================================================================
+% SECTION 8: FUNCTIONAL -- operators actually work through short names
+% ====================================================================
+
+% pipeline: path operator resolves and is callable
+//:pipeline:buffer //pipe-buffer eq           (functional: pipeline:buffer callable) rt-ok  clear
+
+% lazy: range + map via path
+1 5 1 lazy-range { 2 mul } lazy-map lazy-to-array
+[2 4 6 8] deep-eq                             (functional: lazy range+map) rt-ok  clear
+
+% records: path operator executes via \\ (executable immediate lookup)
+100 200 [ /w /h ] record
+\\:records:schema length 2 eq                 (functional: records schema length) rt-ok  clear
+
+% cells: path operator executes via \\
+/x 5 cell def
+{ x cell-get 10 mul } \\:cells:computed
+\\:cells:get 50 eq                            (functional: cells computed get) rt-ok  clear
+
+% ====================================================================
+% SECTION 9: COMPREHENSIVE ENTRY SPOT-CHECKS
+% ====================================================================
+
+% pipeline: all 22 entries
+//:pipeline:buffer is-operator              (spot: pipeline:buffer) rt-ok  clear
+//:pipeline:put is-operator                 (spot: pipeline:put) rt-ok  clear
+//:pipeline:get is-operator                 (spot: pipeline:get) rt-ok  clear
+//:pipeline:close is-operator               (spot: pipeline:close) rt-ok  clear
+//:pipeline:error-close is-operator         (spot: pipeline:error-close) rt-ok  clear
+//:pipeline:tap is-operator                 (spot: pipeline:tap) rt-ok  clear
+//:pipeline:run is-operator                 (spot: pipeline:run) rt-ok  clear
+//:pipeline:collect is-operator             (spot: pipeline:collect) rt-ok  clear
+//:pipeline:reduce is-operator              (spot: pipeline:reduce) rt-ok  clear
+//:pipeline:take is-operator                (spot: pipeline:take) rt-ok  clear
+//:pipeline:drop is-operator                (spot: pipeline:drop) rt-ok  clear
+//:pipeline:scan is-operator                (spot: pipeline:scan) rt-ok  clear
+//:pipeline:distinct is-operator            (spot: pipeline:distinct) rt-ok  clear
+//:pipeline:window is-operator              (spot: pipeline:window) rt-ok  clear
+//:pipeline:merge is-operator               (spot: pipeline:merge) rt-ok  clear
+//:pipeline:status is-operator              (spot: pipeline:status) rt-ok  clear
+//:pipeline:into is-operator                (spot: pipeline:into) rt-ok  clear
+
+% actors: additional entries beyond section 4
+//:actors:try-send is-operator              (spot: actors:try-send) rt-ok  clear
+//:actors:recv-timeout is-operator          (spot: actors:recv-timeout) rt-ok  clear
+//:actors:recv-match is-operator            (spot: actors:recv-match) rt-ok  clear
+//:actors:recv-match-timeout is-operator    (spot: actors:recv-match-timeout) rt-ok  clear
+//:actors:mailbox-count is-operator         (spot: actors:mailbox-count) rt-ok  clear
+//:actors:mailbox-capacity is-operator      (spot: actors:mailbox-capacity) rt-ok  clear
+//:actors:mailbox-empty? is-operator        (spot: actors:mailbox-empty?) rt-ok  clear
+//:actors:broadcast is-operator             (spot: actors:broadcast) rt-ok  clear
+//:actors:flush is-operator                 (spot: actors:flush) rt-ok  clear
+//:actors:name is-operator                  (spot: actors:name) rt-ok  clear
+//:actors:set-name is-operator              (spot: actors:set-name) rt-ok  clear
+//:actors:status is-operator                (spot: actors:status) rt-ok  clear
+//:actors:exit is-operator                  (spot: actors:exit) rt-ok  clear
+//:actors:trap-exit is-operator             (spot: actors:trap-exit) rt-ok  clear
+
+% cells: additional entries
+//:cells:validated is-operator              (spot: cells:validated) rt-ok  clear
+//:cells:set is-operator                    (spot: cells:set) rt-ok  clear
+//:cells:value is-operator                  (spot: cells:value) rt-ok  clear
+//:cells:update is-operator                 (spot: cells:update) rt-ok  clear
+//:cells:dirty? is-operator                 (spot: cells:dirty?) rt-ok  clear
+//:cells:map is-operator                    (spot: cells:map) rt-ok  clear
+//:cells:combine is-operator                (spot: cells:combine) rt-ok  clear
+//:cells:transduce is-operator              (spot: cells:transduce) rt-ok  clear
+//:cells:deps is-operator                   (spot: cells:deps) rt-ok  clear
+//:cells:rdeps is-operator                  (spot: cells:rdeps) rt-ok  clear
+//:cells:watchers is-operator               (spot: cells:watchers) rt-ok  clear
+//:cells:dispose is-operator                (spot: cells:dispose) rt-ok  clear
+//:cells:name is-operator                   (spot: cells:name) rt-ok  clear
+//:cells:set-name is-operator               (spot: cells:set-name) rt-ok  clear
+//:cells:watch is-operator                  (spot: cells:watch) rt-ok  clear
+//:cells:unwatch is-operator                (spot: cells:unwatch) rt-ok  clear
+//:cells:batch is-operator                  (spot: cells:batch) rt-ok  clear
+
+% supervision: all entries
+//:supervision:start-child is-operator      (spot: supervision:start-child) rt-ok  clear
+//:supervision:terminate-child is-operator  (spot: supervision:terminate-child) rt-ok  clear
+//:supervision:restart-child is-operator    (spot: supervision:restart-child) rt-ok  clear
+//:supervision:stop is-operator             (spot: supervision:stop) rt-ok  clear
+//:supervision:count-children is-operator   (spot: supervision:count-children) rt-ok  clear
+//:supervision:get-child is-operator        (spot: supervision:get-child) rt-ok  clear
+//:supervision:which-children is-operator   (spot: supervision:which-children) rt-ok  clear
+//:supervision:supervisor is-operator       (spot: supervision:supervisor) rt-ok  clear
+
+% genserver: all entries
+//:genserver:server is-operator             (spot: genserver:server) rt-ok  clear
+//:genserver:call-timeout is-operator       (spot: genserver:call-timeout) rt-ok  clear
+//:genserver:stop is-operator               (spot: genserver:stop) rt-ok  clear
+//:genserver:reply is-operator              (spot: genserver:reply) rt-ok  clear
+
+% logic: all entries
+//:logic:is-var is-operator                 (spot: logic:is-var) rt-ok  clear
+//:logic:bound? is-operator                 (spot: logic:bound?) rt-ok  clear
+//:logic:unify is-operator                  (spot: logic:unify) rt-ok  clear
+//:logic:fail is-operator                   (spot: logic:fail) rt-ok  clear
+//:logic:cut is-operator                    (spot: logic:cut) rt-ok  clear
+
+% chrono: existence + size + path identity + begin/end + readonly + spot-checks
+//:systemdict:chrono is-dict                (exist: /chrono is dict) rt-ok  clear
+//:systemdict:chrono length 32 eq           (size: chrono = 32) rt-ok  clear
+//:chrono:year is-operator                  (path: chrono:year) rt-ok  clear
+//:chrono:year //instant-year eq            (identity: chrono:year = instant-year) rt-ok  clear
+//:chrono:weekday //instant-weekday eq      (identity: chrono:weekday = instant-weekday) rt-ok  clear
+//:chrono:epoch-time //epoch-time eq        (identity: chrono:epoch-time = epoch-time) rt-ok  clear
+
+% begin/end: short names resolve and execute via chrono dict
+//:systemdict:chrono begin
+    1700000000999ul year 2023 eq
+end
+                                              (begin/end: chrono year resolves) rt-ok  clear
+
+//:systemdict:chrono begin
+    1700000000999ul weekday /tuesday eq
+end
+                                              (begin/end: chrono weekday resolves) rt-ok  clear
+
+% readonly
+{ //:systemdict:chrono /x 42 put } try
+/read-only eq                                 (readonly: chrono rejects put) rt-ok  clear
+
+% spot-check all 16 entries
+//:chrono:epoch-time is-operator            (spot: chrono:epoch-time) rt-ok  clear
+//:chrono:year is-operator                  (spot: chrono:year) rt-ok  clear
+//:chrono:month is-operator                 (spot: chrono:month) rt-ok  clear
+//:chrono:day is-operator                   (spot: chrono:day) rt-ok  clear
+//:chrono:hour is-operator                  (spot: chrono:hour) rt-ok  clear
+//:chrono:minute is-operator                (spot: chrono:minute) rt-ok  clear
+//:chrono:second is-operator                (spot: chrono:second) rt-ok  clear
+//:chrono:millisecond is-operator           (spot: chrono:millisecond) rt-ok  clear
+//:chrono:weekday is-operator               (spot: chrono:weekday) rt-ok  clear
+//:chrono:year-local is-operator            (spot: chrono:year-local) rt-ok  clear
+//:chrono:month-local is-operator           (spot: chrono:month-local) rt-ok  clear
+//:chrono:day-local is-operator             (spot: chrono:day-local) rt-ok  clear
+//:chrono:hour-local is-operator            (spot: chrono:hour-local) rt-ok  clear
+//:chrono:minute-local is-operator          (spot: chrono:minute-local) rt-ok  clear
+//:chrono:second-local is-operator          (spot: chrono:second-local) rt-ok  clear
+//:chrono:weekday-local is-operator         (spot: chrono:weekday-local) rt-ok  clear
+
+% identity: local-suffix in /chrono points at instant-*-local op
+//:chrono:year-local //instant-year-local eq         (identity: chrono:year-local = instant-year-local) rt-ok clear
+//:chrono:weekday-local //instant-weekday-local eq   (identity: chrono:weekday-local = instant-weekday-local) rt-ok clear
+
+% Tier 2 spot-checks (udate surface)
+//:chrono:make-date is-operator             (spot: chrono:make-date) rt-ok  clear
+//:chrono:date-year is-operator             (spot: chrono:date-year) rt-ok  clear
+//:chrono:date-weekday is-operator          (spot: chrono:date-weekday) rt-ok  clear
+//:chrono:day-of-year is-operator           (spot: chrono:day-of-year) rt-ok  clear
+//:chrono:add-days is-operator              (spot: chrono:add-days) rt-ok  clear
+//:chrono:add-months is-operator            (spot: chrono:add-months) rt-ok  clear
+//:chrono:add-years is-operator             (spot: chrono:add-years) rt-ok  clear
+//:chrono:diff-days is-operator             (spot: chrono:diff-days) rt-ok  clear
+//:chrono:leap-year? is-operator          (spot: chrono:leap-year?) rt-ok  clear
+//:chrono:days-in-month is-operator         (spot: chrono:days-in-month) rt-ok  clear
+//:chrono:to-date is-operator               (spot: chrono:to-date) rt-ok  clear
+//:chrono:to-date-local is-operator         (spot: chrono:to-date-local) rt-ok  clear
+//:chrono:make-instant is-operator          (spot: chrono:make-instant) rt-ok  clear
+//:chrono:make-instant-local is-operator    (spot: chrono:make-instant-local) rt-ok  clear
+
+% Tier 2 identity: short-name without prefix points at the date-* op
+//:chrono:add-days //date-add-days eq       (identity: chrono:add-days = date-add-days) rt-ok clear
+//:chrono:diff-days //date-diff-days eq     (identity: chrono:diff-days = date-diff-days) rt-ok clear
+//:chrono:to-date //instant-to-date eq      (identity: chrono:to-date = instant-to-date) rt-ok clear
+
+% Tier 2 begin/end execution: short names resolve and run
+//:systemdict:chrono begin
+    2026 4 30 make-date 1 add-days date-day 1 eq
+end
+                                            (begin/end: chrono add-days resolves) rt-ok clear
+
+//:systemdict:chrono begin
+    2024 leap-year?
+end
+                                            (begin/end: chrono leap-year?) rt-ok clear
+
+(====================================) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(  test_convenience_dicts: ALL TESTS PASSED) =
+(====================================) =
+(__test_ok__) =

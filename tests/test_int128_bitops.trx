@@ -1,0 +1,212 @@
+% ====================================================================
+% Phase 4 bitwise + shift tests for UInt128.
+%
+% Covers and, or, xor, not, shift-left, shift-right, rotate-left,
+% rotate-right, bit-ceil, bit-floor, bit-width, countl-zero,
+% countl-one, countr-zero, countr-one, pop-count, single-bit?, and
+% byte-swap for 128-bit values.  Int128 is excluded from bitwise ops
+% (Trix convention: signed integer types have no bitwise surface), so
+% Int128 operands raise type-check on those ops; byte-swap supports both
+% 128-bit types since it is order-reversal, not bit manipulation.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ---------- and / or / xor (unsigned 128-bit) ----------
+16#FFFF0000FFFF0000FFFF0000FFFF0000#uq
+16#0000FFFF0000FFFF0000FFFF0000FFFF#uq and
+0uq deep-eq                                 (uint128 and: alternating)  rt-ok
+
+16#FFFF0000FFFF0000FFFF0000FFFF0000#uq
+16#0000FFFF0000FFFF0000FFFF0000FFFF#uq or
+16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq deep-eq
+(uint128 or: alternating -> all ones)       rt-ok
+
+16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq
+16#0000FFFF0000FFFF0000FFFF0000FFFF#uq xor
+16#FFFF0000FFFF0000FFFF0000FFFF0000#uq deep-eq
+(uint128 xor: ones ^ alt -> complement)     rt-ok
+
+% not
+0uq not  16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq deep-eq
+(uint128 not: 0 -> UINT128_MAX)             rt-ok
+
+16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq not  0uq deep-eq
+(uint128 not: UINT128_MAX -> 0)             rt-ok
+
+% self-inverse: not(not(x)) == x
+16#DEADBEEFCAFEBABE0123456789ABCDEF#uq not not
+16#DEADBEEFCAFEBABE0123456789ABCDEF#uq deep-eq
+(uint128 not-not is identity)               rt-ok
+
+% ---------- shift-left / shift-right ----------
+1uq 100 shift-left
+16#10000000000000000000000000#uq deep-eq
+(uint128 shl: 1 << 100)                      rt-ok
+
+1uq 127 shift-left
+16#80000000000000000000000000000000#uq deep-eq
+(uint128 shl: 1 << 127)                      rt-ok
+
+% shift by digit count wraps to zero shift
+16#DEADBEEFCAFEBABE0123456789ABCDEF#uq 128 shift-left
+16#DEADBEEFCAFEBABE0123456789ABCDEF#uq deep-eq
+(uint128 shl 128 == shl 0)                   rt-ok
+
+% negative shift-left == shift-right
+16#FF#uq 100 shift-right
+0uq deep-eq                                  (uint128 shr: small value)  rt-ok
+
+16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq 64 shift-right
+16#FFFFFFFFFFFFFFFF#uq deep-eq
+(uint128 shr 64: top half gone)              rt-ok
+
+% ---------- rotate-left / rotate-right ----------
+1uq 64 rotate-left
+16#10000000000000000#uq deep-eq
+(uint128 rotl 64)                            rt-ok
+
+1uq 128 rotate-left
+1uq deep-eq                                  (uint128 rotl N == identity)  rt-ok
+
+% rotl by k == rotr by (N - k): rotl 8 == rotr 120
+16#01#uq 8 rotate-left
+16#01#uq 120 rotate-right deep-eq
+(uint128 rotl vs rotr complementary)         rt-ok
+
+% Negative rotation: rotl by -8 == rotr by 8
+16#FF000000000000000000000000000000#uq 8 rotate-right
+16#FF000000000000000000000000000000#uq -8 rotate-left deep-eq
+(uint128 rotr vs rotl negative)              rt-ok
+
+% full MSB rotates to LSB
+16#80000000000000000000000000000000#uq 1 rotate-left
+1uq deep-eq
+(uint128 MSB rotl 1 -> LSB)                  rt-ok
+
+% ---------- bit-ceil / bit-floor ----------
+0uq bit-ceil 1uq deep-eq                   (uint128 bit-ceil 0 -> 1)     rt-ok
+1uq bit-ceil 1uq deep-eq                   (uint128 bit-ceil 1 -> 1)     rt-ok
+5uq bit-ceil 8uq deep-eq                   (uint128 bit-ceil 5 -> 8)     rt-ok
+16#80000000000000000000000000000000#uq bit-ceil
+16#80000000000000000000000000000000#uq deep-eq
+(uint128 bit-ceil 2^127)                     rt-ok
+
+% bit-ceil overflow (> 2^127 would need 2^128)
+16#80000000000000000000000000000001#uq { bit-ceil } try
+/numerical-overflow eq (uint128 bit-ceil overflow)  rt-ok clear
+
+0uq bit-floor 0uq deep-eq                  (uint128 bit-floor 0 -> 0)    rt-ok
+1uq bit-floor 1uq deep-eq                  (uint128 bit-floor 1 -> 1)    rt-ok
+7uq bit-floor 4uq deep-eq                  (uint128 bit-floor 7 -> 4)    rt-ok
+16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq bit-floor
+16#80000000000000000000000000000000#uq deep-eq
+(uint128 bit-floor UINT128_MAX)              rt-ok
+
+% ---------- bit-width ----------
+0uq bit-width 0 eq                         (uint128 bit-width 0 -> 0)    rt-ok
+1uq bit-width 1 eq                         (uint128 bit-width 1 -> 1)    rt-ok
+16#80000000000000000000000000000000#uq bit-width
+128 eq                                     (uint128 bit-width 2^127 -> 128)  rt-ok
+16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq bit-width
+128 eq                                     (uint128 bit-width max -> 128)    rt-ok
+
+% ---------- countl-zero / countl-one ----------
+0uq countl-zero 128 eq                     (uint128 clz 0 -> 128)        rt-ok
+1uq countl-zero 127 eq                     (uint128 clz 1 -> 127)        rt-ok
+16#80000000000000000000000000000000#uq countl-zero
+0 eq                                       (uint128 clz MSB-set -> 0)    rt-ok
+
+16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq countl-one
+128 eq                                     (uint128 clo max -> 128)      rt-ok
+0uq countl-one 0 eq                        (uint128 clo 0 -> 0)          rt-ok
+
+% ---------- countr-zero / countr-one ----------
+0uq countr-zero 128 eq                     (uint128 ctz 0 -> 128)        rt-ok
+1uq countr-zero 0 eq                       (uint128 ctz 1 -> 0)          rt-ok
+16#80000000000000000000000000000000#uq countr-zero
+127 eq                                     (uint128 ctz MSB-only -> 127)  rt-ok
+
+16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq countr-one
+128 eq                                     (uint128 cto max -> 128)      rt-ok
+0uq countr-one 0 eq                        (uint128 cto 0 -> 0)          rt-ok
+
+% ---------- pop-count ----------
+0uq pop-count 0 eq                          (uint128 pop-count 0 -> 0)     rt-ok
+16#FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF#uq pop-count
+128 eq                                     (uint128 pop-count max -> 128)  rt-ok
+16#80000000000000000000000000000001#uq pop-count
+2 eq                                       (uint128 pop-count 2 bits)     rt-ok
+
+% ---------- single-bit? ----------
+1uq single-bit?                            (uint128 single-bit? 1)       rt-ok
+16#80000000000000000000000000000000#uq single-bit?
+(uint128 single-bit? 2^127)                  rt-ok
+0uq single-bit? not                        (uint128 single-bit? 0 false)  rt-ok
+3uq single-bit? not                        (uint128 single-bit? 3 false)  rt-ok
+
+% ---------- byte-swap (UInt128 and Int128) ----------
+16#0123456789ABCDEF0123456789ABCDEF#uq byte-swap
+16#EFCDAB8967452301EFCDAB8967452301#uq deep-eq
+(uint128 byte-swap palindrome)               rt-ok
+
+% byte-swap involution
+16#DEADBEEFCAFEBABE0123456789ABCDEF#uq byte-swap byte-swap
+16#DEADBEEFCAFEBABE0123456789ABCDEF#uq deep-eq
+(uint128 byte-swap involution)               rt-ok
+
+42q byte-swap byte-swap
+42q deep-eq                                 (int128 byte-swap involution)  rt-ok
+
+% ---------- mixed-type rejection ----------
+5uq 3ul { and } try /type-check eq (uint128 and ulong rejected)  rt-ok clear
+5uq 3 { and } try /type-check eq (uint128 and integer rejected)  rt-ok clear
+5uq 3ul { or } try /type-check eq (uint128 or ulong rejected)    rt-ok clear
+5uq 3ul { xor } try /type-check eq (uint128 xor ulong rejected)  rt-ok clear
+
+% ---------- Int128 rejected for bitwise (signed -> no bitwise surface) ----------
+5q { not } try /type-check eq (int128 not rejected)               rt-ok clear
+5q 3q { and } try /type-check eq (int128 and rejected)            rt-ok clear
+5q 2 { shift-left } try /type-check eq (int128 shl rejected)      rt-ok clear
+5q { pop-count } try /type-check eq (int128 pop-count rejected)     rt-ok clear
+5q { bit-width } try /type-check eq (int128 bit-width rejected)   rt-ok clear
+
+% ---------- WideValue heap accounting across bitwise churn ----------
+/before //:status:widevalue-active def
+/s save def
+
+16#DEADBEEF#uq 16#CAFEBABE#uq and pop
+//:status:widevalue-active before eq
+(and leaves active count at baseline)       rt-ok
+
+16#1#uq 100 shift-left pop
+//:status:widevalue-active before eq
+(shl leaves active count at baseline)       rt-ok
+
+16#DEADBEEFCAFEBABE0123456789ABCDEF#uq pop-count pop
+//:status:widevalue-active before eq
+(pop-count reclaims widevalue)               rt-ok
+
+s restore
+//:status:widevalue-active before eq
+(restore returns to baseline)               rt-ok
+
+% ---------- free-list integrity ----------
+//:status:widevalue-validate
+(widevalue free-list integrity OK)          rt-ok
+//:status:vm-validate
+(vm heap integrity OK)                      rt-ok
+//:status:extvalue-validate
+(extvalue free-list integrity OK)           rt-ok
+
+(test_int128_bitops.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

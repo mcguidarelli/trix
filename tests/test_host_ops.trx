@@ -1,0 +1,145 @@
+% test_host_ops.trx -- host/OS bridging operator tests
+% system, shell, chdir, rmdir, hostname, file-stat, chmod
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+%% === system ===
+
+(true) system 0 eq (system: true=0) rt-ok
+(false) system 0 ne (system: false!=0) rt-ok
+(echo hello > /dev/null) system 0 eq (system: echo=0) rt-ok
+(exit 42) system 42 eq (system: exit 42) rt-ok
+
+%% === shell ===
+
+(echo hello) shell
+exch dup length 6 eq (shell: echo length=6) rt-ok
+(hello
+) eq (shell: echo content) rt-ok
+0 eq (shell: echo exit=0) rt-ok
+
+(echo -n abc) shell
+exch (abc) eq (shell: echo -n content) rt-ok
+0 eq (shell: echo -n exit=0) rt-ok
+
+(false) shell
+exch length 0 eq (shell: false empty stdout) rt-ok
+0 ne (shell: false exit!=0) rt-ok
+
+% Large output
+(printf '%0200d' 0) shell
+exch length 200 eq (shell: large output 200 chars) rt-ok
+0 eq (shell: large exit=0) rt-ok
+
+% Multi-line output
+(printf 'a\nb\nc\n') shell
+exch length 6 eq (shell: multiline length=6) rt-ok
+0 eq (shell: multiline exit=0) rt-ok
+
+%% === hostname ===
+
+hostname
+dup type /string-type eq (hostname: type is string) rt-ok
+length 0 gt (hostname: non-empty) rt-ok
+
+%% === chdir ===
+
+% Save current dir, chdir to /, verify, restore
+getcwd
+(/) chdir
+getcwd (/) eq (chdir: root) rt-ok
+chdir  % restore original
+
+% Error on nonexistent
+<< /filename-not-found { clear true } >> { (/nonexistent_dir_xyz_999) chdir } try-catch
+(chdir: nonexistent error) rt-ok
+
+%% === mkdir + rmdir ===
+
+(/tmp/trix_test_mkdir_rmdir) mkdir
+(/tmp/trix_test_mkdir_rmdir) file-exists? true eq (mkdir: created) rt-ok
+
+(/tmp/trix_test_mkdir_rmdir) rmdir
+(/tmp/trix_test_mkdir_rmdir) file-exists? false eq (rmdir: removed) rt-ok
+
+% rmdir nonexistent
+<< /filename-not-found { clear true } >> { (/tmp/trix_no_such_dir_xyz) rmdir } try-catch
+(rmdir: nonexistent error) rt-ok
+
+% rmdir non-empty dir
+(/tmp/trix_test_nonempty) mkdir
+(/tmp/trix_test_nonempty/file.txt) (w)#b stream dup (hello) write-string close-stream
+<< /filename-not-found { clear true } >> { (/tmp/trix_test_nonempty) rmdir } try-catch
+(rmdir: non-empty error) rt-ok
+(/tmp/trix_test_nonempty/file.txt) delete-file
+(/tmp/trix_test_nonempty) rmdir
+
+%% === file-stat ===
+
+% Create a test file
+(/tmp/trix_stat_test.txt) (w)#b stream dup (hello world) write-string close-stream
+
+(/tmp/trix_stat_test.txt) file-stat
+dup /size get 11l eq (file-stat: size=11) rt-ok
+dup /type get /file eq (file-stat: type=/file) rt-ok
+dup /mtime get type /long-type eq (file-stat: mtime is long) rt-ok
+dup /mode get type /integer-type eq (file-stat: mode is integer) rt-ok
+/nlink get type /integer-type eq (file-stat: nlink is integer) rt-ok
+
+% Stat a directory
+(/tmp) file-stat
+/type get /directory eq (file-stat: dir type=/directory) rt-ok
+
+% Stat nonexistent
+<< /filename-not-found { clear true } >> { (/tmp/trix_no_such_stat_xyz) file-stat } try-catch
+(file-stat: nonexistent error) rt-ok
+
+(/tmp/trix_stat_test.txt) delete-file
+
+%% === chmod ===
+
+(/tmp/trix_chmod_test.txt) (w)#b stream dup (test) write-string close-stream
+
+% Set to 0644
+(/tmp/trix_chmod_test.txt) 8#644# chmod
+(/tmp/trix_chmod_test.txt) file-stat /mode get 8#644# eq (chmod: set 644) rt-ok
+
+% Set to 0755
+(/tmp/trix_chmod_test.txt) 8#755# chmod
+(/tmp/trix_chmod_test.txt) file-stat /mode get 8#755# eq (chmod: set 755) rt-ok
+
+% chmod nonexistent
+<< /filename-not-found { clear true } >> { (/tmp/trix_no_such_chmod_xyz) 8#644# chmod } try-catch
+(chmod: nonexistent error) rt-ok
+
+(/tmp/trix_chmod_test.txt) delete-file
+
+%% === Sandbox ===
+
+% We can't actually test sandbox without a sandbox-mode VM, but we can verify
+% the operators exist and are callable in normal mode (already tested above).
+
+%% === Results ===
+
+failed 0 eq
+{ total (host-ops: all tests passed) = = }
+{ (host-ops: FAILURES = ) print failed = } if-else
+failed 0 eq { } { /assert-failed throw } if-else
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

@@ -1,0 +1,1 @@
+<< /a { 1 } >> { << /b { 2 } >> { /a perform /b perform add } handle-effect } handle-effect

@@ -1,0 +1,390 @@
+% test_tetrix_native.trx -- equivalence checks for the C-side AI kernels.
+%
+% Tests apply only when running under the ./tetrix binary (which registers
+% field-copy-fast, score-board-fast, piece-collides-fast, piece-merge-fast).
+% Under plain ./trix the user ops are absent; the suite short-circuits with
+% a single "skipped" message instead of failing.
+%
+% Strategy: build representative fields/pieces, run both the Trix-level
+% reference and the native op, assert their outputs match.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+userdict /field-copy-fast known? not {
+    (test_tetrix_native: skipped (./trix has no user ops)) =
+    quit
+} if
+
+%=== shared fixtures ===
+
+/field-rows 20 def
+/field-cols 10 def
+/make-row { 10 array /row exch def 0 1 9 { /j exch def row j 0 put } for row } def
+/make-field { 20 array /fld exch def 0 1 19 { /j exch def fld j make-row put } for fld } def
+/field-get { |fld r c|#3 fld r get c get } def
+/field-set { |fld r c v|#4 fld r get c v put } def
+
+% Trix-level reference impls (lifted verbatim from tetrix.trx).
+/column-heights-into {
+    |fld dst|#5
+    0 1 9 { /c exch local-def
+        /h 0 local-def
+        0 1 19 { /r exch local-def
+            fld r get c get 0 ne { /h 20 r sub local-def exit } if
+        } for
+        dst c h put
+    } for
+} def
+/aggregate-height { sum } def
+/count-holes-ref {
+    |fld heights|#7
+    /holes 0 local-def
+    0 1 9 { /c exch local-def
+        /h heights c get local-def
+        h 0 gt {
+            20 h sub 1 add 1 19 { /r exch local-def
+                fld r c field-get 0 eq { /holes holes 1 add local-def } if
+            } for
+        } if
+    } for
+    holes
+} def
+/bumpiness-ref {
+    |arr|#5
+    /tot 0 local-def
+    0 1 8 { /i exch local-def
+        /d arr i get arr i 1 add get sub local-def
+        d 0 lt { /d 0 d sub local-def } if
+        /tot tot d add local-def
+    } for
+    tot
+} def
+/well-depth-ref {
+    |arr|#12
+    /total 0 local-def
+    0 1 9 { /i exch local-def
+        /h arr i get local-def
+        /left  i 0 eq { 20 } { arr i 1 sub get } if-else local-def
+        /right i 9 eq { 20 } { arr i 1 add get } if-else local-def
+        /min-side left right lt { left } { right } if-else local-def
+        /depth min-side h sub local-def
+        depth 2 ge { /total total depth add local-def } if
+    } for
+    total
+} def
+/score-board-ref {
+    |fld lines weights|#10
+    /hbuf 10 array local-def
+    fld hbuf column-heights-into
+    /h-sum   hbuf aggregate-height local-def
+    /n-holes fld hbuf count-holes-ref local-def
+    /n-bumpy hbuf bumpiness-ref local-def
+    /n-well  hbuf well-depth-ref local-def
+    lines weights 0 get mul
+    h-sum weights 1 get mul add
+    n-holes weights 2 get mul add
+    n-bumpy weights 3 get mul add
+    n-well weights 4 get mul add
+} def
+
+/field-copy-ref {
+    |src dst|#4
+    0 1 19 { /r exch local-def src r get dst r get copy pop } for
+} def
+
+/piece-collides?-ref {
+    |fld shape py px|#10
+    /hit false local-def
+    shape {
+        array-load pop /dc exch local-def /dr exch local-def
+        /r py dr add local-def /c px dc add local-def
+        r 0 lt r 20 ge or
+        c 0 lt c 10 ge or
+        or
+            { /hit true local-def }
+            { fld r c field-get 0 ne { /hit true local-def } if }
+        if-else
+    } for-all
+    hit
+} def
+
+/piece-merge-ref {
+    |fld shape color py px|#10
+    shape {
+        array-load pop /dc exch local-def /dr exch local-def
+        /r py dr add local-def /c px dc add local-def
+        r 0 ge r 20 lt and
+        c 0 ge c 10 lt and
+        and
+            { fld r c color field-set }
+        if
+    } for-all
+    fld
+} def
+
+% Build a salted half-full field so heuristic passes hit holes/wells/bumps.
+/build-salted-field {
+    /F make-field def
+    0 1 9 { /c exch def F 19 c c 1 add field-set } for
+    0 1 9 { /c exch def c 5 ne { F 18 c 7 field-set } if } for
+    0 1 9 { /c exch def c 3 ne c 6 ne and { F 17 c 4 field-set } if } for
+    0 1 9 { /c exch def c 1 ne c 7 ne and { F 16 c 2 field-set } if } for
+    F
+} def
+
+%=== field-copy-fast equivalence ===
+
+/src-A make-field def
+0 1 19 { /r exch def 0 1 9 { /c exch def src-A r c r 10 mul c add 1 add field-set } for } for
+
+/dst-ref  make-field def
+/dst-fast make-field def
+src-A dst-ref  field-copy-ref
+src-A dst-fast field-copy-fast
+
+/all-eq true def
+0 1 19 {
+    /r exch def
+    0 1 9 {
+        /c exch def
+        dst-ref r c field-get  dst-fast r c field-get  ne { /all-eq false def } if
+    } for
+} for
+all-eq                                              (field-copy-fast: salted full grid matches ref)        rt-ok
+
+% Empty source: dst should also be all zeros.
+/empty-src make-field def
+/dst-empty make-field def
+empty-src dst-empty field-copy-fast
+/empty-eq true def
+0 1 19 { /r exch def 0 1 9 { /c exch def dst-empty r c field-get 0 ne { /empty-eq false def } if } for } for
+empty-eq                                            (field-copy-fast: empty source -> all zeros)           rt-ok
+
+% Range-check: wrong outer length rejected.
+{ 5 array 5 array field-copy-fast } try
+/range-check eq                                     (field-copy-fast: rejects len-5 outer)                 rt-ok
+clear
+
+%=== score-board-fast equivalence ===
+
+/weights [ 760 -510 -357 -184 -150 ] def
+
+/sb-cmp {
+    |fld lines label|#5
+    fld lines weights score-board-ref  /ref-result exch local-def
+    fld lines weights score-board-fast /fast-result exch local-def
+    ref-result fast-result eq                       label rt-ok
+} def
+
+/EF make-field def
+EF 0 (score-board-fast: empty field, lines=0)        sb-cmp
+EF 4 (score-board-fast: empty field, lines=4)        sb-cmp
+
+/SF build-salted-field def
+SF 0 (score-board-fast: salted, lines=0)             sb-cmp
+SF 1 (score-board-fast: salted, lines=1)             sb-cmp
+SF 4 (score-board-fast: salted, lines=4)             sb-cmp
+
+% Tall left column, empty elsewhere (well + bumpy heavy).
+/TF make-field def
+0 1 9 { /r exch def TF r 10 add 0 3 field-set } for
+TF 0 (score-board-fast: tall left col)               sb-cmp
+
+% Range-check: wrong-length weights array rejected.
+{ EF 0 [ 1 2 3 ] score-board-fast } try
+/range-check eq                                     (score-board-fast: rejects len-3 weights)             rt-ok
+clear
+
+%=== piece-collides-fast equivalence ===
+
+% T-piece spawn shape from tetrix.trx (cells: [0 1] [1 0] [1 1] [1 2]).
+/T-shape [ [0 1] [1 0] [1 1] [1 2] ] def
+% I-piece horizontal (state 0): [1 0] [1 1] [1 2] [1 3]
+/I-shape [ [1 0] [1 1] [1 2] [1 3] ] def
+
+/cmp-collides {
+    |fld shape py px label|#7
+    fld shape py px piece-collides?-ref  /ref exch local-def
+    fld shape py px piece-collides-fast  /fast exch local-def
+    ref fast eq                                     label rt-ok
+} def
+
+% Empty field, T-piece at row 0 col 4 -- no collision.
+/CF1 make-field def
+CF1 T-shape  0 4 (piece-collides-fast: T spawn empty)         cmp-collides
+
+% Same field, T-piece at row 19 col 4 (cells go to row 19, 20, 20, 20 -- out of bounds).
+CF1 T-shape 19 4 (piece-collides-fast: T at row 19 -> oob)    cmp-collides
+
+% Spawn off left edge -- col -2.
+CF1 T-shape  0 -2 (piece-collides-fast: T col=-2 -> oob)       cmp-collides
+
+% Spawn off right edge.
+CF1 T-shape  0 9 (piece-collides-fast: T col=9 -> oob)        cmp-collides
+
+% Salted field collision with bottom row.
+/CF2 build-salted-field def
+CF2 I-shape 18 0 (piece-collides-fast: I onto salted bottom)  cmp-collides
+CF2 I-shape  5 0 (piece-collides-fast: I above salt -- clear) cmp-collides
+
+% Range-check: shape length != 4 rejected.
+{ CF1 [ [0 0] [0 1] ] 0 0 piece-collides-fast } try
+/range-check eq                                     (piece-collides-fast: rejects len-2 shape)            rt-ok
+clear
+
+%=== piece-merge-fast equivalence ===
+
+/cmp-merge {
+    |shape color py px label|#15
+    /F-ref  make-field local-def
+    /F-fast make-field local-def
+    F-ref  shape color py px piece-merge-ref pop
+    F-fast shape color py px piece-merge-fast pop
+    /all-equal true local-def
+    0 1 19 { /r exch local-def 0 1 9 { /c exch local-def
+        F-ref r c field-get F-fast r c field-get ne { /all-equal false local-def } if
+    } for } for
+    all-equal                                       label rt-ok
+} def
+
+T-shape 129 0  4 (piece-merge-fast: T spawn at row 0 col 4)   cmp-merge
+T-shape 129 18 4 (piece-merge-fast: T at bottom)              cmp-merge
+% Out-of-bounds cells silently dropped by both impls.
+T-shape 129 19 4 (piece-merge-fast: T half off-bottom)        cmp-merge
+T-shape 129 0 -1 (piece-merge-fast: T off-left)               cmp-merge
+I-shape  51 5  3 (piece-merge-fast: I horizontal mid-board)   cmp-merge
+
+% piece-merge-fast must leave field on the operand stack.
+/F-ret make-field def
+F-ret T-shape 129 0 4 piece-merge-fast
+F-ret eq                                            (piece-merge-fast: returns field unchanged on stack)  rt-ok
+
+%=== field-clear-rows-fast equivalence ===
+
+/field-clear-rows-ref {
+    |f|#10
+    /write 19 local-def /read 19 local-def
+    {
+        read 0 lt { exit } if
+        /full true local-def
+        0 1 9 { /c exch local-def f read c field-get 0 eq { /full false local-def } if } for
+        full
+            { /read read 1 sub local-def }
+            {
+                read write ne {
+                    f read get  f write get  copy pop
+                } if
+                /read  read 1 sub local-def
+                /write write 1 sub local-def
+            }
+        if-else
+    } loop
+    /cleared write 1 add local-def
+    0 1 write {
+        /i exch local-def
+        /row f i get local-def
+        0 1 9 { /c exch local-def row c 0 put } for
+    } for
+    f cleared
+} def
+
+/cmp-clear {
+    |label setup|#15
+    /F-ref make-field local-def
+    F-ref setup
+    /F-fast make-field local-def
+    F-fast setup
+    F-ref  field-clear-rows-ref  /ref-cleared  exch local-def pop
+    F-fast field-clear-rows-fast /fast-cleared exch local-def pop
+    ref-cleared fast-cleared eq                     label ( cleared count) concat rt-ok
+    /all-equal true local-def
+    0 1 19 { /r exch local-def 0 1 9 { /c exch local-def
+        F-ref r c field-get F-fast r c field-get ne { /all-equal false local-def } if
+    } for } for
+    all-equal                                       label ( field state) concat rt-ok
+} def
+
+% T1: empty field -- nothing cleared.
+(field-clear-rows: empty)
+{ |fld|#1 } cmp-clear
+
+% T2: bottom row full, others empty -- 1 cleared.
+(field-clear-rows: bottom-row only)
+{ |fld|#5 0 1 9 { /c exch local-def fld 19 c 7 field-set } for } cmp-clear
+
+% T3: bottom 4 rows full -- four-line clear.
+(field-clear-rows: 4-row clear)
+{ |fld|#5 16 1 19 { /r exch local-def 0 1 9 { /c exch local-def fld r c r 1 add field-set } for } for } cmp-clear
+
+% T4: bottom row full, row 17 also full, 18 partial -- non-contiguous full rows.
+(field-clear-rows: split full rows)
+{ |fld|#5
+  0 1 9 { /c exch local-def fld 19 c 5 field-set } for
+  0 1 9 { /c exch local-def fld 17 c 3 field-set } for
+  0 1 9 { /c exch local-def c 4 ne { fld 18 c 1 field-set } if } for
+} cmp-clear
+
+% T5: filled board with one hole at (19, 5) -- nothing clears, all rows kept.
+(field-clear-rows: with hole)
+{ |fld|#5
+  10 1 19 { /r exch local-def 0 1 9 { /c exch local-def
+      r 19 eq c 5 eq and not { fld r c 1 field-set } if
+  } for } for
+} cmp-clear
+
+% T6: completely full bottom 19 rows -- 19 cleared, top row stays empty.
+(field-clear-rows: 19 contiguous full)
+{ |fld|#5 1 1 19 { /r exch local-def 0 1 9 { /c exch local-def fld r c 9 field-set } for } for } cmp-clear
+
+%=== piece-ghost-row-fast equivalence ===
+
+/piece-ghost-row-ref {
+    |fld shape py px|#6
+    /try-row py local-def
+    {
+        fld shape try-row 1 add px piece-collides?-ref
+        { exit } if
+        /try-row try-row 1 add local-def
+    } loop
+    try-row
+} def
+
+/cmp-ghost {
+    |fld shape py px label|#7
+    fld shape py px piece-ghost-row-ref  /ref exch local-def
+    fld shape py px piece-ghost-row-fast /fast exch local-def
+    ref fast eq                                     label rt-ok
+} def
+
+% Empty field: T-piece dropped from row 0 col 4 -> bottom (try_row+1=19 cells
+% go to row 20 -> oob, so try_row=18).
+/GF1 make-field def
+GF1 T-shape 0 4 (piece-ghost-row-fast: T empty field)        cmp-ghost
+
+% I-piece horizontal from row 0 col 0 on empty field.
+GF1 I-shape 0 0 (piece-ghost-row-fast: I empty field)        cmp-ghost
+
+% Salted bottom rows: T-piece lands above the salt.
+/GF2 build-salted-field def
+GF2 T-shape 0 4 (piece-ghost-row-fast: T salted)             cmp-ghost
+GF2 I-shape 0 3 (piece-ghost-row-fast: I salted)             cmp-ghost
+
+% Spawn already at the bottom: try_row stays put.
+GF1 T-shape 18 4 (piece-ghost-row-fast: T from row 18)       cmp-ghost
+
+% Range-check: shape length != 4 rejected.
+{ GF1 [ [0 0] [0 1] ] 0 0 piece-ghost-row-fast } try
+/range-check eq                                     (piece-ghost-row-fast: rejects len-2 shape)           rt-ok
+clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_tetrix_native: ALL TESTS PASSED) =
+(__test_ok__) =

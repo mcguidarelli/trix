@@ -1,0 +1,204 @@
+% ====================================================================
+% test_global_dict_gc_expand.trx -- GC walker reaches Dict expansion blocks
+% ====================================================================
+% A dynamic global Dict that outgrows its initial pool gets a separate
+% global-VM block for the new entry slots.  Bucket-chain heads and
+% m_pool can point mid-block into those expansion blocks, so they are
+% NOT payload-start offsets and cannot be marked by the normal block-
+% level GC mark.  Without an extra walk in Dict::gc_walk_contents, a
+% vm-global-gc pass would sweep the expansion block while the Dict
+% header still references entries inside it -- silent corruption on
+% the next put.
+%
+% This test exercises the path:
+%   1. Build a global dynamic-dict with small initial capacity.
+%   2. Put past capacity (forces expansion).
+%   3. Remove the entries that came from the expansion block (free-
+%      list traversal of the Dict now walks through expansion-block
+%      slots with NO bucket-chain reference -- the case the GC walker
+%      must handle via the free-list walk).
+%   4. vm-global-gc.
+%   5. Re-fill with new entries -- they come from the expansion block
+%      via m_pool.  Read them back to confirm no corruption.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% Pre-intern the name keys at BASE so they survive cleanly without
+% triggering the Name-table-above-barrier gotcha.  Putting them into
+% a transient local Dict is the canonical pattern.
+16 dynamic-dict /pre exch def
+pre /k0 0 put
+pre /k1 0 put
+pre /k2 0 put
+pre /k3 0 put
+pre /k4 0 put
+pre /k5 0 put
+pre /k6 0 put
+pre /k7 0 put
+
+% ====================================================================
+% SECTION 1: Build a global dynamic-dict + force expansion
+% ====================================================================
+
+${ 4 dynamic-dict } /d exch def
+d type /dict-type eq                        (s1: type is dict-type)            rt-ok
+
+% Initial fill -- last 4 trip the expand_dict path.
+d /k0 0 put
+d /k1 1 put
+d /k2 2 put
+d /k3 3 put
+d /k4 4 put
+d /k5 5 put
+d /k6 6 put
+d /k7 7 put
+
+d length 8 eq                               (s1: 8 puts -> length 8)           rt-ok
+d /k0 get 0 eq                              (s1: /k0 readable)                 rt-ok
+d /k7 get 7 eq                              (s1: /k7 readable after expansion) rt-ok
+
+% ====================================================================
+% SECTION 2: Drain the expansion block back onto the free list
+% ====================================================================
+% Removing the entries that landed in the expansion block puts them
+% all on m_pool with no bucket-chain reference.  The Dict still has
+% 4 live entries (k0..k3) -- those are in the initial pool inside d's
+% own VM block, always reachable via the Dict's own mark.
+
+d /k4 undef
+d /k5 undef
+d /k6 undef
+d /k7 undef
+
+d length 4 eq                               (s2: 4 undefs -> length 4)         rt-ok
+d /k0 get 0 eq                              (s2: /k0 retained)                 rt-ok
+d /k3 get 3 eq                              (s2: /k3 retained)                 rt-ok
+
+% ====================================================================
+% SECTION 3: vm-global-gc  --  the regression
+% ====================================================================
+% Pre-fix: this reclaims the expansion block as an orphan because no
+% root references it (Dict::gc_walk_contents only marked Objects, not
+% the auxiliary block itself).  m_pool then dangles into freed memory.
+% Post-fix: the free-list walk in gc_walk_contents back-walks each
+% free entry to the owning block and marks it; the expansion block
+% survives the sweep.
+
+vm-global-gc
+
+% ====================================================================
+% SECTION 4: Dict still functional after GC
+% ====================================================================
+% Reading the live entries from the initial pool exercises bucket-
+% chain traversal but doesn't touch the expansion block.
+
+d /k0 get 0 eq                              (s4: /k0 readable post-gc)         rt-ok
+d /k1 get 1 eq                              (s4: /k1 readable post-gc)         rt-ok
+d /k2 get 2 eq                              (s4: /k2 readable post-gc)         rt-ok
+d /k3 get 3 eq                              (s4: /k3 readable post-gc)         rt-ok
+d length 4 eq                               (s4: length 4 post-gc)             rt-ok
+
+% ====================================================================
+% SECTION 5: New puts consume from the (formerly orphan-risk) expansion block
+% ====================================================================
+% Each put pulls m_pool's head into a new bucket chain.  Pre-fix:
+% memory corruption / SIGTRAP / wrong reads on the slot the allocator has
+% since reissued.  Post-fix: clean inserts + reads.
+
+d /k4 40 put
+d /k5 50 put
+d /k6 60 put
+d /k7 70 put
+
+d length 8 eq                               (s5: post-gc puts -> length 8)     rt-ok
+d /k4 get 40 eq                             (s5: /k4 = 40 post-gc-put)         rt-ok
+d /k5 get 50 eq                             (s5: /k5 = 50 post-gc-put)         rt-ok
+d /k6 get 60 eq                             (s5: /k6 = 60 post-gc-put)         rt-ok
+d /k7 get 70 eq                             (s5: /k7 = 70 post-gc-put)         rt-ok
+
+% Earlier entries still readable -- nothing else got corrupted.
+d /k0 get 0 eq                              (s5: /k0 still 0)                  rt-ok
+d /k1 get 1 eq                              (s5: /k1 still 1)                  rt-ok
+
+% ====================================================================
+% SECTION 6: Second expansion + second GC round
+% ====================================================================
+% Force another expand by overflowing the new capacity, then drain
+% and GC again.  Exercises the multi-expansion-block case (chain of
+% expansion blocks all need marking).
+
+% Pre-intern the next batch of keys.
+pre /k8  0 put
+pre /k9  0 put
+pre /k10 0 put
+pre /k11 0 put
+pre /k12 0 put
+pre /k13 0 put
+pre /k14 0 put
+pre /k15 0 put
+
+d /k8  8  put
+d /k9  9  put
+d /k10 10 put
+d /k11 11 put
+d /k12 12 put
+d /k13 13 put
+d /k14 14 put
+d /k15 15 put
+
+d length 16 eq                              (s6: post-2nd-fill -> length 16)   rt-ok
+
+% Drain everything that lives in either expansion block.
+d /k4  undef    d /k5  undef    d /k6  undef    d /k7  undef
+d /k8  undef    d /k9  undef    d /k10 undef    d /k11 undef
+d /k12 undef    d /k13 undef    d /k14 undef    d /k15 undef
+
+d length 4 eq                               (s6: after drain -> length 4)      rt-ok
+
+vm-global-gc
+
+% Refill -- entries come back from m_pool across both expansion blocks.
+d /k4  400 put    d /k5  500 put    d /k6  600 put    d /k7  700 put
+d /k8  800 put    d /k9  900 put    d /k10 1000 put   d /k11 1100 put
+
+d length 12 eq                              (s6: post-gc 8 puts -> length 12)  rt-ok
+d /k4  get 400  eq                          (s6: /k4 = 400 post-2nd-gc)        rt-ok
+d /k11 get 1100 eq                          (s6: /k11 = 1100 post-2nd-gc)      rt-ok
+
+% ====================================================================
+% SECTION 7: an expansion block must NOT be re-walked as a Dict header
+% ====================================================================
+% Pre-fix the expansion-pool block was tagged ChunkKind::Dict.  The GC
+% back-walk marked it, then walk_block_contents re-read it AS a Dict
+% header -- mis-reading an entry's m_value bytes as bucket/pool offsets.
+% A value that looks like a VM offset (305419896 = 0x12345678) made
+% vm-global-gc dereference it: "offset out of VM range" crash.  Sections
+% 1-6 missed this because their values are small ints that never land on a
+% live/in-range block.  Now the block is ChunkKind::HashEntry (a GC leaf).
+% Keys reuse the BASE-interned /k0../k6 from `pre` above.
+${ 4 dynamic-dict } /e exch def
+e /k0 305419896 put
+e /k1 305419896 put
+e /k2 305419896 put
+e /k3 305419896 put
+e /k4 305419896 put
+e /k5 305419896 put
+e /k6 305419896 put
+
+vm-global-gc
+
+e length 7 eq                               (s7: expanded dict survives GC -> length 7)  rt-ok
+e /k6 get 305419896 eq                      (s7: offset-like value intact post-GC)       rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_global_dict_gc_expand: ALL TESTS PASSED) =
+(__test_ok__) =

@@ -1,0 +1,32 @@
+# Build context trim for `docker build`.  Keeps the image build fast and -- for
+# the internal-only paths -- ensures they can never end up in an image layer.
+
+# VCS + CI
+.git
+.gitattributes
+.github
+
+# Build outputs (CMake dirs, .su stack files, objects) -- never needed; the
+# image builds Release from scratch.  'build' / 'build-*' do NOT match build.sh.
+build
+build-*
+*.su
+*.o
+
+# Dev/runtime scratch, fuzz corpora + crashes, snapshots, release tarballs
+local
+backup
+fuzz/corpus
+fuzz/crash*
+*.img
+*.tar.gz
+*.sha256
+
+# Regenerated example output dirs (gitignored)
+out
+
+# Editor / OS cruft
+.vscode
+.idea
+*.swp
+.DS_Store

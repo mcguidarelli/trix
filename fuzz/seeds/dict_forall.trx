@@ -1,0 +1,1 @@
+<< /a 1 /b 2 >> { pop pop } for-all

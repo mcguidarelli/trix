@@ -1,0 +1,7 @@
+% supervisor with one-for-all strategy and a temporary child.
+<< /strategy /one-for-all /intensity 3 /period 30000
+   /children [ << /id /a /start { { actor-recv pop } loop } /restart /temporary >> ] >>
+supervisor /sup exch def
+sup supervisor-which-children length pop
+sup supervisor-count-children pop
+sup supervisor-stop

@@ -1,0 +1,74 @@
+% ====================================================================
+% test_eqref_binding_snapshot.trx -- per-coroutine binding cache round-trip
+% ====================================================================
+% Phase 1: spawn an actor whose body defs names and reads them back
+% (populating its per-coroutine binding_table), yield so the actor runs
+% up to an actor-recv block, snap-shot.  Phase 2 (eqref_binding_snapshot_
+% thaw.trx) restores the image.  Both phases run post-snapshot code that
+% sends the actor a trigger, yields, and verifies the actor's cached
+% bindings still resolve correctly (sum = 142).
+%
+% If the binding_table bucket-array / BindingEntry chain were not
+% faithfully captured in the snapshot, the thaw phase's sum would be
+% wrong or the actor would crash on the cached lookups.
+%
+% Must NOT run inside save/restore (actors cannot span save scopes).
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- setup: spawn actor that populates its per-coroutine binding cache ---
+/sb-actor-sum 0 def
+/sb-actor [ {
+    8 dict begin
+    /bx 42  def
+    /by 100 def
+    % Populate the per-coroutine binding cache for both names with
+    % reads that force the dict-stack walk + cache-populate path.
+    bx pop
+    by pop
+    bx pop
+    by pop
+    % Block on an empty mailbox so this coroutine is Sleeping (with a
+    % populated m_binding_table) when snap-shot fires.
+    actor-recv pop
+    % After resume: read the names through the cache and write the sum
+    % into main's userdict so both phases can verify it.
+    userdict /sb-actor-sum bx by add put
+    end
+} actor-spawn def
+
+% Let the actor run up to its actor-recv -- now its m_binding_table
+% has entries for /bx and /by.
+0 coroutine-sleep 0 coroutine-sleep 0 coroutine-sleep
+
+% Queue the trigger message -- after snap-shot returns, or after thaw,
+% the actor will process this and compute the sum.
+/trigger sb-actor actor-send
+
+(tests/eqref_binding_snapshot.img) snap-shot
+
+% ==== post-snap-shot code: runs in BOTH phase 1 and phase 2 ====
+
+% Lines prefixed with "sb:" are compared across phases by the harness.
+sb-actor is-actor (sb:is-actor) rt-ok
+sb-actor is-coroutine (sb:is-coroutine) rt-ok
+
+% Yield enough times for the actor to wake, consume the message, read
+% the cached names, compute the sum, and die.
+0 coroutine-sleep 0 coroutine-sleep 0 coroutine-sleep 0 coroutine-sleep
+
+% Cached reads resolved correctly: /bx=42 + /by=100 = 142.
+sb-actor-sum 142 eq (sb:binding-cache-sum=142) rt-ok
+sb-actor coroutine-status /dead eq (sb:actor-dead) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_eqref_binding_snapshot: ALL TESTS PASSED) =
+(__test_ok__) =

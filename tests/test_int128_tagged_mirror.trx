@@ -1,0 +1,125 @@
+% ====================================================================
+% Mirror of test_tagged.trx long/ulong cases for Int128/UInt128.
+%
+% test_int128_containers.trx has basic tag/tag-value for 128-bit.
+% This file fills the rest of the tagged-value surface that
+% test_tagged.trx exercises with `l`/`ul`: is-tagged, untag (two
+% return values), tag-update (in-place proc), tag-value-or (fallback),
+% deep-eq across same/different payloads, packed arrays of tags,
+% save/restore of tagged bindings, and dict-resident tag overwrite.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: is-tagged (negative: raw 128-bit is not tagged)
+% ====================================================================
+
+42q is-tagged not                            (is-tagged: int128 false) rt-ok clear
+42uq is-tagged not                           (is-tagged: uint128 false) rt-ok clear
+42q /t tag is-tagged                         (is-tagged: int128 wrapped true) rt-ok clear
+42uq /t tag is-tagged                        (is-tagged: uint128 wrapped true) rt-ok clear
+
+% ====================================================================
+% SECTION 2: tag-value on int128/uint128 payload
+% ====================================================================
+
+42q /t tag tag-value 42q deep-eq             (tag-value: int128 payload) rt-ok clear
+42uq /t tag tag-value 42uq deep-eq           (tag-value: uint128 payload) rt-ok clear
+-170141183460469231731687303715884105728q /min tag tag-value
+    -170141183460469231731687303715884105728q deep-eq
+    (tag-value: INT128_MIN payload) rt-ok clear
+340282366920938463463374607431768211455uq /max tag tag-value
+    340282366920938463463374607431768211455uq deep-eq
+    (tag-value: UINT128_MAX payload) rt-ok clear
+
+% ====================================================================
+% SECTION 3: untag returns (value, name) pair
+% ====================================================================
+
+42q /ev tag untag /ev eq exch 42q deep-eq and
+    (untag: int128 value+name) rt-ok clear
+42uq /ev tag untag /ev eq exch 42uq deep-eq and
+    (untag: uint128 value+name) rt-ok clear
+
+% ====================================================================
+% SECTION 4: deep-eq across tagged 128-bit
+% ====================================================================
+
+42q /ev tag 42q /ev tag deep-eq              (tag deep-eq: same int128) rt-ok clear
+42q /ev tag 99q /ev tag deep-eq not          (tag deep-eq: differing int128) rt-ok clear
+42q /ev tag 42q /other tag deep-eq not       (tag deep-eq: differing name) rt-ok clear
+42uq /ev tag 42uq /ev tag deep-eq            (tag deep-eq: same uint128) rt-ok clear
+
+% ====================================================================
+% SECTION 5: tag-update -- apply proc to unwrap, transform, re-wrap
+% ====================================================================
+
+100q /big tag { 1q add } tag-update
+    dup tag-value 101q deep-eq               (tag-update: int128 value) rt-ok
+    tag-name /big eq                         (tag-update: int128 name preserved) rt-ok clear
+
+100uq /big tag { 1uq add } tag-update
+    dup tag-value 101uq deep-eq              (tag-update: uint128 value) rt-ok
+    tag-name /big eq                         (tag-update: uint128 name preserved) rt-ok clear
+
+% ====================================================================
+% SECTION 6: tag-value-or (with default fallback)
+% ====================================================================
+
+100q /some tag /some 0q tag-value-or 100q deep-eq
+    (tag-value-or: int128 matching tag) rt-ok clear
+null /none tag /some 100q tag-value-or 100q deep-eq
+    (tag-value-or: int128 mismatching tag -> default) rt-ok clear
+
+100uq /big tag /big 0uq tag-value-or 100uq deep-eq
+    (tag-value-or: uint128 matching tag) rt-ok clear
+100q /a tag /b 999q tag-value-or 999q deep-eq
+    (tag-value-or: int128 mismatching tag -> int128 default) rt-ok clear
+
+% ====================================================================
+% SECTION 7: packed arrays of tagged 128-bit
+% ====================================================================
+
+42q /long-val tag 1 packed 0 get tag-value 42q deep-eq
+    (packed: singleton int128 tag round-trip) rt-ok clear
+42uq /big-u tag 1 packed 0 get tag-value 42uq deep-eq
+    (packed: singleton uint128 tag round-trip) rt-ok clear
+
+% Multi-element packed with two tagged int128 entries
+42q /a tag 99q /b tag 2 packed
+    dup 0 get tag-value 42q deep-eq          (packed: [0] tag-value) rt-ok
+    dup 1 get tag-value 99q deep-eq          (packed: [1] tag-value) rt-ok
+    pop clear
+
+% ====================================================================
+% SECTION 8: save/restore of tagged binding
+% ====================================================================
+
+/ev-tagged 42q /long tag def
+/s save def
+    /ev-tagged 99q /replaced tag def
+    ev-tagged tag-value 99q deep-eq          (save: inner int128 tag) rt-ok clear
+s restore
+ev-tagged tag-value 42q deep-eq              (save: int128 tag restored) rt-ok clear
+ev-tagged tag-name /long eq                  (save: int128 tag name restored) rt-ok clear
+
+% ====================================================================
+% SECTION 9: tagged 128-bit inside a curry capture (tagged-wraps-curry)
+% ====================================================================
+
+1q { add } curry /ev tag
+    dup is-tagged                            (tagged curry: wrapped) rt-ok
+    tag-name /ev eq                          (tagged curry: name /ev) rt-ok clear
+
+(test_int128_tagged_mirror.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

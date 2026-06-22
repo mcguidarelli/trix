@@ -1,0 +1,80 @@
+% test_raw_mode_sandbox.trx -- sandbox-block tests for raw-mode family
+%
+% Run with --sandbox flag to verify the host-op ban applies uniformly.
+% raw-mode? must remain ALLOWED in sandbox (read-only state, harmless).
+
+/passed 0 def
+/failed 0 def
+% restore-immune failure counter (string byte writes are unjournaled
+% and local-VM, invisible to heap probes): the file THROWS at EOF so
+% failed assertions gate the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/total  0 def
+
+/rt-ok {
+    /total total 1 add def
+    exch
+    { pop /passed passed 1 add def }
+    { /failed failed 1 add def
+      rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put
+      (FAILED: ) print = } if-else
+} def
+
+%% === Sandbox blocks raw-mode ===
+
+<< /unsupported { clear true } >> { raw-mode } try-catch
+(raw-mode: blocked in sandbox) rt-ok
+
+%% === Sandbox blocks cooked-mode ===
+
+<< /unsupported { clear true } >> { cooked-mode } try-catch
+(cooked-mode: blocked in sandbox) rt-ok
+
+%% === Sandbox ALLOWS raw-mode? (read-only state) ===
+
+raw-mode? false eq (raw-mode?: allowed in sandbox) rt-ok
+
+%% === Sandbox blocks read-key-byte family ===
+
+<< /unsupported { clear true } >> { read-key-byte } try-catch
+(read-key-byte: blocked in sandbox) rt-ok
+
+<< /unsupported { clear true } >> { 100 read-key-byte-timeout } try-catch
+(read-key-byte-timeout: blocked in sandbox) rt-ok
+
+<< /unsupported { clear true } >> { key-ready? } try-catch
+(key-ready?: blocked in sandbox) rt-ok
+
+%% === Sandbox blocks terminal-size ===
+
+<< /unsupported { clear true } >> { terminal-size } try-catch
+(terminal-size: blocked in sandbox) rt-ok
+
+%% === Sandbox blocks screen-park-cursor (direct stdout write) ===
+
+<< /unsupported { clear true } >> { 0 0 screen-park-cursor } try-catch
+(screen-park-cursor: blocked in sandbox) rt-ok
+
+%% === Sandbox blocks screen-render (direct stdout write); the pure
+%% cell-buffer ops and screen-render-to stay allowed ===
+
+<< /unsupported { clear true } >> { 2 2 make-screen screen-render } try-catch
+(screen-render: blocked in sandbox) rt-ok
+
+/sb-scr 2 2 make-screen def
+sb-scr 0 0 65 7 0 0 screen-put-cell pop
+/sb-cap 256 make-string-stream def
+sb-scr sb-cap screen-render-to pop
+sb-cap get-string-stream length 0 gt
+sb-cap close-stream
+(screen-render-to: allowed in sandbox) rt-ok
+
+%% === Results ===
+
+failed 0 eq
+{ total (raw-mode-sandbox: all tests passed) = = }
+{ (raw-mode-sandbox: FAILURES = ) print failed = } if-else
+failed 0 eq { } { /assert-failed throw } if-else
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

@@ -1,0 +1,292 @@
+% ====================================================================
+% test_underscore_num.trx -- underscore separator in numeric literals
+% ====================================================================
+% Validates that _ between digits is accepted as a visual separator
+% in all numeric literal forms, and that invalid placements produce
+% names (not numbers and not errors).
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% Helper: verify a token is a name (not a number) via the token operator
+% Usage: (token-text) is-name-not-number => bool
+/is-name-not-number {
+    token
+    pop                                       % drop true/false
+    exch pop                                  % drop remaining string
+    type /name-type eq
+} def
+
+% ====================================================================
+% SECTION 1: Integer positive cases
+% ====================================================================
+
+1_000 1000 eq                                 (us: 1_000 = 1000) rt-ok clear
+1_000_000 1000000 eq                          (us: 1_000_000 = 1000000) rt-ok clear
+1_0_0 100 eq                                  (us: 1_0_0 = 100) rt-ok clear
+1_000u 1000u eq                               (us: 1_000u = 1000u) rt-ok clear
+1_000_000l 1000000l eq                        (us: 1_000_000l = 1000000l) rt-ok clear
+1_000_000ul 1000000ul eq                      (us: 1_000_000ul = 1000000ul) rt-ok clear
+1_0i 10i eq                                   (us: 1_0i = 10i) rt-ok clear
+25_5b 255b eq                                 (us: 25_5b = 255b) rt-ok clear
+
+% Negative integers
+-1_000 -1000 eq                               (us: -1_000 = -1000) rt-ok clear
+-1_000l -1000l eq                             (us: -1_000l = -1000l) rt-ok clear
++1_000 1000 eq                                (us: +1_000 = 1000) rt-ok clear
+
+% ====================================================================
+% SECTION 2: Radix positive cases
+% ====================================================================
+
+16#FF_FF# 65535 eq                            (us: 16#FF_FF# = 65535) rt-ok clear
+16#DEAD_BEEF#ul 16#DEADBEEF#ul eq             (us: 16#DEAD_BEEF#ul) rt-ok clear
+2#1010_0011# 2#10100011# eq                   (us: 2#1010_0011#) rt-ok clear
+8#7_5_5# 8#755# eq                            (us: 8#7_5_5#) rt-ok clear
+16#FF_FF#u 16#FFFF#u eq                       (us: 16#FF_FF#u) rt-ok clear
+16#1_0#l 16#10#l eq                           (us: 16#1_0#l) rt-ok clear
+
+% ====================================================================
+% SECTION 3: Real positive cases
+% ====================================================================
+
+1_000.5 1000.5 eq                             (us: 1_000.5) rt-ok clear
+1_000.0 1000.0 eq                             (us: 1_000.0) rt-ok clear
+1_000_000.0 1000000.0 eq                      (us: 1_000_000.0) rt-ok clear
+1.123_456 1.123456 eq                         (us: 1.123_456) rt-ok clear
+1_000e3 1000e3 eq                             (us: 1_000e3) rt-ok clear
+1_000E3 1000E3 eq                             (us: 1_000E3) rt-ok clear
+1_000.5e2 1000.5e2 eq                         (us: 1_000.5e2) rt-ok clear
+1_000.5E2 1000.5E2 eq                         (us: 1_000.5E2) rt-ok clear
+1_000.5r 1000.5r eq                           (us: 1_000.5r) rt-ok clear
+1_000e3r 1000e3r eq                           (us: 1_000e3r) rt-ok clear
+
+% Real with signed exponent
+1_000e+3 1000e+3 eq                           (us: 1_000e+3) rt-ok clear
+1_000e-3 1000e-3 eq                           (us: 1_000e-3) rt-ok clear
+
+% Negative real
+-1_000.5 -1000.5 eq                           (us: -1_000.5) rt-ok clear
++1_000.5 1000.5 eq                            (us: +1_000.5) rt-ok clear
+-1_000e3 -1000e3 eq                           (us: -1_000e3) rt-ok clear
+
+% Underscores in fractional part
+12.34_56 12.3456 eq                           (us: 12.34_56) rt-ok clear
+0.1_2_3 0.123 eq                              (us: 0.1_2_3) rt-ok clear
+
+% Underscores in exponent digits
+1e1_0 1e10 eq                                 (us: 1e1_0) rt-ok clear
+1.5e1_0 1.5e10 eq                             (us: 1.5e1_0) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Double positive cases
+% ====================================================================
+
+1_000.5d 1000.5d eq                           (us: 1_000.5d) rt-ok clear
+1_000_000.123_456d 1000000.123456d eq         (us: 1_000_000.123_456d) rt-ok clear
+1_000e3d 1000e3d eq                           (us: 1_000e3d) rt-ok clear
+1_000.5e2d 1000.5e2d eq                       (us: 1_000.5e2d) rt-ok clear
+1_000e+3d 1000e+3d eq                         (us: 1_000e+3d) rt-ok clear
+1_000e-3d 1000e-3d eq                         (us: 1_000e-3d) rt-ok clear
+-1_000.5d -1000.5d eq                         (us: -1_000.5d) rt-ok clear
+12.34_56d 12.3456d eq                         (us: 12.34_56d) rt-ok clear
+1.5e1_0d 1.5e10d eq                           (us: 1.5e1_0d) rt-ok clear
+
+% ====================================================================
+% SECTION 5: Type verification
+% ====================================================================
+
+1_000 type /integer-type eq                   (us: 1_000 is integer) rt-ok clear
+1_000u type /uinteger-type eq                 (us: 1_000u is uinteger) rt-ok clear
+1_000l type /long-type eq                     (us: 1_000l is long) rt-ok clear
+1_000ul type /ulong-type eq                   (us: 1_000ul is ulong) rt-ok clear
+25_5b type /byte-type eq                      (us: 25_5b is byte) rt-ok clear
+1_000.5 type /real-type eq                    (us: 1_000.5 is real) rt-ok clear
+1_000.5d type /double-type eq                 (us: 1_000.5d is double) rt-ok clear
+
+% ====================================================================
+% SECTION 6: Negative cases — leading underscore
+% ====================================================================
+
+(_1) is-name-not-number                       (us-neg: _1 is name) rt-ok clear
+(_100) is-name-not-number                     (us-neg: _100 is name) rt-ok clear
+(__1) is-name-not-number                      (us-neg: __1 is name) rt-ok clear
+(_1_000) is-name-not-number                   (us-neg: _1_000 is name) rt-ok clear
+
+% ====================================================================
+% SECTION 7: Negative cases — trailing underscore
+% ====================================================================
+
+(1_) is-name-not-number                       (us-neg: 1_ is name) rt-ok clear
+(100_) is-name-not-number                     (us-neg: 100_ is name) rt-ok clear
+(1_000_) is-name-not-number                   (us-neg: 1_000_ is name) rt-ok clear
+
+% ====================================================================
+% SECTION 8: Negative cases — doubled underscore
+% ====================================================================
+
+(1__0) is-name-not-number                     (us-neg: 1__0 is name) rt-ok clear
+(1___0) is-name-not-number                    (us-neg: 1___0 is name) rt-ok clear
+(1_000__000) is-name-not-number               (us-neg: 1_000__000 is name) rt-ok clear
+
+% ====================================================================
+% SECTION 9: Negative cases — adjacent to decimal point
+% ====================================================================
+
+(1_.0) is-name-not-number                     (us-neg: 1_.0 is name) rt-ok clear
+(1._0) is-name-not-number                     (us-neg: 1._0 is name) rt-ok clear
+(1_000_.5) is-name-not-number                 (us-neg: 1_000_.5 is name) rt-ok clear
+(1_000._5) is-name-not-number                 (us-neg: 1_000._5 is name) rt-ok clear
+(_.5) is-name-not-number                      (us-neg: _.5 is name) rt-ok clear
+(1._) is-name-not-number                      (us-neg: 1._ is name) rt-ok clear
+(1_._0) is-name-not-number                    (us-neg: 1_._0 is name) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Negative cases — adjacent to exponent
+% ====================================================================
+
+(1_e5) is-name-not-number                     (us-neg: 1_e5 is name) rt-ok clear
+(1e_5) is-name-not-number                     (us-neg: 1e_5 is name) rt-ok clear
+(1.0_e5) is-name-not-number                   (us-neg: 1.0_e5 is name) rt-ok clear
+(1.0e_5) is-name-not-number                   (us-neg: 1.0e_5 is name) rt-ok clear
+(1_E5) is-name-not-number                     (us-neg: 1_E5 is name) rt-ok clear
+(1E_5) is-name-not-number                     (us-neg: 1E_5 is name) rt-ok clear
+(1_000.5_e3) is-name-not-number               (us-neg: 1_000.5_e3 is name) rt-ok clear
+(1_000.5e_3) is-name-not-number               (us-neg: 1_000.5e_3 is name) rt-ok clear
+(1_000.5_E3) is-name-not-number               (us-neg: 1_000.5_E3 is name) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Negative cases — adjacent to exponent sign
+% ====================================================================
+
+(1.0e+_3) is-name-not-number                 (us-neg: 1.0e+_3 is name) rt-ok clear
+(1.0e-_3) is-name-not-number                 (us-neg: 1.0e-_3 is name) rt-ok clear
+(1.0e_+3) is-name-not-number                 (us-neg: 1.0e_+3 is name) rt-ok clear
+(1.0e_-3) is-name-not-number                 (us-neg: 1.0e_-3 is name) rt-ok clear
+
+% ====================================================================
+% SECTION 12: Negative cases — adjacent to radix #
+% ====================================================================
+
+(16_#FF#) is-name-not-number                  (us-neg: 16_#FF# is name) rt-ok clear
+(16#_FF#) is-name-not-number                  (us-neg: 16#_FF# is name) rt-ok clear
+(16#FF_#) is-name-not-number                  (us-neg: 16#FF_# is name) rt-ok clear
+(16#FF#_u) is-name-not-number                 (us-neg: 16#FF#_u is name) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Negative cases — adjacent to integral suffix
+% ====================================================================
+
+(100_u) is-name-not-number                    (us-neg: 100_u is name) rt-ok clear
+(100_l) is-name-not-number                    (us-neg: 100_l is name) rt-ok clear
+(100_ul) is-name-not-number                   (us-neg: 100_ul is name) rt-ok clear
+(100_b) is-name-not-number                    (us-neg: 100_b is name) rt-ok clear
+(100_i) is-name-not-number                    (us-neg: 100_i is name) rt-ok clear
+(100_a) is-name-not-number                    (us-neg: 100_a is name) rt-ok clear
+
+% ====================================================================
+% SECTION 14: Negative cases — adjacent to float suffix
+% ====================================================================
+
+(1.0_d) is-name-not-number                   (us-neg: 1.0_d is name) rt-ok clear
+(1.0_r) is-name-not-number                   (us-neg: 1.0_r is name) rt-ok clear
+(1_000e3_r) is-name-not-number               (us-neg: 1_000e3_r is name) rt-ok clear
+(1_000e3_d) is-name-not-number               (us-neg: 1_000e3_d is name) rt-ok clear
+
+% ====================================================================
+% SECTION 15: Negative cases — adjacent to sign
+% ====================================================================
+
+(+_1) is-name-not-number                     (us-neg: +_1 is name) rt-ok clear
+(-_1) is-name-not-number                     (us-neg: -_1 is name) rt-ok clear
+
+% ====================================================================
+% SECTION 16: Negative cases — bare and misc
+% ====================================================================
+
+(_) is-name-not-number                        (us-neg: _ is name) rt-ok clear
+(__) is-name-not-number                       (us-neg: __ is name) rt-ok clear
+(+_) is-name-not-number                       (us-neg: +_ is name) rt-ok clear
+(-_) is-name-not-number                       (us-neg: -_ is name) rt-ok clear
+(100u_l) is-name-not-number                   (us-neg: 100u_l is name) rt-ok clear
+
+% ====================================================================
+% SECTION 17: Negative cases — doubled in float context
+% ====================================================================
+
+(1__000.5) is-name-not-number                 (us-neg: 1__000.5 is name) rt-ok clear
+(1_000.5__0) is-name-not-number               (us-neg: 1_000.5__0 is name) rt-ok clear
+
+% ====================================================================
+% SECTION 18: Backward compatibility — existing names unchanged
+% ====================================================================
+
+(my_var) is-name-not-number                   (us-compat: my_var is name) rt-ok clear
+(_foo) is-name-not-number                     (us-compat: _foo is name) rt-ok clear
+(a_b_c) is-name-not-number                    (us-compat: a_b_c is name) rt-ok clear
+(x_1) is-name-not-number                      (us-compat: x_1 is name) rt-ok clear
+(test_2) is-name-not-number                   (us-compat: test_2 is name) rt-ok clear
+
+% ====================================================================
+% SECTION 19: No underscore — zero overhead path unchanged
+% ====================================================================
+
+42 42 eq                                      (us-plain: 42 unchanged) rt-ok clear
+3.14 3.14 eq                                  (us-plain: 3.14 unchanged) rt-ok clear
+16#FF# 255 eq                                 (us-plain: 16#FF# unchanged) rt-ok clear
+100u 100u eq                                  (us-plain: 100u unchanged) rt-ok clear
+1.0d 1.0d eq                                  (us-plain: 1.0d unchanged) rt-ok clear
+
+% ====================================================================
+% SECTION 20: 0x / 0o / 0b prefix forms (Wart W09 -- 2026-04-28)
+% ====================================================================
+% Underscore separators in 0x/0o/0b prefix tokens use the prefix's
+% digit predicate for neighbor checks (hex / octal / binary).  Before
+% W09, only the BASE#DIGITS# radix form accepted hex-letter neighbors;
+% prefix tokens used the decimal predicate, so 0xDE_AD was a scan
+% error.  The fix extends strip_number_underscores in src/scanner.inl.
+
+% --- 0x prefix: hex-digit neighbors ---
+0xDE_AD 57005 eq                              (us-0x: 0xDE_AD = 57005) rt-ok clear
+0xFF_FF 65535 eq                              (us-0x: 0xFF_FF = 65535) rt-ok clear
+0xA_B 171 eq                                  (us-0x: 0xA_B = 171) rt-ok clear
+0x1_2_3_4 4660 eq                             (us-0x: 0x1_2_3_4 = 4660) rt-ok clear
+0xDE_AD_BE 14593470 eq                        (us-0x: 0xDE_AD_BE = 14593470) rt-ok clear
+
+% --- 0o prefix: octal-digit neighbors ---
+0o7_77 511 eq                                 (us-0o: 0o7_77 = 511) rt-ok clear
+0o1_2_3 83 eq                                 (us-0o: 0o1_2_3 = 83) rt-ok clear
+0o12_34 668 eq                                (us-0o: 0o12_34 = 668) rt-ok clear
+
+% --- 0b prefix: binary-digit neighbors ---
+0b10_10 10 eq                                 (us-0b: 0b10_10 = 10) rt-ok clear
+0b1010_1010 170 eq                            (us-0b: 0b1010_1010 = 170) rt-ok clear
+0b1_0_1_0 10 eq                               (us-0b: 0b1_0_1_0 = 10) rt-ok clear
+
+% --- Hex floats: hex digits valid through fraction; decimal in exponent ---
+0x1A.B_Cp4 427.75 eq                          (us-0x-float: 0x1A.B_Cp4) rt-ok clear
+0x1Fp4_2 0x1Fp42 eq                           (us-0x-float: 0x1Fp4_2 in exponent) rt-ok clear
+
+% --- Negative cases: rejected as not-a-number (i.e. an executable name) ---
+(0x_DE) is-name-not-number                    (us-0x-neg: leading _) rt-ok clear
+(0xDE_) is-name-not-number                    (us-0x-neg: trailing _) rt-ok clear
+(0x__DE) is-name-not-number                   (us-0x-neg: doubled __) rt-ok clear
+(0xFFp_4) is-name-not-number                  (us-0x-neg: _ adjacent to p) rt-ok clear
+(0xFF_p4) is-name-not-number                  (us-0x-neg: _ before p) rt-ok clear
+(0o7_8) is-name-not-number                    (us-0o-neg: 8 not octal) rt-ok clear
+(0o_77) is-name-not-number                    (us-0o-neg: leading _) rt-ok clear
+(0b10_2) is-name-not-number                   (us-0b-neg: 2 not binary) rt-ok clear
+(0b_10) is-name-not-number                    (us-0b-neg: leading _) rt-ok clear
+(0xDE_.AD) is-name-not-number                 (us-0x-neg: _ before .) rt-ok clear
+(0xDE._AD) is-name-not-number                 (us-0x-neg: _ after .) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_underscore_num: ALL TESTS PASSED) =
+(__test_ok__) =

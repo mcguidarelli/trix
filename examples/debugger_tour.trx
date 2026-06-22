@@ -1,0 +1,31 @@
+% examples/debugger_tour.trx -- companion script for docs/debugger.md.
+%
+% Run with:
+%     ./trix --inspect examples/debugger_tour.trx
+%
+% find-min returns the smallest element of a non-empty integer array.
+% This implementation has a one-line bug; the docs walk you through
+% finding and fixing it using step, breakpoints, conditional bps,
+% watches, and frame navigation.
+%
+% Outside the debugger, run with `./trix examples/debugger_tour.trx`
+% to see the buggy output (three zeros instead of 2 / 42 / 25).
+
+% find-min: arr -- int.  Peels the first element off, recurses on the
+% rest, and returns the smaller of the two.
+/find-min {|arr|#+3
+    arr length 1 le
+    { 0 }                                  % <- bug lives here; see docs/debugger.md
+    {
+        /rest  arr 1 arr length 1 sub get-interval local-def
+        /m     rest find-min                local-def
+        /first arr 0 get                    local-def
+        first m lt { first } { m } if-else
+    }
+    if-else
+} def
+
+% Three drivers.  Expected values shown on the right.
+(small array:        ) print  [7 3 9 2 8 5]  find-min =     % expected 2
+(single-element:     ) print  [42]           find-min =     % expected 42
+(four elements:      ) print  [100 50 75 25] find-min =     % expected 25

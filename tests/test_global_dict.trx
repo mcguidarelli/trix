@@ -1,0 +1,206 @@
+% ====================================================================
+% test_global_dict.trx -- global-dict journal-skip semantics
+% ====================================================================
+% A global Dict lives in the journal-skipped global region of the VM
+% heap: mutations are NOT recorded in the save journal, and the Dict
+% survives save/restore unchanged.  This is the headline behavior the
+% Phase 1 short-circuits in Save::save_data and the restore-time stack
+% scans guarantee.
+%
+% Constructed via `${ N dict }` -- the runtime `dict` op consults
+% m_curr_alloc_global, and ${...} sets that flag during the body's
+% execution.  Equivalent direct form: `true set-global N dict false set-global`.
+%
+% NAME-KEY GOTCHA (resolved by Phase 2): Name-table entries allocated
+% at save_level > 0 USED to be unlinked by Name::restore on rollback,
+% breaking literal-name lookups in a global Dict.  Phase 2 step 1
+% routes Name::add through vm_alloc_global when m_curr_alloc_global
+% is set, so $/foo prefixed names (or any name interned inside ${...})
+% land in global and survive restore.  This test pre-interns names at
+% BASE the old way for backward-compatibility coverage; see
+% test_dollar_name.trx for the new $/foo idioms.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: ${ N dict } returns a Dict; basic put/get works at BASE
+% ====================================================================
+
+${ 8 dict } /gd exch def
+gd type /dict-type eq                       (gd1: type is dict-type) rt-ok
+gd length 0 eq                              (gd1: empty at creation) rt-ok
+gd /count 0 put
+gd /count get 0 eq                          (gd1: put/get at BASE works) rt-ok
+gd length 1 eq                              (gd1: length tracks puts) rt-ok
+
+% vm-global-used must be non-zero after the alloc
+//:status:vm-global-used 0 gt               (gd1: vm-global-used > 0) rt-ok clear
+
+% ====================================================================
+% SECTION 2: mutation under save survives restore -- Integer keys
+% (avoid the Name-table-above-barrier gotcha)
+% ====================================================================
+
+${ 8 dict } /g2 exch def
+g2 0 100 put
+save /sv exch def
+g2 0 700 put
+g2 0 get 700 eq                             (gd2: in-save: mutation visible) rt-ok
+sv restore
+g2 0 get 700 eq                             (gd2: post-restore: mutation persists) rt-ok
+
+% ====================================================================
+% SECTION 3: nested save/restore -- mutation persists through every level
+% ====================================================================
+
+${ 8 dict } /g3 exch def
+g3 1 0 put
+save /outer exch def
+save /inner exch def
+g3 1 42 put
+g3 1 get 42 eq                              (gd3: nested-inner: visible) rt-ok
+inner restore
+g3 1 get 42 eq                              (gd3: after inner restore: persists) rt-ok
+outer restore
+g3 1 get 42 eq                              (gd3: after outer restore: persists) rt-ok
+
+% ====================================================================
+% SECTION 4: journal-skip -- mutating a global Dict does NOT add
+% journal entries (the whole point of the global region).
+%
+% Capture journal-count deltas by keeping values on the operand stack
+% so no intervening def adds spurious journal entries between captures.
+% ====================================================================
+
+${ 8 dict } /g4 exch def
+g4 0 0 put
+
+save /sv4 exch def
+
+% j-base on stack
+//:status:save-journal-entries
+
+% Mutate the global Dict 5 times.  Each put would normally produce
+% one or more journal entries (DictHeader, DictEntry, possibly
+% DictEntryNext).  With the global short-circuit, the journal must
+% remain at the baseline -- delta MUST be zero.
+g4 1 1 put
+g4 2 2 put
+g4 3 3 put
+g4 1 11 put
+g4 2 22 put
+
+% j-after on top, j-base below.
+//:status:save-journal-entries
+eq                                          (gd4: zero journal growth on global mutations) rt-ok
+
+% Confirm the values are present BEFORE restore.
+g4 1 get 11 eq                              (gd4: pre-restore [1] = 11) rt-ok
+g4 2 get 22 eq                              (gd4: pre-restore [2] = 22) rt-ok
+g4 3 get 3  eq                              (gd4: pre-restore [3] =  3) rt-ok
+
+sv4 restore
+
+% Confirm everything survives the restore.
+g4 1 get 11 eq                              (gd4: post-restore [1] = 11) rt-ok
+g4 2 get 22 eq                              (gd4: post-restore [2] = 22) rt-ok
+g4 3 get 3  eq                              (gd4: post-restore [3] =  3) rt-ok
+g4 0 get 0 eq                               (gd4: post-restore [0] =  0) rt-ok
+
+% ====================================================================
+% SECTION 5: contrast -- non-global Dict mutation under save IS rolled
+% back, and DOES add journal entries.  This proves we are measuring
+% real journal traffic in section 4 and not no-ops.
+% ====================================================================
+
+8 dict /local-dict exch def
+local-dict 0 0 put
+
+save /sv5 exch def
+
+% j-local-base on stack
+//:status:save-journal-entries
+
+local-dict 0 99 put
+local-dict 0 100 put
+local-dict 0 101 put
+
+% j-local-after on top, j-local-base below.
+//:status:save-journal-entries
+exch sub                                    % delta on stack
+0 gt                                        (gd5: local Dict mutations DO grow journal) rt-ok
+
+local-dict 0 get 101 eq                     (gd5: pre-restore [0] = 101) rt-ok
+
+sv5 restore
+
+local-dict 0 get 0 eq                       (gd5: post-restore: rolled back to 0) rt-ok
+
+% ====================================================================
+% SECTION 6: same global Dict reachable across multiple save scopes
+% ====================================================================
+
+${ 8 dict } /g6 exch def
+g6 0 100 put
+
+save /a exch def
+g6 0 200 put
+save /b exch def
+g6 0 300 put
+b restore
+g6 0 get 300 eq                             (gd6: inner restore: latest value persists) rt-ok
+a restore
+g6 0 get 300 eq                             (gd6: outer restore: latest value persists) rt-ok
+
+% ====================================================================
+% SECTION 7: Name keys work when pre-interned at BASE before save
+% ====================================================================
+
+${ 16 dict } /g7 exch def
+% Pre-intern the keys at BASE (the actual put values are placeholders)
+g7 /alpha 0 put
+g7 /beta 0 put
+g7 /gamma 0 put
+
+save /sv7 exch def
+g7 /alpha 1 put
+g7 /beta 2 put
+g7 /gamma 3 put
+sv7 restore
+
+g7 /alpha get 1 eq                          (gd7: name key /alpha survives restore) rt-ok
+g7 /beta  get 2 eq                          (gd7: name key /beta  survives restore) rt-ok
+g7 /gamma get 3 eq                          (gd7: name key /gamma survives restore) rt-ok
+
+% ====================================================================
+% SECTION 8: lazy-seq built inside ${...} is allocated in global VM
+% ====================================================================
+% Regression for make_lazy: its [head, tail-thunk] node must allocate in
+% the same region as its tail thunk (make_lazy_thunk -> make_thunk is
+% already region-aware).  Inside ${...} at save_level > 0 the node must be
+% global -- pre-fix make_lazy used local-only vm_alloc_n, so the lazy-seq
+% referenced restore-fragile local VM and the `put` into a global dict
+% raised /invalid-access (R6 hygiene); the node would also dangle on the
+% restore that rewinds local VM.
+
+${ 4 dict } /g8 exch def
+g8 /seq 0 put                               % pre-intern the name key at BASE
+save /sv8 exch def
+${ 1 lazy-from } /lz8 exch def
+g8 /seq lz8 put
+g8 /seq get lazy-head 1 eq                  (gd8: ${} lazy-seq node global, stored in global dict) rt-ok
+sv8 restore
+g8 /seq get lazy-head 1 eq                  (gd8: ${} lazy-seq head survives restore) rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_global_dict: ALL TESTS PASSED) =
+(__test_ok__) =

@@ -1,0 +1,70 @@
+% ====================================================================
+% test_b7_suspended_relocate.trx -- restore relocates above-barrier scalars
+%                                   on SUSPENDED coroutine stacks (B7(b)).
+% ====================================================================
+% When `restore` rolls back below a save level, above-barrier local ExtValue/
+% WideValue scalars on the RUNNING coroutine's stacks are relocated below the
+% barrier so they survive.  Suspended coroutines' scalars were NOT: the restore-
+% time coroutine scan rejected above-barrier COMPOSITES but neither relocated nor
+% rejected scalars, so a coroutine parked holding a heap scalar (a Long, a wide
+% Double, an address) created at save level >= 1 had that scalar reclaimed by the
+% restore -- it read freed memory on resume (use-after-free).  Now the relocation
+% pass (Object::ExtValue/WideValue::restore via Trix::find_lowest_relocatable)
+% covers suspended coroutines' op/exec/err stacks too, ascending-offset order, and
+% the restore step order was fixed so the relocation runs AFTER the above-barrier
+% name/stream cleanup (else the reused space clobbers the name table).
+% No vm-gc-stress needed -- this is a save/restore-contract bug, not a GC bug.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% --- a parked coroutine holding an above-barrier Long across restore ---
+% sc parks (park #1) before save; resumes after save and pushes a level-1 Long, then
+% parks again (park #2) holding it; restore rolls back to BASE and must relocate the
+% Long so sc resumes and computes 9999999999 + 777 = 10000000776.
+mark { 0 coroutine-sleep
+       9999999999l
+       0 coroutine-sleep
+       777l add } coroutine-launch /sc exch def
+0 coroutine-sleep                               % sc runs to park #1 (level 0)
+save /sctok exch def                            % barrier at level 1
+0 coroutine-sleep                               % sc resumes: pushes 9999999999l (level 1), parks at #2 holding it
+sctok restore                                   % roll back to BASE: relocate sc's above-barrier Long below the barrier
+sc coroutine-join /scok exch def /scv exch def
+scv 10000000776l eq (suspended coroutine: above-barrier Long relocated across restore, resumes intact) rt-ok
+clear
+
+% --- a parked coroutine holding an above-barrier wide Double across restore ---
+% A Double literal (the `d` suffix) is a WideValue (128-bit), exercising
+% WideValue::restore's suspended-stack relocation (the mirror of ExtValue's).
+mark { 0 coroutine-sleep
+       1.5e300d
+       0 coroutine-sleep } coroutine-launch /wc exch def
+0 coroutine-sleep
+save /wctok exch def
+0 coroutine-sleep
+wctok restore
+wc coroutine-join /wcok exch def /wcv exch def
+wcv 1.5e300d eq (suspended coroutine: above-barrier wide Double relocated across restore) rt-ok
+clear
+
+% --- control: a parked coroutine with NO above-barrier value across restore is fine ---
+mark { 0 coroutine-sleep 0 coroutine-sleep 42 } coroutine-launch /cc exch def
+0 coroutine-sleep
+save /cctok exch def
+0 coroutine-sleep
+{ cctok restore } try /no-error eq (control: parked coroutine, nothing above barrier, restore is clean) rt-ok
+cc coroutine-join /ccok exch def /ccv exch def
+ccv 42 eq (control: parked coroutine resumes with pure value intact) rt-ok
+clear
+
+(test_b7_suspended_relocate.trx: all tests passed) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

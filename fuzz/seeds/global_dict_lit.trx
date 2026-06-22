@@ -1,0 +1,2 @@
+% <<...>>#$ dict literal suffix: builds the dict directly in global VM.
+<< /a 1 /b 2 >>#$ /b get

@@ -1,0 +1,313 @@
+% examples/screen-demo.trx -- guided tour of the Trix screen subsystem.
+% Multi-page demo:
+%   Page 1   Type & introspection (==, screen?, handle-kind) + 256-color
+%            palette stripe + 6x6 cube row.
+%   Page 2   SGR attribute gallery -- one row per attr bit + all-7.
+%   Page 3   UTF-8 gallery -- box-drawing border, multi-script greetings,
+%            symbols, truncation note.
+%   Page 4   Blit popup -- save-region + popup + restore-region using
+%            screen-blit between two off-screen screens.  Centerpiece.
+%
+% Controls: SPACE / ENTER advance, q / ESC quit.
+%
+% Run:
+%   ./trix examples/screen-demo.trx
+
+(lib/screen.trx) require
+(lib/keys.trx) require
+
+% --- Common helpers ---------------------------------------------------------
+
+/read-key { { read-key-byte } { 50 read-key-byte-timeout } decode-key } def
+
+% Wait for advance (SPACE/ENTER) or quit (q/ESC).  Pushes true=advance.
+% Uses `exit` to break the inner loop and leave the boolean on the stack.
+/wait-key {
+    {
+        read-key
+        dup /q eq      { pop false exit } if
+        dup /escape eq { pop false exit } if
+        dup /space eq  { pop true exit } if
+        dup /return eq { pop true exit } if
+        pop
+    } loop
+} def
+
+% Centered horizontal placement: returns col where a string of length
+% `len` is centered in `cols` columns.
+/centered-col {|cols len| cols len sub 2 div } def
+
+% Clear scr to defaults.
+/clear-scr { 32 7 0 0 screen-fill pop } def
+
+% Footer "Page N/M  SPACE: next   q: quit".
+%
+% Trix gotcha: `print` writes to stdout, not into the =string buffer.
+% Use `concat` to build the footer string.  cast :: int -> str via
+% asprint-fmt is overkill for a single int; small fixed buffer is fine.
+/int-to-str {|n|#2
+    /buf =string ({}) mark n sprint-fmt pop local-def
+    buf
+} def
+/draw-footer {|scr page total|#6
+    /cols scr screen-cols local-def
+    /rows scr screen-rows local-def
+    /tag ( Page ) page int-to-str concat ( / ) concat total int-to-str concat (   SPACE next   q quit) concat local-def
+    scr cols tag length centered-col rows 1 sub tag 8 0 0 screen-put-string pop
+} def
+
+% UTF-8 box-drawing codepoints.
+/box-h     9472 def      % U+2500 ─
+/box-v     9474 def      % U+2502 │
+/box-tl    9484 def      % U+250C ┌
+/box-tr    9488 def      % U+2510 ┐
+/box-bl    9492 def      % U+2514 └
+/box-br    9496 def      % U+2518 ┘
+
+% Draw a Unicode box border on `scr` covering (x, y, w, h).
+/draw-box {|scr x y w h fg bg|
+    scr x y w 1 box-h fg bg 0 screen-fill-rect pop                        % top
+    scr x y h 1 sub add w 1 box-h fg bg 0 screen-fill-rect pop            % bottom
+    scr x y 1 h box-v fg bg 0 screen-fill-rect pop                        % left
+    scr x w 1 sub add y 1 h box-v fg bg 0 screen-fill-rect pop            % right
+    scr x y                         box-tl fg bg 0 screen-put-cell pop
+    scr x w 1 sub add y             box-tr fg bg 0 screen-put-cell pop
+    scr x y h 1 sub add             box-bl fg bg 0 screen-put-cell pop
+    scr x w 1 sub add y h 1 sub add box-br fg bg 0 screen-put-cell pop
+} def
+
+% --- Page 1: Type & introspection -------------------------------------------
+
+/page1 {|scr|#30
+    scr clear-scr
+    /cols scr screen-cols local-def
+    /rows scr screen-rows local-def
+
+    % Yellow Unicode border.
+    scr 0 0 cols rows 11 0 draw-box
+
+    /title (Page 1 - Type & Introspection) local-def
+    scr cols title length centered-col 2 title 14 0 1 screen-put-string pop
+
+    % Five demo lines showing live op outputs.  Aligned at col 12.
+    scr 12 5  (scr ==                ->  --screen:80x24--) 7 0 0 screen-put-string pop
+    scr 12 6  (scr screen?           ->  true)             7 0 0 screen-put-string pop
+    scr 12 7  (42  screen?           ->  false)            7 0 0 screen-put-string pop
+    scr 12 8  (scr handle-kind       ->  /screen)          7 0 0 screen-put-string pop
+    scr 12 9  (42  handle-kind       ->  null)             7 0 0 screen-put-string pop
+
+    % 16-color palette stripe.
+    /palette-y 12 local-def
+    /palette-cap (16-color palette: indices 0..15) local-def
+    scr cols palette-cap length centered-col palette-y palette-cap 8 0 0 screen-put-string pop
+    0 1 15 {|i|#3
+        /x i 4 mul cols 64 sub 2 div add local-def
+        scr x palette-y 1 add 4 1 32 7 i 0 screen-fill-rect pop
+    } for
+
+    % 256-cube row sample.
+    /cube-y 15 local-def
+    /cube-cap (256-color cube row: R=0, G=0..5, B=0..5 -- indices 16..51) local-def
+    scr cols cube-cap length centered-col cube-y cube-cap 8 0 0 screen-put-string pop
+    0 1 35 {|i|#3
+        /x i 2 mul cols 72 sub 2 div add local-def
+        /color 16 i add local-def
+        scr x cube-y 1 add 2 1 32 7 color 0 screen-fill-rect pop
+    } for
+
+    scr 1 4 draw-footer
+    scr screen-render pop
+} def
+
+% --- Page 2: SGR attribute gallery -----------------------------------------
+
+/page2 {|scr|#20
+    scr clear-scr
+    /cols scr screen-cols local-def
+    /rows scr screen-rows local-def
+
+    scr 0 0 cols rows 11 0 draw-box
+
+    /title (Page 2 - SGR Attribute Gallery) local-def
+    scr cols title length centered-col 2 title 14 0 1 screen-put-string pop
+
+    % Each row: [bit N]  <name>  <sample>
+    /sample (The quick brown fox jumps over the lazy dog.) local-def
+
+    scr 6  5 ([bit 0])     8 0 0 screen-put-string pop
+    scr 16 5 (bold)        7 0 0 screen-put-string pop
+    scr 28 5 sample        7 0 1 screen-put-string pop
+
+    scr 6  6 ([bit 1])     8 0 0 screen-put-string pop
+    scr 16 6 (dim)         7 0 0 screen-put-string pop
+    scr 28 6 sample        7 0 2 screen-put-string pop
+
+    scr 6  7 ([bit 2])     8 0 0 screen-put-string pop
+    scr 16 7 (italic)      7 0 0 screen-put-string pop
+    scr 28 7 sample        7 0 4 screen-put-string pop
+
+    scr 6  8 ([bit 3])     8 0 0 screen-put-string pop
+    scr 16 8 (underline)   7 0 0 screen-put-string pop
+    scr 28 8 sample        7 0 8 screen-put-string pop
+
+    scr 6  9 ([bit 4])     8 0 0 screen-put-string pop
+    scr 16 9 (blink)       7 0 0 screen-put-string pop
+    scr 28 9 sample        7 0 16 screen-put-string pop
+
+    scr 6  10 ([bit 5])    8 0 0 screen-put-string pop
+    scr 16 10 (reverse)    7 0 0 screen-put-string pop
+    scr 28 10 sample       7 0 32 screen-put-string pop
+
+    scr 6  11 ([bit 6])    8 0 0 screen-put-string pop
+    scr 16 11 (strike)     7 0 0 screen-put-string pop
+    scr 28 11 sample       7 0 64 screen-put-string pop
+
+    scr 6  12 ([ALL])      14 0 1 screen-put-string pop
+    scr 16 12 (attrs=127)  7 0 0 screen-put-string pop
+    scr 28 12 sample       7 0 127 screen-put-string pop
+
+    scr 6 14 (Combinations:)             14 0 1 screen-put-string pop
+    scr 8 15 (bold + underline)          7 0 9 screen-put-string pop
+    scr 8 16 (italic + reverse)          7 0 36 screen-put-string pop
+    scr 8 17 (bold + italic + underline) 3 0 13 screen-put-string pop
+
+    scr 2 4 draw-footer
+    scr screen-render pop
+} def
+
+% --- Page 3: UTF-8 gallery -------------------------------------------------
+
+/page3 {|scr|#15
+    scr clear-scr
+    /cols scr screen-cols local-def
+    /rows scr screen-rows local-def
+
+    scr 0 0 cols rows 11 0 draw-box
+
+    /title (Page 3 - UTF-8 Gallery) local-def
+    scr cols title length centered-col 2 title 14 0 1 screen-put-string pop
+
+    % Multi-script greetings.
+    scr 6  5 (Latin   :)                                14 0 0 screen-put-string pop
+    scr 18 5 (Hello, café -- crème brulée -- Héllo)     7 0 0 screen-put-utf8-string pop
+    scr 6  6 (Greek   :)                                14 0 0 screen-put-string pop
+    scr 18 6 (Πρόοδος / Καλημέρα)                       7 0 0 screen-put-utf8-string pop
+    scr 6  7 (Japanese:)                                14 0 0 screen-put-string pop
+    scr 18 7 (こんにちは, 日本語は楽しい)                  7 0 0 screen-put-utf8-string pop
+    scr 6  8 (Cyrillic:)                                14 0 0 screen-put-string pop
+    scr 18 8 (Привет, мир)                              7 0 0 screen-put-utf8-string pop
+    scr 6  9 (Arabic  :)                                14 0 0 screen-put-string pop
+    scr 18 9 (مرحبا بالعالم)                            7 0 0 screen-put-utf8-string pop
+
+    % Symbol row.
+    scr 6  11 (Symbols :)                14 0 0 screen-put-string pop
+    scr 18 11 (☃ ★ ♥ ♪ ♛ ☂ ☀ ✓ ✗ → ←)    7 0 0 screen-put-utf8-string pop
+
+    % Box-drawing demo (small inner box).
+    scr 6 13 (Nested  :)                 14 0 0 screen-put-string pop
+    scr 18 13 30 3 10 0 draw-box
+    scr 21 14 (UTF-8 inside Box)         11 0 1 screen-put-utf8-string pop
+
+    % Truncation note.
+    scr 6 17 (Truncate:)                                                  14 0 0 screen-put-string pop
+    scr 18 17 (Five "Héllo" codepoints into 3 cells -> "Hél")              7 0 0 screen-put-utf8-string pop
+
+    scr 3 4 draw-footer
+    scr screen-render pop
+} def
+
+% --- Page 4: Blit popup (centerpiece) --------------------------------------
+
+% Three states cycle on SPACE:
+%   (a) gradient background, "Press SPACE to OPEN popup"
+%   (b) popup overlaid -- saved region tucked away in `saved`
+%   (c) saved region restored -- popup gone bit-for-bit
+%
+% The save/restore symmetry uses the same screen-blit op with src/dst
+% swapped.
+/page4 {|scr|#30
+    scr clear-scr
+    /cols scr screen-cols local-def
+    /rows scr screen-rows local-def
+
+    scr 0 0 cols rows 11 0 draw-box
+
+    /title (Page 4 - Blit Popup) local-def
+    scr cols title length centered-col 2 title 14 0 1 screen-put-string pop
+
+    % Gradient background covering rows 4..rows-3.
+    /grad-y 4 local-def
+    /grad-h rows 7 sub local-def
+    0 1 grad-h 1 sub {|r|#5
+        0 1 cols 3 sub {|c|#2
+            /idx 16 r 6 mod 36 mul add c 6 mod 6 mul add r c add 6 mod add local-def
+            scr c 1 add r grad-y add 32 7 idx 0 screen-put-cell pop
+        } for
+    } for
+
+    /tip (Press SPACE to OPEN popup) local-def
+    scr cols tip length centered-col rows 4 sub tip 15 0 1 screen-put-string pop
+    scr 4 4 draw-footer
+    scr screen-render pop
+
+    % Each wait-key gates the next phase via if; pressing q/ESC drops out
+    % of the proc cleanly so with-fullscreen-screen's teardown still runs.
+    wait-key {
+        % --- POPUP OPEN -------------------------------------------------
+        /popup-w 48 local-def
+        /popup-h 10 local-def
+        /popup-x cols popup-w sub 2 div local-def
+        /popup-y rows popup-h sub 2 div local-def
+
+        % Save the region currently under the popup -> off-screen `saved`.
+        /saved popup-w popup-h make-screen local-def
+        scr popup-x popup-y popup-w popup-h saved 0 0 screen-blit pop
+
+        % Build the popup off-screen so it appears in one render.
+        /popup popup-w popup-h make-screen local-def
+        popup 0 0 popup-w popup-h 32 7 4 0 screen-fill-rect pop                 % blue fill
+        popup 0 0 popup-w popup-h 15 4 draw-box                                 % white-on-blue border
+
+        /ptitle ( Notification ) local-def
+        popup popup-w ptitle length centered-col 0 ptitle 15 4 1 screen-put-utf8-string pop
+
+        /msg1 (screen-blit just saved the cells) local-def
+        /msg2 (under this popup to an off-screen Screen.) local-def
+        /msg3 (Press SPACE to restore them ☃) local-def
+        popup popup-w msg1 length centered-col 3 msg1 15 4 0 screen-put-utf8-string pop
+        popup popup-w msg2 length centered-col 4 msg2 15 4 0 screen-put-utf8-string pop
+        popup popup-w msg3 length centered-col 6 msg3 14 4 1 screen-put-utf8-string pop
+
+        % Blit popup over main screen, render.
+        popup 0 0 popup-w popup-h scr popup-x popup-y screen-blit pop
+        scr screen-render pop
+
+        % Park cursor near popup hint so it sits in a clean spot rather
+        % than wherever the last dirty cell happened to land.
+        popup-x popup-w 4 sub add  popup-y 6 add  screen-park-cursor
+
+        wait-key {
+            % --- POPUP CLOSE: blit `saved` back over the popup region ---
+            saved 0 0 popup-w popup-h scr popup-x popup-y screen-blit pop
+            /done-msg (Popup gone -- background restored bit-for-bit) local-def
+            scr cols done-msg length centered-col rows 4 sub done-msg 15 0 1 screen-put-string pop
+            scr screen-render pop
+        } if
+    } if
+} def
+
+% --- Driver -----------------------------------------------------------------
+
+% Each wait-key gates the next page via nested ifs.  q/ESC at any
+% boundary makes the boolean false; the remaining pages skip and the
+% proc body ends, letting with-fullscreen-screen's teardown run via
+% the normal /no-error try path (no quit/exit gymnastics needed).
+{|scr|
+    scr page1 wait-key {
+        scr page2 wait-key {
+            scr page3 wait-key {
+                scr page4 wait-key pop
+            } if
+        } if
+    } if
+} with-fullscreen-screen

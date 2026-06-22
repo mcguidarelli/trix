@@ -1,0 +1,201 @@
+% ====================================================================
+% test_bitops.trx -- tests for bit-counting and manipulation operators
+% ====================================================================
+% pop-count, countl-zero, countl-one, countr-zero, countr-one,
+% bit-width, single-bit?, bit-ceil, bit-floor, byte-swap
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: pop-count
+% ====================================================================
+
+0u pop-count 0 eq                  (popcount: 0u -> 0) rt-ok clear
+1u pop-count 1 eq                  (popcount: 1u -> 1) rt-ok clear
+3u pop-count 2 eq                  (popcount: 3u -> 2) rt-ok clear
+255b pop-count 8 eq                (popcount: 255b -> 8) rt-ok clear
+0b pop-count 0 eq                  (popcount: 0b -> 0) rt-ok clear
+1b pop-count 1 eq                  (popcount: 1b -> 1) rt-ok clear
+128b pop-count 1 eq                (popcount: 128b -> 1) rt-ok clear
+16#FFFFFFFF#u pop-count 32 eq      (popcount: 0xFFFFFFFF -> 32) rt-ok clear
+0ul pop-count 0 eq                 (popcount: 0ul -> 0) rt-ok clear
+1ul pop-count 1 eq                 (popcount: 1ul -> 1) rt-ok clear
+16#FFFFFFFFFFFFFFFF#ul pop-count 64 eq  (popcount: max-ulong -> 64) rt-ok clear
+
+% return type is integer
+1u pop-count type /integer-type eq (popcount: returns integer) rt-ok clear
+
+% type error on signed
+{ 1 pop-count } try /type-check eq (popcount: signed int type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 2: countl-zero
+% ====================================================================
+
+0u countl-zero 32 eq               (countl-zero: 0u -> 32) rt-ok clear
+1u countl-zero 31 eq               (countl-zero: 1u -> 31) rt-ok clear
+16#80000000#u countl-zero 0 eq      (countl-zero: high-bit-u -> 0) rt-ok clear
+128b countl-zero 0 eq              (countl-zero: 128b -> 0) rt-ok clear
+0b countl-zero 8 eq                (countl-zero: 0b -> 8) rt-ok clear
+1b countl-zero 7 eq                (countl-zero: 1b -> 7) rt-ok clear
+0ul countl-zero 64 eq              (countl-zero: 0ul -> 64) rt-ok clear
+1ul countl-zero 63 eq              (countl-zero: 1ul -> 63) rt-ok clear
+
+% type error on signed
+{ 1 countl-zero } try /type-check eq (countl-zero: signed type-check) rt-ok clear
+
+% ====================================================================
+% SECTION 3: countl-one
+% ====================================================================
+
+0u countl-one 0 eq                 (countl-one: 0u -> 0) rt-ok clear
+16#FFFFFFFF#u countl-one 32 eq      (countl-one: 0xFFFFFFFF -> 32) rt-ok clear
+255b countl-one 8 eq               (countl-one: 255b -> 8) rt-ok clear
+0b countl-one 0 eq                 (countl-one: 0b -> 0) rt-ok clear
+16#F0#b countl-one 4 eq             (countl-one: 0xF0 -> 4) rt-ok clear
+0ul countl-one 0 eq                (countl-one: 0ul -> 0) rt-ok clear
+16#FFFFFFFFFFFFFFFF#ul countl-one 64 eq  (countl-one: max-ulong -> 64) rt-ok clear
+
+% ====================================================================
+% SECTION 4: countr-zero
+% ====================================================================
+
+0u countr-zero 32 eq               (countr-zero: 0u -> 32) rt-ok clear
+1u countr-zero 0 eq                (countr-zero: 1u -> 0) rt-ok clear
+16u countr-zero 4 eq               (countr-zero: 16u -> 4) rt-ok clear
+0b countr-zero 8 eq                (countr-zero: 0b -> 8) rt-ok clear
+1b countr-zero 0 eq                (countr-zero: 1b -> 0) rt-ok clear
+16b countr-zero 4 eq               (countr-zero: 16b -> 4) rt-ok clear
+0ul countr-zero 64 eq              (countr-zero: 0ul -> 64) rt-ok clear
+1ul countr-zero 0 eq               (countr-zero: 1ul -> 0) rt-ok clear
+16ul countr-zero 4 eq              (countr-zero: 16ul -> 4) rt-ok clear
+
+% ====================================================================
+% SECTION 5: countr-one
+% ====================================================================
+
+0u countr-one 0 eq                 (countr-one: 0u -> 0) rt-ok clear
+16#FFFFFFFF#u countr-one 32 eq      (countr-one: 0xFFFFFFFF -> 32) rt-ok clear
+7b countr-one 3 eq                 (countr-one: 7b -> 3) rt-ok clear
+0b countr-one 0 eq                 (countr-one: 0b -> 0) rt-ok clear
+255b countr-one 8 eq               (countr-one: 255b -> 8) rt-ok clear
+7u countr-one 3 eq                 (countr-one: 7u -> 3) rt-ok clear
+0ul countr-one 0 eq                (countr-one: 0ul -> 0) rt-ok clear
+16#FFFFFFFFFFFFFFFF#ul countr-one 64 eq  (countr-one: max-ulong -> 64) rt-ok clear
+
+% ====================================================================
+% SECTION 6: bit-width
+% ====================================================================
+
+0u bit-width 0 eq                  (bit-width: 0u -> 0) rt-ok clear
+1u bit-width 1 eq                  (bit-width: 1u -> 1) rt-ok clear
+2u bit-width 2 eq                  (bit-width: 2u -> 2) rt-ok clear
+255b bit-width 8 eq                (bit-width: 255b -> 8) rt-ok clear
+0b bit-width 0 eq                  (bit-width: 0b -> 0) rt-ok clear
+1b bit-width 1 eq                  (bit-width: 1b -> 1) rt-ok clear
+16#FFFFFFFF#u bit-width 32 eq       (bit-width: 0xFFFFFFFF -> 32) rt-ok clear
+0ul bit-width 0 eq                 (bit-width: 0ul -> 0) rt-ok clear
+1ul bit-width 1 eq                 (bit-width: 1ul -> 1) rt-ok clear
+16#FFFFFFFFFFFFFFFF#ul bit-width 64 eq  (bit-width: max-ulong -> 64) rt-ok clear
+
+% return type is integer
+1u bit-width type /integer-type eq (bit-width: returns integer) rt-ok clear
+
+% ====================================================================
+% SECTION 7: single-bit?
+% ====================================================================
+
+0u single-bit? false eq         (single-bit?: 0u -> false) rt-ok clear
+1u single-bit? true eq          (single-bit?: 1u -> true) rt-ok clear
+2u single-bit? true eq          (single-bit?: 2u -> true) rt-ok clear
+3u single-bit? false eq         (single-bit?: 3u -> false) rt-ok clear
+4u single-bit? true eq          (single-bit?: 4u -> true) rt-ok clear
+128b single-bit? true eq        (single-bit?: 128b -> true) rt-ok clear
+255b single-bit? false eq       (single-bit?: 255b -> false) rt-ok clear
+0b single-bit? false eq         (single-bit?: 0b -> false) rt-ok clear
+1ul single-bit? true eq         (single-bit?: 1ul -> true) rt-ok clear
+3ul single-bit? false eq        (single-bit?: 3ul -> false) rt-ok clear
+16#8000000000000000#ul single-bit? true eq  (single-bit?: ulong high-bit -> true) rt-ok clear
+
+% return type is boolean
+1u single-bit? type /boolean-type eq  (single-bit?: returns boolean) rt-ok clear
+
+% ====================================================================
+% SECTION 8: bit-ceil
+% ====================================================================
+
+0u bit-ceil 1u eq                  (bit-ceil: 0u -> 1u) rt-ok clear
+1u bit-ceil 1u eq                  (bit-ceil: 1u -> 1u) rt-ok clear
+2u bit-ceil 2u eq                  (bit-ceil: 2u -> 2u) rt-ok clear
+3u bit-ceil 4u eq                  (bit-ceil: 3u -> 4u) rt-ok clear
+5u bit-ceil 8u eq                  (bit-ceil: 5u -> 8u) rt-ok clear
+1b bit-ceil 1b eq                  (bit-ceil: 1b -> 1b) rt-ok clear
+3b bit-ceil 4b eq                  (bit-ceil: 3b -> 4b) rt-ok clear
+1ul bit-ceil 1ul eq                (bit-ceil: 1ul -> 1ul) rt-ok clear
+5ul bit-ceil 8ul eq                (bit-ceil: 5ul -> 8ul) rt-ok clear
+
+% return type matches input type
+3u bit-ceil type /uinteger-type eq (bit-ceil: returns uinteger) rt-ok clear
+3b bit-ceil type /byte-type eq     (bit-ceil: returns byte) rt-ok clear
+
+% ====================================================================
+% SECTION 9: bit-floor
+% ====================================================================
+
+0u bit-floor 0u eq                 (bit-floor: 0u -> 0u) rt-ok clear
+1u bit-floor 1u eq                 (bit-floor: 1u -> 1u) rt-ok clear
+2u bit-floor 2u eq                 (bit-floor: 2u -> 2u) rt-ok clear
+3u bit-floor 2u eq                 (bit-floor: 3u -> 2u) rt-ok clear
+7u bit-floor 4u eq                 (bit-floor: 7u -> 4u) rt-ok clear
+1b bit-floor 1b eq                 (bit-floor: 1b -> 1b) rt-ok clear
+7b bit-floor 4b eq                 (bit-floor: 7b -> 4b) rt-ok clear
+0ul bit-floor 0ul eq               (bit-floor: 0ul -> 0ul) rt-ok clear
+7ul bit-floor 4ul eq               (bit-floor: 7ul -> 4ul) rt-ok clear
+
+% return type matches input type
+7u bit-floor type /uinteger-type eq (bit-floor: returns uinteger) rt-ok clear
+
+% ====================================================================
+% SECTION 10: byte-swap
+% ====================================================================
+
+% byte-swap on byte is identity
+42b byte-swap 42b eq               (byte-swap: byte identity) rt-ok clear
+0b byte-swap 0b eq                 (byte-swap: 0b identity) rt-ok clear
+
+% byte-swap round-trip (swap twice = original)
+16#12345678#u byte-swap byte-swap 16#12345678#u eq  (byte-swap: uint round-trip) rt-ok clear
+16#12345678# byte-swap byte-swap 16#12345678# eq    (byte-swap: int round-trip) rt-ok clear
+16#123456789ABCDEF#ul byte-swap byte-swap 16#123456789ABCDEF#ul eq  (byte-swap: ulong round-trip) rt-ok clear
+
+% known value: 0x01020304u byte-swap -> 0x04030201u
+16#01020304#u byte-swap 16#04030201#u eq  (byte-swap: uint known value) rt-ok clear
+
+% ====================================================================
+% SECTION 11: type error and underflow
+% ====================================================================
+
+{ 1 countl-zero } try /type-check eq      (type-err: countl-zero signed) rt-ok clear
+{ 1 countr-zero } try /type-check eq      (type-err: countr-zero signed) rt-ok clear
+{ 1 countl-one } try /type-check eq       (type-err: countl-one signed) rt-ok clear
+{ 1 countr-one } try /type-check eq       (type-err: countr-one signed) rt-ok clear
+{ 1 bit-width } try /type-check eq        (type-err: bit-width signed) rt-ok clear
+{ 1 single-bit? } try /type-check eq   (type-err: single-bit? signed) rt-ok clear
+{ 1 bit-ceil } try /type-check eq         (type-err: bit-ceil signed) rt-ok clear
+{ 1 bit-floor } try /type-check eq        (type-err: bit-floor signed) rt-ok clear
+
+% underflow
+{ pop-count } try /opstack-underflow eq   (underflow: pop-count) rt-ok clear
+{ countl-zero } try /opstack-underflow eq (underflow: countl-zero) rt-ok clear
+
+(Bit operation tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

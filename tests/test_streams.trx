@@ -1,0 +1,1171 @@
+% ====================================================================
+% test_streams.trx -- comprehensive tests for stream/I/O operators
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: bytes-available
+% ====================================================================
+
+% --- bytes-available: unfilled buffer returns -1 ---
+(/tmp/trix_ba_test.txt) (w)#b stream
+dup (ABCDE) write-string
+close-stream
+
+(/tmp/trix_ba_test.txt) (r)#b stream
+dup bytes-available -1 eq  (bytes-available: unfilled buffer = -1) rt-ok
+close-stream  clear
+
+% --- bytes-available: empty file unfilled buffer returns -1 ---
+(/tmp/trix_ba_empty.txt) (w)#b stream
+close-stream
+
+(/tmp/trix_ba_empty.txt) (r)#b stream
+dup bytes-available -1 eq  (bytes-available: empty file unfilled = -1) rt-ok
+close-stream  clear
+
+% --- bytes-available: after reading, shows remaining buffer ---
+(/tmp/trix_ba_partial.txt) (w)#b stream
+dup (12345) write-string
+close-stream
+
+(/tmp/trix_ba_partial.txt) (r)#b stream
+dup read pop pop   % read one byte (triggers buffer fill), discard value and bool
+dup read pop pop   % read another byte
+dup bytes-available 3 eq  (bytes-available: 3 after reading 2 of 5) rt-ok
+close-stream  clear
+
+% --- bytes-available: error on write-only stream ---
+(/tmp/trix_ba_wo.txt) (w)#b stream
+{ dup bytes-available } try
+/invalid-stream-access eq  (bytes-available: error on write-only) rt-ok
+close-stream  clear
+
+% --- bytes-available: after reading all bytes, buffer empty = -1 ---
+(/tmp/trix_ba_all.txt) (w)#b stream
+dup (AB) write-string
+close-stream
+
+(/tmp/trix_ba_all.txt) (r)#b stream
+dup read pop pop  % A
+dup read pop pop  % B
+dup bytes-available -1 eq  (bytes-available: -1 after all read) rt-ok
+close-stream  clear
+
+% cleanup
+(/tmp/trix_ba_test.txt) delete-file
+(/tmp/trix_ba_empty.txt) delete-file
+(/tmp/trix_ba_partial.txt) delete-file
+(/tmp/trix_ba_wo.txt) delete-file
+(/tmp/trix_ba_all.txt) delete-file
+
+(bytes-available tests complete.) =
+
+% ====================================================================
+% SECTION 2: flush-stream
+% ====================================================================
+
+% --- flush-stream: flush a writable stream, verify no error ---
+(/tmp/trix_flush_test.txt) (w)#b stream
+dup (flush test data) write-string
+dup flush-stream
+close-stream
+
+% verify the data was written
+(/tmp/trix_flush_test.txt) (r)#b stream
+read-all (flush test data) eq  (flush-stream: data written after flush) rt-ok  clear
+
+% --- flush-stream: flush readable stream (consumes input) ---
+(/tmp/trix_flush_rd.txt) (w)#b stream
+dup (hello) write-string
+close-stream
+
+(/tmp/trix_flush_rd.txt) (r)#b stream
+dup flush-stream
+% stream consumed, further reads should get EOF
+true  (flush-stream: readable stream consumed ok) rt-ok  clear
+
+% --- flush-stream: error on closed stream ---
+(/tmp/trix_flush_cl.txt) (w)#b stream
+/sfc exch def
+sfc close-stream
+{ sfc flush-stream } try
+/invalid-stream eq  (flush-stream: error on closed stream) rt-ok  clear
+
+% cleanup
+(/tmp/trix_flush_test.txt) delete-file
+(/tmp/trix_flush_rd.txt) delete-file
+(/tmp/trix_flush_cl.txt) delete-file
+
+(flush-stream tests complete.) =
+
+% ====================================================================
+% SECTION 3: reset-stream (resets buffer, not file position)
+% ====================================================================
+
+% --- reset-stream: open file, read, reset buffer ---
+(/tmp/trix_reset_test.txt) (w)#b stream
+dup (ABCDEFGHIJ) write-string
+close-stream
+
+(/tmp/trix_reset_test.txt) (r)#b stream
+dup read pop pop  % read one byte
+dup reset-stream   % reset buffer -- next read refills from OS position
+true  (reset-stream: no error on valid stream) rt-ok
+close-stream  clear
+
+% --- reset-stream: error on closed stream ---
+(/tmp/trix_reset_closed.txt) (w)#b stream
+close-stream
+
+(/tmp/trix_reset_closed.txt) (r)#b stream
+/rst_s exch def
+rst_s close-stream
+{ rst_s reset-stream } try
+/invalid-stream eq  (reset-stream: error on closed stream) rt-ok  clear
+
+% cleanup
+(/tmp/trix_reset_test.txt) delete-file
+(/tmp/trix_reset_closed.txt) delete-file
+
+(reset-stream tests complete.) =
+
+% ====================================================================
+% SECTION 4: read-line
+% ====================================================================
+
+% --- Create test file with multiple lines ---
+(/tmp/trix_rl_test.txt) (w)#b stream
+dup (first line) write-string
+dup 10b write   % newline
+dup (second line) write-string
+dup 10b write   % newline
+dup (third) write-string
+% no trailing newline on last line
+close-stream
+
+% --- read-line: first line ---
+(/tmp/trix_rl_test.txt) (r)#b stream
+/rl_s exch def
+
+rl_s 256 string read-line
+true eq  (read-line: first line not EOF) rt-ok
+(first line) eq  (read-line: first line content) rt-ok  clear
+
+% --- read-line: second line ---
+rl_s 256 string read-line
+true eq  (read-line: second line not EOF) rt-ok
+(second line) eq  (read-line: second line content) rt-ok  clear
+
+% --- read-line: third line (no trailing newline -> EOF) ---
+rl_s 256 string read-line
+false eq  (read-line: third line hits EOF) rt-ok
+(third) eq  (read-line: third line content at EOF) rt-ok  clear
+% stream auto-closed when EOF reached on read-only stream
+
+% --- read-line: empty line ---
+(/tmp/trix_rl_empty.txt) (w)#b stream
+dup 10b write   % just a newline = empty line
+dup (after) write-string
+close-stream
+
+(/tmp/trix_rl_empty.txt) (r)#b stream
+/rl_s2 exch def
+
+rl_s2 256 string read-line
+true eq  (read-line: empty line not EOF) rt-ok
+length 0 eq  (read-line: empty line length = 0) rt-ok  clear
+
+rl_s2 256 string read-line
+false eq  (read-line: after empty line EOF) rt-ok
+(after) eq  (read-line: content after empty line) rt-ok  clear
+% stream auto-closed when EOF reached on read-only stream
+
+% --- read-line: line exceeds buffer -> error ---
+(/tmp/trix_rl_long.txt) (w)#b stream
+dup (abcdefghij) write-string
+close-stream
+
+(/tmp/trix_rl_long.txt) (r)#b stream
+/rl_s3 exch def
+{ rl_s3 3 string read-line } try
+/range-check eq  (read-line: line exceeds buffer error) rt-ok  clear
+rl_s3 close-stream
+
+% --- read-line: error on write-only stream ---
+(/tmp/trix_rl_wo.txt) (w)#b stream
+/rl_s4 exch def
+{ rl_s4 256 string read-line } try
+/invalid-stream-access eq  (read-line: error on write-only stream) rt-ok  clear
+rl_s4 close-stream
+
+% cleanup
+(/tmp/trix_rl_test.txt) delete-file
+(/tmp/trix_rl_empty.txt) delete-file
+(/tmp/trix_rl_long.txt) delete-file
+(/tmp/trix_rl_wo.txt) delete-file
+
+(read-line tests complete.) =
+
+% ====================================================================
+% SECTION 5: read-hex-string
+% ====================================================================
+
+% --- read-hex-string: decode hex data ---
+(/tmp/trix_rhs_test.txt) (w)#b stream
+dup (48656C6C6F) write-string   % "Hello" in hex
+close-stream
+
+(/tmp/trix_rhs_test.txt) (r)#b stream
+/rhs_s exch def
+rhs_s 10 string read-hex-string
+false eq  (read-hex-string: EOF reached) rt-ok
+(Hello) eq  (read-hex-string: decoded Hello) rt-ok  clear
+% stream auto-closed when EOF reached on read-only stream
+
+% --- read-hex-string: partial read (buffer smaller than data) ---
+(/tmp/trix_rhs_part.txt) (w)#b stream
+dup (414243444546) write-string   % "ABCDEF" in hex
+close-stream
+
+(/tmp/trix_rhs_part.txt) (r)#b stream
+/rhs_s2 exch def
+rhs_s2 3 string read-hex-string
+true eq  (read-hex-string: more data available) rt-ok
+(ABC) eq  (read-hex-string: first 3 bytes) rt-ok  clear
+rhs_s2 3 string read-hex-string
+true eq  (read-hex-string: second read buffer full) rt-ok
+(DEF) eq  (read-hex-string: last 3 bytes) rt-ok  clear
+% buffer was filled exactly; stream at EOF but not detected yet
+% next read would hit EOF and auto-close
+
+% --- read-hex-string: with whitespace in hex ---
+(/tmp/trix_rhs_ws.txt) (w)#b stream
+dup (48 65 6C) write-string   % "Hel" with spaces
+close-stream
+
+(/tmp/trix_rhs_ws.txt) (r)#b stream
+/rhs_s3 exch def
+rhs_s3 10 string read-hex-string
+false eq  (read-hex-string: whitespace hex EOF) rt-ok
+dup length 3 eq  (read-hex-string: whitespace ignored length=3) rt-ok
+(Hel) eq  (read-hex-string: whitespace ignored content) rt-ok  clear
+% stream auto-closed when EOF reached on read-only stream
+
+% --- read-hex-string: error on write-only ---
+(/tmp/trix_rhs_wo.txt) (w)#b stream
+/rhs_s4 exch def
+{ rhs_s4 10 string read-hex-string } try
+/invalid-stream-access eq  (read-hex-string: error on write-only) rt-ok  clear
+rhs_s4 close-stream
+
+% --- read-hex-string: odd number of hex digits ---
+(/tmp/trix_rhs_odd.txt) (w)#b stream
+dup (4865C) write-string   % odd: "He" + half byte
+close-stream
+
+(/tmp/trix_rhs_odd.txt) (r)#b stream
+/rhs_s5 exch def
+rhs_s5 10 string read-hex-string
+false eq  (read-hex-string: odd hex EOF) rt-ok
+length 3 eq  (read-hex-string: odd hex length=3) rt-ok  clear
+% stream auto-closed when EOF reached on read-only stream
+
+% cleanup
+(/tmp/trix_rhs_test.txt) delete-file
+(/tmp/trix_rhs_part.txt) delete-file
+(/tmp/trix_rhs_ws.txt) delete-file
+(/tmp/trix_rhs_wo.txt) delete-file
+(/tmp/trix_rhs_odd.txt) delete-file
+
+(read-hex-string tests complete.) =
+
+% ====================================================================
+% SECTION 6: current-stream
+% ====================================================================
+
+% current-stream should return the currently executing input stream
+current-stream
+type /stream-type eq  (current-stream: returns stream type) rt-ok  clear
+
+(current-stream tests complete.) =
+
+% ====================================================================
+% SECTION 7: Stream modes (r, w, a, e, R, W, A, E)
+% ====================================================================
+
+% --- mode r: read only ---
+(/tmp/trix_mode_r.txt) (w)#b stream
+dup (read test) write-string
+close-stream
+
+(/tmp/trix_mode_r.txt) (r)#b stream
+/sr exch def
+sr read-all (read test) eq  (mode-r: can read) rt-ok  clear
+% stream auto-closed by read-all on read-only stream
+
+% reopen to test write fails on read-only
+(/tmp/trix_mode_r.txt) (r)#b stream
+/sr2 exch def
+{ sr2 65b write } try
+/invalid-stream-access eq  (mode-r: write error on read-only) rt-ok  clear
+sr2 close-stream
+
+% --- mode w: write only, creates/truncates ---
+(/tmp/trix_mode_w.txt) (w)#b stream
+dup (original) write-string
+close-stream
+
+% reopen w -> truncates
+(/tmp/trix_mode_w.txt) (w)#b stream
+dup (new) write-string
+close-stream
+
+(/tmp/trix_mode_w.txt) (r)#b stream
+read-all (new) eq  (mode-w: truncates on reopen) rt-ok  clear
+
+% write-only: read should error
+(/tmp/trix_mode_w2.txt) (w)#b stream
+/sw exch def
+{ sw read } try
+/invalid-stream-access eq  (mode-w: read error on write-only) rt-ok  clear
+sw close-stream
+
+% --- mode a: append ---
+(/tmp/trix_mode_a.txt) (w)#b stream
+dup (hello) write-string
+close-stream
+
+(/tmp/trix_mode_a.txt) (a)#b stream
+dup ( world) write-string
+close-stream
+
+(/tmp/trix_mode_a.txt) (r)#b stream
+read-all (hello world) eq  (mode-a: append adds to end) rt-ok  clear
+
+% --- mode e: exclusive create ---
+% first delete if exists
+{ (/tmp/trix_mode_e.txt) delete-file } try clear
+
+(/tmp/trix_mode_e.txt) (e)#b stream
+dup (exclusive) write-string
+close-stream
+
+% second open with 'e' should fail because file exists
+{ (/tmp/trix_mode_e.txt) (e)#b stream } try
+/filename-exists eq  (mode-e: error when file exists) rt-ok  clear
+
+% verify content
+(/tmp/trix_mode_e.txt) (r)#b stream
+read-all (exclusive) eq  (mode-e: content written) rt-ok  clear
+
+% --- mode R: read+write existing ---
+(/tmp/trix_mode_rw.txt) (w)#b stream
+dup (hello) write-string
+close-stream
+
+(/tmp/trix_mode_rw.txt) (R)#b stream
+/sR exch def
+sR read pop pop  % read a byte successfully
+sR 0 set-stream-position
+sR 90b write  % overwrite first byte with 'Z'
+sR close-stream
+
+(/tmp/trix_mode_rw.txt) (r)#b stream
+read-all (Zello) eq  (mode-R: read+write existing) rt-ok  clear
+
+% R on nonexistent file should error
+{ (/tmp/trix_mode_R_noexist.txt) (R)#b stream } try
+/filename-not-found eq  (mode-R: error on nonexistent) rt-ok  clear
+
+% --- mode W: read+write, creates/truncates ---
+(/tmp/trix_mode_W.txt) (w)#b stream
+dup (old data) write-string
+close-stream
+
+(/tmp/trix_mode_W.txt) (W)#b stream
+/sW exch def
+sW (new) write-string
+sW 0 set-stream-position
+sW read-all (new) eq  (mode-W: truncates and read+write) rt-ok  clear
+sW close-stream
+
+% --- mode A: read+write append ---
+(/tmp/trix_mode_A.txt) (w)#b stream
+dup (base) write-string
+close-stream
+
+(/tmp/trix_mode_A.txt) (A)#b stream
+/sA exch def
+sA (ext) write-string
+sA 0 set-stream-position
+sA read-all (baseext) eq  (mode-A: read+write append) rt-ok  clear
+sA close-stream
+
+% --- mode E: exclusive read+write ---
+{ (/tmp/trix_mode_E.txt) delete-file } try clear
+
+(/tmp/trix_mode_E.txt) (E)#b stream
+/sE exch def
+sE (excl-rw) write-string
+sE 0 set-stream-position
+sE read-all (excl-rw) eq  (mode-E: exclusive read+write) rt-ok  clear
+sE close-stream
+
+% second E should fail
+{ (/tmp/trix_mode_E.txt) (E)#b stream } try
+/filename-exists eq  (mode-E: error when file exists) rt-ok  clear
+
+% cleanup
+(/tmp/trix_mode_r.txt) delete-file
+(/tmp/trix_mode_w.txt) delete-file
+(/tmp/trix_mode_w2.txt) delete-file
+(/tmp/trix_mode_a.txt) delete-file
+(/tmp/trix_mode_e.txt) delete-file
+(/tmp/trix_mode_rw.txt) delete-file
+(/tmp/trix_mode_W.txt) delete-file
+(/tmp/trix_mode_A.txt) delete-file
+(/tmp/trix_mode_E.txt) delete-file
+
+(Stream mode tests complete.) =
+
+% ====================================================================
+% SECTION 8: Multiple simultaneous streams
+% ====================================================================
+
+(/tmp/trix_multi_1.txt) (w)#b stream dup (alpha) write-string close-stream
+(/tmp/trix_multi_2.txt) (w)#b stream dup (beta) write-string close-stream
+
+(/tmp/trix_multi_1.txt) (r)#b stream /m1 exch def
+(/tmp/trix_multi_2.txt) (r)#b stream /m2 exch def
+
+% read in reverse order to verify independence
+m2 read-all (beta) eq  (multi-stream: file 2 reads beta) rt-ok  clear
+m1 read-all (alpha) eq  (multi-stream: file 1 reads alpha) rt-ok  clear
+% both auto-closed by read-all (read-only)
+
+(/tmp/trix_multi_1.txt) delete-file
+(/tmp/trix_multi_2.txt) delete-file
+
+(Multiple simultaneous stream tests complete.) =
+
+% ====================================================================
+% SECTION 9: stream-position and set-stream-position
+% ====================================================================
+
+% --- stream-position: initial position is 0 ---
+(/tmp/trix_pos_test.txt) (w)#b stream
+dup (0123456789) write-string
+close-stream
+
+(/tmp/trix_pos_test.txt) (r)#b stream
+/sp_s exch def
+sp_s stream-position 0l eq  (stream-position: initial = 0) rt-ok  clear
+
+% --- stream-position: after reading ---
+sp_s read pop pop  % read one byte
+sp_s read pop pop  % read another
+sp_s read pop pop  % read third
+sp_s stream-position 3l eq  (stream-position: after 3 reads = 3) rt-ok  clear
+
+% --- set-stream-position: seek to beginning ---
+sp_s 0 set-stream-position
+sp_s stream-position 0l eq  (set-stream-position: seek to 0) rt-ok  clear
+
+% --- set-stream-position: seek to middle ---
+sp_s 5 set-stream-position
+sp_s read-all (56789) eq  (set-stream-position: seek to 5 reads rest) rt-ok  clear
+% stream auto-closed when EOF reached on read-only stream
+
+% --- set-stream-position: negative position error ---
+(/tmp/trix_pos_test.txt) (r)#b stream
+/sp_s2 exch def
+{ sp_s2 -1 set-stream-position } try
+/range-check eq  (set-stream-position: negative position error) rt-ok  clear
+sp_s2 close-stream
+
+(/tmp/trix_pos_test.txt) delete-file
+
+(stream-position tests complete.) =
+
+% ====================================================================
+% SECTION 10: Stream error paths
+% ====================================================================
+
+% --- read from closed stream ---
+(/tmp/trix_err_closed.txt) (w)#b stream
+dup (x) write-string
+close-stream
+
+(/tmp/trix_err_closed.txt) (r)#b stream
+/err_s1 exch def
+err_s1 close-stream
+{ err_s1 read } try
+/invalid-stream-access eq  (error: read from closed stream) rt-ok  clear
+
+% --- write to closed stream ---
+(/tmp/trix_err_closed2.txt) (w)#b stream
+/err_s2 exch def
+err_s2 close-stream
+{ err_s2 65b write } try
+/invalid-stream-access eq  (error: write to closed stream) rt-ok  clear
+
+% --- close-stream is idempotent: closing already-closed is a no-op ---
+(/tmp/trix_err_dblclose.txt) (w)#b stream
+dup (x) write-string
+close-stream
+(/tmp/trix_err_dblclose.txt) (r)#b stream
+/err_s3 exch def
+err_s3 close-stream
+{ err_s3 close-stream } try
+/no-error eq  (no-error: close already-closed stream is idempotent) rt-ok  clear
+
+% --- open nonexistent file for read ---
+{ (/tmp/trix_nonexistent_42.txt) (r)#b stream } try
+/filename-not-found eq  (error: open nonexistent for read) rt-ok  clear
+
+% --- write-string to read-only stream ---
+(/tmp/trix_err_ws_ro.txt) (w)#b stream
+dup (data) write-string
+close-stream
+
+(/tmp/trix_err_ws_ro.txt) (r)#b stream
+/err_s4 exch def
+{ err_s4 (test) write-string } try
+/invalid-stream-access eq  (error: write-string to read-only) rt-ok  clear
+err_s4 close-stream
+
+% --- delete nonexistent file ---
+{ (/tmp/trix_no_such_file_42.txt) delete-file } try
+/filename-not-found eq  (error: delete nonexistent file) rt-ok  clear
+
+% --- read-all on write-only ---
+(/tmp/trix_err_ra_wo.txt) (w)#b stream
+/err_s5 exch def
+{ err_s5 read-all } try
+/invalid-stream-access eq  (error: read-all on write-only) rt-ok  clear
+err_s5 close-stream
+
+% --- write on read-only ---
+(/tmp/trix_err_w_ro.txt) (w)#b stream
+dup (x) write-string
+close-stream
+(/tmp/trix_err_w_ro.txt) (r)#b stream
+/err_s6 exch def
+{ err_s6 42b write } try
+/invalid-stream-access eq  (error: write byte on read-only) rt-ok  clear
+err_s6 close-stream
+
+% cleanup
+(/tmp/trix_err_closed.txt) delete-file
+(/tmp/trix_err_closed2.txt) delete-file
+(/tmp/trix_err_dblclose.txt) delete-file
+(/tmp/trix_err_ws_ro.txt) delete-file
+(/tmp/trix_err_ra_wo.txt) delete-file
+(/tmp/trix_err_w_ro.txt) delete-file
+
+(Stream error path tests complete.) =
+
+% ====================================================================
+% SECTION 11: readable? / writable?
+% ====================================================================
+
+% --- readable?: read-only stream ---
+(/tmp/trix_ir_test.txt) (w)#b stream
+dup (test) write-string
+close-stream
+
+(/tmp/trix_ir_test.txt) (r)#b stream
+/sir exch def
+sir readable? true eq  (readable?: true for r mode) rt-ok  clear
+
+% --- writable?: read-only stream ---
+% writable? checks object access attribute
+% For stream opened with 'r', the Object has ReadOnly access -> writable? false
+sir writable? false eq  (writable?: false for r mode) rt-ok  clear
+sir close-stream
+
+% --- readable? on write-only stream ---
+(/tmp/trix_ir_test2.txt) (w)#b stream
+/siw exch def
+siw readable? false eq  (readable?: false for w mode) rt-ok  clear
+
+% --- writable? on write-only stream ---
+siw writable? true eq  (writable?: true for w mode) rt-ok  clear
+siw close-stream
+
+% --- readable?/writable on R mode (read+write) ---
+% Note: writable? checks Object access attribute, not stream capability
+% Mode R: lower_ch == 'r' so Object gets ReadOnly access
+(/tmp/trix_ir_test2.txt) (R)#b stream
+/siR exch def
+siR readable? true eq  (readable?: true for R mode) rt-ok  clear
+siR writable? false eq  (writable?: false for R mode object access) rt-ok  clear
+siR close-stream
+
+% --- readable? on non-stream (always true per implementation) ---
+42 readable? true eq  (readable?: true for integer) rt-ok  clear
+(hello) readable? true eq  (readable?: true for string) rt-ok  clear
+
+% cleanup
+(/tmp/trix_ir_test.txt) delete-file
+(/tmp/trix_ir_test2.txt) delete-file
+
+(readable? / writable? tests complete.) =
+
+% ====================================================================
+% SECTION 12: status operator (stream open/closed check)
+% ====================================================================
+
+(/tmp/trix_status_test.txt) (w)#b stream
+dup (data) write-string
+close-stream
+
+(/tmp/trix_status_test.txt) (r)#b stream
+/sst exch def
+sst status true eq  (status: true for open stream) rt-ok  clear
+sst close-stream
+sst status false eq  (status: false for closed stream) rt-ok  clear
+
+(/tmp/trix_status_test.txt) delete-file
+
+(status tests complete.) =
+
+% ====================================================================
+% SECTION 13: read and write operators
+% ====================================================================
+
+% --- read: single bytes from file ---
+(/tmp/trix_rw_bytes.txt) (w)#b stream
+dup 65b write   % A
+dup 66b write   % B
+dup 67b write   % C
+close-stream
+
+(/tmp/trix_rw_bytes.txt) (r)#b stream
+/srb exch def
+srb read true eq  (read: first byte not EOF) rt-ok
+65b eq  (read: first byte = A) rt-ok  clear
+
+srb read true eq  (read: second byte not EOF) rt-ok
+66b eq  (read: second byte = B) rt-ok  clear
+
+srb read true eq  (read: third byte not EOF) rt-ok
+67b eq  (read: third byte = C) rt-ok  clear
+
+srb read false eq  (read: EOF after all bytes) rt-ok  clear
+% stream auto-closed when EOF reached on read-only stream
+
+% cleanup
+(/tmp/trix_rw_bytes.txt) delete-file
+
+(read/write tests complete.) =
+
+% ====================================================================
+% SECTION 14: read-string
+% ====================================================================
+
+(/tmp/trix_rs_test.txt) (w)#b stream
+dup (ABCDEFGHIJ) write-string
+close-stream
+
+% --- read-string: exact size ---
+(/tmp/trix_rs_test.txt) (r)#b stream
+/srs exch def
+srs 10 string read-string
+true eq  (read-string: exact size not EOF) rt-ok
+(ABCDEFGHIJ) eq  (read-string: exact content) rt-ok  clear
+srs close-stream
+
+% --- read-string: smaller buffer ---
+(/tmp/trix_rs_test.txt) (r)#b stream
+/srs2 exch def
+srs2 5 string read-string
+true eq  (read-string: partial read not EOF) rt-ok
+(ABCDE) eq  (read-string: first 5 bytes) rt-ok  clear
+srs2 5 string read-string
+true eq  (read-string: second partial not EOF) rt-ok
+(FGHIJ) eq  (read-string: last 5 bytes) rt-ok  clear
+srs2 5 string read-string
+false eq  (read-string: EOF on empty) rt-ok  clear
+% stream auto-closed when EOF reached on read-only stream
+
+% --- read-string: error on write-only ---
+(/tmp/trix_rs_wo.txt) (w)#b stream
+/srs3 exch def
+{ srs3 5 string read-string } try
+/invalid-stream-access eq  (read-string: error on write-only) rt-ok  clear
+srs3 close-stream
+
+(/tmp/trix_rs_test.txt) delete-file
+(/tmp/trix_rs_wo.txt) delete-file
+
+(read-string tests complete.) =
+
+% ====================================================================
+% SECTION 15: read-all
+% ====================================================================
+
+% --- read-all: basic ---
+(/tmp/trix_ra_test.txt) (w)#b stream
+dup (complete file content) write-string
+close-stream
+
+(/tmp/trix_ra_test.txt) (r)#b stream
+read-all (complete file content) eq  (read-all: full content) rt-ok  clear
+
+% --- read-all: empty file ---
+(/tmp/trix_ra_empty.txt) (w)#b stream
+close-stream
+(/tmp/trix_ra_empty.txt) (r)#b stream
+read-all length 0 eq  (read-all: empty file length=0) rt-ok  clear
+
+% --- read-all: from offset ---
+(/tmp/trix_ra_off.txt) (w)#b stream
+dup (hello world) write-string
+close-stream
+(/tmp/trix_ra_off.txt) (r)#b stream
+/sra_off exch def
+sra_off 6 set-stream-position
+sra_off read-all (world) eq  (read-all: from offset 6) rt-ok  clear
+
+% --- read-all: error on write-only ---
+(/tmp/trix_ra_wo.txt) (w)#b stream
+/sra_wo exch def
+{ sra_wo read-all } try
+/invalid-stream-access eq  (read-all: error on write-only) rt-ok  clear
+sra_wo close-stream
+
+% cleanup
+(/tmp/trix_ra_test.txt) delete-file
+(/tmp/trix_ra_empty.txt) delete-file
+(/tmp/trix_ra_off.txt) delete-file
+(/tmp/trix_ra_wo.txt) delete-file
+
+(read-all tests complete.) =
+
+% ====================================================================
+% SECTION 16: write-string
+% ====================================================================
+
+% --- write-string: basic write and verify ---
+(/tmp/trix_ws_basic.txt) (w)#b stream
+dup (hello world) write-string
+close-stream
+
+(/tmp/trix_ws_basic.txt) (r)#b stream
+read-all (hello world) eq  (write-string: basic write) rt-ok  clear
+
+% --- write-string: multiple writes concatenate ---
+(/tmp/trix_ws_multi.txt) (w)#b stream
+dup (foo) write-string
+dup (bar) write-string
+dup (baz) write-string
+close-stream
+
+(/tmp/trix_ws_multi.txt) (r)#b stream
+read-all (foobarbaz) eq  (write-string: multiple writes concat) rt-ok  clear
+
+% --- write-string: empty string ---
+(/tmp/trix_ws_empty.txt) (w)#b stream
+dup () write-string
+dup (ok) write-string
+close-stream
+
+(/tmp/trix_ws_empty.txt) (r)#b stream
+read-all (ok) eq  (write-string: empty string then ok) rt-ok  clear
+
+% cleanup
+(/tmp/trix_ws_basic.txt) delete-file
+(/tmp/trix_ws_multi.txt) delete-file
+(/tmp/trix_ws_empty.txt) delete-file
+
+(write-string tests complete.) =
+
+% ====================================================================
+% SECTION 17: rename-file
+% ====================================================================
+
+(/tmp/trix_rename_src.txt) (w)#b stream
+dup (rename me) write-string
+close-stream
+
+(/tmp/trix_rename_src.txt) (/tmp/trix_rename_dst.txt) rename-file
+
+(/tmp/trix_rename_dst.txt) (r)#b stream
+read-all (rename me) eq  (rename-file: content preserved) rt-ok  clear
+
+% original should not exist
+{ (/tmp/trix_rename_src.txt) (r)#b stream } try
+/filename-not-found eq  (rename-file: original deleted) rt-ok  clear
+
+% --- rename-file: error on nonexistent source ---
+{ (/tmp/trix_no_such_ren.txt) (/tmp/trix_ren_dst2.txt) rename-file } try
+/filename-not-found eq  (rename-file: error on missing source) rt-ok  clear
+
+% cleanup
+(/tmp/trix_rename_dst.txt) delete-file
+
+(rename-file tests complete.) =
+
+% ====================================================================
+% SECTION 18: delete-file
+% ====================================================================
+
+% --- delete-file: normal delete ---
+(/tmp/trix_del_test.txt) (w)#b stream
+dup (delete me) write-string
+close-stream
+
+(/tmp/trix_del_test.txt) delete-file
+
+{ (/tmp/trix_del_test.txt) (r)#b stream } try
+/filename-not-found eq  (delete-file: file removed) rt-ok  clear
+
+% --- delete-file: error on nonexistent ---
+{ (/tmp/trix_no_such_del.txt) delete-file } try
+/filename-not-found eq  (delete-file: error on missing file) rt-ok  clear
+
+(delete-file tests complete.) =
+
+% ====================================================================
+% SECTION 19: Combined operations (write, seek, read)
+% ====================================================================
+
+(/tmp/trix_combined.txt) (W)#b stream
+/sc exch def
+sc (Hello, World!) write-string
+sc 0 set-stream-position
+sc stream-position 0l eq  (combined: position 0 after seek) rt-ok  clear
+
+sc 5 string read-string
+true eq  (combined: read-string not EOF) rt-ok
+(Hello) eq  (combined: read first 5 chars) rt-ok  clear
+
+sc stream-position 5l eq  (combined: position 5 after read) rt-ok  clear
+
+sc 0 set-stream-position
+sc 88b write   % overwrite H with X
+sc 0 set-stream-position
+sc read-all (Xello, World!) eq  (combined: overwritten first byte) rt-ok  clear
+
+sc close-stream
+(/tmp/trix_combined.txt) delete-file
+
+(Combined operation tests complete.) =
+
+% ====================================================================
+% SECTION 20: CRLF handling in read-line
+% ====================================================================
+
+% Create file with CRLF line endings
+(/tmp/trix_crlf.txt) (w)#b stream
+dup (line1) write-string
+dup 13b write   % CR
+dup 10b write   % LF
+dup (line2) write-string
+dup 13b write   % CR
+dup 10b write   % LF
+close-stream
+
+(/tmp/trix_crlf.txt) (r)#b stream
+/scr exch def
+scr 256 string read-line
+true eq  (crlf: first line not EOF) rt-ok
+(line1) eq  (crlf: first line content) rt-ok  clear
+
+scr 256 string read-line
+true eq  (crlf: second line not EOF) rt-ok
+(line2) eq  (crlf: second line content) rt-ok  clear
+
+scr close-stream
+(/tmp/trix_crlf.txt) delete-file
+
+(CRLF handling tests complete.) =
+
+% ====================================================================
+% SECTION 21: write byte values
+% ====================================================================
+
+% --- write: various byte values ---
+(/tmp/trix_wb_test.txt) (w)#b stream
+dup 0b write    % null byte
+dup 255b write  % max byte
+dup 32b write   % space
+dup 127b write  % DEL
+close-stream
+
+(/tmp/trix_wb_test.txt) (r)#b stream
+/swb exch def
+swb read pop  0b eq    (write-byte: null byte) rt-ok  clear
+swb read pop  255b eq  (write-byte: max byte 255) rt-ok  clear
+swb read pop  32b eq   (write-byte: space) rt-ok  clear
+swb read pop  127b eq  (write-byte: DEL) rt-ok  clear
+swb read false eq     (write-byte: EOF after 4 bytes) rt-ok  clear
+% stream auto-closed when EOF reached on read-only stream
+
+(/tmp/trix_wb_test.txt) delete-file
+
+(write byte value tests complete.) =
+
+% ====================================================================
+% SECTION 22: Interleaved read/write on R/W mode
+% ====================================================================
+
+(/tmp/trix_interleave.txt) (W)#b stream
+/sil exch def
+sil (AAAA) write-string
+sil 0 set-stream-position
+sil read pop pop   % read first byte
+sil 0 set-stream-position
+sil (BBBB) write-string
+sil 0 set-stream-position
+sil read-all (BBBB) eq  (interleave: overwrite verified) rt-ok  clear
+sil close-stream
+
+(/tmp/trix_interleave.txt) delete-file
+
+(Interleaved read/write tests complete.) =
+
+% ====================================================================
+% SECTION 23: Large write and read-all
+% ====================================================================
+
+% Write a moderately large string (100 bytes)
+(/tmp/trix_large.txt) (w)#b stream
+/slg exch def
+% write 10 copies of 10 chars
+slg (0123456789) write-string
+slg (0123456789) write-string
+slg (0123456789) write-string
+slg (0123456789) write-string
+slg (0123456789) write-string
+slg (0123456789) write-string
+slg (0123456789) write-string
+slg (0123456789) write-string
+slg (0123456789) write-string
+slg (0123456789) write-string
+slg close-stream
+
+(/tmp/trix_large.txt) (r)#b stream
+read-all length 100 eq  (large-write: 100 bytes written) rt-ok  clear
+
+(/tmp/trix_large.txt) delete-file
+
+(Large write tests complete.) =
+
+% ====================================================================
+% SECTION 24: Seek edge cases
+% ====================================================================
+
+% Write 10 bytes, seek to position 5, read 1 byte, seek to 0, read first byte
+(/tmp/trix_seek_test.txt) (w)#b stream
+dup (ABCDEFGHIJ) write-string
+close-stream
+
+(/tmp/trix_seek_test.txt) (r)#b stream
+/ssk exch def
+ssk 5 set-stream-position
+ssk read pop 70b eq                 (seek: read at pos 5 = F) rt-ok clear
+ssk 0 set-stream-position
+ssk read pop 65b eq                 (seek: backward to 0, read = A) rt-ok clear
+ssk close-stream
+
+% Write, then seek past EOF and write -> file grows
+(/tmp/trix_seek_test.txt) (w)#b stream
+/ssk2 exch def
+ssk2 (ABCDE) write-string
+ssk2 close-stream
+
+% Reopen in read mode and verify length
+(/tmp/trix_seek_test.txt) file-size 5l eq  (seek: initial 5 bytes) rt-ok clear
+
+(/tmp/trix_seek_test.txt) delete-file
+
+% Negative position -> range-check
+(/tmp/trix_seek_test2.txt) (w)#b stream
+/sskn exch def
+{ sskn -1 set-stream-position } try /range-check eq  (seek: negative position range-check) rt-ok clear
+sskn close-stream
+(/tmp/trix_seek_test2.txt) delete-file
+
+(Seek edge case tests complete.) =
+
+% ====================================================================
+% Array-argument format operators (aprint-fmt, afprint-fmt, asprint-fmt)
+% ====================================================================
+
+% --- asprint-fmt: str str arr :- str bool ---
+
+% basic substitution: asprint-fmt returns (str bool) — bool on top
+=string ({} + {} = {}) [1 2 3] asprint-fmt
+true eq                                  (asprint-fmt: success = true) rt-ok
+(1 + 2 = 3) eq                          (asprint-fmt: basic subst) rt-ok clear
+
+% empty args
+=string (hello) [] asprint-fmt
+true eq exch (hello) eq and              (asprint-fmt: no args) rt-ok clear
+
+% typed formatting
+=string ({:d}) [42] asprint-fmt pop
+(42) eq                                  (asprint-fmt: :d format) rt-ok clear
+
+% indexed args
+=string ({1} {0}) [10 20] asprint-fmt pop
+(20 10) eq                               (asprint-fmt: indexed args) rt-ok clear
+
+% string args
+=string ({} {}) [(hello) (world)] asprint-fmt pop
+(hello world) eq                         (asprint-fmt: string args) rt-ok clear
+
+% returns output length
+=string ({}{}{}) [1 2 3] asprint-fmt pop
+length 3 eq                              (asprint-fmt: output length = 3) rt-ok clear
+
+% --- aprint-fmt: str arr :- int bool ---
+% aprint-fmt writes to stdout; test return values only
+
+(x{}) [1] aprint-fmt
+true eq                                  (aprint-fmt: success = true) rt-ok
+2 eq                                     (aprint-fmt: count = 2) rt-ok
+clear
+
+% --- afprint-fmt: stream str arr :- int bool ---
+% test with a writable file stream, using save to scope the stream
+% write via afprint-fmt, then read back and verify
+(/tmp/trix_afmt_test.txt) (w)#b stream
+dup ({} + {}) [10 20] afprint-fmt
+true eq                                  (afprint-fmt: success = true) rt-ok
+7 eq                                     (afprint-fmt: count = 7) rt-ok
+close-stream clear                       % close write stream (flushes), clean up
+
+(/tmp/trix_afmt_test.txt) (r)#b stream
+7 string read-string pop
+(10 + 20) eq                             (afprint-fmt: file content) rt-ok clear
+(/tmp/trix_afmt_test.txt) delete-file
+
+% --- error paths ---
+
+% type error: args not array
+{ =string (fmt) 42 asprint-fmt } try /type-check eq
+                                         (asprint-fmt: non-array error) rt-ok clear
+
+% type error: format not string
+{ 42 [] aprint-fmt } try /type-check eq
+                                         (aprint-fmt: non-string error) rt-ok clear
+
+% range error: too few args
+{ =string ({} {}) [1] asprint-fmt } try /range-check eq
+                                         (asprint-fmt: too few args error) rt-ok clear
+
+% overflow failure-count parity: sprint-fmt (mark-args) must report the same dropped
+% count as asprint-fmt (array-args) -- a 200-wide field overflows the 128-byte =string.
+=string ({:200d}) mark 7 sprint-fmt pop /c1 exch def
+=string ({:200d}) [ 7 ] asprint-fmt pop /c2 exch def
+c1 c2 eq                                 (sprint-fmt overflow count matches asprint-fmt) rt-ok clear
+c1 0 gt                                  (sprint-fmt overflow count is the dropped amount) rt-ok clear
+
+//:status:extvalue-validate              (afmt: extvalue-validate) rt-ok clear
+//:status:vm-validate                    (afmt: vm-validate) rt-ok clear
+
+% ====================================================================
+% interactive?: stream :- bool
+% ====================================================================
+% test_all.trx runs Trix with stdin/stdout/stderr redirected to
+% pipes/files, so none of the standard streams should be interactive
+% under the test harness.
+
+stdin  interactive? false eq  (interactive?: stdin not tty under tests) rt-ok clear
+stdout interactive? false eq  (interactive?: stdout not tty under tests) rt-ok clear
+stderr interactive? false eq  (interactive?: stderr not tty under tests) rt-ok clear
+
+% file streams are never interactive
+(/tmp/trix_tty_test.txt) (w)#b stream /sft exch def
+sft interactive? false eq     (interactive?: write-file not tty) rt-ok
+sft close-stream
+(/tmp/trix_tty_test.txt) (r)#b stream /sft exch def
+sft interactive? false eq     (interactive?: read-file not tty) rt-ok  clear
+sft close-stream
+
+% closed stream: still defined, returns false
+sft interactive? false eq     (interactive?: closed stream false) rt-ok clear
+
+% wrong type: type-check error
+{ 42 interactive? } try /type-check eq (interactive?: non-stream type-check) rt-ok clear
+
+% opstack underflow
+{ clear interactive? } try /opstack-underflow eq (interactive?: underflow) rt-ok clear
+
+//:status:extvalue-validate              (interactive?: extvalue-validate) rt-ok clear
+//:status:vm-validate                    (interactive?: vm-validate) rt-ok clear
+
+% ====================================================================
+% SECTION: make-memory-stream
+% ====================================================================
+% `make-memory-stream` wraps a Trix string as a read-only Stream by
+% borrowing the string's VM-heap bytes -- no host-side allocation or
+% copy.  The Stream's IsBorrowed flag suppresses the close-time
+% std::free that the snapshot/invoke memory-stream paths rely on.
+
+% --- Basic construction + read-all round-trip ---
+(hello world) make-memory-stream /mms exch def
+mms read-all (hello world) eq         (mms: read-all returns same bytes) rt-ok clear
+mms close-stream
+
+% --- Empty string ---
+() make-memory-stream /mms exch def
+mms read-all () eq                    (mms: empty string round-trip)     rt-ok clear
+mms close-stream
+
+% --- Binary payload (every byte 0x00..0xFF) ---
+/all-bytes 256 string def
+0 1 255 {|i| all-bytes i i /byte-type cast put} for
+all-bytes make-memory-stream /mms exch def
+mms read-all all-bytes eq             (mms: 256-byte binary round-trip)  rt-ok clear
+mms close-stream
+
+% --- read-string fills a buffer, returns shrunk str + !eof bool ---
+(abc) make-memory-stream /mms exch def
+/buf 2 string def
+mms buf read-string /more1 exch def /chunk1 exch def
+chunk1 (ab) eq                        (mms: read-string first 2 bytes)   rt-ok clear
+more1                                 (mms: more bytes after partial)    rt-ok clear
+/buf2 2 string def
+mms buf2 read-string /more2 exch def /chunk2 exch def
+chunk2 (c)  eq                        (mms: read-string final byte)      rt-ok clear
+more2 not                             (mms: EOF after final read)        rt-ok clear
+mms close-stream
+
+% --- Sad path: type-check on non-string operand ---
+{ 42 make-memory-stream } try /type-check eq
+                                      (mms: int operand -> type-check)   rt-ok clear
+
+% --- Sad path: stack underflow ---
+{ make-memory-stream } try /opstack-underflow eq
+                                      (mms: empty stack -> underflow)    rt-ok clear
+
+% --- Two simultaneous memory-streams over distinct strings work
+%     independently (different stream slots, no shared state) ---
+(first ) make-memory-stream /mms-a exch def
+(second) make-memory-stream /mms-b exch def
+mms-a read-all (first ) eq            (mms: two streams, A intact)       rt-ok clear
+mms-b read-all (second) eq            (mms: two streams, B intact)       rt-ok clear
+mms-a close-stream
+mms-b close-stream
+
+% ====================================================================
+% DONE
+% ====================================================================
+
+(Stream operator tests complete.) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

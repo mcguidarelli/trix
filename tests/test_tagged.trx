@@ -1,0 +1,1598 @@
+% ====================================================================
+% Tagged Value Type Tests
+% ====================================================================
+% Tests for the Tagged discriminated value type: [Name tag, Object payload]
+% Tagged values are always Literal, share PackedType::Curry (X=0 bit).
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Basic creation and type
+% ====================================================================
+
+42 /some tag type /tagged-type eq
+    (tag: type is tagged-type) rt-ok clear
+
+42 /some tag is-tagged
+    (tag: is-tagged true) rt-ok clear
+
+% is-tagged false for every non-tagged type
+42 is-tagged not                         (is-tagged: false for integer) rt-ok clear
+42u is-tagged not                        (is-tagged: false for uinteger) rt-ok clear
+42l is-tagged not                        (is-tagged: false for long) rt-ok clear
+42ul is-tagged not                       (is-tagged: false for ulong) rt-ok clear
+65b is-tagged not                        (is-tagged: false for byte) rt-ok clear
+3.14 is-tagged not                       (is-tagged: false for real) rt-ok clear
+3.14d is-tagged not                      (is-tagged: false for double) rt-ok clear
+0a is-tagged not                         (is-tagged: false for address) rt-ok clear
+true is-tagged not                       (is-tagged: false for boolean) rt-ok clear
+null is-tagged not                       (is-tagged: false for null) rt-ok clear
+(hello) is-tagged not                    (is-tagged: false for string) rt-ok clear
+/foo is-tagged not                       (is-tagged: false for name) rt-ok clear
+mark is-tagged not                       (is-tagged: false for mark) rt-ok clear
+[1 2 3] is-tagged not                    (is-tagged: false for array) rt-ok clear
+{ 1 add } is-tagged not                  (is-tagged: false for packed) rt-ok clear
+<< /a 1 >> is-tagged not                 (is-tagged: false for dict) rt-ok clear
+{{ /a /b }} is-tagged not                (is-tagged: false for set) rt-ok clear
+5 //add curry is-tagged not              (is-tagged: false for curry) rt-ok clear
+save dup is-tagged not exch restore      (is-tagged: false for save) rt-ok clear
+
+% tagged is always literal
+42 /some tag executable? not
+    (tag: tagged is literal) rt-ok clear
+
+% make-literal on tagged is a no-op (already literal)
+42 /some tag dup make-literal eq
+    (tag: make-literal on tagged is no-op) rt-ok clear
+
+% ====================================================================
+% SECTION 2: tag with all payload types
+% ====================================================================
+
+42 /t tag tag-value 42 eq                (tag: integer payload) rt-ok clear
+(hello) /t tag tag-value (hello) eq      (tag: string payload) rt-ok clear
+3.14 /t tag tag-value 3.14 eq            (tag: real payload) rt-ok clear
+true /t tag tag-value true eq            (tag: boolean true payload) rt-ok clear
+false /t tag tag-value false eq          (tag: boolean false payload) rt-ok clear
+null /t tag tag-value null eq            (tag: null payload) rt-ok clear
+65b /t tag tag-value 65b eq              (tag: byte payload) rt-ok clear
+42u /t tag tag-value 42u eq              (tag: uinteger payload) rt-ok clear
+42l /t tag tag-value 42l eq              (tag: long payload) rt-ok clear
+42ul /t tag tag-value 42ul eq            (tag: ulong payload) rt-ok clear
+3.14d /t tag tag-value 3.14d eq          (tag: double payload) rt-ok clear
+0a /t tag tag-value 0a eq               (tag: address payload) rt-ok clear
+[1 2 3] /t tag tag-value [1 2 3] deep-eq (tag: array payload) rt-ok clear
+/foo /t tag tag-value /foo eq            (tag: name payload) rt-ok clear
+mark /t tag tag-value mark eq            (tag: mark payload) rt-ok clear
+<< /a 1 >> /t tag tag-value /a get 1 eq (tag: dict payload) rt-ok clear
+{{ /x /y }} /t tag tag-value /x set-member? (tag: set payload) rt-ok clear
+
+% curry as payload
+5 //add curry /t tag tag-value is-curry
+    (tag: curry payload) rt-ok clear
+
+% tagged as payload (nesting)
+42 /inner tag /t tag tag-value is-tagged
+    (tag: tagged payload) rt-ok clear
+
+% ====================================================================
+% SECTION 3: untag decomposition
+% ====================================================================
+
+42 /some tag untag /some eq
+    (untag: name is /some) rt-ok clear
+
+42 /some tag untag pop 42 eq
+    (untag: value is 42) rt-ok clear
+
+(hello) /msg tag untag /msg eq exch (hello) eq and
+    (untag: string payload round-trip) rt-ok clear
+
+% untag with ExtValue payload
+42l /ev tag untag /ev eq exch 42l eq and
+    (untag: long payload round-trip) rt-ok clear
+
+% tag -> untag -> re-tag -> deep-eq round-trip
+42 /some tag dup untag tag exch deep-eq
+    (untag: tag-untag-retag deep-eq) rt-ok clear
+
+% ====================================================================
+% SECTION 4: tag-name extraction
+% ====================================================================
+
+42 /some tag tag-name /some eq
+    (tag-name: extracts /some) rt-ok clear
+
+(hello) /greeting tag tag-name /greeting eq
+    (tag-name: extracts /greeting) rt-ok clear
+
+% tag-name result is a literal name
+42 /foo tag tag-name is-name
+    (tag-name: result is name) rt-ok clear
+
+42 /foo tag tag-name executable? not
+    (tag-name: result is literal) rt-ok clear
+
+% ====================================================================
+% SECTION 5: tag-value extraction
+% ====================================================================
+
+42 /some tag tag-value 42 eq
+    (tag-value: extracts 42) rt-ok clear
+
+(hello) /greeting tag tag-value (hello) eq
+    (tag-value: extracts string) rt-ok clear
+
+[1 2 3] /arr tag tag-value [1 2 3] deep-eq
+    (tag-value: extracts array deep-eq) rt-ok clear
+
+% ExtValue payloads
+42l /ev tag tag-value 42l eq
+    (tag-value: long) rt-ok clear
+
+3.14d /ev tag tag-value 3.14d eq
+    (tag-value: double) rt-ok clear
+
+% ====================================================================
+% SECTION 6: tag? predicate
+% ====================================================================
+
+42 /some tag /some tag?
+    (tag?: match returns true) rt-ok clear
+
+42 /some tag /none tag? not
+    (tag?: mismatch returns false) rt-ok clear
+
+42 /some tag /other tag? not
+    (tag?: different name returns false) rt-ok clear
+
+% tag? with name created via to-name (names match by content)
+42 /some tag (some) to-name make-literal tag?
+    (tag?: to-name match) rt-ok clear
+
+% ====================================================================
+% SECTION 7: tag-match dispatch
+% ====================================================================
+
+% Two-branch
+42 /ok tag << /ok { 10 add } /err { pop -1 } >> tag-match 52 eq
+    (tag-match: ok branch) rt-ok clear
+
+(oops) /err tag << /ok { pop 0 } /err { length } >> tag-match 4 eq
+    (tag-match: err branch) rt-ok clear
+
+% Three-branch
+(data) /warn tag
+<< /ok { pop (ok) } /err { pop (err) } /warn { pop (warn) } >> tag-match
+(warn) eq
+    (tag-match: three branches) rt-ok clear
+
+% /default handler receives full tagged value
+42 /unknown tag << /ok { pop 0 } /default { tag-name } >> tag-match /unknown eq
+    (tag-match: default handler) rt-ok clear
+
+42 /unknown tag << /default { tag-value } >> tag-match 42 eq
+    (tag-match: default passes full tagged) rt-ok clear
+
+% tag-match with read-only dict
+42 /ok tag << /ok { 10 add } >>#r tag-match 52 eq
+    (tag-match: read-only dict) rt-ok clear
+
+% tag-match handler pushes multiple values
+42 /ok tag << /ok { dup 2 mul } >> tag-match 84 eq exch 42 eq and
+    (tag-match: handler pushes multiple values) rt-ok clear
+
+% Chained tag-match (result of first is input to second)
+42 /raw tag
+<< /raw { 1 add /cooked tag } >> tag-match
+<< /cooked { 2 mul } >> tag-match
+86 eq
+    (tag-match: chained dispatch) rt-ok clear
+
+% Nested tagged dispatch: outer tag controls, inner tag carried
+42 /inner tag /outer tag
+<< /outer { tag-name } >> tag-match
+/inner eq
+    (tag-match: nested tagged dispatch) rt-ok clear
+
+% ====================================================================
+% SECTION 8: deep-eq
+% ====================================================================
+
+42 /some tag 42 /some tag deep-eq
+    (deep-eq: same tag+value) rt-ok clear
+
+42 /some tag 42 /none tag deep-eq not
+    (deep-eq: different tag) rt-ok clear
+
+42 /some tag 99 /some tag deep-eq not
+    (deep-eq: different value) rt-ok clear
+
+[1 2] /arr tag [1 2] /arr tag deep-eq
+    (deep-eq: array payloads) rt-ok clear
+
+[1 2] /arr tag [1 3] /arr tag deep-eq not
+    (deep-eq: different array payloads) rt-ok clear
+
+% deep-ne
+42 /some tag 42 /some tag deep-ne not
+    (deep-ne: same tag+value is not deep-ne) rt-ok clear
+
+42 /some tag 42 /none tag deep-ne
+    (deep-ne: different tag is deep-ne) rt-ok clear
+
+% deep-eq with ExtValue payloads
+42l /ev tag 42l /ev tag deep-eq
+    (deep-eq: long payloads match) rt-ok clear
+
+42l /ev tag 99l /ev tag deep-eq not
+    (deep-eq: different long payloads) rt-ok clear
+
+3.14d /ev tag 3.14d /ev tag deep-eq
+    (deep-eq: double payloads match) rt-ok clear
+
+% deep-eq nested tagged
+42 /inner tag /outer tag 42 /inner tag /outer tag deep-eq
+    (deep-eq: nested tagged same) rt-ok clear
+
+42 /inner tag /outer tag 42 /inner tag /different tag deep-eq not
+    (deep-eq: nested tagged different outer) rt-ok clear
+
+42 /inner tag /outer tag 99 /inner tag /outer tag deep-eq not
+    (deep-eq: nested tagged different leaf value) rt-ok clear
+
+% ====================================================================
+% SECTION 9: eq (identity)
+% ====================================================================
+
+42 /some tag dup eq
+    (eq: same tagged identity) rt-ok clear
+
+42 /some tag 42 /some tag eq not
+    (eq: distinct tagged not eq) rt-ok clear
+
+% ====================================================================
+% SECTION 10: Tagged inside containers
+% ====================================================================
+
+42 /ok tag /t exch def
+[t] 0 get tag-name /ok eq
+    (container: tagged in array) rt-ok clear
+
+<< /result 42 /ok tag >> /result get tag-value 42 eq
+    (container: tagged as dict value) rt-ok clear
+
+% Tagged as dict key (hashable)
+42 /some tag /k exch def
+<< k (found) >> k get (found) eq
+    (container: tagged as dict key) rt-ok clear
+
+% Multiple tagged in array
+[1 /a tag 2 /b tag 3 /c tag]
+dup 0 get tag-name /a eq exch
+dup 1 get tag-name /b eq 3 1 roll
+2 get tag-name /c eq and and
+    (container: multiple tagged in array) rt-ok clear
+
+% Tagged in set
+42 /x tag /tv exch def
+{{ tv }} tv set-member?
+    (container: tagged in set) rt-ok clear
+
+% for-all with tagged elements in array
+0 [10 /a tag 20 /b tag 30 /c tag] { tag-value add } for-all 60 eq
+    (container: for-all sums tagged values) rt-ok clear
+
+% ====================================================================
+% SECTION 11: Nested tagged
+% ====================================================================
+
+42 /inner tag /outer tag tag-value tag-name /inner eq
+    (nested: inner tag-name) rt-ok clear
+
+42 /inner tag /outer tag tag-value tag-value 42 eq
+    (nested: inner tag-value) rt-ok clear
+
+42 /inner tag /outer tag tag-name /outer eq
+    (nested: outer tag-name) rt-ok clear
+
+% Three levels deep
+42 /c tag /b tag /a tag
+dup tag-name /a eq exch
+tag-value dup tag-name /b eq exch
+tag-value tag-value 42 eq and and
+    (nested: three levels deep) rt-ok clear
+
+% ====================================================================
+% SECTION 12: type-case dispatch
+% ====================================================================
+
+42 /some tag
+<< /tagged-type { (found-tagged) } >> type-case
+(found-tagged) eq
+    (type-case: dispatches on tagged-type) rt-ok clear
+
+% ====================================================================
+% SECTION 13: Attribute enforcement
+% ====================================================================
+
+% make-executable on Tagged raises type-check
+42 /some tag
+<< /type-check { clear true } >> { make-executable } try-catch
+    (enforce: make-executable on tagged raises type-check) rt-ok clear
+
+% make-literal on Curry raises type-check
+5 //add curry
+<< /type-check { clear true } >> { make-literal } try-catch
+    (enforce: make-literal on curry raises type-check) rt-ok clear
+
+% make-executable on Curry is a no-op (already executable)
+5 //add curry dup make-executable eq
+    (enforce: make-executable on curry is no-op) rt-ok clear
+
+% ====================================================================
+% SECTION 14: Error cases (sad path)
+% ====================================================================
+
+% tag with non-Name tag: integer
+<< /type-check { clear true } >> { 42 42 tag } try-catch
+    (error: tag with integer as tag-name) rt-ok clear
+
+% tag with non-Name tag: string
+<< /type-check { clear true } >> { 42 (not-a-name) tag } try-catch
+    (error: tag with string as tag-name) rt-ok clear
+
+% tag with non-Name tag: boolean
+<< /type-check { clear true } >> { 42 true tag } try-catch
+    (error: tag with bool as tag-name) rt-ok clear
+
+% untag on non-tagged types
+<< /type-check { clear true } >> { 42 untag } try-catch
+    (error: untag on integer) rt-ok clear
+
+<< /type-check { clear true } >> { (hello) untag } try-catch
+    (error: untag on string) rt-ok clear
+
+<< /type-check { clear true } >> { null untag } try-catch
+    (error: untag on null) rt-ok clear
+
+% tag-name on non-tagged
+<< /type-check { clear true } >> { 42 tag-name } try-catch
+    (error: tag-name on integer) rt-ok clear
+
+<< /type-check { clear true } >> { (hello) tag-name } try-catch
+    (error: tag-name on string) rt-ok clear
+
+% tag-value on non-tagged
+<< /type-check { clear true } >> { 42 tag-value } try-catch
+    (error: tag-value on integer) rt-ok clear
+
+<< /type-check { clear true } >> { [1 2] tag-value } try-catch
+    (error: tag-value on array) rt-ok clear
+
+% tag? with wrong first operand (not tagged)
+<< /type-check { clear true } >> { 42 /foo tag? } try-catch
+    (error: tag? first operand not tagged) rt-ok clear
+
+% tag? with wrong second operand (not name)
+42 /some tag
+<< /type-check { clear true } >> { 42 tag? } try-catch
+    (error: tag? second operand not name) rt-ok clear
+
+% tag-match with non-dict second operand
+42 /ok tag
+<< /type-check { clear true } >> { 42 tag-match } try-catch
+    (error: tag-match second operand not dict) rt-ok clear
+
+% tag-match with non-tagged first operand
+<< /type-check { clear true } >> { 42 << /ok { } >> tag-match } try-catch
+    (error: tag-match first operand not tagged) rt-ok clear
+
+% tag-match with unmatched tag and no /default
+<< /undefined { clear true } >> { 42 /miss tag << /ok { pop 0 } >> tag-match } try-catch
+    (error: tag-match no handler no default) rt-ok clear
+
+% tag-match error inside handler propagates
+42 /ok tag
+<< /div-by-zero { clear true } >> { << /ok { 1 0 div } >> tag-match } try-catch
+    (error: tag-match handler error propagates) rt-ok clear
+
+% ====================================================================
+% SECTION 15: Packed array round-trip
+% ====================================================================
+
+% Tagged literal in packed array round-trips correctly
+42 /ok tag 1 packed 0 get is-tagged
+    (packed: tagged literal survives packing) rt-ok clear
+
+42 /ok tag 1 packed 0 get tag-name /ok eq
+    (packed: tagged in packed has correct tag) rt-ok clear
+
+42 /ok tag 1 packed 0 get tag-value 42 eq
+    (packed: tagged in packed has correct value) rt-ok clear
+
+% Verify X-bit discrimination: curry stays curry in packed
+5 //add curry 1 packed 0 get is-curry
+    (packed: curry literal survives packing) rt-ok clear
+
+5 //add curry 1 packed 0 get is-tagged not
+    (packed: curry in packed is not tagged) rt-ok clear
+
+42 /ok tag 1 packed 0 get is-curry not
+    (packed: tagged in packed is not curry) rt-ok clear
+
+% Packed round-trip with ExtValue payload
+42l /long-val tag 1 packed 0 get tag-value 42l eq
+    (packed: tagged with long payload) rt-ok clear
+
+3.14d /dbl-val tag 1 packed 0 get tag-value 3.14d eq
+    (packed: tagged with double payload) rt-ok clear
+
+100a /addr-val tag 1 packed 0 get tag-value 100a eq
+    (packed: tagged with address payload) rt-ok clear
+
+% Cross-type deep-eq: array-with-tagged vs packed-with-tagged
+42 /ok tag /tv exch def
+[tv] dup 0 get 1 packed deep-eq
+    (packed: array vs packed deep-eq with tagged) rt-ok clear
+
+% Multiple tagged in a single packed array
+42 /a tag (hello) /b tag null /c tag 3 packed
+dup 0 get tag-name /a eq exch
+dup 1 get tag-name /b eq 3 1 roll
+2 get tag-name /c eq and and
+    (packed: multiple tagged in packed) rt-ok clear
+
+% Re-pack: pack, unpack, repack, compare
+42 /ok tag 1 packed dup 0 get 1 packed deep-eq
+    (packed: repack round-trip) rt-ok clear
+
+% ====================================================================
+% SECTION 16: vm-size
+% ====================================================================
+
+42 /some tag vm-size 16 eq
+    (vm-size: tagged is 16 bytes) rt-ok clear
+
+% ====================================================================
+% SECTION 17: ExtValue payloads
+% ====================================================================
+
+42l /long-val tag tag-value 42l eq
+    (extvalue: long payload round-trips) rt-ok clear
+
+3.14d /double-val tag tag-value 3.14d eq
+    (extvalue: double payload round-trips) rt-ok clear
+
+100a /addr-val tag tag-value 100a eq
+    (extvalue: address payload round-trips) rt-ok clear
+
+16#FFFFFFFF#ul /max-ulong tag tag-value 16#FFFFFFFF#ul eq
+    (extvalue: max ulong payload) rt-ok clear
+
+% Multiple tagged values with ExtValue payloads coexist
+42l /a tag /ta exch def
+99l /b tag /tb exch def
+3.14d /c tag /tc exch def
+ta tag-value 42l eq
+    (extvalue: first long preserved) rt-ok
+tb tag-value 99l eq
+    (extvalue: second long preserved) rt-ok
+tc tag-value 3.14d eq
+    (extvalue: double preserved alongside longs) rt-ok clear
+
+% untag preserves ExtValue
+42l /ev tag untag pop 42l eq
+    (extvalue: untag preserves long) rt-ok clear
+
+3.14d /ev tag untag pop 3.14d eq
+    (extvalue: untag preserves double) rt-ok clear
+
+% ====================================================================
+% SECTION 18: Save/restore
+% ====================================================================
+
+% Tagged defined before save survives restore
+/pre-tagged 42 /some tag def
+save /s exch def
+pre-tagged tag-value 42 eq
+    (save: tagged survives save) rt-ok
+s restore
+pre-tagged tag-value 42 eq
+    (save: tagged survives restore) rt-ok clear
+
+% Tagged defined after save is rolled back
+save /s exch def
+42 /some tag /post-tagged exch def
+post-tagged tag-value 42 eq
+    (save: tagged valid before restore) rt-ok
+s restore clear
+
+% Overwrite tagged after save, restore recovers original
+/ov-tagged 42 /original tag def
+save /s exch def
+/ov-tagged 99 /replaced tag def
+ov-tagged tag-name /replaced eq
+    (save: overwritten tagged valid) rt-ok
+s restore
+ov-tagged tag-name /original eq
+    (save: restore recovers original tagged) rt-ok clear
+
+% Nested save/restore
+/outer-sv save def
+    /t-outer 10 /outer tag def
+    /inner-sv save def
+        /t-inner 20 /inner tag def
+    inner-sv restore
+    { /t-inner load } try /undefined eq
+    (save: inner restore rolls back inner tagged) rt-ok clear
+    t-outer tag-value 10 eq
+    (save: outer tagged survives inner restore) rt-ok
+outer-sv restore
+clear
+
+% Tagged with ExtValue payload across save/restore
+/ev-tagged 42l /long tag def
+save /s exch def
+    /ev-tagged 99l /replaced tag def
+s restore
+ev-tagged tag-value 42l eq
+    (save: ExtValue tagged restored) rt-ok clear
+
+% Tagged in array across save/restore
+/arr-tagged [ 42 /ok tag (hello) /msg tag ] def
+save /s exch def
+    arr-tagged 0 99 /changed tag put
+s restore
+arr-tagged 0 get tag-name /ok eq
+    (save: array element tagged restored) rt-ok clear
+
+% ====================================================================
+% SECTION 19: Pattern demonstrations
+% ====================================================================
+
+% Option type: Some/None
+/option-map {
+    % tagged proc -- tagged
+    /proc exch def
+    dup /some tag?
+    { tag-value proc exec /some tag }
+    { } % None stays None
+    if-else
+} def
+
+42 /some tag { 10 add } option-map tag-value 52 eq
+    (pattern: option-map some) rt-ok clear
+
+null /none tag { 10 add } option-map tag-name /none eq
+    (pattern: option-map none) rt-ok clear
+
+% Result type: Ok/Err with tag-match
+/process-result {
+    << /ok { 2 mul }
+       /err { length }
+    >> tag-match
+} def
+
+21 /ok tag process-result 42 eq
+    (pattern: result ok) rt-ok clear
+
+(fail) /err tag process-result 4 eq
+    (pattern: result err) rt-ok clear
+
+% Simple state machine: traffic light
+/next-state {
+    << /red   { pop null /green tag }
+       /green { pop null /yellow tag }
+       /yellow { pop null /red tag }
+    >> tag-match
+} def
+
+null /red tag next-state tag-name /green eq
+    (pattern: state machine red->green) rt-ok clear
+
+null /green tag next-state tag-name /yellow eq
+    (pattern: state machine green->yellow) rt-ok clear
+
+null /yellow tag next-state tag-name /red eq
+    (pattern: state machine yellow->red) rt-ok clear
+
+% State machine cycle: red -> green -> yellow -> red
+null /red tag next-state next-state next-state tag-name /red eq
+    (pattern: state machine full cycle) rt-ok clear
+
+% ====================================================================
+% SECTION 20: Print format
+% ====================================================================
+
+% Default format prints "tagged"
+42 /some tag =string to-string (tagged) eq
+    (print: default format) rt-ok clear
+
+% Alt format prints "TAGGED"
+=string ({:#}) mark 42 /some tag sprint-fmt pop (TAGGED) eq
+    (print: alt format) rt-ok clear
+
+% Object format prints "/tag payload" recursively
+=string ({:O}) mark 42 /some tag sprint-fmt pop (/some 42i) eq
+    (print: object format) rt-ok clear
+
+% ====================================================================
+% SECTION 21: Exec stack hygiene
+% ====================================================================
+
+% tag-match should not leave debris on exec stack
+/pre-depth //:status:exec-depth def
+42 /ok tag << /ok { 10 add } >> tag-match pop
+//:status:exec-depth pre-depth eq
+    (hygiene: exec stack clean after tag-match) rt-ok clear
+
+% ====================================================================
+% SECTION 22: Stress tests
+% ====================================================================
+
+% Create many tagged values in a loop
+0
+100 { 1 add dup /item tag tag-value } repeat
+100 eq
+    (stress: 100 tagged create/extract) rt-ok clear
+
+% Fresh tagged allocation per iteration (VM pressure)
+/stress-sv save def
+/fresh-tag-stress {
+    dup 0 le { pop } {
+        dup /item tag pop   % create and discard tagged
+        1 sub fresh-tag-stress
+    } if-else
+} def
+2000 fresh-tag-stress count 0 eq
+    (stress: 2000 fresh tagged allocations) rt-ok
+stress-sv restore clear
+
+% Fresh tagged with ExtValue payload per iteration
+/stress-sv save def
+/fresh-ev-tag-stress {
+    dup 0 le { pop } {
+        dup 1l { add } curry /ev tag pop pop  % tagged wrapping curry with Long
+        1 sub fresh-ev-tag-stress
+    } if-else
+} def
+1000 fresh-ev-tag-stress count 0 eq
+    (stress: 1000 fresh ExtValue tagged allocations) rt-ok
+stress-sv restore clear
+
+% tag-match dispatch in tight loop
+/stress-sv save def
+/dispatch-stress {
+    dup 0 le { pop } {
+        dup 2 mod 0 eq
+        { dup /even tag << /even { pop } /odd { pop } >> tag-match }
+        { dup /odd tag << /even { pop } /odd { pop } >> tag-match }
+        if-else
+        1 sub dispatch-stress
+    } if-else
+} def
+1000 dispatch-stress count 0 eq
+    (stress: 1000 tag-match dispatches) rt-ok
+stress-sv restore clear
+
+% Multiple tagged in array, iterate all
+/stress-sv save def
+100 array /stress-arr exch def
+0 1 99 { stress-arr exch dup /item tag put } for
+0 stress-arr { tag-value add } for-all
+4950 eq
+    (stress: sum 100 tagged in array) rt-ok
+stress-sv restore clear
+
+% ====================================================================
+% SECTION 23: Fuzz / boundary tests
+% ====================================================================
+
+% Same tag name, different values — not deep-eq
+0 /x tag 1 /x tag deep-eq not
+    (fuzz: same tag different int values) rt-ok clear
+
+% Same value, different tags — not deep-eq
+42 /a tag 42 /b tag deep-eq not
+    (fuzz: same value different tags) rt-ok clear
+
+% tag-match with single branch, match
+42 /only tag << /only { 1 add } >> tag-match 43 eq
+    (fuzz: single-branch match) rt-ok clear
+
+% tag-match with single branch, no match, with default
+42 /miss tag << /only { 1 add } /default { tag-value } >> tag-match 42 eq
+    (fuzz: single-branch miss with default) rt-ok clear
+
+% Empty payload types that might confuse equality
+() /t tag tag-value () eq
+    (fuzz: empty string payload) rt-ok clear
+
+[] /t tag tag-value [] deep-eq
+    (fuzz: empty array payload) rt-ok clear
+
+0 /t tag tag-value 0 eq
+    (fuzz: zero integer payload) rt-ok clear
+
+0b /t tag tag-value 0b eq
+    (fuzz: zero byte payload) rt-ok clear
+
+0.0 /t tag tag-value 0.0 eq
+    (fuzz: zero real payload) rt-ok clear
+
+% Boundary: very long tag name
+(abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz) to-name /long-name exch def
+42 long-name tag tag-name long-name eq
+    (fuzz: long tag name) rt-ok clear
+
+% Boundary: single-char tag name
+42 /x tag tag-name /x eq
+    (fuzz: single-char tag name) rt-ok clear
+
+% tag? with the exact same name object (not just equal name)
+/my-tag-name /foo def
+42 my-tag-name tag my-tag-name tag?
+    (fuzz: tag? with same name object) rt-ok clear
+
+% tag? with a different name object that has the same spelling
+42 /foo tag /foo tag?
+    (fuzz: tag? with equal name) rt-ok clear
+
+% Tagged value survives dup
+42 /some tag dup tag-name /some eq exch tag-name /some eq and
+    (fuzz: dup preserves tagged) rt-ok clear
+
+% Tagged value survives exch
+42 /a tag 99 /b tag exch
+tag-name /a eq exch tag-name /b eq and
+    (fuzz: exch preserves tagged) rt-ok clear
+
+% Tagged value survives roll
+1 /x tag 2 /y tag 3 /z tag
+3 -1 roll  % brings /x to top
+tag-name /x eq exch tag-name /z eq and exch tag-name /y eq and
+    (fuzz: roll preserves tagged) rt-ok clear
+
+% Tagged survives index
+42 /a tag 99 /b tag
+1 index tag-name /a eq
+    (fuzz: index accesses tagged) rt-ok clear
+
+% Tagged survives nip (remove second)
+42 /a tag 99 /b tag nip tag-name /b eq
+    (fuzz: nip preserves tagged) rt-ok clear
+
+% Tagged survives tuck
+42 /a tag 99 /b tag tuck
+tag-name /b eq exch tag-name /a eq and exch tag-name /b eq and
+    (fuzz: tuck preserves tagged) rt-ok clear
+
+% ====================================================================
+% SECTION 24: tag-update — functional update of payload
+% ====================================================================
+
+% Happy path: basic integer update
+42 /ok tag { 1 add } tag-update
+dup tag-name /ok eq
+    (tag-update: tag name preserved) rt-ok
+tag-value 43 eq
+    (tag-update: value updated) rt-ok clear
+
+% String payload
+(hello) /msg tag { uppercase } tag-update
+dup tag-name /msg eq
+    (tag-update: string tag preserved) rt-ok
+tag-value (HELLO) eq
+    (tag-update: string value updated) rt-ok clear
+
+% Identity proc (no change)
+42 /ok tag { } tag-update
+dup tag-name /ok eq
+    (tag-update: identity tag preserved) rt-ok
+tag-value 42 eq
+    (tag-update: identity value unchanged) rt-ok clear
+
+% ExtValue payload (long)
+100l /big tag { 1l add } tag-update
+dup tag-name /big eq
+    (tag-update: long tag preserved) rt-ok
+tag-value 101l eq
+    (tag-update: long value updated) rt-ok clear
+
+% Double payload
+3.14d /pi tag { 2.0d mul } tag-update
+tag-value 6.28d eq
+    (tag-update: double value updated) rt-ok clear
+
+% Nested tagged: update payload that is itself tagged
+42 /inner tag /outer tag { tag-value 1 add /inner tag } tag-update
+dup tag-name /outer eq
+    (tag-update: nested outer tag preserved) rt-ok
+tag-value dup tag-name /inner eq
+    (tag-update: nested inner tag preserved) rt-ok
+tag-value 43 eq
+    (tag-update: nested inner value updated) rt-ok clear
+
+% Result is a new tagged (not same object)
+42 /ok tag dup { 1 add } tag-update
+tag-value 43 eq exch tag-value 42 eq and
+    (tag-update: creates new tagged) rt-ok clear
+
+% Proc that changes type
+42 /x tag { pop (hello) } tag-update
+dup tag-name /x eq
+    (tag-update: type-changing tag preserved) rt-ok
+tag-value (hello) eq
+    (tag-update: type-changing value correct) rt-ok clear
+
+% Proc that returns null
+42 /x tag { pop null } tag-update
+tag-value null eq
+    (tag-update: null payload) rt-ok clear
+
+% Sad path: non-tagged first arg
+{ 42 { } tag-update } try /type-check eq
+    (tag-update: type-check on non-tagged) rt-ok clear
+
+% Sad path: non-proc second arg
+{ 42 /ok tag 5 tag-update } try /type-check eq
+    (tag-update: type-check on non-proc) rt-ok clear
+
+% Proc that errors propagates through
+{ 42 /ok tag { 1 0 div } tag-update } try /div-by-zero eq
+    (tag-update: error propagation) rt-ok clear
+
+% Stress: 1000 tag-updates in a loop
+0 /counter tag
+1000 { { 1 add } tag-update } repeat
+dup tag-name /counter eq
+    (tag-update: stress tag preserved) rt-ok
+tag-value 1000 eq
+    (tag-update: stress value correct) rt-ok clear
+
+% tag-update inside map over array of tagged values
+[ 1 /x tag 2 /x tag 3 /x tag ] { { 1 add } tag-update } map
+dup 0 get tag-value 2 eq
+exch dup 1 get tag-value 3 eq
+exch 2 get tag-value 4 eq and and
+    (tag-update: map over array of tagged) rt-ok clear
+
+% Sad path: stack underflow (no args)
+{ tag-update } try /opstack-underflow eq
+    (tag-update: underflow no args) rt-ok clear
+
+% Sad path: one arg only
+{ { 1 add } tag-update } try /opstack-underflow eq
+    (tag-update: underflow one arg) rt-ok clear
+
+% Sad path: stack underflow inside proc
+{ 42 /ok tag { pop pop } tag-update } try /opstack-underflow eq
+    (tag-update: underflow inside proc) rt-ok clear
+
+% Fuzz: byte payload
+65b /ch tag { 1b add } tag-update
+dup tag-name /ch eq
+    (tag-update: byte tag preserved) rt-ok
+tag-value 66b eq
+    (tag-update: byte value updated) rt-ok clear
+
+% Fuzz: uinteger payload
+42u /ui tag { 1u add } tag-update
+tag-value 43u eq
+    (tag-update: uinteger value updated) rt-ok clear
+
+% Fuzz: ulong payload
+100ul /big tag { 1ul add } tag-update
+tag-value 101ul eq
+    (tag-update: ulong value updated) rt-ok clear
+
+% Fuzz: address payload
+10a /addr tag { pop 20a } tag-update
+tag-value 20a eq
+    (tag-update: address value updated) rt-ok clear
+
+% Fuzz: boolean payload
+true /flag tag { not } tag-update
+tag-value false eq
+    (tag-update: boolean value updated) rt-ok clear
+
+% Fuzz: result survives dup
+42 /ok tag { 1 add } tag-update dup
+tag-value 43 eq exch tag-value 43 eq and
+    (tag-update: result survives dup) rt-ok clear
+
+% Fuzz: result survives exch
+42 /a tag { 1 add } tag-update 99 /b tag { 1 sub } tag-update
+exch tag-value 43 eq exch tag-value 98 eq and
+    (tag-update: result survives exch) rt-ok clear
+
+% Boundary: proc uses stack ops internally
+10 /x tag { dup mul } tag-update
+tag-value 100 eq
+    (tag-update: proc with stack ops) rt-ok clear
+
+% Boundary: chained tag-updates
+1 /n tag { 10 mul } tag-update { 1 add } tag-update { 2 mul } tag-update
+dup tag-name /n eq
+    (tag-update: chained three updates) rt-ok
+tag-value 22 eq
+    (tag-update: chained result correct) rt-ok clear
+
+% Boundary: tag-update with named proc
+/double-it { dup add } def
+42 /ok tag { double-it } tag-update
+tag-value 84 eq
+    (tag-update: named proc) rt-ok clear
+
+% Sad path: curry is not a proc
+{ 42 /ok tag 10 //add curry tag-update } try /type-check eq
+    (tag-update: type-check on curry) rt-ok clear
+
+% Boundary: tag-update inside filter
+[ 1 /x tag 2 /x tag 3 /x tag 4 /x tag ]
+{ { 2 mod 0 eq } tag-update } map
+{ tag-value } filter
+length 2 eq
+    (tag-update: inside filter pipeline) rt-ok clear
+
+% Stress: alternating ExtValue and non-ExtValue
+0 /alt tag
+500 {
+    { 1 add } tag-update                           % integer
+    { /long-type cast 1000000000l add } tag-update % -> long ExtValue
+    { /integer-type cast 1000000000 sub } tag-update  % -> integer back
+} repeat
+tag-value 500 eq
+    (tag-update: stress alternating ExtValue) rt-ok clear
+
+% Stress: tag-update inside reduce
+[ 1 /x tag 2 /x tag 3 /x tag 4 /x tag 5 /x tag ]
+0 { tag-value add } reduce
+15 eq
+    (tag-update: reduce over tagged array) rt-ok clear
+
+% ====================================================================
+% SECTION 25: tag-value-or — unwrap with default
+% ====================================================================
+
+% Happy path: match returns payload
+42 /some tag /some 0 tag-value-or 42 eq
+    (tag-value-or: match returns payload) rt-ok clear
+
+% No match returns default
+null /none tag /some 0 tag-value-or 0 eq
+    (tag-value-or: no match returns default) rt-ok clear
+
+% ExtValue payload match
+100l /some tag /some 0l tag-value-or 100l eq
+    (tag-value-or: long payload match) rt-ok clear
+
+% ExtValue default used
+null /none tag /some 100l tag-value-or 100l eq
+    (tag-value-or: long default used) rt-ok clear
+
+% String payload
+(hi) /some tag /some () tag-value-or (hi) eq
+    (tag-value-or: string payload match) rt-ok clear
+
+% String default
+null /none tag /some (default) tag-value-or (default) eq
+    (tag-value-or: string default used) rt-ok clear
+
+% Different tag names
+42 /a tag /b 0 tag-value-or 0 eq
+    (tag-value-or: different tags returns default) rt-ok clear
+
+% Match with null payload
+null /some tag /some 99 tag-value-or null eq
+    (tag-value-or: null payload returned on match) rt-ok clear
+
+% Boolean payload
+true /ok tag /ok false tag-value-or true eq
+    (tag-value-or: boolean payload match) rt-ok clear
+
+% Default same type as payload
+42 /a tag /a 99 tag-value-or 42 eq
+    (tag-value-or: same type match returns payload) rt-ok clear
+
+99 /a tag /b 42 tag-value-or 42 eq
+    (tag-value-or: same type no-match returns default) rt-ok clear
+
+% Double payload
+3.14d /pi tag /pi 0.0d tag-value-or 3.14d eq
+    (tag-value-or: double payload match) rt-ok clear
+
+% Sad path: non-tagged
+{ 42 /some 0 tag-value-or } try /type-check eq
+    (tag-value-or: type-check on non-tagged) rt-ok clear
+
+% Sad path: non-name
+{ 42 /ok tag 5 0 tag-value-or } try /type-check eq
+    (tag-value-or: type-check on non-name) rt-ok clear
+
+% Sad path: wrong arg count
+{ tag-value-or } try /opstack-underflow eq
+    (tag-value-or: underflow no args) rt-ok clear
+
+{ 0 tag-value-or } try /opstack-underflow eq
+    (tag-value-or: underflow one arg) rt-ok clear
+
+{ /some 0 tag-value-or } try /opstack-underflow eq
+    (tag-value-or: underflow two args) rt-ok clear
+
+% Fuzz: byte payload match
+65b /ch tag /ch 0b tag-value-or 65b eq
+    (tag-value-or: byte payload match) rt-ok clear
+
+% Fuzz: uinteger payload match
+42u /ui tag /ui 0u tag-value-or 42u eq
+    (tag-value-or: uinteger payload match) rt-ok clear
+
+% Fuzz: ulong payload match
+100ul /big tag /big 0ul tag-value-or 100ul eq
+    (tag-value-or: ulong payload match) rt-ok clear
+
+% Fuzz: address payload match
+10a /addr tag /addr 0a tag-value-or 10a eq
+    (tag-value-or: address payload match) rt-ok clear
+
+% Fuzz: byte default used on mismatch
+42 /a tag /b 99b tag-value-or 99b eq
+    (tag-value-or: byte default on mismatch) rt-ok clear
+
+% Boundary: ExtValue payload + ExtValue default (match discards default)
+100l /some tag /some 999l tag-value-or 100l eq
+    (tag-value-or: ExtValue payload discards ExtValue default) rt-ok clear
+
+% Boundary: ExtValue payload + ExtValue default (mismatch discards payload)
+100l /a tag /b 999l tag-value-or 999l eq
+    (tag-value-or: ExtValue default discards ExtValue payload) rt-ok clear
+
+% Fuzz: result survives dup
+42 /ok tag /ok 0 tag-value-or dup 42 eq exch 42 eq and
+    (tag-value-or: result survives dup) rt-ok clear
+
+% Fuzz: result survives exch
+42 /ok tag /ok 0 tag-value-or
+99 /ok tag /ok 0 tag-value-or
+exch 42 eq exch 99 eq and
+    (tag-value-or: result survives exch) rt-ok clear
+
+% Fuzz: tagged result (payload is tagged)
+42 /inner tag /outer tag /outer 0 tag-value-or
+dup is-tagged
+    (tag-value-or: tagged payload is-tagged) rt-ok
+tag-value 42 eq
+    (tag-value-or: tagged payload inner value) rt-ok clear
+
+% Integration: tag-value-or inside reduce (sum of option values with default 0)
+[ 1 /some tag null /none tag 3 /some tag null /none tag 5 /some tag ]
+0 { /some 0 tag-value-or add } reduce
+9 eq
+    (tag-value-or: reduce sum with defaults) rt-ok clear
+
+% Integration: tag-value-or inside map
+[ 10 /some tag null /none tag 30 /some tag ]
+{ /some 0 tag-value-or } map
+dup 0 get 10 eq exch dup 1 get 0 eq exch 2 get 30 eq and and
+    (tag-value-or: map unwrap with defaults) rt-ok clear
+
+% Chained: use with tag-match alternative
+42 /some tag /some 0 tag-value-or 1 add 43 eq
+    (tag-value-or: chained with arithmetic) rt-ok clear
+
+% Stress: 1000 iterations
+42 /some tag
+1000 { /some 0 tag-value-or /some tag } repeat
+/some 0 tag-value-or 42 eq
+    (tag-value-or: stress 1000 match) rt-ok clear
+
+null /none tag
+1000 { /some 0 tag-value-or /none tag } repeat
+/some 99 tag-value-or 99 eq
+    (tag-value-or: stress 1000 no-match) rt-ok clear
+
+% ====================================================================
+% SECTION 26: try-result — exception to Result bridge
+% ====================================================================
+
+% Happy path: success wraps in /ok
+{ 42 } try-result
+dup is-tagged
+    (try-result: result is tagged) rt-ok
+dup tag-name /ok eq
+    (try-result: success tag is /ok) rt-ok
+tag-value 42 eq
+    (try-result: success value is 42) rt-ok clear
+
+% Success with computation
+{ 6 7 mul } try-result
+dup tag-name /ok eq
+    (try-result: computation tag is /ok) rt-ok
+tag-value 42 eq
+    (try-result: computation value is 42) rt-ok clear
+
+% Success with string
+{ (hello) uppercase } try-result
+dup tag-name /ok eq
+    (try-result: string tag is /ok) rt-ok
+tag-value (HELLO) eq
+    (try-result: string value is HELLO) rt-ok clear
+
+% Success with long value (ExtValue)
+{ 100l 1l add } try-result
+tag-value 101l eq
+    (try-result: long value correct) rt-ok clear
+
+% Error path: division by zero
+{ 1 0 div } try-result
+dup is-tagged
+    (try-result: error result is tagged) rt-ok
+dup tag-name /err eq
+    (try-result: error tag is /err) rt-ok
+tag-value /div-by-zero eq
+    (try-result: error value is /div-by-zero) rt-ok clear
+
+% Error path: type check
+{ 1 (a) add } try-result
+dup tag-name /err eq
+    (try-result: type-check tag is /err) rt-ok
+tag-value /type-check eq
+    (try-result: type-check error name) rt-ok clear
+
+% Error path: stack underflow (pop from empty proc context)
+{ clear pop } try-result
+tag-name /err eq
+    (try-result: stack underflow gives /err) rt-ok clear
+
+% Stack is clean after error
+42
+{ 1 0 div } try-result
+tag-name /err eq
+    (try-result: error stack clean top) rt-ok
+42 eq
+    (try-result: error stack clean below) rt-ok clear
+
+% Proc pushes multiple values then errors — verify stack depth correct
+42
+{ 1 2 3 4 5 0 div } try-result
+tag-name /err eq
+    (try-result: multi-push error tag) rt-ok
+42 eq
+    (try-result: multi-push error stack restored) rt-ok clear
+
+% Integration: try-result + tag-match
+{ 42 } try-result
+<< /ok { 1 add } /err { pop -1 } >> tag-match
+43 eq
+    (try-result: success + tag-match dispatch) rt-ok clear
+
+{ 1 0 div } try-result
+<< /ok { 1 add } /err { pop -1 } >> tag-match
+-1 eq
+    (try-result: error + tag-match dispatch) rt-ok clear
+
+% Integration: try-result + tag-value-or
+{ 42 } try-result /ok 0 tag-value-or 42 eq
+    (try-result: success + tag-value-or match) rt-ok clear
+
+{ 1 0 div } try-result /ok 0 tag-value-or 0 eq
+    (try-result: error + tag-value-or no-match) rt-ok clear
+
+% Nested try-result: inner error becomes outer success
+{ { 1 0 div } try-result } try-result
+dup tag-name /ok eq
+    (try-result: nested outer is /ok) rt-ok
+tag-value dup tag-name /err eq
+    (try-result: nested inner is /err) rt-ok
+tag-value /div-by-zero eq
+    (try-result: nested inner error name) rt-ok clear
+
+% Nested try-result: inner success
+{ { 42 } try-result } try-result
+tag-value tag-value 42 eq
+    (try-result: nested inner success value) rt-ok clear
+
+% try-result + tag-update
+{ 42 } try-result { 1 add } tag-update
+dup tag-name /ok eq
+    (try-result: tag-update on success) rt-ok
+tag-value 43 eq
+    (try-result: tag-update value) rt-ok clear
+
+% try-result inside map
+[ 1 2 3 ] { { 10 mul } try-result } map
+dup 0 get tag-value 10 eq
+exch dup 1 get tag-value 20 eq
+exch 2 get tag-value 30 eq and and
+    (try-result: map over success procs) rt-ok clear
+
+% Sad path: non-proc arg
+{ 42 try-result } try /type-check eq
+    (try-result: type-check on non-proc) rt-ok clear
+
+% Sad path: stack underflow (no args)
+{ try-result } try /opstack-underflow eq
+    (try-result: underflow no args) rt-ok clear
+
+% Error path: undefined name
+{ undefined-name-xyz } try-result
+dup tag-name /err eq
+    (try-result: undefined error tag) rt-ok
+tag-value /undefined eq
+    (try-result: undefined error value) rt-ok clear
+
+% Error path: range-check
+{ [1 2 3] 10 get } try-result
+tag-name /err eq
+    (try-result: range-check error) rt-ok clear
+
+% Fuzz: success with byte
+{ 65b } try-result tag-value 65b eq
+    (try-result: byte success) rt-ok clear
+
+% Fuzz: success with uinteger
+{ 42u } try-result tag-value 42u eq
+    (try-result: uinteger success) rt-ok clear
+
+% Fuzz: success with ulong (ExtValue)
+{ 100ul } try-result tag-value 100ul eq
+    (try-result: ulong success) rt-ok clear
+
+% Fuzz: success with address (ExtValue)
+{ 10a } try-result tag-value 10a eq
+    (try-result: address success) rt-ok clear
+
+% Fuzz: success with double (ExtValue)
+{ 3.14d } try-result tag-value 3.14d eq
+    (try-result: double success) rt-ok clear
+
+% Fuzz: success with real
+{ 3.14 } try-result tag-value 3.14 eq
+    (try-result: real success) rt-ok clear
+
+% Fuzz: success with array
+{ [1 2 3] } try-result tag-value [1 2 3] deep-eq
+    (try-result: array success) rt-ok clear
+
+% Fuzz: success with tagged value as result
+{ 42 /inner tag } try-result
+dup tag-name /ok eq
+    (try-result: tagged payload outer is /ok) rt-ok
+tag-value dup tag-name /inner eq
+    (try-result: tagged payload inner tag) rt-ok
+tag-value 42 eq
+    (try-result: tagged payload inner value) rt-ok clear
+
+% Fuzz: result survives dup
+{ 42 } try-result dup
+tag-value 42 eq exch tag-value 42 eq and
+    (try-result: result survives dup) rt-ok clear
+
+% Fuzz: result survives exch
+{ 42 } try-result { 99 } try-result exch
+tag-value 42 eq exch tag-value 99 eq and
+    (try-result: result survives exch) rt-ok clear
+
+% Boundary: proc pushes ExtValues then succeeds — only top kept, rest freed (ASan)
+{ 100l 200l 300l pop pop 42 } try-result
+tag-value 42 eq
+    (try-result: ExtValue success no leak) rt-ok clear
+
+% Boundary: proc pushes ExtValues then errors — all freed (ASan)
+42
+{ 100l 200l 300l 400l 500l pop pop pop pop 1 0 div } try-result
+tag-name /err eq
+    (try-result: ExtValue error all freed) rt-ok
+42 eq
+    (try-result: ExtValue error stack restored) rt-ok clear
+
+% Boundary: deeply nested try-result (3 levels)
+{ { { 1 0 div } try-result } try-result } try-result
+dup tag-name /ok eq
+    (try-result: 3-deep outer is /ok) rt-ok
+tag-value dup tag-name /ok eq
+    (try-result: 3-deep middle is /ok) rt-ok
+tag-value dup tag-name /err eq
+    (try-result: 3-deep inner is /err) rt-ok
+tag-value /div-by-zero eq
+    (try-result: 3-deep inner error name) rt-ok clear
+
+% Boundary: deeply nested try-result all succeed
+{ { { 42 } try-result } try-result } try-result
+tag-value tag-value tag-value 42 eq
+    (try-result: 3-deep all success) rt-ok clear
+
+% Integration: try-result + tag-update on error result
+{ 1 0 div } try-result { pop (handled) } tag-update
+dup tag-name /err eq
+    (try-result: tag-update on error tag preserved) rt-ok
+tag-value (handled) eq
+    (try-result: tag-update on error value changed) rt-ok clear
+
+% Integration: try-result inside map + reduce
+[ 1 2 0 4 5 ]
+{ { 10 exch div } try-result } map
+0 { /ok 0 tag-value-or add } reduce
+19 eq
+    (try-result: map+reduce with error recovery) rt-ok clear
+
+% Integration: try-result + tag-value-or on error gives default
+{ 1 0 div } try-result /ok -1 tag-value-or -1 eq
+    (try-result: error + tag-value-or default) rt-ok clear
+
+% Integration: try-result with proc that does save/restore internally
+{ save 42 exch restore } try-result
+tag-value 42 eq
+    (try-result: proc with save/restore) rt-ok clear
+
+% Stress: mixed success and failure
+true 500 {
+    { 42 } try-result tag-name /ok eq and
+    { 1 0 div } try-result tag-name /err eq and
+} repeat
+    (try-result: stress mixed 1000) rt-ok clear
+
+% Stress: 1000 successful try-results
+true 1000 { { 42 } try-result tag-value 42 eq and } repeat
+    (try-result: stress 1000 success) rt-ok clear
+
+% Stress: 1000 failing try-results
+true 1000 { { 1 0 div } try-result tag-name /err eq and } repeat
+    (try-result: stress 1000 failure) rt-ok clear
+
+% Success with boolean
+{ true } try-result tag-value true eq
+    (try-result: boolean success) rt-ok clear
+
+% Success with null
+{ null } try-result tag-value null eq
+    (try-result: null success) rt-ok clear
+
+% Error with ExtValue junk on stack — verify no leak (ASan validates)
+42
+{ 100l 200l 300l 1 0 div } try-result
+tag-name /err eq
+    (try-result: ExtValue cleanup tag) rt-ok
+42 eq
+    (try-result: ExtValue cleanup stack) rt-ok clear
+
+% ====================================================================
+% SECTION 27: tag-bind — monadic bind for tagged values
+% ====================================================================
+
+% Happy path: match unwraps and applies proc
+42 /ok tag /ok { 1 add /ok tag } tag-bind
+dup tag-name /ok eq
+    (tag-bind: match tag preserved) rt-ok
+tag-value 43 eq
+    (tag-bind: match value updated) rt-ok clear
+
+% Happy path: no match passes through unchanged
+42 /ok tag /err { pop 0 /err tag } tag-bind
+dup tag-name /ok eq
+    (tag-bind: no-match tag preserved) rt-ok
+tag-value 42 eq
+    (tag-bind: no-match value preserved) rt-ok clear
+
+% Railway chain: all succeed
+{ 10 } try-result
+/ok { { 2 mul } try-result } tag-bind
+/ok { { 1 add } try-result } tag-bind
+dup tag-name /ok eq
+    (tag-bind: railway all-ok tag) rt-ok
+tag-value 21 eq
+    (tag-bind: railway all-ok value) rt-ok clear
+
+% Railway chain: second step fails
+{ 10 } try-result
+/ok { { 0 div } try-result } tag-bind
+/ok { { 1 add } try-result } tag-bind
+dup tag-name /err eq
+    (tag-bind: railway error stops chain) rt-ok
+tag-value /div-by-zero eq
+    (tag-bind: railway error name preserved) rt-ok clear
+
+% Railway chain: first step fails, subsequent pass through
+{ 1 0 div } try-result
+/ok { { 2 mul } try-result } tag-bind
+/ok { { 1 add } try-result } tag-bind
+dup tag-name /err eq
+    (tag-bind: railway initial error passes through) rt-ok
+tag-value /div-by-zero eq
+    (tag-bind: railway initial error value) rt-ok clear
+
+% Proc returns different tag
+42 /ok tag /ok { pop (failed) /err tag } tag-bind
+dup tag-name /err eq
+    (tag-bind: proc changes tag) rt-ok
+tag-value (failed) eq
+    (tag-bind: proc changes tag value) rt-ok clear
+
+% Bind with string payload
+(hello) /msg tag /msg { uppercase /msg tag } tag-bind
+dup tag-name /msg eq
+    (tag-bind: string payload tag) rt-ok
+tag-value (HELLO) eq
+    (tag-bind: string payload value) rt-ok clear
+
+% Bind with ExtValue payload (long)
+100l /ok tag /ok { 1l add /ok tag } tag-bind
+tag-value 101l eq
+    (tag-bind: long payload) rt-ok clear
+
+% Bind with double payload
+3.14d /ok tag /ok { 2.0d mul /ok tag } tag-bind
+tag-value 6.28d eq
+    (tag-bind: double payload) rt-ok clear
+
+% No-match with ExtValue default — tagged untouched
+100l /val tag /other { pop 0 /err tag } tag-bind
+dup tag-name /val eq
+    (tag-bind: no-match ExtValue tag) rt-ok
+tag-value 100l eq
+    (tag-bind: no-match ExtValue value) rt-ok clear
+
+% Nested tagged through bind
+42 /inner tag /outer tag
+/outer { tag-value 1 add /inner tag /outer tag } tag-bind
+dup tag-name /outer eq
+    (tag-bind: nested outer tag) rt-ok
+tag-value tag-value 43 eq
+    (tag-bind: nested inner value) rt-ok clear
+
+% Identity bind (proc wraps same tag)
+42 /ok tag /ok { /ok tag } tag-bind
+dup tag-name /ok eq
+    (tag-bind: identity tag) rt-ok
+tag-value 42 eq
+    (tag-bind: identity value) rt-ok clear
+
+% Sad path: non-tagged first arg
+{ 42 /ok { /ok tag } tag-bind } try /type-check eq
+    (tag-bind: type-check on non-tagged) rt-ok clear
+
+% Sad path: non-name second arg
+{ 42 /ok tag 5 { /ok tag } tag-bind } try /type-check eq
+    (tag-bind: type-check on non-name) rt-ok clear
+
+% Sad path: non-proc third arg
+{ 42 /ok tag /ok 5 tag-bind } try /type-check eq
+    (tag-bind: type-check on non-proc) rt-ok clear
+
+% Sad path: stack underflow
+{ tag-bind } try /opstack-underflow eq
+    (tag-bind: underflow no args) rt-ok clear
+
+{ /ok { } tag-bind } try /opstack-underflow eq
+    (tag-bind: underflow two args) rt-ok clear
+
+% Sad path: proc errors propagate
+{ 42 /ok tag /ok { 1 0 div } tag-bind } try /div-by-zero eq
+    (tag-bind: error propagation) rt-ok clear
+
+% Fuzz: result survives dup
+42 /ok tag /ok { 1 add /ok tag } tag-bind dup
+tag-value 43 eq exch tag-value 43 eq and
+    (tag-bind: result survives dup) rt-ok clear
+
+% Fuzz: result survives exch
+42 /a tag /a { 1 add /a tag } tag-bind
+99 /b tag /b { 1 sub /b tag } tag-bind
+exch tag-value 43 eq exch tag-value 98 eq and
+    (tag-bind: result survives exch) rt-ok clear
+
+% Fuzz: multiple different tag names, only matching one binds
+42 /a tag
+/b { pop 0 /b tag } tag-bind
+/c { pop 0 /c tag } tag-bind
+/a { 1 add /a tag } tag-bind
+dup tag-name /a eq
+    (tag-bind: selective match tag) rt-ok
+tag-value 43 eq
+    (tag-bind: selective match value) rt-ok clear
+
+% Integration: tag-bind inside map
+[ 1 /ok tag 2 /ok tag 3 /ok tag ]
+{ /ok { 10 mul /ok tag } tag-bind } map
+dup 0 get tag-value 10 eq
+exch dup 1 get tag-value 20 eq
+exch 2 get tag-value 30 eq and and
+    (tag-bind: map over tagged array) rt-ok clear
+
+% Integration: mixed ok/err through map with bind
+[ { 10 } try-result { 1 0 div } try-result { 20 } try-result ]
+{ /ok { { 2 mul } try-result } tag-bind } map
+dup 0 get tag-value 20 eq
+exch dup 1 get tag-name /err eq
+exch 2 get tag-value 40 eq and and
+    (tag-bind: map mixed ok/err) rt-ok clear
+
+% Integration: tag-bind + tag-value-or (full railway with default)
+{ 42 } try-result
+/ok { { 2 mul } try-result } tag-bind
+/ok 0 tag-value-or
+84 eq
+    (tag-bind: railway + tag-value-or success) rt-ok clear
+
+{ 1 0 div } try-result
+/ok { { 2 mul } try-result } tag-bind
+/ok 0 tag-value-or
+0 eq
+    (tag-bind: railway + tag-value-or error) rt-ok clear
+
+% Integration: tag-bind + tag-match (dispatch after chain)
+{ 42 } try-result
+/ok { { 1 add } try-result } tag-bind
+<< /ok { (success) } /err { pop (error) } >> tag-match
+(success) eq
+    (tag-bind: railway + tag-match success) rt-ok clear
+
+{ 1 0 div } try-result
+/ok { { 1 add } try-result } tag-bind
+<< /ok { (success) } /err { pop (error) } >> tag-match
+(error) eq
+    (tag-bind: railway + tag-match error) rt-ok clear
+
+% Integration: tag-bind + tag-update
+{ 42 } try-result
+/ok { { 1 add } try-result } tag-bind
+{ 10 mul } tag-update
+tag-value 430 eq
+    (tag-bind: chain + tag-update) rt-ok clear
+
+% Stress: 1000 matching tag-binds
+0 /ok tag
+1000 { /ok { 1 add /ok tag } tag-bind } repeat
+tag-value 1000 eq
+    (tag-bind: stress 1000 match) rt-ok clear
+
+% Stress: 1000 non-matching tag-binds (pass-through)
+42 /ok tag
+1000 { /err { pop 0 /err tag } tag-bind } repeat
+dup tag-name /ok eq
+    (tag-bind: stress 1000 no-match tag) rt-ok
+tag-value 42 eq
+    (tag-bind: stress 1000 no-match value) rt-ok clear
+
+% Stress: mixed match/no-match
+0 /ok tag
+500 {
+    /ok { 1 add /ok tag } tag-bind
+    /err { pop 0 /err tag } tag-bind
+} repeat
+tag-value 500 eq
+    (tag-bind: stress mixed match/no-match) rt-ok clear
+
+% Stress: 4-step railway chain
+true 200 {
+    { 6 } try-result
+    /ok { { 7 mul } try-result } tag-bind
+    /ok { { 1 add } try-result } tag-bind
+    /ok { { 2 div } try-result } tag-bind
+    tag-value 21 eq and
+} repeat
+    (tag-bind: stress 200 railway chains) rt-ok clear
+
+% Boundary: proc that returns non-tagged (allowed, caller's responsibility)
+42 /ok tag /ok { 1 add } tag-bind
+43 eq
+    (tag-bind: proc returns non-tagged) rt-ok clear
+
+% Boundary: empty proc
+42 /ok tag /ok { /ok tag } tag-bind
+tag-value 42 eq
+    (tag-bind: wrap-only proc) rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_tagged: ALL TESTS PASSED) =
+(__test_ok__) =

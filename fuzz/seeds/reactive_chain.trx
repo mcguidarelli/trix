@@ -1,0 +1,5 @@
+10 cell /a exch def
+{ a cell-get 2 mul } cell-computed /b exch def
+{ b cell-get 1 add } cell-computed /c exch def
+5 a cell-set
+c cell-get

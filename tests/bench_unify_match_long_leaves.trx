@@ -1,0 +1,56 @@
+% ====================================================================
+% bench_unify_match_long_leaves.trx
+% ====================================================================
+% Synthetic worst-case microbenchmark for Option B (context-aware
+% lvar_bind) from plan_lvar_bind_context_aware.md.
+%
+% Tight loop: unify-match a value of 10 Long leaves against a pattern
+% of 10 lvar leaves, repeated 100k times.  This is the maximal case
+% for Option B's per-leaf clone cost -- every leaf is an ExtValue-
+% bearing scalar, every leaf bind takes the deep-clone path.
+%
+% Pre-Option B (shallow share): each per-iter bind transferred 10 Long
+% offsets into the lvar bindings (0 extra ExtValue allocs).
+% Post-Option B (deep clone on recursion): each per-iter bind allocates
+% 10 fresh ExtValues for the lvar bindings (+10 allocs).  100k iters
+% = 1M extra alloc/free roundtrips.
+%
+% Per-roundtrip cost: ~50-200ns on the local-VM free-list path (LIFO
+% pop is O(1)).  Expected total overhead: 50-200ms.
+%
+% Excluded from tests/run_all.sh by naming convention (bench_*).
+% Run manually for A/B comparison:
+%
+%   /usr/bin/time -f "%e" ./trix.opt tests/bench_unify_match_long_leaves.trx
+%
+% Compare wall-time output for trix.pre-optionB.opt vs trix.post-optionB.opt.
+% ====================================================================
+
+% --- Set up the iter body.  Each call:
+%       1. allocate 10 fresh lvars
+%       2. allocate value array [42l..800l]
+%       3. allocate pattern array [a..j]
+%       4. unify-match value against [[pattern { }]]
+%       5. restore the per-iter save scope
+{
+    save /S exch def
+    logic-var /a exch def
+    logic-var /b exch def
+    logic-var /c exch def
+    logic-var /d exch def
+    logic-var /e exch def
+    logic-var /f exch def
+    logic-var /g exch def
+    logic-var /h exch def
+    logic-var /i exch def
+    logic-var /j exch def
+    [ 42l 99l 100l 200l 300l 400l 500l 600l 700l 800l ]
+    [[ [ a b c d e f g h i j ] { } ]] unify-match
+    S restore
+} /iter exch def
+
+% --- Tight loop.  100k iterations of the body above.
+100000 /iter load repeat
+
+(bench_unify_match_long_leaves: 100k iterations complete) =
+(__test_ok__) =

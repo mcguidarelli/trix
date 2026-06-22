@@ -1,0 +1,89 @@
+% ====================================================================
+% Extension mirror of test_actor.trx for Int128/UInt128 patterns not
+% already covered in test_int128_actor.trx:
+%   * actor-try-send (non-blocking) with 128-bit message
+%   * mailbox-count with 128-bit messages in queue
+%   * broadcast to multiple actors (128-bit message)
+%   * silent drop on dead actor (128-bit message)
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: actor-try-send with Int128 message
+% ====================================================================
+
+/recv-a null def
+/a-recv [ {
+    actor-recv /recv-a exch def
+} actor-spawn def
+
+42q a-recv actor-try-send
+    true eq                                 (try-send: int128 accepted) rt-ok clear
+0 coroutine-sleep
+recv-a 42q deep-eq                          (try-send: int128 delivered) rt-ok clear
+
+% ====================================================================
+% SECTION 2: mailbox-count with several 128-bit messages queued
+% ====================================================================
+
+% Spawn actor that holds messages (doesn't recv)
+/holder [ { 0 coroutine-sleep 0 coroutine-sleep 0 coroutine-sleep } 10 actor-spawn-capacity def
+42q holder actor-send
+100q holder actor-send
+-7q holder actor-send
+holder actor-mailbox-count 3 eq
+    (mailbox-count: 3 int128 messages queued) rt-ok clear
+
+% ====================================================================
+% SECTION 3: broadcast 128-bit message to multiple actors
+% ====================================================================
+
+/b1 null def
+/b2 null def
+/ba1 [ { actor-recv /b1 exch def } actor-spawn def
+/ba2 [ { actor-recv /b2 exch def } actor-spawn def
+
+% Send same message to two actors
+999q ba1 actor-send
+999q ba2 actor-send
+0 coroutine-sleep
+b1 999q deep-eq                             (broadcast-ish: a1 got int128) rt-ok
+b2 999q deep-eq                             (broadcast-ish: a2 got int128) rt-ok clear
+
+% ====================================================================
+% SECTION 4: Silent drop on dead actor (message to already-exited actor)
+% ====================================================================
+
+/dead-actor [ { 0 coroutine-sleep } actor-spawn def
+0 coroutine-sleep
+0 coroutine-sleep
+% Actor should be dead now -- send silently drops (returns normally)
+42q dead-actor actor-send
+    (dead-actor: int128 send completed without crash) =
+clear
+
+% ====================================================================
+% SECTION 5: UInt128 message
+% ====================================================================
+
+/recv-u null def
+/u-recv [ {
+    actor-recv /recv-u exch def
+} actor-spawn def
+340282366920938463463374607431768211455uq u-recv actor-send
+0 coroutine-sleep
+recv-u 340282366920938463463374607431768211455uq deep-eq
+    (actor: UINT128_MAX delivered intact) rt-ok clear
+
+(test_int128_actor_mirror.trx complete) =
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

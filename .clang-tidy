@@ -1,0 +1,131 @@
+# Trix clang-tidy configuration.
+#
+# Applied in CI (see .github/workflows/clang-tidy.yml) and usable
+# locally with:
+#
+#     cmake -B build -DCMAKE_BUILD_TYPE=Debug \
+#           -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DTRIX_SANITIZERS=OFF
+#     clang-tidy-20 -p build trix.cpp
+#
+# Use clang-tidy-20 explicitly (the source uses clang-19+ features --
+# [[assume]], __builtin_clzg -- so an older clang-tidy fails to parse the
+# TU).  The full CI invocation (see the workflow) adds a few -Wno-*
+# suppressions for clang front-end warnings that gcc's stricter build matrix
+# already polices.
+#
+# Trix compiles as a single translation unit (trix.cpp includes trix.h
+# which includes all 64 .inl fragments), so one clang-tidy invocation
+# on trix.cpp analyses the entire codebase.
+#
+# Check groups enabled:
+#   bugprone-*     -- likely bug patterns
+#   performance-*  -- obvious perf footguns
+#   portability-*  -- cross-platform / cross-compiler issues
+#   (curated)      -- a handful of modernize-* and readability-* checks,
+#                     plus two that enforce documented STYLE.md restrictions:
+#                     readability-braces-around-statements (braces on every
+#                     block) and cppcoreguidelines-avoid-goto (no goto).
+#
+# Everything else is disabled by the leading '-*'.  The -CheckName
+# entries turn off checks inside an enabled group that don't fit
+# Trix's documented style or produce false positives in this codebase.
+
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-branch-clone,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  -bugprone-inc-dec-in-conditions,
+  -bugprone-macro-parentheses,
+  -bugprone-narrowing-conversions,
+  -bugprone-reserved-identifier,
+  -bugprone-signed-char-misuse,
+  -bugprone-suspicious-stringview-data-usage,
+  -bugprone-switch-missing-default-case,
+  performance-*,
+  -performance-enum-size,
+  -performance-no-int-to-ptr,
+  portability-*,
+  modernize-deprecated-headers,
+  modernize-use-equals-default,
+  modernize-use-equals-delete,
+  modernize-use-nullptr,
+  modernize-use-override,
+  readability-deleted-default,
+  readability-duplicate-include,
+  readability-redundant-string-cstr,
+  readability-redundant-string-init,
+  readability-braces-around-statements,
+  cppcoreguidelines-avoid-goto,
+  misc-const-correctness
+
+# Promote every remaining warning to an error so CI fails on new
+# findings instead of letting them pile up.
+WarningsAsErrors: '*'
+
+# Only examine headers under src/ and the top-level trix.h; ignore
+# the many-thousand findings in fmt/, libstdc++/, etc.
+HeaderFilterRegex: '(src/|trix\.h$)'
+
+# Use the repo's .clang-format for any fix-it formatting.
+FormatStyle: file
+
+# Justifications for the excluded checks (keep this list up to date;
+# every suppressed check should have a documented reason):
+#
+#   bugprone-branch-clone
+#       Noisy; Trix has intentional dispatch-by-type branches that
+#       look like clones but serve different enum cases.
+#
+#   bugprone-easily-swappable-parameters
+#       Perpetually noisy on any API with two same-typed positional
+#       args.  Not actionable at scale.
+#
+#   bugprone-exception-escape
+#       Trix has a limited exception surface already covered by the
+#       Error enum and the interrupt system; the check's rules don't
+#       match the project's exception policy.
+#
+#   bugprone-inc-dec-in-conditions
+#       The `--counter == 0` inside a short-circuited && chain is a
+#       deliberate "counter that expires at zero" idiom used in the
+#       interpreter loop and debugger; both sites are correct.
+#
+#   bugprone-macro-parentheses
+#       Trix has no preprocessor macros beyond #include and #pragma
+#       (see STYLE.md); this check has nothing to examine and fires
+#       only on rare third-party macro code.
+#
+#   bugprone-narrowing-conversions
+#       Duplicates gcc's -Wconversion which is already in the build
+#       flags (see README's "Compiler Discipline" section).
+#
+#   bugprone-reserved-identifier
+#       The shim dispatch family uses `shim_O*__R*` names with double
+#       underscores as deliberate separators.  Renaming was considered
+#       and rejected (see memory/feedback_no_shim_refactor.md).
+#
+#   bugprone-signed-char-misuse
+#       Noisy; fires on any `char`/`int` interaction, including the
+#       scanner's character-class tables that are deliberately typed.
+#
+#   bugprone-suspicious-stringview-data-usage
+#       False positive on `std::copy_n(sv.data(), length, dst)`: the
+#       explicit length argument already bounds the copy.  clang-tidy
+#       cannot see the bound through copy_n's API.
+#
+#   bugprone-switch-missing-default-case
+#       Trix style explicitly handles every enum case and omits
+#       default clauses; -Wswitch-enum catches missing cases at
+#       compile time (see STYLE.md).
+#
+#   performance-enum-size
+#       Most enums are sized for layout reasons (Object attribute
+#       byte, snapshot header ABI).  Shrinking them is a separate
+#       project-wide decision, not an individual-site fix.
+#
+#   performance-no-int-to-ptr
+#       Trix's Address type is defined as an integer reinterpreted
+#       as a pointer; this is the whole point of the type and cannot
+#       be rewritten without removing the feature.

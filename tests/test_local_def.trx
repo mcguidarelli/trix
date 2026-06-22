@@ -1,0 +1,213 @@
+% ====================================================================
+% test_local_def.trx -- C-side local-def operator (Phase A of Wart 02)
+% ====================================================================
+% local-def is the explicit-frame counterpart to def.  It requires the
+% top of the dict stack to be a |...| frame dict (set via begin-locals),
+% and writes the binding there.  At top level (or inside a non-locals
+% proc) it raises Unsupported.
+%
+% Phase A is purely additive: def is unchanged.  This test exercises
+% local-def's happy path, sad path, name-lookup interaction, and
+% save/restore journaling.
+
+% rt-ok counts failures in a restore-immune slot -- string byte writes
+% are unjournaled, so the count survives assertions made inside save
+% scopes, and the 1-byte string lives in LOCAL VM, invisible to the
+% global-heap/gc-counter probes some files assert on.  The file THROWS
+% at EOF: test_all counts a file as failed only when its run throws,
+% so print-only failures would slip the suite verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: Happy path -- local-def inside a |...| proc
+% ====================================================================
+
+/s1a {
+  |x|#5
+  % Frame on top; binding /scratch via local-def writes to the frame.
+  /scratch 99 local-def
+  scratch
+} def
+
+42 s1a 99 eq                                    (s1: local-def writes to frame)               rt-ok
+
+% Frame is gone after proc returns; the binding does not leak.
+{ scratch } try /undefined eq                   (s1: frame binding gone after proc returns)   rt-ok clear
+
+% ====================================================================
+% SECTION 2: local-def coexists with locals declared in |...|
+% ====================================================================
+
+/s2a {
+  |declared|#10
+  /also-local 7 local-def
+  declared also-local add
+} def
+
+3 s2a 10 eq                                     (s2: local-def + |...| declared local)        rt-ok
+
+% Multiple local-def inside one proc.
+/s2b {
+  |x|#10
+  /a 1 local-def
+  /b 2 local-def
+  /c 3 local-def
+  a b add c add x add
+} def
+
+10 s2b 16 eq                                    (s2: multiple local-def)                      rt-ok
+
+% ====================================================================
+% SECTION 3: Sad path -- local-def with no frame on top
+% ====================================================================
+
+% At top level, dict stack is [systemdict protocoldict userdict].
+% None are frames, so local-def must raise Unsupported.
+{ /nope 1 local-def } try /unsupported eq       (s3: top-level local-def -> unsupported)      rt-ok clear
+
+% Inside a proc with NO |...| header: also no frame on top.
+/s3a {
+  /also-nope 1 local-def
+} def
+
+{ s3a } try /unsupported eq                     (s3: no-header proc -> unsupported)           rt-ok clear
+
+% Inside `userdict begin ... end`: top is userdict (non-frame).
+{ userdict begin /still-nope 1 local-def end } try /unsupported eq
+(s3: begin user-dict + local-def -> unsupported)                                              rt-ok clear
+
+% ====================================================================
+% SECTION 4: Read paths still see frame bindings (locals shadowing)
+% ====================================================================
+
+% local-def binding is visible via name lookup AND via load.
+/s4a {
+  |x|#5
+  /shadow-target 555 local-def
+  shadow-target              % name lookup walks dict stack including frame
+} def
+
+0 s4a 555 eq                                    (s4: name lookup sees local-def binding)      rt-ok
+
+/s4b {
+  |x|#5
+  /loaded-name 777 local-def
+  /loaded-name load          % load walks dict stack including frame
+} def
+
+0 s4b 777 eq                                    (s4: load sees local-def binding)             rt-ok
+
+% where finds the frame dict, but current-dict skips it.
+/s4c {
+  |x|#5
+  /where-target 1 local-def
+  /where-target where { current-dict ne } { false } if-else
+  % where returns the frame; current-dict returns userdict (non-frame).
+} def
+
+0 s4c true eq                                   (s4: where finds frame, current-dict skips it) rt-ok
+
+% ====================================================================
+% SECTION 5: local-def writes are journaled by save/restore
+% ====================================================================
+
+/s5a {
+  |x|#5
+  /pre-save 100 local-def
+  save
+  /post-save 200 local-def
+  pre-save post-save add        % 300 visible inside save
+  exch restore
+} def
+
+0 s5a 300 eq                                    (s5: pre+post save bindings visible inside)   rt-ok
+
+% ====================================================================
+% SECTION 6: local-def on a frame at deeper nesting
+% ====================================================================
+
+% Nested procs each have their own frame.  Inner local-def writes to
+% the INNER frame, not the outer one.
+/s6-inner { |i|#5 /inner-only 11 local-def inner-only } def
+/s6-outer { |o|#5 /outer-only 22 local-def 0 s6-inner outer-only add } def
+
+0 s6-outer 33 eq                                (s6: nested local-def each writes own frame)  rt-ok
+
+% Inner binding is gone after inner returns.
+/s6-leak {
+  |o|#5
+  0 s6-inner pop
+  { inner-only } try /undefined eq
+} def
+
+0 s6-leak true eq                               (s6: inner binding does not leak to outer)    rt-ok
+
+% ====================================================================
+% SECTION 7: Phase C semantic flip -- def silently writes past frames
+% ====================================================================
+
+% Phase C: `def` walks past any |...| frames on the dict stack and
+% writes to the first non-frame (userdict at module scope).  No error,
+% no silent frame mutation -- the binding lands in module scope.
+/s7a {
+  |x|#5
+  /s7-leaked 42 def       % phase C: writes to userdict, not the frame
+} def
+
+42 s7a
+s7-leaked 42 eq                                 (s7: def skips frame, writes to userdict)     rt-ok
+
+% local-def is the way to bind into the frame.
+/s7b {
+  |x|#5
+  /scratch 99 local-def
+  scratch
+} def
+
+0 s7b 99 eq                                     (s7: local-def writes to frame)               rt-ok
+
+% After s7b returns, /scratch is gone (frame torn down).
+{ scratch } try /undefined eq                   (s7: local-def binding gone after return)     rt-ok clear
+
+% end on a frame errors (frames are popped by proc return, not user).
+/s7c { |x|#5 end } def
+{ 0 s7c } try /unsupported eq                   (s7: end on frame -> unsupported)             rt-ok clear
+
+% current-dict inside |...| returns userdict, not the frame.
+/s7d { |x|#5 current-dict userdict eq } def
+0 s7d true eq                                   (s7: current-dict skips frame)                rt-ok
+
+% store on a name that exists in the frame updates the frame slot.
+/s7e {
+  |x|#5
+  /counter 0 local-def
+  /counter 7 store
+  counter
+} def
+
+0 s7e 7 eq                                      (s7: store hits frame binding directly)       rt-ok
+
+% store on a name that does NOT exist anywhere falls back to userdict.
+{ s7-leaked-store } try /undefined eq pop  % drain pre-existing if present
+/s7f { |x|#5 /s7-leaked-store 11 store } def
+42 s7f
+s7-leaked-store 11 eq                           (s7: store fallback skips frame)              rt-ok
+
+% ====================================================================
+% SECTION 8: Type / arity sanity
+% ====================================================================
+
+% Insufficient operand stack.
+/s8a { |x|#5 local-def } def
+{ 0 s8a } try /opstack-underflow eq             (s8: missing operands -> underflow)           rt-ok clear
+
+% Mixed-type keys ARE legal in Trix dicts (def accepts any hashable
+% key, local-def must too).  Pin behavior: integer key works.
+/s8b { |x|#5 42 99 local-def 42 load } def
+0 s8b 99 eq                                     (s8: integer key + value works)               rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_local_def: ALL TESTS PASSED) =
+(__test_ok__) =
