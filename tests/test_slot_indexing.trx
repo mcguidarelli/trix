@@ -1,0 +1,112 @@
+% ====================================================================
+% test_slot_indexing.trx -- frame-local slot-indexing (Phase 3)
+% ====================================================================
+% A locals proc's OWN top-level body refs to its PARAMS are rewritten at
+% scan time from executable Names to inline frame-slot references, resolved
+% by direct frame indexing at run time (entries[slot].m_value) instead of a
+% dict-stack name lookup.  Always-on; depth=0 only (nested procs keep dynamic
+% name refs); literal /name refs are left as names (e.g. for local-def).
+%
+% This increment slot-indexes PARAMS only; declared /locals stay name-based
+% (their slot-indexing is a follow-on).  Params remain name-accessible too
+% (still bound + chained in the frame dict), so /p load and reflection work.
+%
+% rt-fails counts failures in a restore-immune string byte (the suite wraps
+% each test in save/restore).  The file THROWS at EOF on failure.
+
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: correctness parity -- a slot-ref reads the same value a name would
+% ====================================================================
+
+/c1 { |a b| a b add } def
+3 4 c1 7 eq                          (c1: two params read via slot-ref)            rt-ok
+
+% param order: first param is deeper on the stack
+/c2 { |a b| a b sub } def
+10 3 c2 7 eq                         (c2: param order a=deeper, b=top)             rt-ok
+
+% same param read more than once
+/c3 { |a| a a mul } def
+5 c3 25 eq                           (c3: a param read multiple times)             rt-ok
+
+% three params
+/c4 { |a b c| a b c add add } def
+1 2 3 c4 6 eq                        (c4: three params)                            rt-ok
+
+% a param whose value is null pushes null (not /undefined)
+/c5 { |a| a } def
+null c5 null eq                      (c5: param bound to null reads null)          rt-ok
+
+% ====================================================================
+% SECTION 2: operator-shadowing param resolves to the LOCAL (subsumes the
+% own-frame half of the #e hazard -- a param ref is a slot-ref, never an op)
+% ====================================================================
+
+/o1 { |add| add } def
+5 o1 5 eq                            (o1: param 'add' -> the param, not the op)    rt-ok
+
+% same, but the proc is early-bound (#e): the slot-ref + #e coexist, and a
+% NON-shadowed operator in the body still binds.
+/o2 { |sub mul| sub mul add }#e def
+7 2 o2 9 eq                          (o2: #e binds 'add', params stay slot-refs)   rt-ok
+
+% ====================================================================
+% SECTION 3: nested procs -- an OUTER-frame ref stays a dynamic name
+% ====================================================================
+
+% inner { a } references the OUTER param a; it is NOT slot-indexed (nested),
+% resolves dynamically while the outer frame is live.
+/n1 { |a| { a } exec } def
+10 n1 10 eq                          (n1: nested ref to outer param is dynamic)    rt-ok
+
+% inner proc has its OWN param b (slot-ref) and reads outer a (dynamic name)
+/n2 { |a| 4 { |b| a b add } exec } def
+6 n2 10 eq                           (n2: inner slot-ref b + outer dynamic a)      rt-ok
+
+% ====================================================================
+% SECTION 4: a param bound to a PROC is EXECUTED (name semantics), not pushed
+% ====================================================================
+
+/p1 { |p| p } def
+{ 99 } p1 99 eq                      (p1: proc-valued param is executed)           rt-ok
+
+% f is applied to x: x f -> push x, then execute f
+/p2 { |f x| x f } def
+{ 2 mul } 21 p2 42 eq                (p2: proc-valued param applied to data)       rt-ok
+
+% params remain reachable by NAME too: /p load pushes the value as data
+/p3 { |p| /p load exec } def
+{ 7 } p3 7 eq                        (p3: param reachable by name via /p load)     rt-ok
+
+% ====================================================================
+% SECTION 5: Tail Call Optimization is maintained
+% ====================================================================
+
+% (a) Frame-proc deep recursion whose tail call is a GLOBAL name, with the
+% counter read via a slot-ref each step -- slot-indexing params must not break
+% the existing frame-proc TCO (@end-locals over @call).  50000 deep would
+% overflow the exec stack (~512 frames) without TCO.
+/cd { |n| n 0 le { (done) } { n 1 sub cd } if-else } def
+50000 cd (done) eq                   (cd: frame TCO via global name, slot-ref n)   rt-ok
+
+% (b) Deep recursion whose TAIL CALL is itself a SLOT-REF: the recursive proc
+% is passed as the param f and invoked in tail position via `f`.  This drives
+% the slot-ref resolution through the SAME closure-TCO path (@end-locals over
+% @call) as a name call, so it stays constant-space.
+/lp { |n f| n 0 le { (done) } { n 1 sub /f load f } if-else } def
+50000 /lp load lp (done) eq          (lp: TCO via slot-ref tail call)              rt-ok
+
+% ====================================================================
+% SECTION 6: regression -- params (slot-ref) + declared /locals (name) mixed
+% ====================================================================
+
+/m1 { |x /acc| /acc x 1 add local-def acc } def
+7 m1 8 eq                            (m1: slot-ref param + local-def /local)       rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_slot_indexing: ALL TESTS PASSED) =
+(__test_ok__) =

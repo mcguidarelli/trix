@@ -1799,6 +1799,34 @@ template<typename CleanupFn>
         auto body_start = (base + preamble_count);
         auto body_length = static_cast<length_t>(length - preamble_count);
 
+        // Slot-indexing (Phase 3): rewrite this proc's OWN top-level body refs to its
+        // params into slot-refs, resolved by direct frame indexing at run time instead of
+        // a dict-stack name lookup (the hot-loop payoff; also subsumes the own-frame half
+        // of the #e operator-shadow hazard -- a param ref is now a slot-ref, never frozen
+        // to an operator).  Always-on for every locals proc.  Only EXECUTABLE name refs
+        // are rewritten -- a literal /name stays a name (e.g. for local-def) -- and only at
+        // depth 0: nested procs are single packed/array body elements here and are left
+        // untouched (an outer-frame ref from a nested proc must stay a dynamic name, since
+        // Trix frame scoping is dynamic, not lexical-closure).  Layout on the scratch stack
+        // is [/p0../p(P-1) /loc0../loc(M-1) P M N body...]; param i sits at base[i] for i in
+        // [0, P) and its slot index is i.  (Declared /locals -- base[P..P+M) -- are left as
+        // names this increment; their slot-indexing is a follow-on.)
+        auto param_count = static_cast<length_t>(base[locals_count].integer_value());
+        for (length_t i = 0; i < body_length; ++i) {
+            auto *elem = &body_start[i];
+            if (elem->is_name() && elem->is_executable()) {
+                auto elem_name_offset = elem->name_offset();
+                for (length_t slot = 0; slot < param_count; ++slot) {
+                    if (base[slot].is_name() && (base[slot].name_offset() == elem_name_offset)) {
+                        auto saved_level = elem->save_level();
+                        *elem = Object::make_slot_ref(slot, Object::ExecutableAttrib);
+                        elem->set_save_level(saved_level);
+                        break;
+                    }
+                }
+            }
+        }
+
         // The wrap rewrites body_start[0..body_length) to body_start[0..1] = {body-proc, begin-locals}.
         // body_length >= 2 shrinks the footprint; body_length == 1 grows by one slot and writes
         // body_start[1] at state->ptr -- which must be strictly below state->limit.  Without this

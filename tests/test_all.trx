@@ -55,6 +55,7 @@
 (tests/test_def_frame_cache_coherence.trx) run-test
 (tests/test_early_bind_frame_local.trx) run-test
 (tests/test_named_locals.trx) run-test
+(tests/test_slot_indexing.trx) run-test
 (tests/test_arithmetic.trx) run-test
 (tests/test_scanner.trx) run-test
 (tests/test_eqref_regression.trx) run-test

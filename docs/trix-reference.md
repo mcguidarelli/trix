@@ -325,6 +325,26 @@ operator (declare it as a preamble param instead, or do not early-bind).  The
 opt-in lint `tests/check_operator_shadows.py` flags the operator-named-local
 hazard.  See `interpreter.md` Section 8.2.
 
+#### Slot-indexing of parameters
+
+A locals proc's references to its **own parameters**, where they appear directly
+in the proc's top-level body, are compiled at scan time into direct frame-slot
+references: the run-time resolver indexes the proc's frame dict by position
+(`O(1)`, no hash, no dictionary-stack walk) instead of looking the name up.  This
+is always on — no suffix — and gives the same hot-loop speedup as `#e` for the
+common case of reading a parameter, but without `#e`'s sensitivity to binding
+cache invalidation under recursion or `save`.  A consequence is that an own-frame
+parameter reference is no longer a name at all, so it is inherently immune to the
+`#e` operator-shadow hazard above (the parameter always wins).
+
+Scope is **depth-0 only**: a parameter referenced inside a *nested* proc keeps a
+dynamic name, because Trix frame scoping is dynamic — a nested proc may be stored
+and run after its enclosing frame has returned, so its outer-frame references can
+only be resolved at call time.  Parameters stay reachable by name as well
+(`/p load`, reflection, and dynamic lookup all still see them), so slot-indexing
+is transparent except for the speedup.  (Declared `/locals` are not yet
+slot-indexed; only parameters are today.)
+
 #### Parameters vs declared locals (`/`-prefix)
 
 Inside the `|...|` preamble a **bare** name is a **parameter** — popped from the

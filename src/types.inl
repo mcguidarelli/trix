@@ -1018,7 +1018,14 @@ static constexpr uint8_t PATCH{1};
 // future slot-indexing -- declared, not bound, so an unassigned /local reads
 // /undefined).  Old v178 snapshots used a two-integer (K N) preamble and would
 // mis-decode.
-static constexpr uint32_t SNAPSHOT_VERSION{179};
+// v180 adds slot-indexing (Phase 3): a locals proc's own top-level body refs to
+// its params are rewritten at scan time from executable Names to PackedType::SlotRef
+// elements (an inline frame-slot index), resolved by direct frame indexing at run
+// time.  A pre-v180 image never contains SlotRef body elements; a v180 build is
+// fine reading its own images, but a pre-v180 build replaying a v180 packed stream
+// would hit a SlotRef element it cannot resolve -- the version gate rejects the
+// mismatch.
+static constexpr uint32_t SNAPSHOT_VERSION{180};
 public:
 using vm_offset_t = vm_size_t;
 static constexpr vm_offset_t nulloffset{0};

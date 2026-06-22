@@ -5008,10 +5008,14 @@ public:
                 break;
 
             case Type::SlotRef:
-                // Slot-refs are written directly into the packed stream by the
-                // slot-indexing rewrite (never classified from an Object), and never
-                // appear as a body element handed to make_packed_data.
-                trx->error(Error::InternalError, "make_packed_data: SlotRef cannot be classified for packing");
+                // Slot-ref (Phase 3 slot-indexing): the scanner rewrites a frame proc's
+                // own-frame body name-refs to SlotRef Objects before packing the body, so
+                // they DO reach make_packed_data.  Encode like any small inline value:
+                // header carries the X (literal/executable) bit, value bytes carry the
+                // slot index (1-2 bytes; length_t is <= 65535).  No length bytes.
+                packed_type = PackedType::SlotRef;
+                value = object->slot_ref_index();
+                break;
             }
 
             if (value_size == -1) {

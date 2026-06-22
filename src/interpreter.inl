@@ -423,7 +423,24 @@ void execute_name(Object name) {
     auto value = Name::name_search(trx, &name);
     if (value == nullptr) [[unlikely]] {
         error(Error::Undefined, "executable name {} is not associated with any Object", name.name_sv(trx));
-    } else if (value->is_literal() || value->ignores_execute()) {
+    } else {
+        execute_resolved_value(value, name);
+    }
+}
+
+// Execute a value resolved from an executable reference -- a dict name lookup
+// (execute_name) or a frame slot-ref (execute_proc).  `value` is a BORROWED
+// pointer into a dict / frame-dict entry whose container is GC-rooted (the dict
+// stack), so make_clone is safe here without extra rooting and the entry is
+// never relocated.  `name` is the literal Name used as the @call backtrace
+// companion: the looked-up name, or the frame slot's bound param name.  This is
+// the single source of truth for name-execution semantics, including Tail Call
+// Optimization -- so a slot-ref call gets exactly the same TCO (incl. the
+// closure @end-locals-over-@call case, which fires for frame-proc tails where
+// slot-refs live) as the equivalent name call.
+void execute_resolved_value(const Object *value, Object name) {
+    auto trx = this;
+    if (value->is_literal() || value->ignores_execute()) {
         // a proc encountered indirectly via an \name lookup is pushed on the execution stack
         // and called as a procedure.
         // ignores_execute() is used (not pushop_direct()) because Array/Packed do NOT have
@@ -908,6 +925,22 @@ void execute_continuation(Object continuation) {
     }
 }
 
+// Resolve a frame slot-ref against the NEAREST frame dict on the dict stack
+// (walk top-down, skipping begin-pushed non-frame dicts via is_frame()).  A
+// depth=0 slot-ref is only ever emitted into a frame proc's OWN top-level body,
+// which always runs with that proc's frame dict topmost (any nested frame has
+// returned), so this always finds the correct frame.  Returns the frame Dict*;
+// the caller indexes the slot via frame_slot_value / frame_slot_key.
+[[nodiscard]] Dict *resolve_slot_ref_dict() {
+    for (auto dp = m_dict_ptr; dp >= m_dict_base; --dp) {
+        auto dict = dp->dict_value(this);
+        if (dict->is_frame()) {
+            return dict;
+        }
+    }
+    error(Error::InternalError, "slot-ref encountered with no frame dict on the dict stack");
+}
+
 void execute_proc(Object proc) {
     auto length = proc.arrays_length();
     if (length != 0) {
@@ -916,6 +949,27 @@ void execute_proc(Object proc) {
         // packed_pop_head (not _clone_head): both branches below call make_clone on value,
         // so an intermediate clone here would leak an ExtValue/WideValue cell per literal.
         auto value = proc.is_array() ? proc.array_pop_head(trx) : proc.packed_pop_head(trx);
+
+        // Slot-ref (Phase 3 slot-indexing): a frame proc's own-frame body name-refs were
+        // rewritten to slot-refs at scan time.  Resolve against the nearest frame dict and
+        // execute with the SAME semantics (incl. TCO) as the executable name it replaced.
+        // A slot-ref is inline (no ExtValue) and never lands on a stack -- resolve it here,
+        // the single packed-exec choke point.
+        if (value.is_slot_ref()) [[unlikely]] {
+            auto *frame_dict = resolve_slot_ref_dict();
+            auto slot = value.slot_ref_index();
+            // Re-push the remaining body BEFORE executing the resolved value so the head
+            // runs first and the tail after.  A re-pushed tail also naturally blocks TCO
+            // for this (non-tail) ref.  When the slot-ref IS the last body element
+            // (length == 1) nothing is re-pushed, so execute_resolved_value sees the
+            // enclosing @end-locals/@call and applies TCO -- the frame-proc tail case.
+            if (length > 1) {
+                require_exec_capacity(1);
+                *++m_exec_ptr = proc;
+            }
+            execute_resolved_value(frame_dict->frame_slot_value(slot), frame_dict->frame_slot_key(slot));
+            return;
+        }
 
         // A value encountered as a direct body element of a proc is pushed as data, not
         // executed as a sub-procedure.  pushop_direct() is used here (not ignores_execute())

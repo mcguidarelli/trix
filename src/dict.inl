@@ -180,6 +180,18 @@ public:
 
     [[nodiscard]] bool is_frame() const { return ((m_access & IsFrame) != 0); }
 
+    // Frame-slot positional accessors (Phase 3 slot-indexing).  A frame dict's
+    // entry pool is filled in SLOT order by begin-locals (1st param -> entry[0],
+    // 2nd -> entry[1], ... -- the pool free list is sequential on a fresh or
+    // recycled dict), so slot i lives at entries()[i] at a fixed offset.  The
+    // interpreter resolves a slot-ref against the nearest frame dict and reads
+    // the value at this fixed offset, bypassing name_search + the binding cache.
+    // Caller guarantees slot < m_length (the slot was emitted by the scanner for
+    // a declared frame name and begin-locals reserved it).  frame_slot_key returns
+    // the bound name for backtrace identification (the @call companion).
+    [[nodiscard]] Object *frame_slot_value(length_t slot) { return &frame_entries()[slot].m_value; }
+    [[nodiscard]] Object frame_slot_key(length_t slot) const { return frame_entries()[slot].m_key; }
+
     // True if this dict's contents are guaranteed local-VM only (no global
     // refs, transitively).  GC walker short-circuits on these.  See the
     // NoGlobalRefs flag comment above for the invariant.
@@ -2779,6 +2791,16 @@ private:
 
     [[nodiscard]] vm_offset_t *buckets() { return m_buckets; }
     [[nodiscard]] const vm_offset_t *buckets() const { return m_buckets; }
+
+    // Entry pool base: the DictEntry array follows the header + bucket array
+    // (same arithmetic as create_dict / reinit_recycled).  Used by the
+    // frame_slot_* positional accessors for slot-ref resolution.
+    [[nodiscard]] DictEntry *frame_entries() {
+        return reinterpret_cast<DictEntry *>(reinterpret_cast<vm_t *>(this) + alloc_size(m_bucket_count));
+    }
+    [[nodiscard]] const DictEntry *frame_entries() const {
+        return reinterpret_cast<const DictEntry *>(reinterpret_cast<const vm_t *>(this) + alloc_size(m_bucket_count));
+    }
 public:
     //
     // GC mark-phase walker for ChunkKind::Dict and ChunkKind::Set
