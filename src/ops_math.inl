@@ -2130,7 +2130,7 @@ static void modf_op(Trix *trx) {
 
         T integral_part;
         auto fractional_part = std::modf(x, &integral_part);
-        return std::pair{fractional_part, integral_part};
+        return FloatPair<T>{fractional_part, integral_part};
     });
 }
 

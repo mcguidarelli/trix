@@ -1094,6 +1094,17 @@ static void shim_OFloats__RFloats(Trix *trx, verify_t Xattr, F &&func) {
     }
 }
 
+// A homogeneous two-float result for shims that return two floats.  Unlike
+// std::pair<T, T>, this trivial aggregate is an HFA (aarch64) / SSE-class
+// (x86-64), passed in FP registers consistently across the C++14/C++17 ABI --
+// so it avoids the GCC -Wpsabi note (which -w cannot suppress) that
+// std::pair<float, float> / std::pair<double, double> emit.
+template<typename T>
+struct FloatPair {
+    T first;
+    T second;
+};
+
 //      X    R
 // Real   :- Real   Real
 // Double :- Double Double
