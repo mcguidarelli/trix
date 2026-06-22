@@ -53,7 +53,7 @@ Source code (.trx)
 | --------------------- | ------------------------------------------ |
 | Operators             | 838                                        |
 | Operator categories   | 36 (`ops_*.inl` files)                     |
-| Type system           | 31 types (5-bit tag, 32 slots, 1 reserved) |
+| Type system           | 32 types (5-bit tag, 32 slots, 0 reserved) |
 | VM heap               | 1 MB default (256KB minimum)               |
 | Source code           | ~85K lines C++ (header-only)               |
 | Test assertions       | 20,200+ across 270 test files              |
@@ -113,7 +113,7 @@ to application:
        Coroutines, Pipelines, Actors, Supervision, Reactive cells
                            |
                        Data Model
-            31 types, Records, Tagged ADTs, Sets, Dicts
+            32 types, Records, Tagged ADTs, Sets, Dicts
                            |
                     Functional Core
         Higher-order (map/filter/reduce), Lazy sequences, Curry/Compose
@@ -833,7 +833,7 @@ snap-shot/thaw as part of its validation suite.
 ### 7.5 Single-File Deployment
 
 Trix is header-only.  `#include "trix.h"` and compile.  The entire
-language -- VM, scanner, interpreter, all 838 operators, all 31 types --
+language -- VM, scanner, interpreter, all 838 operators, all 32 types --
 is one compilation unit.  No separate runtime, no shared libraries, no
 build system complexity, no version-mismatch headaches.
 
@@ -868,7 +868,7 @@ computation within a single small heap (1 MB default).
 
 | Aspect          | Forth                                  | Trix                                           |
 | --------------- | -------------------------------------- | ---------------------------------------------- |
-| Types           | Untyped cells (1 or 2 cells per value) | 31 types, tagged, verified                     |
+| Types           | Untyped cells (1 or 2 cells per value) | 32 types, tagged, verified                     |
 | Safety          | None (raw memory access)               | Type-checked, bounds-checked                   |
 | Data structures | User-built from raw memory             | Built-in Array, Dict, Record, Set, Tagged      |
 | Concurrency     | None (typically)                       | Coroutines, Actors, Pipelines                  |
@@ -1153,7 +1153,7 @@ One `#include`.
 | `interpreter.md`    | Exec stack dispatch, operator execution   |
 | `scanner.md`        | Tokenizer, binary tokens                  |
 | `scanner-syntax.md` | Full syntax reference                     |
-| `type-system.md`    | 31 types, Object encoding, verify_t       |
+| `type-system.md`    | 32 types, Object encoding, verify_t       |
 | `name-lookup.md`    | Name resolution, dict stack search        |
 | `save-restore.md`   | Transaction journaling                    |
 | `snapshot-thaw.md`  | Full state serialization                  |

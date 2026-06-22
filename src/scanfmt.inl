@@ -718,6 +718,7 @@ private:
                         case Object::Type::Cell:
                         case Object::Type::Continuation:
                         case Object::Type::OpaqueHandle:
+                        case Object::Type::SlotRef:
                             assert(false && "scan_numeric: logic error");
                             std::unreachable();
                         }
@@ -1146,6 +1147,7 @@ private:
         case Object::Type::Cell:
         case Object::Type::Continuation:
         case Object::Type::OpaqueHandle:
+        case Object::Type::SlotRef:
         default:
             assert(false && "scan_value: logic error");
             std::unreachable();

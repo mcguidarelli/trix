@@ -213,7 +213,7 @@ passed by value, never by reference.
 Push via `*++m_op_ptr = obj;` pop via `auto x = *m_op_ptr--;`.
 
 **OpaqueHandle** — The last defined Object type (type value 30, the 31st
-of the 32 slots the 5-bit type field allows — one slot stays free),
+of the 32 slots the 5-bit type field allows; the 32nd is SlotRef, so all are now used),
 claimed as a generic carrier for future object families: the payload kind lives in
 a separate `HandleKind` byte (stored in the length slot), so new kinds
 (currently Screen) never consume type-field slots or break snapshots.

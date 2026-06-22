@@ -682,7 +682,7 @@ Dict and Set store length in the heap-resident hash table header.
 The operand verification system uses 64-bit bitmasks:
 
 ```
-Bits 0..30:   one bit per Object::Type (31 types)
+Bits 0..31:   one bit per Object::Type (32 types)
 Bits 32..45:  constraint flags (RW, Exe, NotZero, etc.)
 ```
 
@@ -727,7 +727,7 @@ itself for the next iteration. Final iteration pops the entire frame.
 | 15       | Name       | 3-5   | standard                                                  |
 | 16-29    | Containers | 2-5   | Short/Long length variants                                |
 | 30       | Dict       | 2-5   | standard                                                  |
-| 13       | Reserved2  | --    | unused (slot 31 also unused)                              |
+| 13       | SlotRef    | 2-3   | frame-slot index (X=literal/exec); slot-indexing          |
 
 ### 6.6 Save/Restore Interaction
 

@@ -1487,38 +1487,38 @@ the normal attribute/size roles.
 
 ### 11.2 PackedType values
 
-| Value | Name                        | Description                                                    |
-| ----- | --------------------------- | -------------------------------------------------------------- |
-| 0     | `CommonOp`                  | Hot operator — X\|SS selects one of 8 operators (see below)    |
-| 1     | `Byte`                      | 1-byte Byte value                                              |
-| 2     | `Integer`                   | 1–4 byte signed Integer (sign-aware encoding)                  |
-| 3     | `PackedExt`                 | 128-bit (Int128/UInt128) via subcode byte; X=0, SS=offset size |
-| 4     | `UInteger`                  | 1–4 byte UInteger                                              |
-| 5     | `Long`                      | ExtValue-stored 64-bit (offset is 1–4 bytes)                   |
-| 6     | `ULong`                     | ExtValue-stored 64-bit (offset is 1–4 bytes)                   |
-| 7     | `Address`                   | ExtValue-stored Address                                        |
-| 8     | `Real`                      | 4-byte Real                                                    |
-| 9     | `Double`                    | ExtValue-stored 64-bit float (offset is 1–4 bytes)             |
-| 10    | `Simple`                    | Zero-payload; SS selects: 00=Null, 01=Mark, 10=False, 11=True  |
-| 12    | `Operator`                  | Operator by sign-aware index                                   |
-| 13    | `Reserved2`                 | Reserved                                                       |
-| 14    | `Record`                    | Record; X=fc width (0=1B, 1=2B), SS=offset size                |
-| 15    | `Name`                      | Name by index in name table                                    |
-| 16    | `ShortLengthArray`          | R/W Array, 1-byte length                                       |
-| 17    | `LongLengthArray`           | R/W Array, 2-byte length                                       |
-| 18    | `ReadOnlyShortLengthArray`  | R/O Array, 1-byte length                                       |
-| 19    | `ReadOnlyLongLengthArray`   | R/O Array, 2-byte length                                       |
-| 20    | `ReadOnlyShortLengthPacked` | R/O Packed, 1-byte length                                      |
-| 21    | `ReadOnlyLongLengthPacked`  | R/O Packed, 2-byte length                                      |
-| 22    | `ShortLengthString`         | R/W String, 1-byte length                                      |
-| 23    | `LongLengthString`          | R/W String, 2-byte length                                      |
-| 24    | `ReadOnlyShortLengthString` | R/O String, 1-byte length                                      |
-| 25    | `ReadOnlyLongLengthString`  | R/O String, 2-byte length                                      |
-| 26    | `ShortLengthStream`         | R/W Stream, 1-byte length                                      |
-| 27    | `LongLengthStream`          | R/W Stream, 2-byte length                                      |
-| 28    | `ReadOnlyShortLengthStream` | R/O Stream, 1-byte length                                      |
-| 29    | `ReadOnlyLongLengthStream`  | R/O Stream, 2-byte length                                      |
-| 30    | `Dict`                      | Dict                                                           |
+| Value | Name                        | Description                                                      |
+| ----- | --------------------------- | ---------------------------------------------------------------- |
+| 0     | `CommonOp`                  | Hot operator — X\|SS selects one of 8 operators (see below)      |
+| 1     | `Byte`                      | 1-byte Byte value                                                |
+| 2     | `Integer`                   | 1–4 byte signed Integer (sign-aware encoding)                    |
+| 3     | `PackedExt`                 | 128-bit (Int128/UInt128) via subcode byte; X=0, SS=offset size   |
+| 4     | `UInteger`                  | 1–4 byte UInteger                                                |
+| 5     | `Long`                      | ExtValue-stored 64-bit (offset is 1–4 bytes)                     |
+| 6     | `ULong`                     | ExtValue-stored 64-bit (offset is 1–4 bytes)                     |
+| 7     | `Address`                   | ExtValue-stored Address                                          |
+| 8     | `Real`                      | 4-byte Real                                                      |
+| 9     | `Double`                    | ExtValue-stored 64-bit float (offset is 1–4 bytes)               |
+| 10    | `Simple`                    | Zero-payload; SS selects: 00=Null, 01=Mark, 10=False, 11=True    |
+| 12    | `Operator`                  | Operator by sign-aware index                                     |
+| 13    | `SlotRef`                   | Frame-slot index (X=literal/exec, SS=value bytes); slot-indexing |
+| 14    | `Record`                    | Record; X=fc width (0=1B, 1=2B), SS=offset size                  |
+| 15    | `Name`                      | Name by index in name table                                      |
+| 16    | `ShortLengthArray`          | R/W Array, 1-byte length                                         |
+| 17    | `LongLengthArray`           | R/W Array, 2-byte length                                         |
+| 18    | `ReadOnlyShortLengthArray`  | R/O Array, 1-byte length                                         |
+| 19    | `ReadOnlyLongLengthArray`   | R/O Array, 2-byte length                                         |
+| 20    | `ReadOnlyShortLengthPacked` | R/O Packed, 1-byte length                                        |
+| 21    | `ReadOnlyLongLengthPacked`  | R/O Packed, 2-byte length                                        |
+| 22    | `ShortLengthString`         | R/W String, 1-byte length                                        |
+| 23    | `LongLengthString`          | R/W String, 2-byte length                                        |
+| 24    | `ReadOnlyShortLengthString` | R/O String, 1-byte length                                        |
+| 25    | `ReadOnlyLongLengthString`  | R/O String, 2-byte length                                        |
+| 26    | `ShortLengthStream`         | R/W Stream, 1-byte length                                        |
+| 27    | `LongLengthStream`          | R/W Stream, 2-byte length                                        |
+| 28    | `ReadOnlyShortLengthStream` | R/O Stream, 1-byte length                                        |
+| 29    | `ReadOnlyLongLengthStream`  | R/O Stream, 2-byte length                                        |
+| 30    | `Dict`                      | Dict                                                             |
 
 Value 11 is `Curry` (partial application). Tagged shares Curry's slot (X=0
 for Tagged, X=1 for Curry). Value 14 is `Record` (immutable named-field
@@ -1546,7 +1546,9 @@ subcode byte selects the concrete type:
 | 0x13       | OpaqueHandle (long kind)                               |
 | 0x14..0xFF | Reserved for future fixed-size heap-backed value types |
 
-Value 13 (`Reserved2`) remains unused.
+Value 13 (`SlotRef`) encodes a frame-slot index for slot-indexing (Phase 3): an
+inline reference resolved against the nearest frame dict at execution time, emitted
+only inside packed proc bodies.
 
 Note: Thunk objects cannot be packed (they are runtime-only with mutable state).
 

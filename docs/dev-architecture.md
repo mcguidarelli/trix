@@ -193,13 +193,13 @@ the *attribute byte*, a tagged-union discriminator:
  |X|W|F|T T T T T|
  +-+-+-+-+-+-+-+-+
   | | |  \_____/
-  | | |     +----- T: 5-bit type tag (31 types: Null=0 .. OpaqueHandle=30)
+  | | |     +----- T: 5-bit type tag (32 types: Null=0 .. SlotRef=31)
   | | +----------- F: per-type flag (meaning depends on T)
   | +------------- W: 0 = ReadOnly, 1 = ReadWrite
   +--------------- X: 0 = Literal,  1 = Executable
 ```
 
-The 5-bit `T` field names 31 types (30 user-visible; `SourceLoc` is internal).
+The 5-bit `T` field names 32 types (30 user-visible; `SourceLoc` and `SlotRef` are internal).
 The remaining seven bytes hold the value: an immediate scalar (Integer, Real,
 Boolean, ...) inline, or a VM offset for a composite (Array, String, Dict,
 Record, ...) that lives in the heap.  The `W` and `X` bits are the VM-enforced

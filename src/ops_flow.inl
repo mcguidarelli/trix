@@ -996,6 +996,7 @@ static void for_op(Trix *trx) {
             case Object::Type::Int128:
             case Object::Type::UInt128:
             case Object::Type::OpaqueHandle:
+            case Object::Type::SlotRef:
                 // verify_operands already rejects these; unreachable.
                 trx->error(Error::InternalError, "for: unreachable type {}", Object::type_sv(initial_type));
             }

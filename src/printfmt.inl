@@ -706,6 +706,10 @@ private:
             print_handle(val_ptr);
             break;
 
+        case Object::Type::SlotRef:
+            print_slot_ref(val_ptr);
+            break;
+
         case Object::Type::SourceLoc:
         default:
             assert(false && "PrintFmt::print_object: unknown Object type");
@@ -728,6 +732,19 @@ private:
             print_type(arg_ptr);
         } else {
             print_object(arg_ptr);
+        }
+    }
+
+    // Render a transient frame-slot reference for proc-disasm as "<slot N>".  Slot-refs
+    // exist only inside packed proc bodies (Phase 3 slot-indexing) and are resolved
+    // before execution, so this is reached only when disassembling such a body.
+    void print_slot_ref(const Object *val_ptr) {
+        assert(val_ptr->is_slot_ref());
+
+        char buffer[24];
+        auto [out, _] = std::format_to_n(buffer, sizeof(buffer), "<slot {}>", val_ptr->slot_ref_index());
+        for (auto p = buffer; p < out; ++p) {
+            emit(static_cast<vm_t>(*p));
         }
     }
 

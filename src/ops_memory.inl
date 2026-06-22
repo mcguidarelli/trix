@@ -122,7 +122,7 @@
 //                                                    (Tagged shares: X=lit)
 //   Operator (12)              1       -     1-2     signed 16-bit operator index
 //                                                    (>=0: SystemName, <0: user op)
-//   Reserved2 (13)             -       -     -       (unused)
+//   SlotRef (13)               -       -     1-2     frame-slot index (X=lit/exec)
 //   Record (14)                1       fc    1-4     CUSTOM: X=fc width(1|2),
 //                                                    SS=offset size, fc=field
 //                                                    count, value=vm_offset_t
@@ -600,7 +600,9 @@ static int64_t pack_extract_signed(Trix *trx, const Object *arg, char spec) {
     case Object::Type::UInt128:
     case Object::Type::SourceLoc:
     case Object::Type::OpaqueHandle:
-        // 128-bit integers must use the 'q'/'Q' specifier.
+    case Object::Type::SlotRef:
+        // 128-bit integers need the 'q'/'Q' specifier; the others are non-integer types
+        // (SlotRef is a transient slot-index that never reaches a pack op).
         trx->error(Error::TypeCheck, "pack '{:c}': expected integer type, got {}", spec, Object::type_sv(arg->type()));
     }
     std::unreachable();
@@ -662,7 +664,9 @@ static uint64_t pack_extract_unsigned(Trix *trx, const Object *arg, char spec) {
     case Object::Type::UInt128:
     case Object::Type::SourceLoc:
     case Object::Type::OpaqueHandle:
-        // 128-bit integers must use the 'q'/'Q' specifier.
+    case Object::Type::SlotRef:
+        // 128-bit integers need the 'q'/'Q' specifier; the others are non-integer types
+        // (SlotRef is a transient slot-index that never reaches a pack op).
         trx->error(Error::TypeCheck, "pack '{:c}': expected integer type, got {}", spec, Object::type_sv(arg->type()));
     }
     std::unreachable();
@@ -802,6 +806,7 @@ static double pack_extract_double(Trix *trx, const Object *arg, char spec) {
     case Object::Type::UInt128:
     case Object::Type::SourceLoc:
     case Object::Type::OpaqueHandle:
+    case Object::Type::SlotRef:
         trx->error(Error::TypeCheck, "pack '{:c}': expected numeric type, got {}", spec, Object::type_sv(arg->type()));
     }
     std::unreachable();
@@ -2114,6 +2119,7 @@ static void bit_position_op(Trix *trx, const char *name, OpFn &&op_fn) {
     case Object::Type::Cell:
     case Object::Type::Continuation:
     case Object::Type::OpaqueHandle:
+    case Object::Type::SlotRef:
         trx->error(Error::TypeCheck, "make_binary_token_string: cannot encode {}", Object::type_sv(object.type()));
 
     case Object::Type::Int128: {

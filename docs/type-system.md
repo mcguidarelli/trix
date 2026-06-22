@@ -204,7 +204,7 @@ Four properties are encoded in a single byte:
 
 | Field | Bits | Values | Purpose |
 | --- | --- | --- | --- |
-| **Type** | 0-4 | 0-30 | Identifies which of 31 types the value is (30 user-visible + SourceLoc) |
+| **Type** | 0-4 | 0-30 | Identifies which of 32 types the value is (30 user-visible + SourceLoc + SlotRef) |
 | **Special** | 5 | per-type | `F` flag: Boolean value / Address-cache bit / eqref marker, otherwise 0 |
 | **Access** | 6 | 0=ReadOnly, 1=ReadWrite | Controls mutation permission |
 | **Execution** | 7 | 0=Literal, 1=Executable | Controls interpreter behavior |

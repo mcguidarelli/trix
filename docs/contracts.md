@@ -39,7 +39,7 @@ A **precondition** asserts that inputs are valid before proceeding.  A
 ```
 
 Contracts are not type checks -- Trix's type system handles that
-(31 types, 30 user-visible, no implicit coercion, `verify_operands` in
+(32 types, 30 user-visible, no implicit coercion, `verify_operands` in
 every operator).
 Contracts check **domain constraints**: "this integer must be positive",
 "this array must be non-empty", "this string must match a pattern."

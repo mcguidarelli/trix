@@ -85,7 +85,7 @@ syntactic form.  When in doubt, search this first.
 How the language's building blocks work end-to-end.
 
 ### Core
-- [Type System](type-system.md) -- 8-byte tagged union, 31 types (30 user-visible)
+- [Type System](type-system.md) -- 8-byte tagged union, 32 types (30 user-visible)
 - [Scanner](scanner.md) and [Scanner Syntax](scanner-syntax.md) --
   lexer, tokenization, binary tokens
 - [Infix Design](infix-design.md) -- `$(...)` infix arithmetic

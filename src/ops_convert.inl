@@ -66,7 +66,7 @@
 //   is-<type>: any -- bool (per-type tests: is-array, is-byte, is-integer,
 //              is-number, ... one for each Object type, no generic is-type)
 //   type: any -- name (returns the type name of an object)
-//   All 31 types (Object::TypeCount) have a corresponding type name in systemdict.
+//   All 32 types (Object::TypeCount) have a corresponding type name in systemdict.
 //
 // Type casting (cast, reinterpret), type promotion, numeric conversion
 // (to-name, to-number, to-string), attribute modification (make-executable,

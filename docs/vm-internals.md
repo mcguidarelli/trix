@@ -441,7 +441,7 @@ Every value in the VM is an 8-byte `Object`.
   //  7 6 5 4 3 2 1 0
   //  | | | +---------+
   //  | | |     |
-  //  | | |     +------- Type (5 bits, 31 types including 1 internal)
+  //  | | |     +------- Type (5 bits, 32 types including 2 internal)
   //  | | +------------- F: SpecialFlag (Dict dynamic mode, packed prefix, etc.)
   //  | +--------------- W: 0 = ReadOnly, 1 = ReadWrite
   //  +----------------- X: 0 = Literal, 1 = Executable

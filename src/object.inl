@@ -88,11 +88,13 @@ class Stream;
 //   the free list.  The active count (m_extvalue_active_count) tracks
 //   live ExtValues for leak detection.
 //
-// TYPE SYSTEM (31 types, 5-bit encoding, 32 slots, 1 remaining)
+// TYPE SYSTEM (32 types, 5-bit encoding, 32 slots, 0 remaining)
 //   Null, Byte, Integer, UInteger, Long, ULong, Address, Real, Double,
 //   Boolean, Operator, Mark, Name, Array, Packed, String, Stream, Dict,
 //   SourceLoc, Curry, Thunk, Set, Tagged, Record, Coroutine, PipeBuffer,
-//   Cell, Continuation, Int128, UInt128, OpaqueHandle, + 1 reserved slot.
+//   Cell, Continuation, Int128, UInt128, OpaqueHandle, SlotRef.
+//   The slots are full; future types ride the OpaqueHandle escape hatch
+//   (a new HandleKind + sm_object_attrib row), not a new top-level Type.
 //
 // ATTRIBUTE BYTE (aat_t)
 //   Bit 7 (X): Execute attribute -- 0 = Literal (data), 1 = Executable.
@@ -337,10 +339,14 @@ public:
         Continuation,  // 11011 -- one-shot delimited continuation [ContinuationContext in VM]
         Int128,        // 11100 -- signed 128-bit integer [WideValue in VM]
         UInt128,       // 11101 -- unsigned 128-bit integer [WideValue in VM]
-        OpaqueHandle   // 11110 -- sub-typed by HandleKind (Screen, future Tilemap/Sample/...).
+        OpaqueHandle,  // 11110 -- sub-typed by HandleKind (Screen, future Tilemap/Sample/...).
                        //          attrib_index() expands the sm_object_attrib table so each kind has its own row.
+        SlotRef        // 11111 -- transient frame-slot reference (inline slot index; Phase 3 slot-indexing).
+                       //          Decoded from a PackedType::SlotRef body element and resolved against the
+                       //          nearest frame dict by execute_proc; never stored/serialized.  This spends
+                       //          the last 5-bit Type slot -- future types ride the OpaqueHandle escape hatch.
     };
-    static constexpr type_t TypeCount{+Type::OpaqueHandle + 1};
+    static constexpr type_t TypeCount{+Type::SlotRef + 1};
     static constexpr type_t TypeMask{0x1F};
 
     // HandleKind: sub-type discriminator for Type::OpaqueHandle.  Stored in the
@@ -452,6 +458,9 @@ public:
 
         case Type::OpaqueHandle:
             return "opaque-handle-type"sv;
+
+        case Type::SlotRef:
+            return "slotref-type"sv;
 
         default:
             assert(false && "type_sv: unknown Type");
@@ -1321,6 +1330,11 @@ public:
             assert(false && "hash: SourceLoc cannot be a dict key");
 
             std::unreachable();
+
+        case Type::SlotRef:
+            assert(false && "hash: SlotRef is transient and cannot be a dict key");
+
+            std::unreachable();
         }
 
         assert(false && "hash: unknown Object type");
@@ -1407,6 +1421,10 @@ public:
 
                 case Type::SourceLoc:
                     assert(false && "equal: SourceLoc cannot be a dict key");
+                    std::unreachable();
+
+                case Type::SlotRef:
+                    assert(false && "equal: SlotRef is transient and cannot be compared");
                     std::unreachable();
 
                 case Type::Curry:
@@ -1606,6 +1624,30 @@ public:
         assert(is_integer());
 
         return m_integer;
+    }
+
+    // Slot-ref (Phase 3 slot-indexing): a transient reference to a frame-local slot,
+    // produced ONLY by decoding a PackedType::SlotRef element during packed traversal.
+    // An inline Type::SlotRef carrying the slot index: GC never follows it (inline, no
+    // heap offset) and it is never stored or serialized.  exec_attrib carries the
+    // literal/executable context (X bit) so the resolver knows whether to push or
+    // execute the slot value.  execute_proc resolves it against the nearest frame dict
+    // immediately, so it never lands on a stack or in a container.
+    [[nodiscard]] static constexpr Object make_slot_ref(length_t slot, aat_t exec_attrib) {
+        Object object;
+        object.m_aat = (exec_attrib | +Type::SlotRef);
+        object.m_object_save_level = Save::BASE;
+        object.m_length = 0;
+        object.m_offset = static_cast<vm_offset_t>(slot);
+        return object;
+    }
+
+    [[nodiscard]] bool is_slot_ref() const { return (type() == Type::SlotRef); }
+
+    [[nodiscard]] length_t slot_ref_index() const {
+        assert(is_slot_ref());
+
+        return static_cast<length_t>(m_offset);
     }
 
     [[nodiscard]] std::pair<bool, integer_t> integer_value(Trix *trx,
@@ -4964,6 +5006,12 @@ public:
                 packed_type = PackedType::PackedExt;
                 value = object->m_uint128;
                 break;
+
+            case Type::SlotRef:
+                // Slot-refs are written directly into the packed stream by the
+                // slot-indexing rewrite (never classified from an Object), and never
+                // appear as a body element handed to make_packed_data.
+                trx->error(Error::InternalError, "make_packed_data: SlotRef cannot be classified for packing");
             }
 
             if (value_size == -1) {
@@ -5345,8 +5393,14 @@ public:
             break;
         }
 
-        case PackedType::Reserved2:
-            trx->error(Error::InternalError, "extract_next_packed: reserved packed type {}", +packed_type);
+        case PackedType::SlotRef:
+            // Slot-ref (Phase 3 slot-indexing): a transient reference to a frame-local
+            // slot, emitted ONLY inside packed proc bodies.  sm_type already set
+            // Type::SlotRef; the inline slot index is in the value slot (m_offset).  The
+            // X bit carries the literal/executable context.  execute_proc resolves it
+            // against the nearest frame dict before any push/execute; it never persists,
+            // is never serialized, and (inline) is a GC leaf.
+            break;
 
         case PackedType::Curry:
             // Curry and Tagged share PackedType::Curry.
@@ -5420,7 +5474,7 @@ public:
                 Type::Null,      // PackedType::Simple     (type overridden in switch)
                 Type::Curry,     // PackedType::Curry  (or Tagged if X=0; resolved in switch)
                 Type::Operator,  // PackedType::Operator
-                Type::Null,      // PackedType::Reserved2
+                Type::SlotRef,   // PackedType::SlotRef -> Type::SlotRef (inline slot index)
                 Type::Record,    // PackedType::Record  (field_count set in switch)
                 Type::Name,      // PackedType::Name
                 Type::Array,     // PackedType::ShortLengthArray
@@ -5877,7 +5931,8 @@ private:
             (PushOpDirect | IgnoresExecute | UsesVM | IsSignedIntegral | IsPersistable),                       // Int128
             (PushOpDirect | IgnoresExecute | UsesVM | IsUnsignedIntegral | IsPersistable),                     // UInt128
             0,                                                                                                 // OpaqueHandle
-            (PushOpDirect | IgnoresExecute | UsesVM)                                                           // HandleKind::Screen
+            0,                                        // SlotRef (inline, transient; resolved before any attr use)
+            (PushOpDirect | IgnoresExecute | UsesVM)  // HandleKind::Screen
     };
 
     // attrib_index() lifts the lookup key for sm_object_attrib above its raw
@@ -5911,7 +5966,7 @@ private:
         Simple,  // SS = 2-bit sub-type (00=Null,01=Mark,10=False,11=True)
         Curry,
         Operator,
-        Reserved2,
+        SlotRef,  // frame-slot index (X=literal/exec, SS=value_size-1); Phase 3 slot-indexing
         Record,
         Name,
         ShortLengthArray,
@@ -6052,7 +6107,7 @@ private:
                 VSizeZero,              // PackedType::Simple X=attrib SS=sub-type Length Size: 0, Value Size:   0 bytes
                 LSizeZero,              // PackedType::Curry                       Length Size: 0, Value Size:1..4 bytes
                 LSizeZero,              // PackedType::Operator                    Length Size: 0, Value Size:1..2 bytes
-                VSizeZero,              // PackedType::Reserved2                   Length Size: 0, Value Size:   0 bytes
+                LSizeZero,              // PackedType::SlotRef -> slot-ref        Length Size: 0, Value Size:1..2 bytes
                 VSizeZero,              // PackedType::Record   X=fc width         Length Size: 0, Value Size:   0 bytes (custom)
                 LSizeZero,              // PackedType::Name                        Length Size: 0, Value Size:2..4 bytes
                 LSizeOne,               // PackedType::ShortLengthArray            Length Size: 1, Value Size:1..4 bytes

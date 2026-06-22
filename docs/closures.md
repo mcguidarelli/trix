@@ -382,8 +382,8 @@ No new type required.  The Curry execution path pushes the value (dict) onto
 the operand stack, then executes the callable.  The callable moves the dict
 to the dict stack via `closure-with-dict`.
 
-**Alternative considered**: New closure type (using the 1 remaining type
-slot -- 31 of the 32 five-bit slots are defined).  Rejected -- Curry already
+**Alternative considered**: New closure type (using what was then the 1 remaining type
+slot; all 32 five-bit slots are now defined -- SlotRef took the last).  Rejected -- Curry already
 does exactly what is needed, and type slots are scarce.
 
 ### 5.2 Captured Dict is ReadOnly

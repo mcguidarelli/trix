@@ -119,6 +119,7 @@ static void clearobject_op(Trix *trx) {
     case Object::Type::Cell:
     case Object::Type::Continuation:
     case Object::Type::OpaqueHandle:
+    case Object::Type::SlotRef:
         assert(false && "clearobject_op: logic error");
         std::unreachable();
     }
@@ -531,6 +532,7 @@ static void vmsize_op(Trix *trx) {
     case Object::Type::Cell:
     case Object::Type::Continuation:
     case Object::Type::OpaqueHandle:
+    case Object::Type::SlotRef:  // transient, no storage (never a user-visible value)
         size = 0;
         break;
     }

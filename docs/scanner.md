@@ -1415,7 +1415,7 @@ types that need more, the packed type itself indicates the length format
 | `Simple` | 10 | Null/Mark/False/True | SS = sub-type (no extra bytes) |
 | `Curry` | 11 | curried function | encoded inline |
 | `Operator` | 12 | operator (sign-aware index) | SS = 1-2 bytes |
-| `Reserved2` | 13 | reserved | -- |
+| `SlotRef` | 13 | frame-slot index (slot-indexing) | X=literal/exec, SS = 1-2 bytes |
 | `Record` | 14 | immutable record | X=fc width + SS=offset bytes |
 | `Name` | 15 | name by index | SS = 2-4 bytes (minimum 2 for bind compatibility) |
 | `ShortLengthArray` | 16 | R/W Array | 1-byte length + elements |

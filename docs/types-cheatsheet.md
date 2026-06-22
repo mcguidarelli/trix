@@ -34,7 +34,7 @@ operational rules:
 
 ---
 
-## 1. The 31 types
+## 1. The 32 types
 
 | Tag | Type | Size | Encoding | Notes |
 | --- | --- | --- | --- | --- |
