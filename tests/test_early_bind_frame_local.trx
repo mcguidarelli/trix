@@ -1,0 +1,85 @@
+% ====================================================================
+% test_early_bind_frame_local.trx -- #e must not freeze a |locals|
+% preamble PARAM that shadows a built-in operator name (Phase 1).
+% ====================================================================
+% Early binding (#e / bind) resolves a body's executable names to
+% direct operator references at SCAN time.  A preamble param whose
+% name collides with an operator (add, sub, mul, ...) used to be
+% frozen to the OPERATOR -- the frame local does not exist at scan
+% time.  Phase 1 makes the binder skip such names at every nesting
+% depth (the proc's own frame is detected in-stream; enclosing frames
+% are seeded from the scanner's enclosing-frame stack).
+%
+% SCOPE: preamble params only.  An operator-named local installed via
+% local-def / bind-locals is NOT a preamble name and stays frozen --
+% out of Phase 1 scope, still flagged by check_operator_shadows.py.
+%
+% rt-fails counts failures in a restore-immune string byte (the suite
+% wraps each test in save/restore, so a plain integer counter would
+% roll back).  The file THROWS at EOF if any assertion failed.
+
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: single-level param shadowing an operator
+% ====================================================================
+
+% 'add' is a param; #e must resolve the body 'add' to the LOCAL.
+/s1-late  { |add| add }    def
+/s1-early { |add| add }#e  def
+5 s1-late  5 eq                                 (s1: late param resolves to local)            rt-ok
+5 s1-early 5 eq                                 (s1: #e param resolves to local, not operator) rt-ok
+
+% #e and late binding must agree for a shadowing param.
+7 s1-late 7 s1-early eq                          (s1: #e matches late for shadowing param)     rt-ok
+
+% Capacity suffix (N > K) must not defeat frame detection.
+/s1-cap { |add|#3 add }#e def
+9 s1-cap 9 eq                                    (s1: #e param safe with #N capacity)          rt-ok
+
+% ====================================================================
+% SECTION 2: no over-exclusion -- real operators still bind under #e
+% ====================================================================
+
+% No frame at all: 'add' binds to the operator.
+/s2-noframe { 2 3 add }#e def
+s2-noframe 5 eq                                  (s2: no-frame #e still binds operator)        rt-ok
+
+% Frame present, but 'add' is NOT a param -> binds to the operator.
+/s2-real { |x| x 1 add }#e def
+5 s2-real 6 eq                                   (s2: non-shadowed operator still binds)       rt-ok
+
+% Shadowed param AND a real operator in one body: mul binds, add is local.
+% x=3 -> 3 10 mul = 30 (left below); add(param=7) pushed on top.
+/s2-mix { |add x| x 10 mul add }#e def
+7 3 s2-mix 7 eq                                  (s2: real op binds beside shadowed param)     rt-ok
+clear
+
+% ====================================================================
+% SECTION 3: nesting -- both directions of Finding 1
+% ====================================================================
+
+% (a) OUTER #e descends into an inner proc whose param shadows 'sub'.
+%     The inner proc is NOT itself #e; the outer bind reaches its body.
+/s3-outer { |a| { |sub| sub } a exch exec }#e def
+9 s3-outer 9 eq                                  (s3a: outer #e spares inner param)            rt-ok
+
+% (b) INNER #e references an OUTER param shadowing 'sub'.  The inner
+%     proc is bound before the outer exists, so it must consult the
+%     enclosing-frame seed.
+/s3-inner { |sub| { sub }#e exec }#e def
+12 s3-inner 12 eq                                (s3b: inner #e spares outer param)            rt-ok
+
+% ====================================================================
+% SECTION 4: documented out-of-scope -- local-def name stays frozen
+% ====================================================================
+% A 'mul' installed via local-def is not a preamble name; #e freezes
+% it to the operator, so the body underflows.  Pin that it throws.
+/s4-localdef { |x|#2 5 /mul local-def x mul }#e def
+{ 3 s4-localdef } try /opstack-underflow eq      (s4: local-def shadow still frozen)           rt-ok clear
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_early_bind_frame_local: ALL TESTS PASSED) =
+(__test_ok__) =

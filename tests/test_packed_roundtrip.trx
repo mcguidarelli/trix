@@ -426,16 +426,16 @@ save
 5 late-loc   exec 4 eq      (pk: late-bound |locals| body sees the redefinition) rt-ok
 restore clear
 
-% --- HAZARD: a |locals| name that shadows an operator, plus #e ---
-% At scan time the local does not exist, so #e freezes the body reference to the
-% OPERATOR (not the future local); the proc then mis-dispatches.  This is the
-% exact foot-gun tests/check_operator_shadows.py guards against -- early binding
-% an operator-named local is NOT the same as the late-bound (correct) proc.
+% --- A |locals| PARAM that shadows an operator, plus #e (Phase 1) ---
+% The binder excludes preamble param names from operator-binding, so an
+% operator-named param is NOT frozen to the operator: #e now matches the
+% late-bound (correct) proc.  (local-def / bind-locals names remain a
+% hazard -- see tests/test_early_bind_frame_local.trx.)
 save
 { |max| max }   /late-max  exch def
 { |max| max }#e /early-max exch def
-42 late-max exec 42 eq                  (pk: late-bound operator-named local pushes the local value) rt-ok
-{ 42 early-max exec } try /no-error ne  (pk: #e froze operator-named local 'max' to the operator -> errors) rt-ok
+42 late-max  exec 42 eq                 (pk: late-bound operator-named param pushes the local value) rt-ok
+42 early-max exec 42 eq                 (pk: #e operator-named param resolves to the local, not the operator) rt-ok
 restore clear
 
 % --- Empty body + #e (regression: bind on an empty packed body crashed) ---

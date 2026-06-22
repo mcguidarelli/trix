@@ -2,13 +2,20 @@
 # check_operator_shadows.py -- flag .trx names that shadow a built-in operator.
 #
 # A name bound by `def` / `def-persist` (global), or declared as a frame local
-# (`|locals|` preamble, `local-def`, `bind-locals`), that collides with a system
-# operator name is a SHADOW.  It works (late binding resolves to the user's
-# binding) but is a readability foot-gun AND it breaks early binding (`#e` /
-# `bind`): early binding freezes a name to the operator at SCAN time, so a frame
-# local that shadows an operator is frozen to the OPERATOR (the local does not
-# exist yet), and a body scanned after a global redefinition diverges from one
-# scanned before -- a silent split.
+# via `local-def` / `bind-locals`, that collides with a system operator name is
+# a SHADOW.  It works (late binding resolves to the user's binding) but is a
+# readability foot-gun AND it breaks early binding (`#e` / `bind`): early binding
+# freezes a name to the operator at SCAN time, so a `local-def` / `bind-locals`
+# frame local that shadows an operator is frozen to the OPERATOR (the local does
+# not exist yet), and a body scanned after a global redefinition diverges from
+# one scanned before -- a silent split.
+#
+# `|locals|` PREAMBLE PARAMS are NOT a hazard and are NOT flagged: the early
+# binder knows the preamble names (the proc's own at every nesting depth, plus
+# any enclosing locals proc's) and leaves those body references alone, so a
+# param wins over a same-named operator under `#e` exactly as under late
+# binding.  Only the `local-def` / `bind-locals` form -- invisible at scan time
+# -- remains a foot-gun.
 #
 # This is a LINT, not a hard language rule: redefinition is a deliberate Trix
 # feature and operator names overlap with common variable names, so it is run on
@@ -27,19 +34,22 @@
 #                                     foot-gun) -> exits 1.
 #   * `override`                   -> the deliberate, sanctioned shadow -> EXEMPT
 #                                     (never flagged; it is the intended fix).
-#   * `local-def` / `bind-locals`  -> frame local; and `|locals|` preamble tokens
-#     / `|...|` preamble             -> frame local.  Both are REPORTED but do not
-#                                     fail -- operator names overlap heavily with
-#                                     good variable names (sum, count, max), so
-#                                     failing on them would cry wolf.
+#   * `local-def` / `bind-locals`  -> frame local invisible at scan time -> the
+#                                     #e foot-gun.  REPORTED but does not fail --
+#                                     operator names overlap heavily with good
+#                                     variable names (sum, count, max), so failing
+#                                     on them would cry wolf.
+#   * `|locals|` preamble param    -> #e-safe (the binder excludes preamble names)
+#                                     -> NOT flagged.
 #   * `def-prim` / `put` / `store` / anything else -> NOT a shadow.  These install
 #     into a USER or domain dict (e.g. mini-scheme's Scheme primitives-dict via
 #     `def-prim`), never the Trix dict stack, so they cannot shadow an operator.
 #     The previous line-only heuristic mis-flagged these as global redefinitions.
 #
 # `@`-operators are excluded: leading-`@` names are reserved and cannot be user
-# bound, so they are unshadowable.  Run before using `#e` to find frame-local
-# hazards; CI runs it over examples/*.trx (`--quiet`) as a guard against NEW
+# bound, so they are unshadowable.  Run before using `#e` to find `local-def` /
+# `bind-locals` frame-local hazards; CI runs it over examples/*.trx (`--quiet`)
+# as a guard against NEW
 # global operator redefinitions in the showcases (all are currently 0-global).
 # tests/*.trx are NOT guarded -- they deliberately exercise redefinition.
 
@@ -57,7 +67,6 @@ NAME_CHARS = r"[A-Za-z][A-Za-z0-9_?<>=!*+./-]*"
 NAME_CONT = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_?<>=!*+./-")
 NAME_START = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 LINE_LEAD_DEF = re.compile(r"^[ \t]*/(" + NAME_CHARS + r")")
-LOCALS_PREAMBLE = re.compile(r"\{\s*\|([^|]*)\|")
 
 # Binder words that bind a GLOBAL name (into the current/system dict).
 GLOBAL_BINDERS = {"def", "def-persist"}
@@ -184,7 +193,7 @@ def find_binder(masked, name_end):
 
 
 def scan_file(path, ops):
-    shadows = []  # (lineno, kind, name); kind in global-def / local-def / local-var
+    shadows = []  # (lineno, kind, name); kind in global-def / local-def
     text = path.read_text()
     masked = mask(text)
     lines = masked.split("\n")
@@ -200,10 +209,9 @@ def scan_file(path, ops):
                 shadows.append((lineno, "local-def", m.group(1)))
             # override / def-prim / put / store / None: a sanctioned shadow, a dict
             # install, or a value-use -- not a foot-gun, so not flagged
-        for pm in LOCALS_PREAMBLE.finditer(line):
-            for tok in pm.group(1).split():
-                if tok in ops:
-                    shadows.append((lineno, "local-var", tok))
+        # NOTE: `|locals|` preamble params are intentionally NOT scanned -- the
+        # early binder excludes preamble names, so an operator-named param is
+        # #e-safe (see the module docstring).
         offset += len(line) + 1  # +1 for the '\n' removed by split
     return shadows
 

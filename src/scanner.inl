@@ -1848,7 +1848,19 @@ make_proc_object(Trix *trx, Object *base, length_t length, Object *saved_op_ptr,
 
     // within Array and Packed, replace executable names with underlying operator value
     if (suffix.is_earlybinding) {
-        Object::bind_array(trx, base, length, Object::ArrayKind::Normal);
+        // Seed the binder with the lexically-enclosing |locals| frame scopes (recorded
+        // in m_enclosing_frames by scan_procedure) so a body name that shadows an
+        // enclosing proc's frame local is not frozen to the operator -- the frame local
+        // is invisible at scan time.  This proc's OWN frame is detected in-stream by
+        // bind_array.  The chain links oldest-first; depth <= MaxProcNesting (no heap).
+        Object::FrameScope seed_nodes[MaxProcNesting]{};
+        const Object::FrameScope *seed = nullptr;
+        auto depth = trx->m_enclosing_frame_count;
+        for (auto i = 0; (i < depth) && (i < MaxProcNesting); ++i) {
+            seed_nodes[i] = Object::FrameScope{seed, trx->m_enclosing_frames[i].names, nullptr, trx->m_enclosing_frames[i].count};
+            seed = &seed_nodes[i];
+        }
+        Object::bind_array(trx, base, length, Object::ArrayKind::Normal, seed);
     }
 
     // Before committing to eqproc storage reuse, verify the generation counter hasn't
@@ -2284,6 +2296,30 @@ scan_scope_block(Trix *trx, int proc_nesting, ProcScanState *state, SystemName o
     } else {
         return syntaxerror_pair(locals_count_obj);
     }
+
+    // Register this proc's frame-local names (base[0..locals_count)) as an enclosing
+    // scope for any nested procs scanned in the body below, so their #e early binding
+    // excludes these names (frame-local safety across nesting).  The names sit on the
+    // scratch op stack and are never relocated by the overflow valve (the preamble is
+    // placed before any body element).  The guard pops on EVERY exit (RAII) -- after
+    // make_proc_object, so the names are also live while binding this proc's own
+    // descendants; this proc detects its own frame in-stream, so the redundant
+    // self-entry is harmless.  Skip the empty ||#N scratch form (no names to exclude).
+    struct EnclosingFrameGuard {
+        Trix *trx;
+        bool active;
+        ~EnclosingFrameGuard() {
+            if (active) {
+                --trx->m_enclosing_frame_count;
+            }
+        }
+    };
+    auto push_enclosing = (has_locals_preamble && (locals_count > 0) && (trx->m_enclosing_frame_count < MaxProcNesting));
+    if (push_enclosing) {
+        trx->m_enclosing_frames[trx->m_enclosing_frame_count] = EnclosingFrame{base, locals_count};
+        ++trx->m_enclosing_frame_count;
+    }
+    const EnclosingFrameGuard enclosing_guard{trx, push_enclosing};
 
 // Per-element source-line tracking for `proc-disasm` annotation.  Each
 // committed body element gets the line it was scanned from (post-scanner

@@ -5574,18 +5574,128 @@ public:
     // Whether packed-name entries should be saved before overwriting during bind.
     enum class SavePolicy { DoNotSave, Save };
 
+    // A frame scope = the frame-local names of one |locals| proc, linked to its
+    // lexically-enclosing scope.  Used during #e early binding to skip overwriting
+    // a body name that actually refers to a frame local (which shadows a same-named
+    // operator).  Names live in place -- never copied -- in one of two sources:
+    //   ArrayNames  (array_names != nullptr): contiguous literal Name Objects, i.e.
+    //               the transformed outer array's base[0..count), or an enclosing
+    //               proc's preamble still on the scratch op stack.
+    //   PackedNames (packed_names != nullptr): a packed stream whose first `count`
+    //               entries are the literal frame names -- an already-built nested
+    //               locals proc met during recursive descent.  Those leading entries
+    //               are literal (never executable), so bind never overwrites them and
+    //               the pointer stays valid for the whole descent.
+    struct FrameScope {
+        const FrameScope *parent;
+        const Object *array_names;
+        const packed_data_t *packed_names;
+        length_t count;
+    };
+
+    // True if `name_off` (an interned Name offset) names a frame local of any scope
+    // in the chain.  Names are interned, so equal text => equal offset => integer
+    // compare.  Chain depth = nesting depth and count = frame size: both tiny.
+    static bool frame_scope_contains(Trix *trx, const FrameScope *chain, vm_offset_t name_off) {
+        for (auto scope = chain; scope != nullptr; scope = scope->parent) {
+            if (scope->array_names != nullptr) {
+                for (length_t i = 0; i < scope->count; ++i) {
+                    if (scope->array_names[i].is_name() && (scope->array_names[i].name_offset() == name_off)) {
+                        return true;
+                    }
+                }
+            } else {
+                auto entry = scope->packed_names;
+                for (length_t i = 0; i < scope->count; ++i) {
+                    auto [next, obj] = extract_next_packed(trx, entry);
+                    if (obj.is_name() && (obj.name_offset() == name_off)) {
+                        return true;
+                    }
+                    entry = next;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Recognize the scanner's locals-frame transform -- [/n1../nK  K  N  {body} begin-locals]
+    // -- in array form and return K (the count of leading frame-local names), or 0 when the
+    // sequence is not a frame body.  The K names shadow same-named operators inside {body}.
+    static length_t frame_name_count_array(const Object *base, length_t count) {
+        auto result = length_t{0};
+        if (count >= 4) {
+            const auto &last = base[count - 1];
+            const auto &k_obj = base[count - 4];
+            auto candidate = k_obj.is_integer() ? k_obj.integer_value() : integer_t{-1};
+            auto structural = last.is_operator() && (last.m_operator == +SystemName::BeginLocals) && (candidate >= 0) &&
+                              (static_cast<length_t>(count - 4) == static_cast<length_t>(candidate)) &&
+                              base[count - 3].is_integer() && base[count - 2].is_packed();
+            if (structural) {
+                // The leading K elements must all be literal names (else not a frame body).
+                // Fold the scan's early-out into the loop condition -- no guard return.
+                auto all_names = true;
+                for (length_t i = 0; all_names && (i < static_cast<length_t>(candidate)); ++i) {
+                    all_names = base[i].is_name();
+                }
+                if (all_names) {
+                    result = static_cast<length_t>(candidate);
+                }
+            }
+        }
+        return result;
+    }
+
+    // Packed-form counterpart of frame_name_count_array.  Navigates the packed stream
+    // via skip_packed (binding is a one-time scan-time cost; procs are small).
+    static length_t frame_name_count_packed(Trix *trx, const packed_data_t *src, length_t count) {
+        auto result = length_t{0};
+        if (count >= 4) {
+            auto element_at = [&](length_t idx) { return extract_next_packed(trx, skip_packed(src, idx)).second; };
+            auto last_obj = element_at(static_cast<length_t>(count - 1));
+            auto k_obj = element_at(static_cast<length_t>(count - 4));
+            auto n_obj = element_at(static_cast<length_t>(count - 3));
+            auto body_obj = element_at(static_cast<length_t>(count - 2));
+            auto candidate = k_obj.is_integer() ? k_obj.integer_value() : integer_t{-1};
+            auto structural = last_obj.is_operator() && (last_obj.m_operator == +SystemName::BeginLocals) && (candidate >= 0) &&
+                              (static_cast<length_t>(count - 4) == static_cast<length_t>(candidate)) && n_obj.is_integer() &&
+                              body_obj.is_packed();
+            if (structural) {
+                auto all_names = true;
+                auto entry = src;
+                for (length_t i = 0; all_names && (i < static_cast<length_t>(candidate)); ++i) {
+                    auto [next, obj] = extract_next_packed(trx, entry);
+                    all_names = obj.is_name();
+                    entry = next;
+                }
+                if (all_names) {
+                    result = static_cast<length_t>(candidate);
+                }
+            }
+        }
+        return result;
+    }
+
     // Resolve executable name elements within src in-place to their bound operator values.
     // kind: Normal  = save each element to the undo log before overwriting (when at an older save level);
     //       EqArray = skip per-element saves (the enclosing dict's save mechanism covers rollback).
+    // enclosing: the chain of lexically-enclosing |locals| frame scopes (nullptr at the top of a
+    //       runtime `bind`, or seeded from the scanner's enclosing-frame stack for #e).  A body name
+    //       that matches a frame local of this proc (detected in-stream below) or of any enclosing
+    //       proc is left untouched -- the frame local shadows the same-named operator at run time.
     // Contrast with copy_array (Trix member), which copies elements between two arrays.
-    static void bind_array(Trix *trx, Object *src, length_t count, ArrayKind kind) {
+    static void bind_array(Trix *trx, Object *src, length_t count, ArrayKind kind, const FrameScope *enclosing = nullptr) {
         auto curr_save_level = trx->m_curr_save_level;
+        // If src is this proc's transformed frame body, its K leading names are frame locals
+        // that must not be frozen to operators inside the body.
+        auto frame_names_count = frame_name_count_array(src, count);
+        FrameScope own_scope{enclosing, src, nullptr, frame_names_count};
+        const FrameScope *active = (frame_names_count != 0) ? &own_scope : enclosing;
         for (auto end = src + count; src != end; ++src) {
             if (src->is_executable()) {
                 auto save_policy = (src->save_level() != curr_save_level) ? SavePolicy::Save : SavePolicy::DoNotSave;
                 if (src->is_name()) {
                     auto value = Name::name_search(trx, src);
-                    if ((value != nullptr) && value->is_operator()) {
+                    if ((value != nullptr) && value->is_operator() && !frame_scope_contains(trx, active, src->name_offset())) {
                         if ((save_policy == SavePolicy::Save) && (kind != ArrayKind::EqArray)) {
                             Save::save_object(trx, src);
                         }
@@ -5593,9 +5703,9 @@ public:
                     }
                 } else if (src->is_array()) {
                     auto [head, length] = src->array_value(trx);
-                    bind_array(trx, head, length, kind);
+                    bind_array(trx, head, length, kind, active);
                 } else if (src->is_packed()) {
-                    bind_packed(trx, *src, save_policy);
+                    bind_packed(trx, *src, save_policy, active);
                 }
             }
         }
@@ -5604,7 +5714,7 @@ public:
     // Resolves executable Name elements within a packed array in-place to their bound Operator encoding.
     // save_policy: Save = preserve original bytes in the save log before overwriting (when the
     // packed array was created at an earlier save level than the current one).
-    static void bind_packed(Trix *trx, Object packed_obj, SavePolicy save_policy) {
+    static void bind_packed(Trix *trx, Object packed_obj, SavePolicy save_policy, const FrameScope *enclosing = nullptr) {
         // Bind only when the packed proc has data.  An empty packed proc (e.g.
         // the body of `{ }` or `{|x| }`) has no data offset -- m_packed is
         // nulloffset -- so there is nothing to bind, and packed_value()/
@@ -5614,12 +5724,19 @@ public:
         // ([/x K N {} begin-locals]).
         if (packed_obj.m_arrays_length != 0) {
             auto [src, count] = packed_obj.packed_value(trx);
+            // If this packed proc is a transformed frame body, its K leading names are
+            // frame locals to exclude from operator-binding inside the body.  The leading
+            // entries are literal (never overwritten below), so packed_names stays valid.
+            auto frame_names_count = frame_name_count_packed(trx, src, count);
+            FrameScope own_scope{enclosing, nullptr, src, frame_names_count};
+            const FrameScope *active = (frame_names_count != 0) ? &own_scope : enclosing;
             while (count-- != 0) {
                 auto [next, object] = extract_next_packed(trx, src);
                 if (object.is_executable()) {
                     if (object.is_name()) {
                         auto name_value = Name::name_search(trx, &object);
-                        if ((name_value != nullptr) && name_value->is_operator()) {
+                        if ((name_value != nullptr) && name_value->is_operator() &&
+                            !frame_scope_contains(trx, active, object.name_offset())) {
                             auto header = *src;
                             auto [length_size, value_size, _] = packed_sizes(header);
                             if ((length_size != 0) || (value_size < 2) || (value_size > 4)) {
@@ -5663,9 +5780,9 @@ public:
                         }
                     } else if (object.is_array()) {
                         auto array_objects = trx->offset_to_ptr<Object>(object.m_array);
-                        bind_array(trx, array_objects, object.m_arrays_length, ArrayKind::Normal);
+                        bind_array(trx, array_objects, object.m_arrays_length, ArrayKind::Normal, active);
                     } else if (object.is_packed()) {
-                        bind_packed(trx, object, save_policy);
+                        bind_packed(trx, object, save_policy, active);
                     }
                 }
                 src = next;

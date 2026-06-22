@@ -314,11 +314,16 @@ across a whole hot path: early-binding the bundled Z-machine interpreter's
 44-proc hot core cut 10.7% off a real-game walkthrough.  Unlike `#a`, `#e` binds
 **recursively**, reaching through a `|...|` locals body.  `#e` is safe only when
 each name's scan-time meaning is its run-time meaning -- do NOT early-bind a
-proc that relies on an operator being redefined later, or that has a frame
-variable shadowing an operator name (the local does not exist at scan time, so
-`#e` freezes the reference to the operator).  The opt-in lint
-`tests/check_operator_shadows.py` flags the operator-named-local hazard.  See
-`interpreter.md` Section 8.2.
+proc that relies on an operator being redefined later.  A `|...|` preamble
+**param** that shadows an operator name *is* safe: the binder knows the
+preamble names (the proc's own at every nesting depth, plus any enclosing
+locals proc's) and leaves those references alone, so the param wins over the
+operator just as it does under late binding.  The remaining hazard is a frame
+local installed by `local-def` / `bind-locals` whose name shadows an operator:
+that name is invisible at scan time, so `#e` freezes the body reference to the
+operator (declare it as a preamble param instead, or do not early-bind).  The
+opt-in lint `tests/check_operator_shadows.py` flags the operator-named-local
+hazard.  See `interpreter.md` Section 8.2.
 
 #### Suffixes — Locals preamble capacity
 

@@ -191,6 +191,24 @@ vm_offset_t m_frame_dict_overflow{nulloffset};
 // understanding cross-actor save/restore dynamics, not just heap-tracking.
 uint64_t m_frame_dict_pool_evictions{0};
 
+// Early-binding (#e) frame-local exclusion stack.  While scan_procedure is
+// active, each lexically-enclosing |locals| proc records its preamble names
+// here so make_proc_object can seed bind_array/bind_packed with the ancestor
+// frame scopes.  Without it, a proc whose #e binds a body name that shadows a
+// frame local of an ENCLOSING proc (an inner #e bound before the outer proc
+// exists) would freeze the name to the operator -- the frame local is
+// invisible at scan time.  `names` points at the preamble names in the
+// scanner's scratch op stack (base[0..count)); those stay put for the proc's
+// lifetime (the preamble is placed before any body element and is never
+// relocated by the overflow valve).  Depth is bounded by MaxProcNesting
+// (scan_procedure rejects deeper nesting), so a fixed array -- no heap.
+struct EnclosingFrame {
+    const Object *names;  // -> preamble names base[0..count) on the scratch op stack
+    length_t count;       // number of frame-local names (params in Phase 1)
+};
+EnclosingFrame m_enclosing_frames[MaxProcNesting]{};
+int m_enclosing_frame_count{0};
+
 // Class-indexed mailbox free list for recycling dead-actor mailboxes.
 // 1D array [MaxMailboxPoolSize], indexed by class_index.  Size classes
 // in sm_mailbox_pool_classes[].  Mailboxes live in global VM (BASE-immune

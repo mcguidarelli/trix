@@ -53,6 +53,7 @@
 (tests/test_extvalue.trx) run-test
 (tests/test_dict.trx) run-test
 (tests/test_def_frame_cache_coherence.trx) run-test
+(tests/test_early_bind_frame_local.trx) run-test
 (tests/test_arithmetic.trx) run-test
 (tests/test_scanner.trx) run-test
 (tests/test_eqref_regression.trx) run-test
