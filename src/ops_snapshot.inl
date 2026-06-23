@@ -752,18 +752,61 @@ static void snapshot_op(Trix *trx) {
                     }
                 };
 
-                // Emit the local VM blob in three segments, substituting zeros for the
-                // m_vm_temp_save region (per-save-level temp watermarks -- absolute pointers
-                // that vary with ASLR).  Those bytes are don't-care: thaw CRC-checks them and
-                // then re-derives the array from the new m_vm_limit, so zeroing them keeps
-                // snapshots byte-reproducible without affecting thaw.  on_real(ptr,len) takes a
-                // real span; on_zeros(len) takes a zero run.
+                // Emit the local VM blob, substituting zeros for every don't-care region that
+                // holds a raw absolute pointer.  Such pointers vary with ASLR run to run, so
+                // leaving them in the image would defeat byte-reproducible snapshots.  Two kinds
+                // of region are zeroed:
+                //
+                //   * m_vm_temp_save -- the per-save-level temp watermarks.
+                //   * each inuse stream's m_ext_base/m_ext_ptr pair -- raw pointers into a
+                //     malloc'd (or borrowed VM) buffer.  Non-null for memory streams that still
+                //     have bytes remaining and for the startup-file tail stream.
+                //
+                // All of these are don't-care across thaw: it CRC-checks them, then
+                // unconditionally re-derives them (m_vm_temp_save from the new m_vm_limit; every
+                // stream's ext fields are nulled at fixup and rebuilt from the serialized stream
+                // blocks), so zeroing them never affects a restored image.  Regions are emitted
+                // in ascending offset order by repeatedly selecting the lowest region at or after
+                // the cursor; the count is tiny (one temp-save region plus at most a few streams),
+                // so the O(regions^2) selection scan is negligible and needs no scratch array.
+                // on_real(ptr,len) takes a real span; on_zeros(len) takes a zero run.  (A memory
+                // stream living in the global save region is not covered -- the global blob is
+                // emitted verbatim below -- but that is not a realistic case.)
                 auto emit_vm_blob = [&](auto on_real, auto on_zeros) {
                     auto ts_off = static_cast<vm_size_t>(reinterpret_cast<const vm_t *>(trx->m_vm_temp_save) - trx->m_vm_base);
                     auto ts_len = static_cast<vm_size_t>(trx->m_max_save_level * sizeof(vm_t *));
-                    on_real(trx->m_vm_base, ts_off);
-                    on_zeros(ts_len);
-                    on_real(trx->m_vm_base + ts_off + ts_len, h.vm_used - ts_off - ts_len);
+                    vm_size_t cursor = 0;
+                    while (true) {
+                        vm_size_t region_start = h.vm_used;
+                        vm_size_t region_len = 0;
+                        bool found = false;
+                        auto consider = [&](vm_size_t start, vm_size_t len) {
+                            if ((len > 0) && (start >= cursor) && (start < region_start)) {
+                                region_start = start;
+                                region_len = len;
+                                found = true;
+                            }
+                        };
+                        consider(ts_off, ts_len);
+                        for (auto s = trx->m_stream_inuse_list; s != nullptr; s = s->next_stream(trx)) {
+                            if ((s->m_ext_base != nullptr) || (s->m_ext_ptr != nullptr)) {
+                                auto ext_off =
+                                        static_cast<vm_size_t>(reinterpret_cast<const vm_t *>(&s->m_ext_base) - trx->m_vm_base);
+                                // Span [m_ext_base, m_ext_remaining): the two raw pointers exactly
+                                // (m_ext_remaining is the next field and is a deterministic count).
+                                auto ext_len = static_cast<vm_size_t>(reinterpret_cast<const vm_t *>(&s->m_ext_remaining) -
+                                                                      reinterpret_cast<const vm_t *>(&s->m_ext_base));
+                                consider(ext_off, ext_len);
+                            }
+                        }
+                        if (!found) {
+                            on_real(trx->m_vm_base + cursor, h.vm_used - cursor);
+                            break;
+                        }
+                        on_real(trx->m_vm_base + cursor, region_start - cursor);
+                        on_zeros(region_len);
+                        cursor = region_start + region_len;
+                    }
                 };
 
                 // Section CRC pass: memory-stream section, then user-file section.
@@ -838,7 +881,7 @@ static void snapshot_op(Trix *trx) {
                             },
                             [&](Stream *s) { write_stream_path(trx, s, fd); });
 
-                    // Write: 4. Local VM blob (m_vm_temp_save region zeroed for reproducibility).
+                    // Write: 4. Local VM blob (don't-care pointer regions zeroed for reproducibility).
                     bool vm_blob_ok = true;
                     emit_vm_blob([&](const vm_t *p, vm_size_t n) { vm_blob_ok = vm_blob_ok && write_all(fd, p, n); },
                                  [&](vm_size_t n) {
