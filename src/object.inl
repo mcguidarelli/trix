@@ -122,18 +122,18 @@ class Stream;
 //   +---+---+---+---+---+---+---+---+
 //   | 0 | 1 | 2   3 | 4   5   6   7 |
 //   +---+---+---+---+---+---+---+---+
-//   |aat|slv| length | value/offset  |
+//   |aat|slv| length|  value/offset |
 //   +---+---+---+---+---+---+---+---+
-//     |   |     |          |
-//     |   |     |          +-- Inline: Null, Byte, Integer, UInteger,
-//     |   |     |              Real, Boolean, Operator, Mark (32-bit)
-//     |   |     |              (save tokens are inline Integers).
-//     |   |     |              Offset: vm_offset_t to heap data for
-//     |   |     |              Long, ULong, Double, Address, Name,
-//     |   |     |              String, Array, Packed, Dict, Stream,
-//     |   |     |              Curry, Thunk, Tagged, Record, Coroutine,
-//     |   |     |              PipeBuffer, Cell, Set, Continuation,
-//     |   |     |              Int128, UInt128, OpaqueHandle
+//     |   |     |           |
+//     |   |     |           +-- Inline: Null, Byte, Integer, UInteger,
+//     |   |     |               Real, Boolean, Operator, Mark (32-bit)
+//     |   |     |               (save tokens are inline Integers).
+//     |   |     |               Offset: vm_offset_t to heap data for
+//     |   |     |               Long, ULong, Double, Address, Name,
+//     |   |     |               String, Array, Packed, Dict, Stream,
+//     |   |     |               Curry, Thunk, Tagged, Record, Coroutine,
+//     |   |     |               PipeBuffer, Cell, Set, Continuation,
+//     |   |     |               Int128, UInt128, OpaqueHandle
 //     |   |     |
 //     |   |     +-- Type-specific: string length, array length,
 //     |   |         operator index, dict bucket count, etc.
@@ -215,6 +215,7 @@ public:
     //  | | |                   11100: Int128
     //  | | |                   11101: UInt128
     //  | | |                   11110: OpaqueHandle
+    //  | | |                   11111: SlotRef
     //  | | +----------- F: per-type flag (see below); constant SpecialFlag = 0x20
     //  | +------------- W: 0 = ReadOnly, 1 = ReadWrite
     //  +--------------- X: 0 = Literal,  1 = Executable
