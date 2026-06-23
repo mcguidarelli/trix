@@ -350,14 +350,7 @@ static void at_pipe_put_retry_op(Trix *trx) {
     } else {
         // Still full: re-sleep
         hdr->m_blocked_writer = trx->m_running_coroutine;
-        trx->require_exec_capacity(1);
-        *++trx->m_exec_ptr = Object::make_control_operator(SystemName::atPipePutRetry);
-        trx->coroutine_flush_running();
-        auto ctx = trx->offset_to_ptr<CoroutineContext>(trx->m_running_coroutine);
-        ctx->m_status = CoroutineContext::Sleeping;
-        ctx->m_flags |= CoroutineContext::FlagBlocked;
-        ctx->m_wake_time_ns = std::numeric_limits<uint64_t>::max();
-        trx->coroutine_schedule();
+        trx->coroutine_sleep_and_schedule(SystemName::atPipePutRetry, std::numeric_limits<uint64_t>::max());
     }
 }
 
@@ -406,19 +399,12 @@ static void pipe_put_op(Trix *trx) {
                         --trx->m_op_ptr;
                         pipe_put_complete(trx, hdr, val_obj);
                     } else {
-                        // Buffer full: leave value on op stack, push continuation, sleep
-                        // Exec stack: [buffer, @pipe-put-retry]
+                        // Buffer full: leave value on op stack, push the buffer companion,
+                        // then block on @pipe-put-retry.  Exec stack: [buffer, @pipe-put-retry]
                         trx->require_exec_capacity(2);
                         *++trx->m_exec_ptr = saved_buffer_obj;
-                        *++trx->m_exec_ptr = Object::make_control_operator(SystemName::atPipePutRetry);
-
                         hdr->m_blocked_writer = trx->m_running_coroutine;
-                        trx->coroutine_flush_running();
-                        auto ctx = trx->offset_to_ptr<CoroutineContext>(trx->m_running_coroutine);
-                        ctx->m_status = CoroutineContext::Sleeping;
-                        ctx->m_flags |= CoroutineContext::FlagBlocked;
-                        ctx->m_wake_time_ns = std::numeric_limits<uint64_t>::max();
-                        trx->coroutine_schedule();
+                        trx->coroutine_sleep_and_schedule(SystemName::atPipePutRetry, std::numeric_limits<uint64_t>::max());
                     }
                 }
             }
@@ -487,14 +473,7 @@ static void at_pipe_get_retry_op(Trix *trx) {
     } else {
         // Still empty and not closed: re-sleep
         hdr->m_blocked_reader = trx->m_running_coroutine;
-        trx->require_exec_capacity(1);
-        *++trx->m_exec_ptr = Object::make_control_operator(SystemName::atPipeGetRetry);
-        trx->coroutine_flush_running();
-        auto ctx = trx->offset_to_ptr<CoroutineContext>(trx->m_running_coroutine);
-        ctx->m_status = CoroutineContext::Sleeping;
-        ctx->m_flags |= CoroutineContext::FlagBlocked;
-        ctx->m_wake_time_ns = std::numeric_limits<uint64_t>::max();
-        trx->coroutine_schedule();
+        trx->coroutine_sleep_and_schedule(SystemName::atPipeGetRetry, std::numeric_limits<uint64_t>::max());
     }
 }
 
@@ -531,18 +510,12 @@ static void pipe_get_op(Trix *trx) {
             // Closed + drained
             pipe_get_end(trx, hdr, hdr_offset);
         } else {
-            // Empty and not closed: push continuation, sleep
+            // Empty and not closed: push the buffer companion, then block on
+            // @pipe-get-retry.  Exec stack: [buffer, @pipe-get-retry]
             trx->require_exec_capacity(2);
             *++trx->m_exec_ptr = buffer_obj;
-            *++trx->m_exec_ptr = Object::make_control_operator(SystemName::atPipeGetRetry);
-
             hdr->m_blocked_reader = trx->m_running_coroutine;
-            trx->coroutine_flush_running();
-            auto ctx = trx->offset_to_ptr<CoroutineContext>(trx->m_running_coroutine);
-            ctx->m_status = CoroutineContext::Sleeping;
-            ctx->m_flags |= CoroutineContext::FlagBlocked;
-            ctx->m_wake_time_ns = std::numeric_limits<uint64_t>::max();
-            trx->coroutine_schedule();
+            trx->coroutine_sleep_and_schedule(SystemName::atPipeGetRetry, std::numeric_limits<uint64_t>::max());
         }
     }
 }
