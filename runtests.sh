@@ -6,6 +6,31 @@ set -euo pipefail
 FAIL=0
 ERRORS=""
 
+# --- Step 0: C++ house-style gate (tools/cpp_style.py) ---
+# The CI "clang-format check" job runs this -- a SEPARATE linter from
+# clang-format itself (it enforces parenthesis-wrapping of binary/ternary
+# expressions + void-cast form, which clang-format does not).  Run it FIRST so
+# a style violation fails fast locally instead of surfacing red in CI after a
+# push.  Static check; does not need ./trix.  ("?? SKIP" lines are unparsed
+# lines, not violations.)  Fix violations with ./tools/cpp_style.py --apply.
+echo "===================================="
+echo "  Running tools/cpp_style.py --check (C++ house style)"
+echo "===================================="
+
+set +e
+STYLE_OUTPUT=$(./tools/cpp_style.py --check 2>&1)
+STYLE_EXIT=$?
+set -e
+grep -vE "^[[:space:]]*\?\? SKIP" <<< "$STYLE_OUTPUT" || true
+
+if [ "$STYLE_EXIT" -ne 0 ]; then
+    FAIL=$((FAIL + 1))
+    ERRORS="${ERRORS}  FAIL: cpp_style.py --check reported violations (fix: ./tools/cpp_style.py --apply)\n"
+    STYLE_RESULTS="FAILED"
+else
+    STYLE_RESULTS="clean"
+fi
+
 # --- Step 1: test_all.trx (master test runner) ---
 # 2 MB VM: the debug binary's baseline is ~495 KB (heap-tracking tables +
 # debugger substrate) and the unwrapped concurrency tail legitimately
@@ -301,6 +326,7 @@ fi
 # --- Summary ---
 echo ""
 echo "===================================="
+echo "  Style:      ${STYLE_RESULTS}"
 echo "  Trix:       ${STX_RESULTS}"
 echo "  Standalone: ${RUNALL_RESULTS}"
 echo "  Golden:     ${GOLDEN_RESULTS}"
