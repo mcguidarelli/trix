@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside a nested proc keeps a dynamic name (Trix frame scoping is dynamic). Frame
   locals remain reachable by name (`/p load`, reflection). Tail Call Optimization
   is preserved for a frame-local-bound proc invoked in tail position.
+- **`--seed N` for reproducible RNG runs.** Seeds the PCG32 generator from a
+  fixed value instead of `/dev/urandom`, so a run's random-dependent behavior --
+  and any snapshot it writes -- is repeatable. Combined with the snapshot image
+  normalization below, two runs with the same `--seed` produce byte-identical
+  `.img` files.
 
 ### Changed
 - **`#e` early binding no longer freezes a frame-local name that shadows a
@@ -68,6 +73,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (returned positionally as `TypeName{...}`); distinct-typed, locally-
   destructured pairs (allocator ptr+offset, `scan_proc_suffix`, etc.) keep
   `std::pair`. Behavior-preserving.
+- Snapshot images are now byte-reproducible across runs: the ASLR-varying
+  absolute addresses that thaw discards and re-derives are normalized out of the
+  image. The diagnostic `vm_base_addr` header field is written as 0; the
+  `m_vm_temp_save` per-save-level watermark array and every inuse stream's raw
+  `m_ext_base`/`m_ext_ptr` pair (non-null for a partially-read memory stream, or
+  the startup-file tail) are zeroed in both the CRC pass and the write pass via a
+  single ascending-offset region walk. All of these are don't-care values --
+  thaw CRC-checks them and then re-derives them -- so the on-disk layout is
+  unchanged: no `SNAPSHOT_VERSION` bump, and the adversarial exact-offset
+  calibration suite still passes.
 
 ## [0.10.1] - 2026-06-21
 
