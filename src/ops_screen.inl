@@ -87,11 +87,23 @@ struct ScreenState {
 
 // Default cell content for fresh screens / cleared regions.
 static constexpr ScreenCell DefaultScreenCell{
-        .m_ch = 0x20,  // space
-        .m_fg = 7,     // light gray
-        .m_bg = 0,     // black
-        .m_attrs = 0,
-        .m_pad = 0,
+        0x20,  // m_ch: space
+        7,     // m_fg: light gray
+        0,     // m_bg: black
+        0,     // m_attrs
+        0,     // m_pad
+};
+
+// Sentinel prev-cell that compares unequal to any user-constructible cell, so
+// the first render emits everything.  m_attrs bit 7 is reserved (verify_attrs_arg
+// rejects user values that set it) and m_ch is out of Unicode range, so a cell
+// with these values can never match real content.
+static constexpr ScreenCell SentinelScreenCell{
+        0xFFFFFFFFu,  // m_ch: out of Unicode range
+        0,            // m_fg
+        0,            // m_bg
+        0x80,         // m_attrs: reserved bit 7 set
+        0,            // m_pad
 };
 
 // Cap cells * sizeof(ScreenCell) at vm_size_t comfortably below 1 GiB.  In
@@ -124,20 +136,10 @@ static constexpr vm_size_t MaxScreenCells{(1ull << 24)};  // 16M cells = 128 MiB
             state->m_last_state_valid = 0;
 
             std::fill_n(cells, cell_count, DefaultScreenCell);
-            // prev is filled with a sentinel cell guaranteed to differ from any
-            // valid cell content -- m_attrs bit 7 is reserved (verify_attrs_arg
-            // rejects user values that set it), so any cell with m_attrs == 0x80
-            // is distinguishable from every cell a user can construct.  m_ch is
-            // also set to 0xFFFFFFFF (out of Unicode range) for defense-in-depth.
-            // After the first render, prev is overwritten with a copy of cells.
-            auto sentinel = ScreenCell{
-                    .m_ch = 0xFFFFFFFFu,
-                    .m_fg = 0,
-                    .m_bg = 0,
-                    .m_attrs = 0x80,
-                    .m_pad = 0,
-            };
-            std::fill_n(prev, cell_count, sentinel);
+            // prev gets SentinelScreenCell (unequal to any valid cell) so the
+            // first render emits everything; it is overwritten with a copy of
+            // cells after that first render.
+            std::fill_n(prev, cell_count, SentinelScreenCell);
 
             return Object::make_handle(state_offset, Object::HandleKind::Screen);
         }
@@ -276,16 +278,8 @@ static void screen_resize_op(Trix *trx) {
             auto dst = new_cells + static_cast<vm_size_t>(r) * new_cols;
             std::copy_n(src, copy_cols, dst);
         }
-        // prev gets the sentinel so next render is a full repaint.  See
-        // make_screen_helper for the bit-7 reserved-attrs explanation.
-        auto sentinel = ScreenCell{
-                .m_ch = 0xFFFFFFFFu,
-                .m_fg = 0,
-                .m_bg = 0,
-                .m_attrs = 0x80,
-                .m_pad = 0,
-        };
-        std::fill_n(new_prev, new_cell_count, sentinel);
+        // prev gets SentinelScreenCell so the next render is a full repaint.
+        std::fill_n(new_prev, new_cell_count, SentinelScreenCell);
 
         state->m_cols = new_cols;
         state->m_rows = new_rows;
