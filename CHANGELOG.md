@@ -88,6 +88,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   helper instead of hand-rolling the flush -> `Sleeping` + `FlagBlocked` +
   wake=never -> schedule dance at each site -- the same helper already used by
   coroutine join / await / wait-all. Behavior-preserving (-27 lines).
+- Single-source the freshly-spawned `CoroutineContext` field initialization: the
+  ~27-field bookkeeping block (status/flags/scheduler metadata) that was
+  duplicated verbatim in `coroutine_launch_common` (`ops_coroutine.inl`, used by
+  coroutine-launch and actor-spawn) and `pipe_alloc_stage_context`
+  (`ops_pipeline.inl`) now lives in one helper, `coroutine_init_spawned_fields`.
+  Each spawn site's per-site logic (stack-block partitioning, registry link,
+  GC-rooting strategy, scanner stream) stays put; the main coroutine (#0) keeps
+  its own init in `init.inl` since it carries genuinely different values
+  (Running/BASE/id 0/unlimited quantum) and is never recycled. The helper also
+  zeroes `m_last_mailbox_capacity` on the launch path (previously only the
+  pipeline path did) -- a provably-dead store, since that field is read only for
+  `FlagWasActor` contexts, which always recapture it at mailbox recycle.
+  Behavior-preserving (-14 lines).
 
 ## [0.10.1] - 2026-06-21
 
