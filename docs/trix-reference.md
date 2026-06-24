@@ -2213,17 +2213,53 @@ the `|params -- outputs|` preamble form (see
 leave exactly the declared number of outputs and consume no more than its declared
 inputs, or scanning raises `/stack-effect` (exit 60).  The checker abstractly
 interprets straight-line bodies plus `if`, `if-else`, and `repeat` — whose branches
-must be stack-neutral (`if`/`repeat`) or agree on their net effect (`if-else`).  It is
-also inter-procedural: a call to a procedure already defined at scan time has that
-procedure's own (inferred or declared) stack effect applied in place, so a checked
-proc is verified through the procs it calls.  It is sound and best-effort: it bails
-(accepts silently) on variadic operators, dynamic name lookup, calls to a procedure
-that is unanalyzable or not yet defined (e.g. recursion), and other combinators
-(`loop`, `while`, `for`, `do-while`, `when`, `case`, `type-case`, `exec`), so it
-never rejects a correct program.  Effects are read from the bindings live at scan
-time, so a later `override`/redefinition can only mask a real violation, never
-manufacture a false one.  A bare `|...|` with no `--` is unchecked;
-`--no-stack-check` disables it process-wide.
+must be stack-neutral (`if`/`repeat`) or agree on their net effect (`if-else`) —
+tracks `local-def` / `store` frame locals, and is inter-procedural: a call to a
+procedure already defined at scan time has that procedure's own (inferred or declared)
+stack effect applied in place, so a checked proc is verified through the procs it
+calls.  It is best-effort: it bails (accepts silently) on variadic operators, dynamic
+name lookup, calls to a procedure that is unanalyzable or not yet defined (e.g.
+recursion), and other combinators (`loop`, `while`, `for`, `do-while`, `when`, `case`,
+`type-case`, `exec`).  Effects are read from the bindings live at scan time, so a later
+`override`/redefinition can only mask a real violation, never manufacture a false one.
+A bare `|...|` with no `--` is unchecked; `--no-stack-check` disables it process-wide.
+
+The check is **sound for first-order code** — code whose parameters and frame locals
+hold data values.  In Trix a bare reference to a frame binding that holds a procedure
+*auto-executes* it; the checker models a frame reference as a single pushed value, so a
+higher-order procedure that bare-references a proc-valued **parameter** can be misjudged
+(a proc-valued **local** the checker sees being bound is handled correctly — its
+reference bails).  This is the one case where a checked procedure can be wrongly
+rejected; the next note shows how to avoid it.
+
+**Best practices.** The checker is opt-in and rewards a few habits:
+
+- **Annotate the procedures you want verified.** Add a `-- outputs` tail to the
+  `|...|` preamble; a bare `|...|` (or no preamble) is never checked.
+- **Declare or `local-def` your locals.** Declared locals (`|a /acc -- r|`) and
+  `local-def` / `store` bindings — including undeclared ones in a capacity-reserved
+  frame (`|a -- r|#+2`) — are tracked, so references to them are checked, not skipped.
+- **Keep checked procedures first-order.** Do not put a `-- outputs` tail on a
+  higher-order procedure that bare-references a proc-valued *parameter*; omit the tail
+  (leaving it unchecked) or call the parameter explicitly.
+
+A well-formed checked procedure — params and a tracked value local:
+
+```trix
+/scale { |v factor /scaled -- r|     % ( 2 -- 1 )
+    /scaled v factor mul local-def   % tracked value local
+    scaled
+} def
+6 7 scale =                          % => 42
+```
+
+A higher-order procedure to leave un-annotated — `f` is a proc parameter, so a
+`-- r` tail would be misjudged (the checker counts each bare `f` as one value):
+
+```trix ignore
+/apply-twice { |x f| x f f } def     % no `-- outputs`: not checked
+0 { 1 add } apply-twice              % => 2
+```
 
 ### 3.16 Error Handling
 

@@ -285,14 +285,23 @@ no more than its declared inputs:
 ```
 
 The second proc fails to scan with `/stack-effect` (exit `60`).  The check is
-*best-effort and sound*: it reports only violations it can prove and silently
-accepts anything it cannot fully analyze (variadic operators, dynamic name
-lookup, procedures not yet defined), so it never rejects a correct program.  It
-understands straight-line bodies plus the `if`, `if-else`, and `repeat`
-combinators (their branches must be stack-neutral / agree), and it is
-*inter-procedural*: a call to an already-defined procedure has that procedure's
-own stack effect applied, so a checked proc is verified through the procs it
-calls (calls to a proc that is itself unanalyzable simply bail).
+*best-effort*: it reports only violations it can prove and silently accepts
+anything it cannot fully analyze (variadic operators, dynamic name lookup,
+procedures not yet defined).  It understands straight-line bodies plus the `if`,
+`if-else`, and `repeat` combinators (their branches must be stack-neutral /
+agree), tracks `local-def` / `store` frame locals, and is *inter-procedural*: a
+call to an already-defined procedure has that procedure's own stack effect
+applied, so a checked proc is verified through the procs it calls (calls to a
+proc that is itself unanalyzable simply bail).
+
+It is sound for **first-order code** -- code whose parameters and frame locals
+hold data values.  Because a bare reference to a frame binding that holds a
+procedure *auto-executes* it, the checker (which models a frame reference as a
+single pushed value) can misjudge a higher-order procedure that bare-references
+a proc-valued **parameter**; declare such procedures without a `-- outputs` tail.
+A proc-valued **local** the checker can *see* being bound (`/p { … } local-def`)
+is handled correctly.  See the best-practices notes in
+[`trix-reference.md` § 3.15](trix-reference.md).
 
 A bare `|...|` preamble with no `--` is unchecked, exactly as before, so the
 feature is opt-in per procedure.  Pass `--no-stack-check` to disable the check

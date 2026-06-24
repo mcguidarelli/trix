@@ -2203,7 +2203,9 @@ template<typename CleanupFn>
             if (has_declared_effect && trx->m_stack_check) {
                 auto preamble_count = static_cast<length_t>(locals_count + 3);
                 auto param_count = static_cast<length_t>(base[locals_count].integer_value());
-                auto verdict = trx->check_stack_effect(trx, base[preamble_count], declared_out_count);
+                // base[0..locals_count) are this proc's declared frame names in slot order;
+                // pass them so the checker can resolve slot-refs to local-def'd value-kinds.
+                auto verdict = trx->check_stack_effect(trx, base[preamble_count], declared_out_count, base, locals_count);
                 if (verdict.result != Trix::StackEffectResult::Ok) {
                     cleanup();
                     if (verdict.result == Trix::StackEffectResult::Mismatch) {

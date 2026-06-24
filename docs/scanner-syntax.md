@@ -1037,11 +1037,14 @@ parameters before `--` are the inputs (popped, bound as usual); the bare names a
 drive the scan-time stack-effect check (`trix-reference.md` § 3.15). For example
 `{ |price qty -- total| price qty mul }` declares `( 2 -- 1 )`. The check runs at scan
 time and raises `/stack-effect` (exit 60) if the body cannot leave exactly the declared
-number of outputs; it is best-effort (it bails on anything it cannot prove), is
-inter-procedural (a call to an already-defined proc applies that proc's own effect; see
-`trix-reference.md` § 3.15), and is disabled process-wide by `--no-stack-check`. A zero-input form `| -- r|` is allowed
-(a minimal scratch frame is created). Output names must be bare (a `/`-prefixed output,
-or a second `--`, is a `SyntaxError`).
+number of outputs; it is best-effort (it bails on anything it cannot prove), tracks
+`local-def` / `store` frame locals, is inter-procedural (a call to an already-defined
+proc applies that proc's own effect), and is disabled process-wide by
+`--no-stack-check`. It is sound for first-order code (parameters and locals holding
+data); do not annotate a higher-order proc that bare-references a proc-valued
+parameter. See `trix-reference.md` § 3.15 for the limitation and best practices. A
+zero-input form `| -- r|` is allowed (a minimal scratch frame is created). Output names
+must be bare (a `/`-prefixed output, or a second `--`, is a `SyntaxError`).
 
 **Error conditions:**
 - Missing closing `|` → `SyntaxError`

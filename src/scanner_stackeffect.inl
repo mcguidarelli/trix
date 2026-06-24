@@ -55,6 +55,7 @@ private:
 
 static constexpr int MaxStackEffectStack{64};      // abstract operand-stack cap; deeper => bail
 static constexpr int MaxStackEffectCallDepth{16};  // inter-procedural call-descent cap; deeper => bail
+static constexpr int MaxTrackedLocals{64};         // per-body local-def / store bindings tracked; overflow => untracked
 
 // SystemName-indexed view of the generated arity rows (op_effects.inl).  Built
 // once, the same way build_sysoperator_table() builds the dispatch table.
@@ -92,11 +93,18 @@ struct ProcEffect {
 };
 
 // One abstract operand-stack slot.  proc slots carry the nested {proc}'s net
-// effect so a following combinator can reason about its branch.
+// effect so a following combinator can reason about its branch.  is_exec_value
+// and the literal-name fields support local-def / store tracking: a literal /name
+// push remembers its identity so a following local-def / store can record the
+// frame-local's value-kind, and an executable string is flagged because a bare
+// reference to a frame local that holds one auto-executes (unknown net).
 struct StackSlot {
     bool is_proc{false};
     bool proc_known{false};
     int proc_net{0};
+    bool is_exec_value{false};
+    bool is_literal_name{false};
+    vm_offset_t name_off{nulloffset};
 };
 
 // Abstractly interpret one proc body (packed or array) and report its effect.
@@ -104,11 +112,50 @@ struct StackSlot {
 // executable names that resolve to a bound proc, into the callee via
 // analyze_call_target (a true call, call_depth + 1).  Reads VM storage only;
 // never mutates.
-[[nodiscard]] ProcEffect analyze_proc(Trix *trx, Object proc_obj, int call_depth) {
+[[nodiscard]] ProcEffect
+analyze_proc(Trix *trx, Object proc_obj, int call_depth, const Object *frame_names = nullptr, length_t frame_name_count = 0) {
     StackSlot slots[MaxStackEffectStack]{};
     auto depth = 0;
     auto min_depth = 0;
     auto overflowed = false;
+
+    // Frame locals assigned by local-def / store inside THIS body, so a later bare
+    // reference resolves correctly: a value local pushes one; a proc / exec-string
+    // local auto-executes on bare reference (unknown net) and must bail.  Per-body
+    // and reset each analyze_proc call -- a nested proc gets its own map.
+    struct TrackedLocal {
+        vm_offset_t name_off{nulloffset};
+        bool is_nonvalue{false};  // proc / exec-string: bare reference auto-executes
+    };
+    TrackedLocal tracked[MaxTrackedLocals]{};
+    auto tracked_count = 0;
+    auto find_tracked = [&](vm_offset_t off) -> int {
+        for (auto i = 0; i < tracked_count; ++i) {
+            if (tracked[i].name_off == off) {
+                return i;
+            }
+        }
+        return -1;
+    };
+    auto record_tracked = [&](vm_offset_t off, bool nonvalue) {
+        auto idx = find_tracked(off);
+        if (idx >= 0) {
+            tracked[idx].is_nonvalue = nonvalue;
+        } else if (tracked_count < MaxTrackedLocals) {
+            tracked[tracked_count] = TrackedLocal{off, nonvalue};
+            ++tracked_count;
+        }
+        // overflow: simply untracked -- references fall back to the default below (sound)
+    };
+    // Name behind a slot-ref index, via this proc's declared frame names (top-level
+    // call only; nullptr for nested procs / callees, whose slot-refs then default to a
+    // plain value push).
+    auto slot_name_off = [&](length_t slot_idx) -> vm_offset_t {
+        if ((frame_names != nullptr) && (slot_idx < frame_name_count) && frame_names[slot_idx].is_name()) {
+            return frame_names[slot_idx].name_offset();
+        }
+        return nulloffset;
+    };
 
     auto pop_value = [&]() {
         --depth;
@@ -119,12 +166,12 @@ struct StackSlot {
     // depth may be negative while a body draws below its own start (a combinator
     // branch consuming parent-stack values); slots only exist for indices >= 0, and
     // those in [0, depth) are always freshly written, so combinators read valid data.
-    auto push_value = [&]() {
+    auto push_value = [&](bool exec_value = false, bool lit_name = false, vm_offset_t lit_off = nulloffset) {
         if (depth >= MaxStackEffectStack) {
             overflowed = true;
         } else {
             if (depth >= 0) {
-                slots[depth] = StackSlot{false, false, 0};
+                slots[depth] = StackSlot{false, false, 0, exec_value, lit_name, lit_off};
             }
             ++depth;
         }
@@ -189,6 +236,16 @@ struct StackSlot {
                     return StackEffectKind::Bail;
                 }
             } else {
+                if ((sysname == SystemName::LocalDef) || (sysname == SystemName::Store)) {
+                    // `/name value local-def|store`: record the frame-local's value-kind so a
+                    // later bare reference resolves correctly (value => push one; proc / exec
+                    // => bail, since a bare frame-local reference auto-executes).  Only when the
+                    // key is a literal /name we captured; otherwise leave it untracked.
+                    if ((depth >= 2) && slots[depth - 2].is_literal_name) {
+                        auto nonvalue = (slots[depth - 1].is_proc || slots[depth - 1].is_exec_value);
+                        record_tracked(slots[depth - 2].name_off, nonvalue);
+                    }
+                }
                 auto eff = op_effect_for(sysname);
                 if (!eff.known) {
                     return StackEffectKind::Bail;
@@ -208,11 +265,31 @@ struct StackSlot {
     // Apply one body element to the abstract stack.
     auto handle = [&](Object elem_obj) -> StackEffectKind {
         if (elem_obj.is_slot_ref()) {
-            push_value();  // frame-slot read pushes one value
-            return StackEffectKind::Ok;
+            // A declared frame-local known (via local-def / store) to hold a proc / exec
+            // auto-executes on this read; its effect is unknown -> bail.  Otherwise a
+            // slot read pushes one value (a value local, or a param assumed to hold data).
+            auto off = slot_name_off(elem_obj.slot_ref_index());
+            auto idx = (off != nulloffset) ? find_tracked(off) : -1;
+            if ((idx >= 0) && tracked[idx].is_nonvalue) {
+                return StackEffectKind::Bail;
+            } else {
+                push_value();
+                return StackEffectKind::Ok;
+            }
         } else if (elem_obj.is_operator()) {
             return apply_operator(elem_obj.m_operator);
         } else if (elem_obj.is_name() && elem_obj.is_executable()) {
+            // A frame local recorded in this body shadows the dictionary stack: a value
+            // local pushes one; a proc / exec local auto-executes (unknown net) -> bail.
+            auto tracked_idx = find_tracked(elem_obj.name_offset());
+            if (tracked_idx >= 0) {
+                if (tracked[tracked_idx].is_nonvalue) {
+                    return StackEffectKind::Bail;
+                } else {
+                    push_value();
+                    return StackEffectKind::Ok;
+                }
+            }
             auto bound_ptr = Name::name_search(trx, elem_obj);
             if (bound_ptr == nullptr) {
                 return StackEffectKind::Bail;  // unresolved now; may bind at run time
@@ -249,8 +326,15 @@ struct StackSlot {
             auto child = analyze_proc(trx, elem_obj, call_depth);  // nested {proc} literal: pushed, not run
             push_proc((child.kind == StackEffectKind::Ok), child.net);
             return StackEffectKind::Ok;
+        } else if (elem_obj.is_name() && elem_obj.is_literal()) {
+            // literal /name push -- remember its identity so a following local-def / store
+            // can key the frame-local it binds.
+            push_value(false, true, elem_obj.name_offset());
+            return StackEffectKind::Ok;
         } else {
-            push_value();  // literal value (number / string / bool / null / mark / literal-name)
+            // literal value (number / string / bool / null / mark).  An executable string is
+            // flagged: a frame local bound to one auto-executes on a bare reference.
+            push_value(elem_obj.is_executable());
             return StackEffectKind::Ok;
         }
     };
@@ -354,8 +438,9 @@ struct StackEffectVerdict {
 
 // Check a `|params -- outputs|` proc body (the inner packed body) against its
 // declared output count.  Returns Ok for both "conforms" and "unanalyzable".
-[[nodiscard]] StackEffectVerdict check_stack_effect(Trix *trx, Object body_proc_obj, length_t out_count) {
-    auto eff = analyze_proc(trx, body_proc_obj, 0);
+[[nodiscard]] StackEffectVerdict check_stack_effect(
+        Trix *trx, Object body_proc_obj, length_t out_count, const Object *frame_names = nullptr, length_t frame_name_count = 0) {
+    auto eff = analyze_proc(trx, body_proc_obj, 0, frame_names, frame_name_count);
     if (eff.kind == StackEffectKind::Bail) {
         return StackEffectVerdict{StackEffectResult::Ok, 0, 0};
     } else if (eff.kind == StackEffectKind::Imbalance) {

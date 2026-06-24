@@ -303,6 +303,16 @@ run_case stack-effect-interproc-callee-bails 0 exact '6' - -- -q -e '/runit { |p
 # mutual recursion: neither name is bound during its own scan -> bails, no false positive, no hang
 run_case stack-effect-interproc-mutual 0 exact 'ok' - -- -q -e '/ping { |n -- r| n pong } def /pong { |n -- r| n ping } def (ok) ='
 
+#--- stack-effect: local-def / store value-kind tracking ---#
+# an undeclared (capacity-reserved) local-def'd VALUE resolves, so the body is checked
+run_case stack-effect-localdef-value 0 exact '14' - -- -q -e '/v { |x -- r|#+1 /t x 2 mul local-def t } def 7 v ='
+# a real mismatch is caught THROUGH a tracked value local (declares 2 outputs, leaves 1)
+run_case stack-effect-localdef-mismatch stack-effect none '' - -- -q -e '{ |x -- a b|#+1 /t x 2 mul local-def t } pop'
+# a local bound to a PROC auto-execs on a bare reference -> bails (no false positive), runs fine
+run_case stack-effect-localdef-proc-bails 0 exact '6' - -- -q -e '/vp { |x -- r|#+1 /q { 1 add } local-def x q } def 5 vp ='
+# regression: a DECLARED local bound to a proc, bare-ref'd via slot-ref, is accepted (was a false positive)
+run_case stack-effect-localproc-accepted 0 exact 'ok' - -- -q -e '/f { |x /p -- | /p { pop } local-def x p } def 5 f (ok) ='
+
 #--- stack-effect: more sad cases ---#
 # body leaves fewer than declared outputs
 run_case stack-effect-too-few-out stack-effect none '' - -- -q -e '{ |a b -- x y z| a b add } pop'
