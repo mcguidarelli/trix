@@ -1037,8 +1037,9 @@ parameters before `--` are the inputs (popped, bound as usual); the bare names a
 drive the scan-time stack-effect check (`trix-reference.md` § 3.15). For example
 `{ |price qty -- total| price qty mul }` declares `( 2 -- 1 )`. The check runs at scan
 time and raises `/stack-effect` (exit 60) if the body cannot leave exactly the declared
-number of outputs; it is best-effort (it bails on anything it cannot prove) and is
-disabled process-wide by `--no-stack-check`. A zero-input form `| -- r|` is allowed
+number of outputs; it is best-effort (it bails on anything it cannot prove), is
+inter-procedural (a call to an already-defined proc applies that proc's own effect; see
+`trix-reference.md` § 3.15), and is disabled process-wide by `--no-stack-check`. A zero-input form `| -- r|` is allowed
 (a minimal scratch frame is created). Output names must be bare (a `/`-prefixed output,
 or a second `--`, is a `SyntaxError`).
 

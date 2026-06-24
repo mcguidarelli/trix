@@ -2214,11 +2214,16 @@ leave exactly the declared number of outputs and consume no more than its declar
 inputs, or scanning raises `/stack-effect` (exit 60).  The checker abstractly
 interprets straight-line bodies plus `if`, `if-else`, and `repeat` — whose branches
 must be stack-neutral (`if`/`repeat`) or agree on their net effect (`if-else`).  It is
-sound and best-effort: it bails (accepts silently) on variadic operators, user-defined
-procedures, dynamic name lookup, and other combinators (`loop`, `while`, `for`,
-`do-while`, `when`, `case`, `type-case`, `exec`), so it never rejects a correct
-program.  A bare `|...|` with no `--` is unchecked; `--no-stack-check` disables it
-process-wide.
+also inter-procedural: a call to a procedure already defined at scan time has that
+procedure's own (inferred or declared) stack effect applied in place, so a checked
+proc is verified through the procs it calls.  It is sound and best-effort: it bails
+(accepts silently) on variadic operators, dynamic name lookup, calls to a procedure
+that is unanalyzable or not yet defined (e.g. recursion), and other combinators
+(`loop`, `while`, `for`, `do-while`, `when`, `case`, `type-case`, `exec`), so it
+never rejects a correct program.  Effects are read from the bindings live at scan
+time, so a later `override`/redefinition can only mask a real violation, never
+manufacture a false one.  A bare `|...|` with no `--` is unchecked;
+`--no-stack-check` disables it process-wide.
 
 ### 3.16 Error Handling
 

@@ -9,3 +9,7 @@
 { |n -- s| 0 n { 1 add } repeat } 5 exch exec =
 /k { |a /t -- r| /t a 2 mul local-def t } def 7 k =
 { |a -- x y| a a } 9 exch exec add =
+% inter-procedural (Phase 2): a checked proc verified through calls to
+% already-defined procs -- declared-effect callee and a plain inferred callee.
+/sqr { |x -- y| x x mul } def /quad { |x -- y| x sqr sqr } def 3 quad =
+/inc1 { 1 add } def /addtwo { |n -- r| n inc1 inc1 } def 5 addtwo =

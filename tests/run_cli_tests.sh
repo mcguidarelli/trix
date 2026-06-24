@@ -289,8 +289,19 @@ run_case stack-effect-local-decl 0 exact '14' - -- -q -e '/k { |a /t -- r| /t a 
 run_case stack-effect-capacity 0 exact '14' - -- -q -e '/k2 { |a -- r|#4 a 2 mul } def 7 k2 ='
 # `when` (single-arm match) is unanalyzable -> bails (accepted), runs fine
 run_case stack-effect-when-bails 0 exact 'big' - -- -q -e '/w { |v -- r| v { dup 3 gt } { pop (big) } when } def 5 w ='
-# calling a user proc is unanalyzable -> bails (accepted), runs fine
-run_case stack-effect-userproc-bails 0 exact '6' - -- -q -e '/g { |a b -- c| a b add } def /h { |x -- y| x x g } def 3 h ='
+#--- stack-effect: inter-procedural (Phase 2) -- calls to already-bound procs are checked ---#
+# caller verified through a call to a declared-effect proc (g is ( 2 -- 1 ))
+run_case stack-effect-interproc-ok 0 exact '6' - -- -q -e '/g { |a b -- c| a b add } def /h { |x -- y| x x g } def 3 h ='
+# callee has no declared effect -> its effect is inferred from its body and applied
+run_case stack-effect-interproc-plain 0 exact '7' - -- -q -e '/inc { 1 add } def /add2 { |n -- r| n inc inc } def 5 add2 ='
+# multi-output callee, both outputs consumed by the caller
+run_case stack-effect-interproc-multiout 0 exact '8' - -- -q -e '/pair { |x -- a b| x x } def /sum2 { |x -- r| x pair add } def 4 sum2 ='
+# three-deep call chain, each link declared and checked
+run_case stack-effect-interproc-chain 0 exact '11' - -- -q -e '/a { |x -- y| x 1 add } def /b { |x -- y| x a } def /c { |x -- y| x b } def 10 c ='
+# callee whose body is itself unanalyzable (exec splicer) -> the call bails, caller accepted
+run_case stack-effect-interproc-callee-bails 0 exact '6' - -- -q -e '/runit { |p -- r| p exec } def /useit { |x -- r| x { 1 add } runit } def 5 useit ='
+# mutual recursion: neither name is bound during its own scan -> bails, no false positive, no hang
+run_case stack-effect-interproc-mutual 0 exact 'ok' - -- -q -e '/ping { |n -- r| n pong } def /pong { |n -- r| n ping } def (ok) ='
 
 #--- stack-effect: more sad cases ---#
 # body leaves fewer than declared outputs
@@ -299,6 +310,10 @@ run_case stack-effect-too-few-out stack-effect none '' - -- -q -e '{ |a b -- x y
 run_case stack-effect-repeat-imbalance stack-effect none '' - -- -q -e '{ |n -- r| n { 1 } repeat } pop'
 # zero-output declaration but body leaves a value
 run_case stack-effect-zero-out-violated stack-effect none '' - -- -q -e '{ |a -- | a } pop'
+# inter-proc: callee changes the net so the caller's declared output is wrong
+run_case stack-effect-interproc-mismatch stack-effect none '' - -- -q -e '/pair { |x -- a b| x x } def /bad { |x -- r| x pair } def'
+# inter-proc: callee consumes more than the caller supplies -> caller underflow
+run_case stack-effect-interproc-underflow stack-effect none '' - -- -q -e '/drop2 { |a b -- | } def /bad2 { |x -- r| x drop2 } def'
 
 #--- stack-effect: stress (must never crash or false-positive; run under ASan) ---#
 # abstract stack deeper than the cap -> bail (accept), not crash, not false error

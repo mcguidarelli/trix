@@ -15,10 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   declared number of values and consume no more than its declared inputs; a
   mismatch raises the new `/stack-effect` error (exit 60) before the program runs.
   The check is sound and best-effort: it reports only provable violations and
-  silently accepts anything it cannot fully analyze (variadic operators,
-  user-defined procs, dynamic lookup), understanding straight-line bodies plus the
-  `if` / `if-else` / `repeat` combinators. A bare `|...|` with no `--` is unchecked
-  (opt-in per procedure); `--no-stack-check` disables the gate process-wide. The
+  silently accepts anything it cannot fully analyze (variadic operators, dynamic
+  lookup, procs not yet defined), understanding straight-line bodies plus the
+  `if` / `if-else` / `repeat` combinators. It is inter-procedural: a call to an
+  already-defined procedure has that procedure's own (inferred or declared) effect
+  applied in place, so a checked proc is verified through the procs it calls, with
+  effects read from the bindings live at scan time. A bare `|...|` with no `--` is
+  unchecked (opt-in per procedure); `--no-stack-check` disables the gate
+  process-wide. The
   arity table (`src/op_effects.inl`) is generated from `dispatch.inl` + the
   reference docs by `tools/gen_op_effects.py` and pinned by its `--check` CI gate.
 - **`-e` / `--eval EXPR` runs inline source.** Executes `EXPR` as a Trix program

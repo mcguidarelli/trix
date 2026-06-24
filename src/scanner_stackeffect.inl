@@ -35,14 +35,26 @@ private:
 // lets the combinators if / if-else / repeat reason about their branches.
 //
 // Bails (accepted without a verdict): variadic / unknown-arity operators (see
-// the generated arity table in op_effects.inl), executable names that resolve
-// to a user proc or are unresolved at scan time, a {proc} branch whose net
-// effect is itself unknown, dynamic name lookup, and abstract stacks deeper
-// than MaxStackEffectStack.  A nested {proc} literal that is pushed (not
-// directly executed by a combinator) degrades any internal imbalance to
+// the generated arity table in op_effects.inl), executable names unresolved at
+// scan time or resolving to something not statically analyzable, a {proc}
+// branch whose net effect is itself unknown, dynamic name lookup, abstract
+// stacks deeper than MaxStackEffectStack, and inter-procedural call nesting
+// deeper than MaxStackEffectCallDepth.  A nested {proc} literal that is pushed
+// (not directly executed by a combinator) degrades any internal imbalance to
 // "unknown net" rather than reporting it -- the proc may never run.
+//
+// Inter-procedural (Phase 2): an executable name that resolves at scan time to
+// an already-bound, analyzable proc has that callee's stack effect applied in
+// place instead of bailing, so a checked proc that calls other procs is still
+// verified.  The callee effect is computed by re-descending into its body
+// (analyze_call_target) -- there is no persistent registry, so redefinition is
+// handled for free and there is no stale-binding hazard.  Effects are read from
+// the bindings live at scan time: a later override / redefine can only mask a
+// real violation (a false negative), never manufacture a false positive, since
+// a scan-time error halts execution before any such redefinition could run.
 
-static constexpr int MaxStackEffectStack{64};  // abstract operand-stack cap; deeper => bail
+static constexpr int MaxStackEffectStack{64};      // abstract operand-stack cap; deeper => bail
+static constexpr int MaxStackEffectCallDepth{16};  // inter-procedural call-descent cap; deeper => bail
 
 // SystemName-indexed view of the generated arity rows (op_effects.inl).  Built
 // once, the same way build_sysoperator_table() builds the dispatch table.
@@ -88,8 +100,11 @@ struct StackSlot {
 };
 
 // Abstractly interpret one proc body (packed or array) and report its effect.
-// Recurses into nested {proc} literals.  Reads VM storage only; never mutates.
-[[nodiscard]] ProcEffect analyze_proc(Trix *trx, Object proc_obj) {
+// Recurses into nested {proc} literals (structural, same call_depth) and, for
+// executable names that resolve to a bound proc, into the callee via
+// analyze_call_target (a true call, call_depth + 1).  Reads VM storage only;
+// never mutates.
+[[nodiscard]] ProcEffect analyze_proc(Trix *trx, Object proc_obj, int call_depth) {
     StackSlot slots[MaxStackEffectStack]{};
     auto depth = 0;
     auto min_depth = 0;
@@ -203,14 +218,35 @@ struct StackSlot {
                 return StackEffectKind::Bail;  // unresolved now; may bind at run time
             } else if (bound_ptr->is_operator()) {
                 return apply_operator(bound_ptr->m_operator);
+            } else if (bound_ptr->is_executable() && (bound_ptr->is_packed() || bound_ptr->is_array())) {
+                // Inter-procedural: a name resolving to an already-bound proc has that
+                // callee's stack effect applied in place.  Re-descend to compute it; bail
+                // if the callee is not fully analyzable (or the call nesting is too deep).
+                auto callee = analyze_call_target(trx, *bound_ptr, call_depth + 1);
+                if (callee.kind == StackEffectKind::Ok) {
+                    // Replay the callee's external effect through the local primitives so
+                    // min-depth (underflow) and slot bookkeeping stay correct: it draws
+                    // down to (-min_depth) below the top, then settles at (+net).
+                    auto consumed = (-callee.min_depth);
+                    auto produced = (callee.net - callee.min_depth);
+                    for (int i = 0; i < consumed; ++i) {
+                        pop_value();
+                    }
+                    for (int i = 0; i < produced; ++i) {
+                        push_value();
+                    }
+                    return StackEffectKind::Ok;
+                } else {
+                    return StackEffectKind::Bail;  // callee not statically analyzable
+                }
             } else if (bound_ptr->is_executable()) {
-                return StackEffectKind::Bail;  // user proc / exec-name: unknown effect
+                return StackEffectKind::Bail;  // executable string / other exec value: unknown effect
             } else {
                 push_value();  // name bound to a constant value pushes it
                 return StackEffectKind::Ok;
             }
         } else if (elem_obj.is_executable() && (elem_obj.is_packed() || elem_obj.is_array())) {
-            auto child = analyze_proc(trx, elem_obj);  // nested {proc} literal: pushed, not run
+            auto child = analyze_proc(trx, elem_obj, call_depth);  // nested {proc} literal: pushed, not run
             push_proc((child.kind == StackEffectKind::Ok), child.net);
             return StackEffectKind::Ok;
         } else {
@@ -254,6 +290,60 @@ struct StackSlot {
     }
 }
 
+// External (caller-relative) stack effect of CALLING a resolved proc object, for
+// inter-procedural checking.  A finalized `|locals|` proc is packed and ends with
+// the engine's begin-locals op: [/p.. /loc.. P M N {inner-body} begin-locals]; a
+// call pops its P declared params, then runs the inner body, so its external
+// effect is (consume P, then the inner body's effect).  A plain proc (no
+// preamble) acts directly with its own body effect.  Recurses through the callee
+// body via analyze_proc; call_depth bounds the descent so mutual recursion among
+// already-bound procs terminates (bail past MaxStackEffectCallDepth).  Reads VM
+// storage only; never mutates.  Returns Ok with the external (net, min_depth), or
+// Bail for anything not fully analyzable.
+[[nodiscard]] ProcEffect analyze_call_target(Trix *trx, Object proc_obj, int call_depth) {
+    if (call_depth >= MaxStackEffectCallDepth) {
+        return ProcEffect{StackEffectKind::Bail, 0, 0};
+    } else {
+        // Detect the |locals| tail and recover P + the inner body.  Only packed
+        // procs carry a preamble (locals procs are always finalized packed).
+        if (proc_obj.is_packed()) {
+            auto [data_ptr, count] = proc_obj.packed_value(trx);
+            if (count >= 5) {
+                Object tail[5]{};  // last five elements: [P M N {inner} begin-locals]
+                auto tail_start = static_cast<length_t>(count - 5);
+                const auto *cursor = data_ptr;
+                for (length_t i = 0; i < count; ++i) {
+                    auto [next, elem_obj] = Object::extract_next_packed(trx, cursor);
+                    if (i >= tail_start) {
+                        tail[i - tail_start] = elem_obj;
+                    }
+                    cursor = next;
+                }
+                auto begin_locals_index = static_cast<operator_index_t>(+SystemName::BeginLocals);
+                if (tail[4].is_operator() && (tail[4].m_operator == begin_locals_index) && tail[3].is_executable() &&
+                    (tail[3].is_packed() || tail[3].is_array()) && tail[0].is_integer() && (tail[0].integer_value() >= 0)) {
+                    auto param_count = static_cast<int>(tail[0].integer_value());
+                    auto inner = analyze_proc(trx, tail[3], call_depth);
+                    if (inner.kind == StackEffectKind::Ok) {
+                        // Consume P params off the caller (floor -P), then the inner body
+                        // runs above that point: net shifts by -P, the floor is the deeper
+                        // of the param pop and any draw the inner body makes below it.
+                        auto external_net = (inner.net - param_count);
+                        auto floor_after_pop = (-param_count);
+                        auto floor_in_inner = (inner.min_depth - param_count);
+                        auto external_min = (floor_in_inner < floor_after_pop) ? floor_in_inner : floor_after_pop;
+                        return ProcEffect{StackEffectKind::Ok, external_net, external_min};
+                    } else {
+                        return ProcEffect{StackEffectKind::Bail, 0, 0};
+                    }
+                }
+            }
+        }
+        // Not a |locals| proc: analyze the whole body as a plain (no-preamble) proc.
+        return analyze_proc(trx, proc_obj, call_depth);
+    }
+}
+
 // Verdict of checking a declared-effect proc body against its output count.
 enum struct StackEffectResult { Ok, Imbalance, Underflow, Mismatch };
 struct StackEffectVerdict {
@@ -265,7 +355,7 @@ struct StackEffectVerdict {
 // Check a `|params -- outputs|` proc body (the inner packed body) against its
 // declared output count.  Returns Ok for both "conforms" and "unanalyzable".
 [[nodiscard]] StackEffectVerdict check_stack_effect(Trix *trx, Object body_proc_obj, length_t out_count) {
-    auto eff = analyze_proc(trx, body_proc_obj);
+    auto eff = analyze_proc(trx, body_proc_obj, 0);
     if (eff.kind == StackEffectKind::Bail) {
         return StackEffectVerdict{StackEffectResult::Ok, 0, 0};
     } else if (eff.kind == StackEffectKind::Imbalance) {
