@@ -700,6 +700,22 @@ static void ncr_op(Trix *trx) {
     });
 }
 
+// Modular exponentiation base^exp mod m, using __uint128_t intermediates to
+// avoid overflow on the products (mod must be > 0).  Shared by prime?'s
+// Miller-Rabin witness test and pow-mod.
+[[nodiscard]] static ulong_t mod_pow(ulong_t base, ulong_t exp, ulong_t mod) {
+    ulong_t result = 1;
+    base %= mod;
+    while (exp > 0) {
+        if ((exp & 1) != 0) {
+            result = static_cast<ulong_t>((__uint128_t(result) * base) % mod);
+        }
+        exp >>= 1;
+        base = static_cast<ulong_t>((__uint128_t(base) * base) % mod);
+    }
+    return result;
+}
+
 // prime?: int -- bool
 // Deterministic Miller-Rabin primality test.  Correct for all values up to 2^64.
 // Input must be a non-negative integer.  0 and 1 are not prime.
@@ -776,20 +792,6 @@ static void prime_pred_op(Trix *trx) {
         if (n <= 1000) {
             *val_ptr = Object::make_boolean(true);
         } else {
-            // modular exponentiation: base^exp mod m using __uint128_t
-            auto mod_pow = [](ulong_t base, ulong_t exp, ulong_t mod) -> ulong_t {
-                ulong_t result = 1;
-                base %= mod;
-                while (exp > 0) {
-                    if ((exp & 1) != 0) {
-                        result = static_cast<ulong_t>((__uint128_t(result) * base) % mod);
-                    }
-                    exp >>= 1;
-                    base = static_cast<ulong_t>((__uint128_t(base) * base) % mod);
-                }
-                return result;
-            };
-
             // Miller-Rabin: write n-1 = d * 2^r
             auto d = n - 1;
             int r = 0;
@@ -893,16 +895,7 @@ static void powmod_op(Trix *trx) {
     if (mod_val == 0) {
         trx->error(Error::RangeCheck, "pow-mod: modulus must be > 0");
     } else {
-        // modular exponentiation using __uint128_t
-        ulong_t result = 1;
-        base_val %= mod_val;
-        while (exp_val > 0) {
-            if ((exp_val & 1) != 0) {
-                result = static_cast<ulong_t>((__uint128_t(result) * base_val) % mod_val);
-            }
-            exp_val >>= 1;
-            base_val = static_cast<ulong_t>((__uint128_t(base_val) * base_val) % mod_val);
-        }
+        auto result = mod_pow(base_val, exp_val, mod_val);
 
         // Validate the result against the base operand's type and construct the
         // result object BEFORE freeing the operands' ExtValues: an error raised
