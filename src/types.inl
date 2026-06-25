@@ -701,7 +701,7 @@ private:
 static constexpr uint8_t MAJOR{0};
 static constexpr uint8_t MINOR{11};
 static constexpr uint8_t PATCH{0};
-static constexpr std::string_view PRERELEASE{"-dev"};
+static constexpr std::string_view PRERELEASE{""};
 
 // Snapshot-image format revision: stored in the snapshot header and
 // strict-compared on thaw.  Increment any time the on-disk layout,

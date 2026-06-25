@@ -85,8 +85,8 @@ Two flags exit immediately after printing:
 
 ```console
 $ trix --version
-trix 0.10.1 — the cat in concatenative
-build: debug; sanitizers: address; features: heap-tracking debugger backtrace
+trix 0.11.0 — the cat in concatenative
+build: debug; sanitizers: address; features: heap-tracking debugger backtrace zlib readline
 
 $ trix --help
 Usage: trix [options] [filename] [script-args...]
@@ -148,7 +148,7 @@ version, VM size, operator count, and snapshot-image version, then a
 
 ```console
 $ trix -i
-Trix 0.10.1 -- 1M VM -- 838 ops (996 total) +3 user, image v178
+Trix 0.11.0 -- 1M VM -- 839 ops (997 total) +3 user, image v181
 (ctrl-D or 'quit' to exit)
 Trix> 2 3 mul =
 6
@@ -389,7 +389,7 @@ Notes on the less obvious knobs:
 
   ```console
   $ trix -i --vm-size=2M
-  Trix 0.10.1 -- 2M VM -- 838 ops (996 total) +3 user, image v178
+  Trix 0.11.0 -- 2M VM -- 839 ops (997 total) +3 user, image v181
   (ctrl-D or 'quit' to exit)
   Trix>
   ```

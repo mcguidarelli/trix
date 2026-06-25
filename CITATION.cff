@@ -13,8 +13,8 @@ authors:
   - family-names: "Guidarelli"
     given-names: "Mark"
     email: "guido@grumpy-cat.com"
-version: "0.9.0"
-date-released: "2026-06-06"
+version: "0.11.0"
+date-released: "2026-06-24"
 license: Apache-2.0
 repository-code: "https://github.com/mcguidarelli/trix"
 url: "https://github.com/mcguidarelli/trix"

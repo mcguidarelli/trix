@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-24
+
 ### Added
 - **`string-from-bytes` operator + byte arrays accepted by output sinks.** New
   `string-from-bytes` (`array -- string`) builds a string from an array whose
@@ -317,7 +319,8 @@ a performance pass).
 - Dependencies are readline and zlib, both opt-out (`--no-readline` / `--no-zlib`).
 - Apache 2.0 licensed.
 
-[Unreleased]: https://github.com/mcguidarelli/trix/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/mcguidarelli/trix/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/mcguidarelli/trix/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/mcguidarelli/trix/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/mcguidarelli/trix/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/mcguidarelli/trix/releases/tag/v0.9.0
