@@ -327,6 +327,27 @@ vm_size_t gc_count_live_blocks() {
 }
 
 //
+// gc_count_global_name_blocks(): count live global Name blocks via a full
+// heap walk.  Debug oracle ONLY -- referenced solely from the walk_all_roots
+// assert that guards the m_has_global_names name-walk skip (so the call is
+// compiled out in release).  Catches a flag-maintenance bug (flag false while
+// a global Name exists) before the skipped walk can sweep a still-rooted Name.
+//
+[[nodiscard]] vm_size_t gc_count_global_name_blocks() {
+    vm_size_t n = 0;
+    gvm_for_each([&n](vm_offset_t /*payload_offset*/,
+                      ChunkKind kind,
+                      vm_size_t /*payload_size*/,
+                      vm_size_t /*block_size*/,
+                      bool is_free) {
+        if (!is_free && (kind == ChunkKind::Name)) {
+            ++n;
+        }
+    });
+    return n;
+}
+
+//
 // gc_advance_generation(): flip m_gc_current_gen for the next pass.
 // m_gc_current_gen is a 1-bit flip-flop holding {0,1}; XOR-ing it
 // makes every existing block's m_mark_gen point to the "other"
@@ -1298,29 +1319,47 @@ void walk_all_roots() {
         gc_walk_coroutine_context(m_main_context);
     }
 
-    // 3. Name table buckets + pre-interned Name offsets.
-    if (m_name_buckets != nullptr) {
-        for (name_bucket_count_t i = 0; i < m_name_bucket_count; ++i) {
-            for (auto curr = m_name_buckets[i]; curr != nulloffset; curr = offset_to_ptr<Name>(curr)->next()) {
-                mark_global_offset(curr);
+    // 3 + 3b. Name table buckets + pre-interned Name offset tables.
+    //
+    // Both walks exist SOLELY to mark global Name blocks so the sweep keeps them
+    // alive (a global Name is rooted only here -- the bucket chain references it,
+    // but the sweep never rewrites buckets, so an unmarked global Name would be
+    // freed under a live bucket pointer -> UAF).  When no Name has ever been
+    // interned globally (m_has_global_names false), every entry is local-VM:
+    // mark_global_offset skips it AND the global sweep never touches it, so the
+    // whole walk is a no-op.  Skipping it drops the dominant per-pass root-walk
+    // cost (~1300 boot system names all live in local VM) on every program with
+    // no global names -- the common case.
+    //
+    // Debug oracle: if the flag is false there must be zero live global Name
+    // blocks, else we are about to wrongly skip marking a sweep-eligible Name.
+    assert((m_has_global_names || (gc_count_global_name_blocks() == 0)) &&
+           "m_has_global_names is false but a live global Name block exists -- name-table walk wrongly skipped");
+    if (m_has_global_names) {
+        // 3. Name table buckets.
+        if (m_name_buckets != nullptr) {
+            for (name_bucket_count_t i = 0; i < m_name_bucket_count; ++i) {
+                for (auto curr = m_name_buckets[i]; curr != nulloffset; curr = offset_to_ptr<Name>(curr)->next()) {
+                    mark_global_offset(curr);
+                }
             }
         }
-    }
-    // 3b. Pre-interned Name offset tables (vm_offset_t arrays, null until
-    // built): walk each entry by raw offset via mark_global_offset.
-    struct OffsetTable {
-        const vm_offset_t *base_ptr;
-        size_t count;
-    };
-    for (auto table : {
-                 OffsetTable{m_systemname_offsets,  static_cast<size_t>(SYSTEMNAME_COUNT)},
-                 OffsetTable{  m_typename_offsets, static_cast<size_t>(Object::TypeCount)},
-                 OffsetTable{ m_errorname_offsets,        static_cast<size_t>(ErrorCount)},
-                 OffsetTable{ m_wellknown_offsets,   static_cast<size_t>(WELLKNOWN_COUNT)}
-    }) {
-        if (table.base_ptr != nullptr) {
-            for (size_t i = 0; i < table.count; ++i) {
-                mark_global_offset(table.base_ptr[i]);
+        // 3b. Pre-interned Name offset tables (vm_offset_t arrays, null until
+        // built): walk each entry by raw offset via mark_global_offset.
+        struct OffsetTable {
+            const vm_offset_t *base_ptr;
+            size_t count;
+        };
+        for (auto table : {
+                     OffsetTable{m_systemname_offsets,  static_cast<size_t>(SYSTEMNAME_COUNT)},
+                     OffsetTable{  m_typename_offsets, static_cast<size_t>(Object::TypeCount)},
+                     OffsetTable{ m_errorname_offsets,        static_cast<size_t>(ErrorCount)},
+                     OffsetTable{ m_wellknown_offsets,   static_cast<size_t>(WELLKNOWN_COUNT)}
+        }) {
+            if (table.base_ptr != nullptr) {
+                for (size_t i = 0; i < table.count; ++i) {
+                    mark_global_offset(table.base_ptr[i]);
+                }
             }
         }
     }

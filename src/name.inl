@@ -346,6 +346,12 @@ public:
                 std::copy_n(sv.data(), length, name->data());
 
                 *chain = name_offset;
+                if (trx->is_global(name_offset)) {
+                    // A global Name block is GC-managed and rooted only by the
+                    // name-table walk; flag that the walk must run this session
+                    // (see m_has_global_names + gc.inl::walk_all_roots).
+                    trx->m_has_global_names = true;
+                }
                 return name_offset;
             } else {
                 auto name = trx->offset_to_ptr<Name>(offset);

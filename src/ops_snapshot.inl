@@ -1102,6 +1102,13 @@ static void restore_from_header(Trix *trx, const SnapShotHeader *h) {
     trx->m_gc_scratch_offset = h->gc_scratch_offset;  // lazy GC scratch survives thaw
     trx->m_gvm_user_block_count = h->gvm_user_block_count;
     trx->m_gvm_free_block_count = h->gvm_free_block_count;
+    // A thawed global region may contain global Name blocks; the snapshot does
+    // not record their presence separately.  Set conservatively: if the region
+    // holds any user block, assume a global Name may be present so the
+    // name-table walk runs (runtime Name::add refines nothing -- it only ever
+    // sets the flag true).  False only when the global region is empty, where no
+    // Name block can exist.  Over-walking after thaw is a perf miss, never a UAF.
+    trx->m_has_global_names = (h->gvm_user_block_count > 0);
     // Local-visited pointer is derived from m_gc_scratch_offset on every GC
     // entry; reset to nullptr here.  Thaw doesn't run GC, so an idle pointer
     // is correct.

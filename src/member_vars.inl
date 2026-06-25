@@ -139,6 +139,18 @@ Object *m_root_objects_ptr{nullptr};          // RootObject-indexed array of hea
 name_bucket_count_t m_name_bucket_count{0};
 uint64_t m_name_bucket_magic{0};  // Lemire fastmod magic for m_name_bucket_count (recomputed on init/thaw)
 
+// True once any Name has been interned in GLOBAL VM (a `set-global` window, the
+// `$/foo` / `$\foo` prefixes, or a `${...}` block).  Global Name blocks are
+// GC-managed and kept alive ONLY by the name-table root walk (gc.inl
+// walk_all_roots section 3/3b): the bucket chain references them but the sweep
+// never rewrites buckets, so an unmarked global Name would be freed under a live
+// bucket pointer.  When this is false, every interned Name is local-VM -- the
+// global sweep never touches it and mark_global_offset skips it -- so the entire
+// name-table walk is a no-op and gets skipped.  Monotonic at runtime (global
+// names are never unlinked; see Name::restore's !is_global guard); set
+// conservatively on snapshot thaw when the global region is non-empty.
+bool m_has_global_names{false};
+
 // Stream
 stream_id_t m_next_sid{0};
 bool m_sid_wrapped{false};

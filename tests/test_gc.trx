@@ -327,7 +327,28 @@ vm-global-gc-probe /probe13b exch def
 probe13b /dead get 0 eq                       (13: post-gc no remaining garbage) rt-ok
 
 % ====================================================================
-% SECTION 14: tail of session
+% SECTION 14: global-name survival (name-table-walk gate)
+% ====================================================================
+% walk_all_roots skips the name-table root walk entirely while no Name has
+% been interned globally (the common case: ~1300 boot system names all live in
+% local VM, which the global sweep never touches).  The instant a global Name
+% exists the walk must run -- the bucket chain roots it, and the sweep would
+% otherwise free it under a live bucket pointer.  Intern a global Name via the
+% $/ prefix, drop every other reference, and confirm it survives GC: re-interning
+% must return the SAME surviving block (a swept block would fault under ASan +
+% gc-stress, or re-intern at a fresh offset).  Sections 1-13 above exercised the
+% skip path (no global names); this exercises the walk path.
+
+/gname-before vm-global-info /by-kind get /name get /count get def
+$/zzz-gc-survivor-name pop                    % interned in GLOBAL VM, reference then dropped
+vm-global-info /by-kind get /name get /count get gname-before gt
+                                             (14: $/ interned a global name) rt-ok
+vm-global-gc pop                              % flag now true -> name walk runs -> global name marked
+$/zzz-gc-survivor-name $/zzz-gc-survivor-name eq
+                                             (14: global name survives GC at the same offset) rt-ok
+
+% ====================================================================
+% SECTION 15: tail of session
 % ====================================================================
 % Final integrity check: confirm no errors mid-test, gc-in-progress
 % rests at false, gc-runs is positive.
@@ -337,8 +358,8 @@ probe13b /dead get 0 eq                       (13: post-gc no remaining garbage)
 % tokens incrementally, so a test that exhausts the heap mid-file
 % would leave the remaining lines unscannable.
 
-//:status:gc-in-progress not                 (14: gc-in-progress at false at end) rt-ok
-//:status:gc-runs 0l gt                      (14: gc-runs > 0 at end) rt-ok
+//:status:gc-in-progress not                 (15: gc-in-progress at false at end) rt-ok
+//:status:gc-runs 0l gt                      (15: gc-runs > 0 at end) rt-ok
 
 rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
 (test_gc: ALL TESTS PASSED) =
