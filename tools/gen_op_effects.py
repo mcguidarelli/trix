@@ -263,22 +263,36 @@ def clang_format(content):
     return r.stdout
 
 
+def normalize(content):
+    """Strip ALL whitespace so a comparison ignores layout entirely -- clang-format
+    inserts spaces around punctuation ({a,b} -> { a, b }) and aligns columns, so a
+    single-space collapse is not enough; every token here is punctuation-delimited,
+    so removing whitespace cannot merge distinct values.  --check verifies the
+    operator/arity DATA is in sync; the file's *formatting* is the separate
+    clang-format CI gate's job.  Decoupling them keeps --check working with any
+    clang-format version, or none at all (a CI runner without clang-format must not
+    turn a data check into a format check)."""
+    return "".join(content.split())
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "--dry"
     rows = build_rows()
-    content = clang_format(render(rows))
-    if mode == "--write":
-        open(OUTPUT, "w", encoding="utf-8").write(content)
-        print(f"wrote {OUTPUT} ({len(rows)} operators)")
-        return 0
+    rendered = render(rows)
     if mode == "--check":
+        # Compare DATA only (whitespace-insensitive): no clang-format dependency.
         existing = open(OUTPUT, encoding="utf-8").read() if os.path.exists(OUTPUT) else ""
-        if existing != content:
+        if normalize(rendered) != normalize(existing):
             print("src/op_effects.inl is OUT OF SYNC with dispatch.inl / trix-reference.md.",
                   file=sys.stderr)
             print("Regenerate with: tools/gen_op_effects.py --write", file=sys.stderr)
             return 1
         print(f"src/op_effects.inl in sync ({len(rows)} operators)")
+        return 0
+    content = clang_format(rendered)  # --write / dry-run emit the formatted file
+    if mode == "--write":
+        open(OUTPUT, "w", encoding="utf-8").write(content)
+        print(f"wrote {OUTPUT} ({len(rows)} operators)")
         return 0
     print(content)
     return 0
