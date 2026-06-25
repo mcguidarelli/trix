@@ -360,6 +360,7 @@ enum struct SystemName : name_index_t {
     CharSpace,              // "space?"
     CharUpper,              // "upper?"
     Chars,                  // "chars"
+    StringFromBytes,        // "string-from-bytes"
     Chunk,                  // "chunk"
     Cbrt,                   // "cbrt"
     Ceil,                   // "ceil"

@@ -137,15 +137,16 @@ static void op_stack_op(Trix *trx) {
     *trx->m_op_ptr = arr_obj;
 }
 
-// print: str :- --
-// Writes a string to stdout.
+// print: str|array :- --
+// Writes a string (or an array of bytes) to stdout.
 // throws: io-write-error, opstack-underflow, type-check, unsupported
 static void print_op(Trix *trx) {
     auto out = trx->m_stdout;
     if (out != nullptr) {
-        trx->verify_operands(VerifyString);
+        trx->verify_operands(VerifyString | VerifyArray);
 
         auto str_ptr = trx->m_op_ptr;
+        coerce_byte_array_to_string(trx, str_ptr);
         auto str_data = str_ptr->string_vptr(trx);
         auto length = str_ptr->string_length();
         if (length > 1) {

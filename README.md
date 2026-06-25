@@ -436,7 +436,7 @@ user-operator and interrupt APIs, and the complete Config table.
 
 | Category                                                            | Operators |
 | ------------------------------------------------------------------- | --------- |
-| Core (stack, math, string, array, dict, set, coroutines, lazy, ...) | 661       |
+| Core (stack, math, string, array, dict, set, coroutines, lazy, ...) | 662       |
 | Pipelines (bounded buffers, backpressure)                           | 21        |
 | Actors (mailboxes, selective receive)                               | 18        |
 | Supervision (monitor, link, restart trees)                          | 18        |
@@ -444,14 +444,14 @@ user-operator and interrupt APIs, and the complete Config table.
 | Reactive Cells (incremental computation)                            | 21        |
 | Composability (protocols, matching, GenServer, transducers, ...)    | 36        |
 | Infix expressions, modules, contracts                               | 34        |
-| **Total**                                                           | **838**   |
+| **Total**                                                           | **839**   |
 
 ## Metrics
 
 | Metric               | Value                                                           |
 | -------------------- | --------------------------------------------------------------- |
 | Source               | ~87,400 lines C++23 (69 .inl files)                             |
-| Operators            | 838                                                             |
+| Operators            | 839                                                             |
 | Test assertions      | 20,700+ across 263 test files                                   |
 | Fuzz testing         | libFuzzer harness (full interpreter)                            |
 | Interpreter dispatch | ~47M ops/sec (representative mix; see [benchmark/](benchmark/)) |

@@ -27,7 +27,7 @@ How all subsystems compose into a unified programming system.
 ## 1. What Trix Is
 
 Trix is a stack-based programming language and virtual machine implemented
-as a header-only C++23 library.  It provides 838 operators spanning eight
+as a header-only C++23 library.  It provides 839 operators spanning eight
 programming paradigms in a deterministic runtime -- GC-free on the local
 execution path -- with a 1 MB default VM heap (256KB minimum).
 
@@ -51,7 +51,7 @@ Source code (.trx)
 
 | Metric                | Value                                      |
 | --------------------- | ------------------------------------------ |
-| Operators             | 838                                        |
+| Operators             | 839                                        |
 | Operator categories   | 36 (`ops_*.inl` files)                     |
 | Type system           | 32 types (5-bit tag, 32 slots, 0 reserved) |
 | VM heap               | 1 MB default (256KB minimum)               |
@@ -248,7 +248,7 @@ and dispatches by type:
 - **Literal** objects (integers, strings, names) push to the operand stack.
 - **Executable** names are looked up in the dict stack; the found
   value is pushed back onto the exec stack for further dispatch.
-- **Operators** call native C++ functions (the 838 built-in operators).
+- **Operators** call native C++ functions (the 839 built-in operators).
 - **Executable arrays** (procs) push their elements in reverse onto
   the exec stack, so the first element executes first.
 - **Strings and streams** are scanned for tokens (invoking the scanner).
@@ -833,7 +833,7 @@ snap-shot/thaw as part of its validation suite.
 ### 7.5 Single-File Deployment
 
 Trix is header-only.  `#include "trix.h"` and compile.  The entire
-language -- VM, scanner, interpreter, all 838 operators, all 32 types --
+language -- VM, scanner, interpreter, all 839 operators, all 32 types --
 is one compilation unit.  No separate runtime, no shared libraries, no
 build system complexity, no version-mismatch headaches.
 
@@ -1148,7 +1148,7 @@ One `#include`.
 
 | Document            | Covers                                    |
 | ------------------- | ----------------------------------------- |
-| `trix-reference.md` | Complete operator reference (all 838 ops) |
+| `trix-reference.md` | Complete operator reference (all 839 ops) |
 | `vm-internals.md`   | Heap, allocation, offset addressing       |
 | `interpreter.md`    | Exec stack dispatch, operator execution   |
 | `scanner.md`        | Tokenizer, binary tokens                  |

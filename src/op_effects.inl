@@ -47,7 +47,7 @@ struct OpEffectRow {
     uint8_t m_out;
 };
 
-// 594 operators with a statically reliable fixed arity.
+// 595 operators with a statically reliable fixed arity.
 static constexpr OpEffectRow sm_op_effect_rows[] = {
         {                SystemName::SingleEq, 1, 0}, // =
         {                SystemName::DoubleEq, 1, 0}, // ==
@@ -441,6 +441,7 @@ static constexpr OpEffectRow sm_op_effect_rows[] = {
         {               SystemName::CharSpace, 1, 1}, // space?
         {               SystemName::CharUpper, 1, 1}, // upper?
         {                   SystemName::Chars, 1, 1}, // chars
+        {         SystemName::StringFromBytes, 1, 1}, // string-from-bytes
         {                   SystemName::Chunk, 2, 1}, // chunk
         {                    SystemName::Cbrt, 1, 1}, // cbrt
         {             SystemName::CompEllint1, 1, 1}, // comp-ellint-1

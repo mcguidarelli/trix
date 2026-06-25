@@ -380,7 +380,8 @@ static void screen_put_cell_op(Trix *trx) {
     // screen remains on stack
 }
 
-// screen-put-string: screen col row str fg bg attrs :- screen
+// screen-put-string: screen col row str|array fg bg attrs :- screen
+// `str` may be a string or an array of bytes.
 // Writes successive bytes of `str` as cells starting at (col, row) on the
 // same row.  Off-screen bytes are silently truncated at the row's right
 // edge.  fg/bg/attrs apply uniformly to every cell.  Bytes are interpreted
@@ -391,10 +392,11 @@ static void screen_put_string_op(Trix *trx) {
     trx->verify_operands(VerifyIntegers32 | VerifyNotNegative,  // attrs
                          VerifyIntegers32 | VerifyNotNegative,  // bg
                          VerifyIntegers32 | VerifyNotNegative,  // fg
-                         VerifyString,                          // str
+                         VerifyString | VerifyArray,            // str
                          VerifyIntegers32 | VerifyNotNegative,  // row
                          VerifyIntegers32 | VerifyNotNegative,  // col
                          VerifyScreen);                         // screen
+    coerce_byte_array_to_string(trx, trx->m_op_ptr - 3);        // str operand
     auto attrs_ptr = trx->m_op_ptr;
     auto bg_ptr = (attrs_ptr - 1);
     auto fg_ptr = (attrs_ptr - 2);
@@ -930,7 +932,8 @@ struct Utf8Decode {
     }
 }
 
-// screen-put-utf8-string: screen col row str fg bg attrs :- screen
+// screen-put-utf8-string: screen col row str|array fg bg attrs :- screen
+// `str` may be a string or an array of bytes.
 // Like screen-put-string, but interprets `str` as UTF-8 and writes one
 // cell per decoded codepoint (instead of one cell per byte).  Ill-formed
 // sequences become U+FFFD and consume one byte.  Off-screen cells are
@@ -940,10 +943,11 @@ static void screen_put_utf8_string_op(Trix *trx) {
     trx->verify_operands(VerifyIntegers32 | VerifyNotNegative,  // attrs
                          VerifyIntegers32 | VerifyNotNegative,  // bg
                          VerifyIntegers32 | VerifyNotNegative,  // fg
-                         VerifyString,                          // str
+                         VerifyString | VerifyArray,            // str
                          VerifyIntegers32 | VerifyNotNegative,  // row
                          VerifyIntegers32 | VerifyNotNegative,  // col
                          VerifyScreen);                         // screen
+    coerce_byte_array_to_string(trx, trx->m_op_ptr - 3);        // str operand
     auto attrs_ptr = trx->m_op_ptr;
     auto bg_ptr = (attrs_ptr - 1);
     auto fg_ptr = (attrs_ptr - 2);

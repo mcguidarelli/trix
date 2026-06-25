@@ -1011,6 +1011,7 @@ struct SysOperatorRow {
             {                   SystemName::CharSpace,                         charspace_op,                          "space?"sv},
             {                   SystemName::CharUpper,                         charupper_op,                          "upper?"sv},
             {                       SystemName::Chars,                             chars_op,                           "chars"sv},
+            {             SystemName::StringFromBytes,                 string_from_bytes_op,               "string-from-bytes"sv},
             {                       SystemName::Chunk,                             chunk_op,                           "chunk"sv},
             {                        SystemName::Cbrt,                              cbrt_op,                            "cbrt"sv},
             {                 SystemName::CompEllint1,                     comp_ellint_1_op,                   "comp-ellint-1"sv},

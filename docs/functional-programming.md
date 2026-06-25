@@ -28,7 +28,7 @@ variables (only mutable containers with explicit ReadOnly/ReadWrite access
 control).
 
 This document covers the complete functional programming toolkit available
-in Trix: 32 types, 838 operators, and a set of design choices that make
+in Trix: 32 types, 839 operators, and a set of design choices that make
 Trix competitive with dedicated functional languages for higher-order
 programming, while remaining a zero-GC, deterministic, embeddable scripting
 engine.

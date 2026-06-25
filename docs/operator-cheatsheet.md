@@ -14,7 +14,7 @@ You may obtain a copy of the License at
 
 # Trix Operator Cheat Sheet
 
-The everyday subset.  ~312 of the 838 user-facing operators in Trix,
+The everyday subset.  ~312 of the 839 user-facing operators in Trix,
 picked for "things you reach for first".  Every op listed has been verified to
 exist in `systemdict`.  For exact stack effects, error conditions,
 edge cases, and worked examples, see the corresponding `### 3.x`

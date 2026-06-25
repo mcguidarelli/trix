@@ -1240,7 +1240,7 @@ follow.
 | 3.44 | Operator error reference | *(generated)* | Per-operator table of the errors each operator may raise |
 | 3.45 | Host introspection (DWARF) | `dwarf-open peek-bytes leb128-decode module-load-bias module-load-bias-for dwarf-read-die dwarf-line-lookup dwarf-munmap` | Parse the host's own ELF/DWARF + read its live memory by name -- Layer 1 of the `lib/dwarf.trx` reader; see [DWARF Host Introspection](dwarf.md) |
 
-Total user-facing ops: 838.  See the corresponding subsection
+Total user-facing ops: 839.  See the corresponding subsection
 below for exact stack effects, error conditions, and worked examples.
 
 ### 3.1 Stack Manipulation
@@ -1572,7 +1572,8 @@ get-interval        str index count -- substr
 search              str seek -- post match pre true | str false
 split               str delim -- arr         % split into array of strings
 join                arr delim -- str         % join array with delimiter
-chars               str -- arr               % split into 1-char strings
+chars               str -- arr               % explode into array of bytes
+string-from-bytes   arr -- str               % build string from an array of bytes (inverse of chars)
 starts-with?         str prefix -- bool
 ends-with?           str suffix -- bool
 contains?            str substr -- bool
@@ -1598,6 +1599,18 @@ reverse             str -- str
 > rather than a fresh copy — a `put` through the substring writes through to
 > the original.  See `docs/string-processing.md` for details and how to
 > detach.
+
+**Byte arrays as journaled strings.**  `string-from-bytes` is the runtime
+inverse of `chars` (and of the `(...)#a` literal): it rebuilds a string from an
+array whose elements are all bytes, raising `type-check` on the first non-byte
+element.  Its purpose is `save`/`restore` journaling: an array of `Byte` is
+fully journaled, so element writes roll back on `restore`, whereas string byte
+writes persist by design (see `docs/save-restore.md`).  An array of bytes is
+therefore the representation of choice for undoable text.  To make that text
+easy to emit, the output sinks `print`, `write-string`, `screen-put-string`,
+and `screen-put-utf8-string` accept a byte array directly in place of a string
+(internally coercing it, leaving the array on the stack unchanged); every other
+string operator requires an explicit `string-from-bytes` first.
 
 **Regex:**
 ```
@@ -2394,12 +2407,12 @@ clear-string-stream stream --                   % rewind write ptr; buffer reuse
 set-stdout          stream -- stream            % swap trx->m_stdout, return prev
 read                stream -- byte true | false % Byte, like read-key-byte / string get / unpack 'B'; EOF is the false branch
 write               stream int --               % byte value 0..255 (Byte or any integer type)
-write-string        stream str --
+write-string        stream str --               % str may be a byte array
 read-all            stream -- str
 read-string         stream str -- str bool
 read-hex-string     stream str -- str bool
 read-line           stream str -- str bool
-print               str --                   % print to stdout
+print               str --                   % print to stdout; str may be a byte array
 nl                  --                       % print newline
 flush               --                       % flush stdout
 flush-stream        stream --
@@ -2428,12 +2441,12 @@ screen-rows         screen -- rows
 screen-clear        screen -- screen         % reset all cells to default (space, fg=7, bg=0)
 screen-resize       screen new-cols new-rows -- screen
 screen-put-cell     screen col row codepoint fg bg attrs -- screen
-screen-put-string   screen col row str fg bg attrs -- screen       % truncates at right edge
+screen-put-string   screen col row str fg bg attrs -- screen       % truncates at right edge; str may be a byte array
 screen-fill-rect    screen x y w h codepoint fg bg attrs -- screen % clipped silently
 screen-render       screen -- screen                               % diff-render to stdout (sandbox-gated, flushes m_stdout first)
 screen-render-to    screen stream -- screen                        % diff-render to writable stream
 screen-get-cell     screen col row -- ch fg bg attrs               % read one cell
-screen-put-utf8-string  screen col row str fg bg attrs -- screen   % UTF-8 (one cell per codepoint)
+screen-put-utf8-string  screen col row str fg bg attrs -- screen   % UTF-8 (one cell per codepoint); str may be a byte array
 screen-blit         src sx sy w h dst dx dy -- dst                 % rect copy with clipping; same-screen safe
 screen-park-cursor  col row --                                     % park terminal cursor (0-indexed, sandbox-gated)
 screen?             any -- bool                                    % type test (true iff Screen handle)
@@ -5687,6 +5700,7 @@ error).  `(none)` means the operator raises no error.
 | `stream` | `execstack-overflow`, `file-open-error`, `filename-exists`, `filename-not-found`, `invalid-stream-access`, `io-seek-error`, `limit-check`, `opstack-underflow`, `type-check` |
 | `stream-position` | `io-seek-error`, `opstack-underflow`, `type-check`, `vm-full` |
 | `string` | `limit-check`, `opstack-underflow`, `type-check` |
+| `string-from-bytes` | `opstack-underflow`, `type-check`, `vm-full` |
 | `string-index-of` | `opstack-underflow`, `type-check` |
 | `sub` | `numerical-inf`, `numerical-nan`, `numerical-overflow`, `opstack-underflow`, `type-check` |
 | `subset?` | `opstack-underflow`, `type-check` |

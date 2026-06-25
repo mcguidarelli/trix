@@ -1,0 +1,2 @@
+(hi)#a print
+9 make-string-stream(yo)#a write-string

@@ -1050,7 +1050,12 @@ static constexpr std::string_view PRERELEASE{"-dev"};
 // fine reading its own images, but a pre-v180 build replaying a v180 packed stream
 // would hit a SlotRef element it cannot resolve -- the version gate rejects the
 // mismatch.
-static constexpr uint32_t SNAPSHOT_VERSION{180};
+// v181 inserts the string-from-bytes operator into the SystemName enum next to
+// chars, which shifts the ordinals of every operator after it.  Operator Objects
+// persist their ordinal in the heap (and thus in snapshots), so a pre-v181 image's
+// operators would resolve to the wrong functions under a v181 build -- the version
+// gate rejects the mismatch.
+static constexpr uint32_t SNAPSHOT_VERSION{181};
 public:
 using vm_offset_t = vm_size_t;
 static constexpr vm_offset_t nulloffset{0};

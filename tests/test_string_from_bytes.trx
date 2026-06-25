@@ -1,0 +1,93 @@
+% ====================================================================
+% test_string_from_bytes.trx -- string-from-bytes + byte-array sinks
+% ====================================================================
+% Validates the string-from-bytes operator (the runtime inverse of chars /
+% (...)#a) and the output sinks (print, write-string, screen-put-string,
+% screen-put-utf8-string) accepting a homogeneous array of bytes in place of
+% a string.  Covers happy paths, error paths, a 1000-byte stress round-trip,
+% embedded-nul / high-byte fidelity, and the save/restore journaling payoff.
+
+% rt-ok counts failures in a restore-immune slot (string byte writes are
+% unjournaled), so the count survives assertions made inside save scopes.
+% The file THROWS at EOF so test_all marks it failed on any assertion miss.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: happy path -- round-trips and string-ness
+% ====================================================================
+(hello)#a string-from-bytes (hello) eq          (sfb: #a literal round-trip) rt-ok clear
+(world) chars string-from-bytes (world) eq      (sfb: chars round-trip) rt-ok clear
+() chars string-from-bytes () eq                (sfb: empty round-trip) rt-ok clear
+[ 65b 66b 67b ] string-from-bytes (ABC) eq      (sfb: literal byte array) rt-ok clear
+(test)#a string-from-bytes length 4 eq          (sfb: length preserved) rt-ok clear
+(test)#a string-from-bytes type /string-type eq (sfb: result is a string) rt-ok clear
+(ab)#a string-from-bytes (cd) concat (abcd) eq  (sfb: usable as a string) rt-ok clear
+
+% ====================================================================
+% SECTION 2: error paths
+% ====================================================================
+{ [ 1 2 3 ] string-from-bytes } try /type-check eq      (sfb: non-byte elements raise type-check) rt-ok clear
+{ [ 65b 1 67b ] string-from-bytes } try /type-check eq  (sfb: mixed element raises type-check) rt-ok clear
+{ (notarray) string-from-bytes } try /type-check eq     (sfb: non-array raises type-check) rt-ok clear
+{ string-from-bytes } try /opstack-underflow eq         (sfb: empty stack underflows) rt-ok clear
+
+% ====================================================================
+% SECTION 3: embedded nul + full byte range fidelity
+% ====================================================================
+[ 0b 127b 128b 255b ] string-from-bytes /s exch def
+s length 4 eq                                   (sfb: length 4 with embedded nul) rt-ok clear
+s 0 get 0b eq                                   (sfb: nul byte at index 0 preserved) rt-ok clear
+s 1 get 127b eq                                 (sfb: byte 127 preserved) rt-ok clear
+s 2 get 128b eq                                 (sfb: high byte 128 preserved) rt-ok clear
+s 3 get 255b eq                                 (sfb: high byte 255 preserved) rt-ok clear
+
+% ====================================================================
+% SECTION 4: stress -- 1000-byte round-trip
+% ====================================================================
+(abcdefghij) 100 repeat-string /big exch def
+big chars string-from-bytes big eq              (sfb: 1000-byte round-trip equal) rt-ok clear
+big chars string-from-bytes length 1000 eq      (sfb: 1000-byte length) rt-ok clear
+
+% ====================================================================
+% SECTION 5: output sinks accept a byte array
+% ====================================================================
+% write-string -> string stream
+256 make-string-stream /ws exch def
+ws (hello world)#a write-string
+ws get-string-stream (hello world) eq           (sink: write-string takes byte array) rt-ok clear
+
+% print -> captured via a redirected stdout
+256 make-string-stream /cap exch def
+cap set-stdout /prev exch def
+(captured)#a print
+prev set-stdout pop
+cap get-string-stream (captured) eq             (sink: print takes byte array) rt-ok clear
+
+% screen-put-string -> read the cell back (codepoint 120 == 'x')
+2 1 make-screen /scr exch def
+scr 0 0 (xy)#a 7 0 0 screen-put-string pop
+scr 0 0 screen-get-cell pop pop pop 120 eq      (sink: screen-put-string takes byte array) rt-ok clear
+
+% screen-put-utf8-string -> read the cell back (codepoint 98 == 'b')
+2 1 make-screen /scr2 exch def
+scr2 0 0 (ab)#a 7 0 0 screen-put-utf8-string pop
+scr2 1 0 screen-get-cell pop pop pop 98 eq      (sink: screen-put-utf8-string takes byte array) rt-ok clear
+
+% ====================================================================
+% SECTION 6: save/restore journaling payoff
+% ====================================================================
+% A byte array is fully journaled: an element write inside a save scope rolls
+% back on restore, whereas a string's byte writes would persist by design.
+[ 65b 66b 67b ] /jb exch def
+save /jsv exch def
+jb 0 90b put                                    % edit: 'A' -> 'Z'
+jb string-from-bytes (ZBC) eq                   (journal: edit visible in save scope) rt-ok clear
+jsv restore                                     % undo the edit
+jb string-from-bytes (ABC) eq                   (journal: edit rolled back after restore) rt-ok clear
+
+% ====================================================================
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_string_from_bytes: ALL TESTS PASSED) =
+(__test_ok__) =

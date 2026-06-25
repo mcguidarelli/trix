@@ -49,6 +49,7 @@
 (tests/test_sysvars.trx) run-test
 (tests/test_streams.trx) run-test
 (tests/test_string_stream.trx) run-test
+(tests/test_string_from_bytes.trx) run-test
 (tests/test_screen_render.trx) run-test
 (tests/test_extvalue.trx) run-test
 (tests/test_dict.trx) run-test

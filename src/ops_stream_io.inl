@@ -778,13 +778,14 @@ static void write_op(Trix *trx) {
     }
 }
 
-// writestring: stream str :- --
-// Writes all bytes of str to stream.
+// writestring: stream str|array :- --
+// Writes all bytes of str (a string or an array of bytes) to stream.
 // throws: invalid-stream-access, io-write-error, opstack-underflow, type-check
 static void writestring_op(Trix *trx) {
-    trx->verify_operands(VerifyString, VerifyStream);
+    trx->verify_operands(VerifyString | VerifyArray, VerifyStream);
 
     auto str_ptr = trx->m_op_ptr;
+    coerce_byte_array_to_string(trx, str_ptr);
     auto stream_ptr = (str_ptr - 1);
     auto [stream, sid] = stream_ptr->stream_value(trx);
     if (stream->is_writable(sid)) {

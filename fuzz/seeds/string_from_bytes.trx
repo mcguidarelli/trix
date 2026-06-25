@@ -1,0 +1,2 @@
+[72b 105b]string-from-bytes print
+(yo)chars string-from-bytes print

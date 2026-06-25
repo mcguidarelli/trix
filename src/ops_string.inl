@@ -928,6 +928,47 @@ static void chars_op(Trix *trx) {
     *str_ptr = Object::make_array(dst_offset, length);
 }
 
+// Build a string from an array whose elements are all bytes.  Shared by
+// string-from-bytes and the sink operators that accept a byte array in place of
+// a string.  Every element is validated up front so a non-byte element raises
+// type-check before any partial string is produced.
+[[nodiscard]] static Object build_string_from_byte_array(Trix *trx, Object *array_ptr) {
+    auto [src_ptr, count] = array_ptr->array_value(trx);
+    for (length_t i = 0; i < count; ++i) {
+        if (!src_ptr[i].is_byte()) {
+            trx->error(Error::TypeCheck, "string-from-bytes: array element {} is not a byte", i);
+        }
+    }
+
+    auto [dst_data, dst_offset] = trx->vm_alloc_dispatch<vm_t>(count + 1, ChunkKind::String);
+    for (length_t i = 0; i < count; ++i) {
+        dst_data[i] = src_ptr[i].byte_value();
+    }
+    dst_data[count] = '\0';
+    return Object::make_string(dst_offset, count);
+}
+
+// If `slot` holds a byte array, replace it in place with the equivalent string so
+// a string operator can run its normal String path; a string passes through
+// untouched.  Call before reading the operand's string buffer.  The operand is
+// already verified to be String or Array.
+static void coerce_byte_array_to_string(Trix *trx, Object *slot) {
+    if (slot->is_array()) {
+        *slot = build_string_from_byte_array(trx, slot);
+    }
+}
+
+// string-from-bytes: array :- string
+// Builds a string from an array whose elements are all bytes -- the runtime
+// inverse of chars and the (...)#a literal.  Region-aware: a ${...} result
+// survives save/restore.
+// throws: opstack-underflow, type-check, vm-full
+static void string_from_bytes_op(Trix *trx) {
+    trx->verify_operands(VerifyArray);
+    auto arr_ptr = trx->m_op_ptr;
+    *arr_ptr = build_string_from_byte_array(trx, arr_ptr);
+}
+
 // String: returns true iff non-empty and every byte matches the mask.
 template<chattr_t Mask>
 static void char_predicate_op(Trix *trx) {

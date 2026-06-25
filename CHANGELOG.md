@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`string-from-bytes` operator + byte arrays accepted by output sinks.** New
+  `string-from-bytes` (`array -- string`) builds a string from an array whose
+  elements are all bytes — the runtime inverse of `chars` and the `(...)#a`
+  literal — raising `/type-check` on the first non-byte element. Its motivation is
+  `save`/`restore` journaling: an array of `Byte` is fully journaled (element
+  writes roll back on `restore`) whereas string byte writes persist by design, so
+  a byte array is the representation of choice for undoable text. To render such
+  text without an explicit conversion, the output sinks `print`, `write-string`,
+  `screen-put-string`, and `screen-put-utf8-string` now accept a byte array in
+  place of a string (coerced internally; the array left on the stack is
+  unchanged). Operator count is now 839. The snapshot format is bumped to **v181**
+  (the new operator shifts the SystemName ordinals that operators persist in a
+  snapshot).
 - **Scan-time stack-effect checking.** A procedure may declare its stack effect by
   extending the `|...|` preamble with a `-- outputs` tail —
   `{ |price qty -- total| price qty mul }` is `( 2 -- 1 )`. At scan time (zero

@@ -90,6 +90,10 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
             cfg.m_sleep_budget_ms = 500;  // max_ops cannot tick while parked: bound wall-clock
                                           // sleeps too, or one huge sleep operand stalls a unit
                                           // until libFuzzer's -timeout flags a false positive
+            cfg.m_timeout_ms = 2000;      // in-process wall-clock deadline: a unit heavy in
+                                          // wall-clock but light in op-count (which max_ops
+                                          // misses) halts with a catchable TimeLimit before
+                                          // libFuzzer's external -timeout=5 SIGKILLs the process
 
             // Trix constructor runs interpreter() synchronously and catches all exceptions.
             Trix trx(kVmSize, cfg);

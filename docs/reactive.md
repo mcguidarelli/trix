@@ -1268,7 +1268,7 @@ A production system using all 5 layers:
 **Total VM footprint**: ~5 actors (~26 KB) + ~10 cells (~1 KB) +
 pipeline buffers (~2 KB) + overhead = ~30 KB of the 256 KB VM.
 
-### 10.3 The 838-Operator Runtime
+### 10.3 The 839-Operator Runtime
 
 | Category                                              | Operators |
 | ----------------------------------------------------- | --------- |
@@ -1280,7 +1280,7 @@ pipeline buffers (~2 KB) + overhead = ~30 KB of the 256 KB VM.
 | Logic / Backtracking                                  | 19        |
 | Reactive Cells                                        | 21        |
 | Composability (protocols, matching, transducers, ...) | ~53       |
-| **Total**                                             | **838**   |
+| **Total**                                             | **839**   |
 
 All in a single `#include "trix.h"`.  No external dependencies beyond
 readline and zlib.  Mark-sweep GC for the global VM region; otherwise

@@ -716,6 +716,21 @@ sv restore
 bytes 0 get                     % => 65b (rolled back)
 ```
 
+To make this representation ergonomic for text, `string-from-bytes` rebuilds a
+string from such an array (the runtime inverse of `chars` / `(...)#a`), and the
+output sinks `print`, `write-string`, `screen-put-string`, and
+`screen-put-utf8-string` accept the byte array directly -- so journaled text can
+be edited and rendered without ever leaving the journaled representation:
+
+```
+[ 65b 66b 67b ] /bytes exch def
+save /sv exch def
+bytes 0 90b put                 % edit: 'A' -> 'Z'  (journaled)
+bytes print                     % => ZBC  (sink takes the byte array as-is)
+sv restore                      % undo the edit
+bytes string-from-bytes print   % => ABC  (rolled back, materialised to a string)
+```
+
 **Workaround -- allocate after save:** If the string is allocated after the
 save point, it is discarded entirely by the heap rollback:
 

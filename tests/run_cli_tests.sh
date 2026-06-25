@@ -224,6 +224,11 @@ run_case argv-tail-not-parsed 0 grep '[(--help)#lr (-x)#lr (extra)#lr]' - -- -q 
 run_case eval-basic 0 exact '5' - -- -q -e '2 3 add ='
 run_case eval-long 0 exact 'eval-ok' - -- -q --eval '(eval-ok) ='
 run_case eval-empty 0 none '' - -- -q -e ''
+
+#--- string-from-bytes + byte-array output sinks ---#
+run_case sfb-print 0 exact 'hi' - -- -q -e '(hi)#a print'
+run_case sfb-roundtrip 0 exact 'ok' - -- -q -e '(ok) chars string-from-bytes print'
+run_case sfb-type-error type-check grep 'not a byte' - -- -e '[ 1 2 3 ] string-from-bytes'
 # tokens after EXPR are the script's argv tail (no filename is consumed)
 run_case eval-args 0 exact '[(alpha)#lr (beta)#lr]' - -- -q -e 'command-line-args ==' alpha beta
 # -e then -i: inline source runs, then the REPL takes over
