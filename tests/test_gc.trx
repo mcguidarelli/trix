@@ -285,7 +285,49 @@ post_wrap_probe /dead get 0 eq               (12: post-flip probe sees no garbag
 post_wrap_probe /live get 0 gt               (12: post-flip probe sees rooted blocks) rt-ok
 
 % ====================================================================
-% SECTION 13: tail of session
+% SECTION 13: leaf-block survival through a composite (no-enqueue path)
+% ====================================================================
+% gc_mark_reached marks leaf / no-op-walker kinds (Long, Double, String,
+% Name, ...) WITHOUT pushing them onto the work queue -- walking them is a
+% bare return, so the push/pop/dispatch round trip is skipped.  This
+% section pins a global Array whose only contents are heap-backed LEAF
+% blocks allocated inside the same ${...} window (a global Long, a global
+% Double, a global String), reachable solely as array elements.  After GC
+% they must still be intact: a leaf the no-enqueue path failed to mark
+% would be swept and read back wrong (or fault under ASan + gc-stress).
+
+% Drain orphaned ${...} body procs from the sections above so the probe
+% deltas below reflect only this section's blocks.
+vm-global-gc pop
+
+${ 4 array
+   dup 0 9000000000l put           % global Long   leaf (64-bit, heap-backed)
+   dup 1 2.718281828 put           % global Double leaf (heap-backed)
+   dup 2 (leaf-survivor) put       % global String leaf
+} /leaf-arr exch def
+
+% Rooted: a GC must keep the Array AND its three leaf blocks.  Drain the
+% body proc first so probe.dead reflects only reachability of the leaves.
+vm-global-gc pop
+vm-global-gc-probe /probe13 exch def
+probe13 /dead get 0 eq                        (13: rooted leaf array: 0 dead) rt-ok
+
+% Integrity: each leaf reads back at its original value -- a swept leaf
+% would mismatch here (or fault under ASan).
+leaf-arr 0 get 9000000000l eq                 (13: Long leaf survived intact) rt-ok
+leaf-arr 1 get 2.718281828 eq                 (13: Double leaf survived intact) rt-ok
+leaf-arr 2 get (leaf-survivor) eq             (13: String leaf survived intact) rt-ok
+
+% Orphan the array; it and its three leaves are now unreachable (the
+% leaves were reachable only through it) and must reclaim.
+/leaf-arr null def
+vm-global-gc /reclaimed13 exch def
+reclaimed13 0 gt                             (13: orphaned leaf array reclaimed bytes) rt-ok
+vm-global-gc-probe /probe13b exch def
+probe13b /dead get 0 eq                       (13: post-gc no remaining garbage) rt-ok
+
+% ====================================================================
+% SECTION 14: tail of session
 % ====================================================================
 % Final integrity check: confirm no errors mid-test, gc-in-progress
 % rests at false, gc-runs is positive.
@@ -295,8 +337,8 @@ post_wrap_probe /live get 0 gt               (12: post-flip probe sees rooted bl
 % tokens incrementally, so a test that exhausts the heap mid-file
 % would leave the remaining lines unscannable.
 
-//:status:gc-in-progress not                 (13: gc-in-progress at false at end) rt-ok
-//:status:gc-runs 0l gt                      (13: gc-runs > 0 at end) rt-ok
+//:status:gc-in-progress not                 (14: gc-in-progress at false at end) rt-ok
+//:status:gc-runs 0l gt                      (14: gc-runs > 0 at end) rt-ok
 
 rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
 (test_gc: ALL TESTS PASSED) =

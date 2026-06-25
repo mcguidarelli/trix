@@ -201,6 +201,26 @@ void gc_doomed_push(vm_offset_t payload_offset) {
     gc_work_list_insert(payload_offset);
 }
 
+// gc_mark_reached(payload_offset, kind): stamp the current mark generation
+// on a freshly-reached live block and account it toward m_gc_marked_count.
+// Leaf / no-op-walker kinds (gc_kind_has_no_children) are marked and counted
+// but NOT enqueued -- walk_block_contents would only dispatch them to a bare
+// return.  Composite kinds are pushed onto the work queue for the drain loop.
+//
+// Caller contract: the block MUST be live (not free) and not yet marked this
+// pass -- callers gate on gvm_block_is_free + the mark-generation check first.
+// The marked-first / push-second ordering (preserved for composites via
+// gc_work_push) keeps the cycle-break invariant in gc_mark_object intact.
+//
+void gc_mark_reached(vm_offset_t payload_offset, ChunkKind kind) {
+    gvm_set_mark_gen(payload_offset, m_gc_current_gen);
+    if (gc_kind_has_no_children(kind)) {
+        ++m_gc_marked_count;
+    } else {
+        gc_work_push(payload_offset);
+    }
+}
+
 // LOCAL-VM Dict/Set visit list end-of-list sentinel.  Distinguishes
 // "tail of list" from "off list" (the latter is nulloffset).  Picked
 // as offset 1 because it's:
@@ -536,8 +556,9 @@ void mark_global_offset(vm_offset_t payload_offset) {
                     } else if (gvm_get_mark_gen(payload_offset) != m_gc_current_gen) {
                         // Mark-generation bit: "alive in this pass" iff
                         // m_mark_gen == m_gc_current_gen.  Already-marked short-circuit.
-                        gvm_set_mark_gen(payload_offset, m_gc_current_gen);
-                        gc_work_push(payload_offset);
+                        // Leaf / no-op-walker kinds are marked + counted but not
+                        // enqueued (gc_mark_reached).
+                        gc_mark_reached(payload_offset, gvm_get_kind(payload_offset));
                     }
                 }
             }
@@ -841,14 +862,89 @@ void gc_mark_object(Object o) {
                     } else if (gvm_get_mark_gen(offset) != m_gc_current_gen) {
                         // Cycle break: block already marked at the current generation,
                         // contents enqueued / processed.  Mark FIRST so cyclic refs
-                        // short-circuit.
-                        gvm_set_mark_gen(offset, m_gc_current_gen);
-                        gc_work_push(offset);
+                        // short-circuit.  Leaf / no-op-walker kinds are marked +
+                        // counted but not enqueued (gc_mark_reached).
+                        gc_mark_reached(offset, gvm_get_kind(offset));
                     }
                 }
             }
         }
     }
+}
+
+//
+// gc_kind_has_no_children(kind): true for kinds whose payload holds no
+// Object references the GC must follow -- the leaves and no-op walkers
+// that walk_block_contents dispatches to a bare return.  A reached block
+// of such a kind is MARKED (so it survives the sweep) and counted toward
+// m_gc_marked_count, but is NOT pushed onto the mark work queue: the
+// push / pop / switch-dispatch round trip would only land on an empty
+// walker.  On a typical heap (numbers, interned names, strings dominate)
+// this is most reached blocks, so it both removes queue traffic and
+// shortens the queue the remaining composites drain through.
+//
+// MUST stay in lockstep with walk_block_contents: every kind that returns
+// true here is a bare-break / no-op case there, and every kind that
+// returns false runs a real per-subsystem walker.  Like walk_block_
+// contents, this switch has NO default clause, so -Wswitch-enum + -Werror
+// turns a newly-added ChunkKind into a compile-time error in BOTH
+// functions -- the leaf/composite classification cannot silently drift.
+//
+[[nodiscard]] static constexpr bool gc_kind_has_no_children(ChunkKind kind) {
+    switch (kind) {
+    // Leaves: scalar payloads, name bytes, string bytes, and standalone
+    // HashEntry blocks (their key/value are marked by the owning Dict/Set
+    // bucket walk, not from here).
+    case ChunkKind::Long:
+    case ChunkKind::ULong:
+    case ChunkKind::Address:
+    case ChunkKind::Double:
+    case ChunkKind::Int128:
+    case ChunkKind::UInt128:
+    case ChunkKind::String:
+    case ChunkKind::Name:
+    case ChunkKind::HashEntry:
+    // No-op walkers: the block is marked (via a sibling field or as a
+    // root) but its payload is not followed as a whole -- the live region
+    // is reached another way (CoroutineStacks via the context's tip
+    // pointers; GcScratch is GC-private raw offsets).
+    case ChunkKind::CoroutineStacks:
+    case ChunkKind::GcScratch:
+    // Retired / reserved: no live allocator, so no block of these kinds
+    // exists -- but they are bare-break cases in walk_block_contents, so
+    // they belong on the no-children side for switch totality.
+    case ChunkKind::Other:
+    case ChunkKind::Stream:
+    case ChunkKind::Continuation:
+    case ChunkKind::Screen:
+        return true;
+
+    // Composites: a real walker enumerates Object references in the payload.
+    case ChunkKind::Dict:
+    case ChunkKind::Set:
+    case ChunkKind::Array:
+    case ChunkKind::Curry:
+    case ChunkKind::Thunk:
+    case ChunkKind::Tagged:
+    case ChunkKind::Record:
+    case ChunkKind::Packed:
+    case ChunkKind::Cell:
+    case ChunkKind::CoroutineContext:
+    case ChunkKind::PipeBuffer:
+    case ChunkKind::Mailbox:
+    case ChunkKind::Monitor:
+    case ChunkKind::BindingBucket:
+    case ChunkKind::BindingEntry:
+    case ChunkKind::Supervisor:
+        return false;
+
+    // Free never reaches a mark path -- gc_mark_object / mark_global_offset
+    // reject free blocks before classifying -- but it is a named
+    // enumerator, so handle it for switch totality.
+    case ChunkKind::Free:
+        return false;
+    }
+    return false;  // unreachable: switch is exhaustive (mirrors gvm_kind_name)
 }
 
 //
