@@ -548,6 +548,20 @@ bool m_gc_stress{false};
 bool m_gc_poison{false};
 #endif
 
+// Debug-only per-section GC timing profile (vm-gc-profile operator).  When
+// m_gc_profile is true, walk_all_roots + vm_global_gc_impl charge each timed
+// region's elapsed nanoseconds into m_gc_profile_ns[], bucketed by
+// GcProfileSection, with m_gc_profile_passes counting passes that walked roots.
+// m_gc_profile_last_ns is the running section-boundary timestamp (steady_clock
+// epoch ns).  A measurement tool -- O(sections) steady_clock reads per pass when
+// enabled, zero cost when off; absent in release builds.
+#ifdef TRIX_DEBUGGER
+bool m_gc_profile{false};
+uint64_t m_gc_profile_passes{0};
+uint64_t m_gc_profile_last_ns{0};
+uint64_t m_gc_profile_ns[GcProfileSectionCount]{};
+#endif
+
 // Current GC mark-generation: a 1-bit flip-flop holding {0,1}.
 // GvmBlock::m_mark_gen is the matching per-block tag.  A block is
 // "alive in this pass" iff `header->m_mark_gen == m_gc_current_gen`.

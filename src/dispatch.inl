@@ -879,6 +879,8 @@ struct SysOperatorRow {
 #ifdef TRIX_DEBUGGER
             {                  SystemName::VmGcStress,                      vm_gc_stress_op,                    "vm-gc-stress"sv},
             {                  SystemName::VmGcPoison,                      vm_gc_poison_op,                    "vm-gc-poison"sv},
+            {                 SystemName::VmGcProfile,                     vm_gc_profile_op,                   "vm-gc-profile"sv},
+            {           SystemName::VmGcProfileReport,              vm_gc_profile_report_op,            "vm-gc-profile-report"sv},
 #endif
             {                SystemName::VmGlobalInfo,                    vm_global_info_op,                  "vm-global-info"sv},
 #ifdef TRIX_HEAP_TRACKING

@@ -1333,7 +1333,49 @@ void walk_object_range(Object *base, Object *ptr) {
 //     (no global allocator); the C++-side Stream objects live
 //     outside global VM.
 //
+// GC timing profile (TRIX_DEBUGGER, vm-gc-profile): a section-boundary
+// stopwatch.  gc_profile_begin stamps the start; each gc_profile_tick(section)
+// charges the time since the previous stamp to `section` and re-stamps;
+// gc_profile_pass_end counts a completed pass.  All are no-ops unless profiling
+// is enabled (and compile to nothing without TRIX_DEBUGGER), so the call sites
+// in walk_all_roots / vm_global_gc_impl stay free of preprocessor noise.
+#ifdef TRIX_DEBUGGER
+[[nodiscard]] static uint64_t gc_profile_now_ns() {
+    return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+#endif
+
+void gc_profile_begin() {
+#ifdef TRIX_DEBUGGER
+    if (m_gc_profile) {
+        m_gc_profile_last_ns = gc_profile_now_ns();
+    }
+#endif
+}
+
+void gc_profile_tick(GcProfileSection section) {
+#ifdef TRIX_DEBUGGER
+    if (m_gc_profile) {
+        auto now = gc_profile_now_ns();
+        m_gc_profile_ns[static_cast<size_t>(section)] += (now - m_gc_profile_last_ns);
+        m_gc_profile_last_ns = now;
+    }
+#else
+    static_cast<void>(section);
+#endif
+}
+
+void gc_profile_pass_end() {
+#ifdef TRIX_DEBUGGER
+    if (m_gc_profile) {
+        ++m_gc_profile_passes;
+    }
+#endif
+}
+
 void walk_all_roots() {
+    gc_profile_begin();
     // 1. Running coroutine hot stacks
     walk_object_range(m_op_base, m_op_ptr);
     walk_object_range(m_exec_base, m_exec_ptr);
@@ -1343,6 +1385,7 @@ void walk_all_roots() {
     // GcScope temporary roots (object.inl): in-flight global nodes held across a
     // build's allocations.  Empty except mid-operator; scanned identically.
     walk_object_range(m_gc_roots_base, m_gc_roots_ptr);
+    gc_profile_tick(GcProfileSection::Stacks);
 
     // 2. All coroutines via the registry list (circular).  The
     // running coroutine's context block is included; gc_walk_
@@ -1371,6 +1414,7 @@ void walk_all_roots() {
     if ((m_main_context != nulloffset) && (m_main_context < (vm_global_off + GvmHeaderSize))) {
         gc_walk_coroutine_context(m_main_context);
     }
+    gc_profile_tick(GcProfileSection::Coroutines);
 
     // 3. Global Name blocks.
     //
@@ -1413,6 +1457,7 @@ void walk_all_roots() {
             }
         }
     }
+    gc_profile_tick(GcProfileSection::Names);
 
     // 4. Object arrays: the WellKnownName cache (fixed member array -- base is
     // never null) and the RootObject array (heap pointer, null until built).
@@ -1431,6 +1476,7 @@ void walk_all_roots() {
             }
         }
     }
+    gc_profile_tick(GcProfileSection::ObjTables);
 
     // 5. Named registry dicts + offset companions.  These Dict
     // headers may live in LOCAL VM (allocated at init via vm_alloc,
@@ -1455,6 +1501,7 @@ void walk_all_roots() {
     for (auto off : {m_require_dict_offset, m_modules_dict_offset, m_protocol_registry_offset}) {
         mark_global_offset(off);
     }
+    gc_profile_tick(GcProfileSection::NamedDicts);
 
     // 6. Eqref tables: same local-vs-global concern as named dicts.
     // Walk their entries directly so global-VM Object values stay reachable.
@@ -1470,10 +1517,12 @@ void walk_all_roots() {
             gc_mark_object(m_eqproc_storage_ptr[i]);
         }
     }
+    gc_profile_tick(GcProfileSection::Eqref);
 
     // 7. Save journal: per-save-level chains, each entry's flavor
     // determines whether it carries Object cells worth marking.
     walk_save_journal();
+    gc_profile_tick(GcProfileSection::SaveJournal);
 
     // 8. Last-error fields (pointers into local VM scratch areas)
     for (auto *obj_ptr : {m_last_error_name_ptr,
@@ -1523,6 +1572,7 @@ void walk_all_roots() {
     gc_mark_object(m_debug.m_pending_error_data);
     gc_mark_object(m_debug.m_pending_operator);
 #endif
+    gc_profile_tick(GcProfileSection::RootTail);
 }
 
 //
@@ -1701,11 +1751,13 @@ vm_size_t vm_global_gc_impl() {
             m_gc_marked_count = 0;
 
             walk_all_roots();
+            gc_profile_pass_end();
 
             while (m_gc_work_head != nulloffset) {
                 auto payload_offset = gc_work_pop();
                 walk_block_contents(payload_offset);
             }
+            gc_profile_tick(GcProfileSection::MarkDrain);
 
             // Restore the off-list invariant on every visited Dict/Set so the
             // next GC pass starts clean.  Position relative to sweep does not
@@ -1717,8 +1769,12 @@ vm_size_t vm_global_gc_impl() {
             if (m_gc_marked_count == total_live) {
                 return 0;  // no garbage; skip sweep
             } else {
-                // Phase C: sweep.
-                return gc_sweep_unmarked(total_live - m_gc_marked_count);
+                // Phase C: sweep.  Re-stamp first so gc_visit_clear_all's time
+                // (between the MarkDrain tick and here) is not charged to Sweep.
+                gc_profile_begin();
+                auto reclaimed = gc_sweep_unmarked(total_live - m_gc_marked_count);
+                gc_profile_tick(GcProfileSection::Sweep);
+                return reclaimed;
             }
         }
     }
@@ -1769,6 +1825,77 @@ static void vm_gc_poison_op(Trix *trx) {
     trx->verify_operands(VerifyBoolean);
     trx->m_gc_poison = trx->m_op_ptr->boolean_value();
     --trx->m_op_ptr;
+}
+#endif
+
+// vm-gc-profile:  bool --   (debug-only)
+//
+// Toggle per-section GC timing accumulation (see GcProfileSection).  Passing
+// true enables profiling AND zeroes all accumulators; false disables it, leaving
+// the totals intact for a subsequent vm-gc-profile-report.  Each enabled pass
+// charges its timed regions into m_gc_profile_ns[] via gc_profile_tick.
+// O(sections) steady_clock reads per pass while enabled; a measurement tool.
+// Present only in TRIX_DEBUGGER builds.
+#ifdef TRIX_DEBUGGER
+static void vm_gc_profile_op(Trix *trx) {
+    trx->verify_operands(VerifyBoolean);
+    auto on = trx->m_op_ptr->boolean_value();
+    --trx->m_op_ptr;
+    if (on) {
+        trx->m_gc_profile_passes = 0;
+        trx->m_gc_profile_last_ns = 0;
+        for (size_t i = 0; i < static_cast<size_t>(GcProfileSectionCount); ++i) {
+            trx->m_gc_profile_ns[i] = 0;
+        }
+    }
+    trx->m_gc_profile = on;
+}
+#endif
+
+// vm-gc-profile-report:  -- dict   (debug-only)
+//
+// Push a dict summarising the accumulated profile (does not reset):
+//   { passes: int,
+//     by-section: { <section>: { total-ns: int, ns-per-pass: int } ... } }
+// where <section> is the GcProfileSection name.  ns-per-pass divides by the
+// pass count (0 when no pass ran).  Pair with min-of-N runs over a GC-heavy
+// workload; absolute numbers carry ~one steady_clock read of instrument cost
+// per section boundary, so compare sections within a run rather than across
+// instrumented vs uninstrumented builds.  Present only in TRIX_DEBUGGER builds.
+#ifdef TRIX_DEBUGGER
+static void vm_gc_profile_report_op(Trix *trx) {
+    using namespace std::literals::string_view_literals;
+    trx->require_op_capacity(1);
+
+    static constexpr std::string_view section_names[GcProfileSectionCount] = {"stacks"sv,
+                                                                              "coroutines"sv,
+                                                                              "names"sv,
+                                                                              "obj-tables"sv,
+                                                                              "named-dicts"sv,
+                                                                              "eqref"sv,
+                                                                              "save-journal"sv,
+                                                                              "root-tail"sv,
+                                                                              "mark-drain"sv,
+                                                                              "sweep"sv};
+
+    auto passes = trx->m_gc_profile_passes;
+    auto total_key = Name::make(trx, "total-ns"sv);
+    auto perpass_key = Name::make(trx, "ns-per-pass"sv);
+
+    auto [by_section, by_section_offset] = Dict::create_dict(trx, GcProfileSectionCount);
+    for (size_t i = 0; i < static_cast<size_t>(GcProfileSectionCount); ++i) {
+        auto total = trx->m_gc_profile_ns[i];
+        auto per_pass = (passes != 0) ? (total / passes) : uint64_t{0};
+        auto [sub, sub_offset] = Dict::create_dict(trx, 2);
+        sub->put(trx, total_key, Object::make_integer(static_cast<integer_t>(total)));
+        sub->put(trx, perpass_key, Object::make_integer(static_cast<integer_t>(per_pass)));
+        by_section->put(trx, Name::make(trx, section_names[i]), Object::make_dict(sub_offset));
+    }
+
+    auto [result, result_offset] = Dict::create_dict(trx, 2);
+    result->put(trx, Name::make(trx, "passes"sv), Object::make_integer(static_cast<integer_t>(passes)));
+    result->put(trx, Name::make(trx, "by-section"sv), Object::make_dict(by_section_offset));
+    *++trx->m_op_ptr = Object::make_dict(result_offset);
 }
 #endif
 

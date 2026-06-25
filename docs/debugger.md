@@ -849,32 +849,34 @@ locals directly without any frame-restoration glue.
 The C++ side exposes ~25 ops, all gated behind `#ifdef TRIX_DEBUGGER`
 (plus the `@debug-error-resume` control op):
 
-| Op                     | Stack effect       | Role                                                        |
-| ---------------------- | ------------------ | ----------------------------------------------------------- |
-| `debug-step`           | `--`               | Set mode StepIn                                             |
-| `debug-step-over`      | `--`               | Set mode StepOver                                           |
-| `debug-step-out`       | `--`               | Set mode StepOut                                            |
-| `debug-continue`       | `--`               | Set mode Continue                                           |
-| `debug-break`          | `/name --`         | Register a breakpoint                                       |
-| `debug-unbreak`        | `/name --`         | Drop a breakpoint                                           |
-| `debug-break-on-error` | `bool --`          | Toggle break-on-error mode                                  |
-| `debug-call-depth`     | `-- int`           | Current exec-stack `@call` depth                            |
-| `debug-pc`             | `-- name\|null`    | Current PC's dispatched name                                |
-| `debug-pc-source`      | `-- int int int`   | Current `[sid line col]`                                    |
-| `debug-on-event`       | `proc --`          | Install the cb                                              |
-| `debug-breakpoints`    | `-- array`         | Snapshot bp Dict's keys                                     |
-| `debug-bp-hits`        | `/name -- int`     | Hit count for a bp                                          |
-| `op-stack-snapshot`    | `-- array`         | Copy operand stack                                          |
-| `exec-stack-snapshot`  | `-- array`         | Copy exec stack                                             |
-| `dict-stack-snapshot`  | `-- array`         | Copy dict stack                                             |
-| `err-stack-snapshot`   | `-- array`         | Copy error stack                                            |
-| `proc-disasm`          | `proc -- array`    | Disassemble to `[sid line col name preview]` rows           |
-| `format-object`        | `obj n -- str`     | Pretty-print at most `n` chars                              |
-| `stream-name`          | `sid -- str\|null` | sid → filename (via persistent cache)                       |
-| `frame-source-locs`    | `-- array`         | `@call` frames + source locs                                |
-| `breakpoint`           | `--`               | Inline halt marker (no-op when debugger inactive)           |
-| `vm-gc-stress`         | `bool --`          | GC test harness: force a collection per allocation          |
-| `vm-gc-poison`         | `bool --`          | GC test harness: poison freed slots to catch use-after-free |
+| Op | Stack effect | Role |
+| --- | --- | --- |
+| `debug-step` | `--` | Set mode StepIn |
+| `debug-step-over` | `--` | Set mode StepOver |
+| `debug-step-out` | `--` | Set mode StepOut |
+| `debug-continue` | `--` | Set mode Continue |
+| `debug-break` | `/name --` | Register a breakpoint |
+| `debug-unbreak` | `/name --` | Drop a breakpoint |
+| `debug-break-on-error` | `bool --` | Toggle break-on-error mode |
+| `debug-call-depth` | `-- int` | Current exec-stack `@call` depth |
+| `debug-pc` | `-- name\|null` | Current PC's dispatched name |
+| `debug-pc-source` | `-- int int int` | Current `[sid line col]` |
+| `debug-on-event` | `proc --` | Install the cb |
+| `debug-breakpoints` | `-- array` | Snapshot bp Dict's keys |
+| `debug-bp-hits` | `/name -- int` | Hit count for a bp |
+| `op-stack-snapshot` | `-- array` | Copy operand stack |
+| `exec-stack-snapshot` | `-- array` | Copy exec stack |
+| `dict-stack-snapshot` | `-- array` | Copy dict stack |
+| `err-stack-snapshot` | `-- array` | Copy error stack |
+| `proc-disasm` | `proc -- array` | Disassemble to `[sid line col name preview]` rows |
+| `format-object` | `obj n -- str` | Pretty-print at most `n` chars |
+| `stream-name` | `sid -- str\|null` | sid → filename (via persistent cache) |
+| `frame-source-locs` | `-- array` | `@call` frames + source locs |
+| `breakpoint` | `--` | Inline halt marker (no-op when debugger inactive) |
+| `vm-gc-stress` | `bool --` | GC test harness: force a collection per allocation |
+| `vm-gc-poison` | `bool --` | GC test harness: poison freed slots to catch use-after-free |
+| `vm-gc-profile` | `bool --` | GC timing harness: toggle per-section accumulation (true resets) |
+| `vm-gc-profile-report` | `-- dict` | Per-section GC timing: `{ passes, by-section }` |
 
 Everything else — the rendering, the key handling, the command
 dispatch, the conditional-bp predicate eval, the sandbox, the watches,

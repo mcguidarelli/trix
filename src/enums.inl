@@ -965,6 +965,8 @@ enum struct SystemName : name_index_t {
     DebugBpHits,        // "debug-bp-hits"      (bp hit count)
     VmGcStress,         // "vm-gc-stress"       (toggle GC-before-every-global-alloc stress mode)
     VmGcPoison,         // "vm-gc-poison"       (scribble freed payloads -> deterministic UAF detection)
+    VmGcProfile,        // "vm-gc-profile"      (toggle per-section GC timing accumulation)
+    VmGcProfileReport,  // "vm-gc-profile-report" (dict of section -> ns totals + per-pass)
 #endif
     Die,                           // "coroutine-die"
     Peek,                          // "peek"
@@ -1274,6 +1276,26 @@ enum struct RootObject : uint8_t {
     PendingErrorData,  // throw-with error data
 };
 static constexpr uint8_t ROOT_OBJECT_COUNT{+RootObject::PendingErrorData + 1};
+
+// Per-section GC timing buckets (TRIX_DEBUGGER profiling, vm-gc-profile).  Each
+// names a timed region of one mark-sweep pass: the walk_all_roots sub-sections
+// (in declaration order) followed by the two phase-level regions (work-queue
+// drain, sweep).  Always defined -- the gc_profile_tick(section) signature must
+// exist in every build -- but the accumulators it feeds live only under
+// TRIX_DEBUGGER (member_vars.inl).
+enum struct GcProfileSection : uint8_t {
+    Stacks,       // section 1: running-coroutine hot stacks
+    Coroutines,   // section 2 + 2b: coroutine registry + main context
+    Names,        // section 3: global Name buckets (mask-gated)
+    ObjTables,    // section 4: well-known cache + root-objects array
+    NamedDicts,   // section 5: systemdict / userdict / errordict / handlers / protocol
+    Eqref,        // section 6: eqref tables (eqdict / eqset / eqproc storage)
+    SaveJournal,  // section 7: per-save-level journal chains
+    RootTail,     // sections 8-11: last-error, misc cells, reactive batch, debugger
+    MarkDrain,    // phase B: work-queue drain (walk_block_contents loop)
+    Sweep,        // phase C: gc_sweep_unmarked
+};
+static constexpr uint8_t GcProfileSectionCount{+GcProfileSection::Sweep + 1};
 
 // Binary tokens occupy the full 0x80..0xFF byte range.  Every byte with the high
 // bit set is unambiguously a binary token initiator -- this is enforced by the BT

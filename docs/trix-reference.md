@@ -4722,7 +4722,7 @@ ops are not registered and resolve to `/undefined` if invoked:
 | --- | --- | --- |
 | Family A -- the 14 `debug-*` / `breakpoint` ops | `ops_debugger.inl` (`#ifdef TRIX_DEBUGGER`) | **No** -- `/undefined` |
 | Family B -- the 8 introspection / disasm ops | `ops_debugger.inl` (`#ifdef TRIX_DEBUGGER`) | **No** -- `/undefined` |
-| Family C -- `vm-gc-stress`, `vm-gc-poison` | `gc.inl` (`#ifdef TRIX_DEBUGGER`) | **No** -- `/undefined` |
+| Family C -- `vm-gc-stress`, `vm-gc-poison`, `vm-gc-profile`, `vm-gc-profile-report` | `gc.inl` (`#ifdef TRIX_DEBUGGER`) | **No** -- `/undefined` |
 | Family C -- `vm-global-gc-probe` | `gc.inl` (not gated) | **Yes** -- present in all builds |
 
 Test files that use these ops must run under the debug binary (or guard
@@ -4903,14 +4903,16 @@ clear
 #### Family C -- GC test-harness / fault injection (3 ops)
 
 These ops make global-VM GC-rooting bugs deterministic; they are the
-project's own GC-bug-detection idiom (see §6.7).  `vm-gc-stress` and
-`vm-gc-poison` exist only in `TRIX_DEBUGGER` builds; `vm-global-gc-probe`
-is present in all builds.
+project's own GC-bug-detection idiom (see §6.7).  `vm-gc-stress`,
+`vm-gc-poison`, and the `vm-gc-profile` pair exist only in `TRIX_DEBUGGER`
+builds; `vm-global-gc-probe` is present in all builds.
 
 ```
-vm-gc-stress        bool --             % (debug-only) GC before every global alloc
-vm-gc-poison        bool --             % (debug-only) scribble freed blocks with poison
-vm-global-gc-probe  -- dict             % mark-only reachability census (no sweep)
+vm-gc-stress          bool --           % (debug-only) GC before every global alloc
+vm-gc-poison          bool --           % (debug-only) scribble freed blocks with poison
+vm-gc-profile         bool --           % (debug-only) toggle per-section GC timing (true resets)
+vm-gc-profile-report  -- dict           % (debug-only) { passes, by-section: { sec: { total-ns, ns-per-pass } } }
+vm-global-gc-probe    -- dict           % mark-only reachability census (no sweep)
 ```
 
 - **`vm-gc-stress true`** makes `gvm_alloc` run a full `vm-global-gc`
