@@ -248,9 +248,13 @@ void gc_visit_clear_all() {
 
 //
 // gc_count_live_blocks(): walk every live block in the global region
-// and return the count.  Used to pre-size the mark-phase work queue
-// (which has an exact upper bound: each live block can be enqueued
-// at most once).
+// and return the count of live user (non-GcScratch) blocks.
+//
+// This is now a DEBUG-ONLY oracle: gc_live_block_count() returns the
+// incrementally-maintained m_gvm_user_block_count and asserts it equals
+// this full tally, so the per-pass code never pays for the walk in a
+// release build.  Kept as a member function (referenced only inside the
+// assert) so the cross-check survives.
 //
 // This routine does not clear marks per pass -- gc_advance_generation
 // flips m_gc_current_gen, making old marks stale by definition.  Only
@@ -278,6 +282,28 @@ vm_size_t gc_count_live_blocks() {
         }
     });
     return total_live;
+}
+
+//
+// gc_live_block_count(): the live user-block count used to bound the mark
+// queue and gate the "everything reachable -> skip sweep" early exit.
+//
+// Returns the incrementally-maintained m_gvm_user_block_count (updated by
+// gvm_alloc / gvm_free, round-tripped through the snapshot header on
+// thaw -- see member_vars.inl), so no per-pass heap walk is needed: the
+// count is O(1).  This is exactly the set gc_count_live_blocks() tallies
+// (live, non-GcScratch), and the work queue is intrusive in each block's
+// header (capacity is one slot per live block by construction), so the
+// count is needed only for the two early exits and the doomed count --
+// never to size an allocation.
+//
+// In debug builds it cross-checks the counter against a full gvm_for_each
+// tally so any future alloc/free path that bypasses the counter trips the
+// assert here instead of silently mis-sizing the sweep's doomed count.
+//
+[[nodiscard]] vm_size_t gc_live_block_count() {
+    assert((m_gvm_user_block_count == gc_count_live_blocks()) && "m_gvm_user_block_count drifted from the live-block heap tally");
+    return m_gvm_user_block_count;
 }
 
 //
@@ -1459,10 +1485,10 @@ vm_size_t vm_global_gc_impl() {
     Dict::gc_drain_global_from_overflow(this, &m_frame_dict_overflow);
 
     // Phase A: advance the generation (flip the mark bit, making all
-    // old marks stale by definition -- no clear walk) and count live
-    // blocks for the work-queue upper bound.
+    // old marks stale by definition -- no clear walk) and read the live
+    // user-block count (O(1) counter; gates the early exits below).
     gc_advance_generation();
-    auto total_live = gc_count_live_blocks();
+    auto total_live = gc_live_block_count();
     if (total_live == 0) {
         return 0;
     } else {
@@ -1632,7 +1658,7 @@ GcProbeResult vm_global_gc_probe_impl() {
     // aliased.  The bit has no slack, hence the explicit restore.)
     auto saved_gen = m_gc_current_gen;
     gc_advance_generation();
-    auto total_live = gc_count_live_blocks();
+    auto total_live = gc_live_block_count();
     if (total_live == 0) {
         m_gc_current_gen = saved_gen;
         return result;
