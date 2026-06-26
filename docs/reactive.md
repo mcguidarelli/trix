@@ -184,7 +184,7 @@ creating an edge.
 | `m_deferred_watchers` | `vm_offset_t` | `nulloffset` | BatchEntry array for deferred watcher firing during batch |
 | `m_deferred_watcher_count` | `length_t` | `0` | Number of valid entries in deferred watcher array |
 
-All four are serialized in SnapShotHeader (SNAPSHOT_VERSION 178).
+All four are serialized in SnapShotHeader (SNAPSHOT_VERSION 185).
 
 ---
 

@@ -189,6 +189,46 @@ fires `vm_global_gc` before every global alloc) and the
 m_gc_roots_ptr]`.  The empty-at-boundary invariant is asserted at both ends
 — `require_gc_root_capacity` (operator entry) and `reset_gc_root` (tail).
 
+## localdict GC-Skip Barrier Contract
+
+The global mark-sweep **skips `localdict`** -- the local user dictionary every
+plain `def` writes to -- whenever `m_localdict_maybe_global` is clear.  A clear
+flag MUST imply `localdict`'s transitive closure holds no live global block, or
+the sweep frees a still-rooted global: a use-after-free that surfaces only under
+GC pressure, exactly like a missing gc-root.
+
+**Rule: any store that can place a global-VM reference where `localdict`'s walk
+would reach it must arm the barrier.**
+
+The barrier is `Save::note_global_into_local` (`save.inl`), called from every
+composite store path (`Dict::put` and the persist variants, array put / append,
+the curry / thunk / tagged / record builders, the scanner's proc-body copy,
+etc.).  It arms the flag when a global value lands in a local container that
+`Dict::barrier_relevant_for_localdict` does not exclude.  A genuinely *buried*
+global -- one reachable only several levels down a local composite that is
+itself stored later -- is caught by the store-time deep scan
+`value_reaches_global` (an iterative, allocation-free closure walk over a
+pre-allocated path stack), which re-arms the flag whenever the precise per-pass
+clear would otherwise turn the skip back on behind a hidden global.
+
+Two things keep this honest:
+- **The gate is exclusion-shaped.**  `barrier_relevant_for_localdict` EXCLUDES
+  the independently-walked dictionaries (`globaldict`, `systemdict`,
+  `protocoldict`, `errordict`, `handlersdict`, the eq dict / set, frames).  A
+  NEW permanent or independently-rooted dict must be added to that exclusion or
+  it will needlessly arm the flag; a NEW local container kind that can hold a
+  global reference must NOT be excluded, or it silently breaks the skip.
+- **The debug oracle is the net.**  Under `TRIX_DEBUGGER`, every pass about to
+  skip `localdict` marks it anyway (after pre-marking the global Names) and
+  asserts the isolated scan reached zero non-Name global blocks.  A missed store
+  site is then a loud failure under `vm-gc-stress` and the
+  `tests/test_gc_*localdict*.trx` oracles, not silent release corruption.
+
+**Where to check:** `gc_mark_localdict_isolated`, `value_reaches_global`, and
+the precise clear in `vm_global_gc_impl` (`gc.inl`); the barrier in `save.inl`;
+the gate and `vrg_dict_step` in `dict.inl`.  Full design in
+[`gvm-heap-gc.md` § Skipping localdict](gvm-heap-gc.md#skipping-localdict).
+
 ## Save/Restore Journaling Contract
 
 The save/restore system captures old values before mutation so `restore()`

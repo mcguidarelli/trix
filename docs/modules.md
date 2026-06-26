@@ -400,7 +400,7 @@ Modules are accessible via the `//:modules:` dict path root:
 
 This works because the modules registry is a regular Dict, and `check_systemdicts()`
 in the name lookup code recognizes `:modules:` as a root path alongside
-`:systemdict:`, `:localdict:`, `:errordict:`, and `:handlersdict:`.
+`:systemdict:`, `:localdict:`, `:globaldict:`, `:errordict:`, and `:handlersdict:`.
 
 **Nested dict access:** If a module entry is itself a dict, the path can
 continue:

@@ -28,7 +28,7 @@ Trix coroutines are cooperative, stackful execution contexts, scheduled with
 two priority tiers (FIFO within each tier), that share a single VM heap.
 Each coroutine has its own operand,
 exec, error, and dict stacks.  All coroutines share the VM heap,
-save stack, interrupt system, I/O streams, systemdict, protocoldict, and localdict.
+save stack, interrupt system, I/O streams, systemdict, protocoldict, globaldict, and localdict.
 
 A coroutine yields control explicitly by calling `coroutine-sleep`.  The
 scheduler picks the next eligible coroutine and switches to it by swapping
@@ -224,7 +224,7 @@ save/restore.
 | localdict        | **Shared**    | Communication through shared definitions   |
 
 The dict stack deserves special attention.  Each coroutine's dict stack
-starts with `[systemdict, protocoldict, localdict]` -- the same Dict objects shared across
+starts with `[systemdict, protocoldict, globaldict, localdict]` -- the same Dict objects shared across
 all coroutines.  A `def` in any coroutine writes to the shared localdict,
 immediately visible to all others.  A coroutine can `begin` its own private
 dicts without affecting other coroutines' dict stacks.
@@ -1009,7 +1009,7 @@ and is independent of the number of live coroutines.
 - 1 stack block allocation (free list check + possible heap alloc: ~4,480 bytes)
 - N object moves for parameters
 - 4 stack pointer initializations
-- 3 dict stack entries (systemdict + protocoldict + localdict references)
+- 4 dict stack entries (systemdict + protocoldict + globaldict + localdict references)
 - 1 linked list insertion
 
 With free list reuse, launch after a previous coroutine has died requires

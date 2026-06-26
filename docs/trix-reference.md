@@ -990,6 +990,40 @@ string buffer, etc.  This makes `${...}` and `set-global`/
 `current-global` the single uniform mechanism -- no separate
 `make-global-XXX` family is needed.
 
+**`globaldict` -- a second user dictionary with a definition split.**
+`set-global` routes *allocations*; `globaldict` extends the same idea to
+*definitions*.  It is a fixed-capacity dictionary (in local VM, entries
+persisting into global VM) sitting on the dict stack directly below
+`localdict` and pushed by the `globaldict` operator.  While `set-global`
+is true, a genuinely-new `def` / `override` / `def-persist` / `store`
+lands in `globaldict` instead of `localdict`:
+
+```trix
+/local-name 1 def
+true set-global  /global-name 2 def  false set-global
+(both resolve through the dict stack) local-name global-name add 3 eq assert
+(ok) =
+```
+
+Routing is by **sticky home**: a base-dict name keeps the dictionary it
+was first defined in and is updated there regardless of the current mode,
+so `set-global; /existing def` updates the existing binding in place
+rather than shadowing it in the other dictionary.  A name that ends up in
+*both* base dictionaries (only reachable by a direct `put` that bypassed
+routing) raises `/dict-conflict` (exit 61).  Capacity is
+`--globaldict-size=N` (default 64); `//:status:globaldict-length` and
+`//:status:globaldict-maxlength` report it.
+
+This split is also the cheapest way to keep GC fast.  The global
+mark-sweep **skips `localdict` whenever it provably holds no reference
+into global VM**, and `localdict` is usually the largest GC root (every
+plain `def` lands there).  So persistent state defined through
+`globaldict` (via `set-global`) keeps `localdict` skippable -- for the
+bundled Z-machine interpreter, routing one global-owning definition into
+`globaldict` cut per-pass GC cost roughly 240x.  See
+[`gvm-heap-gc.md` § Skipping localdict](gvm-heap-gc.md#skipping-localdict)
+and [`from-postscript.md` § 4.5](from-postscript.md#45-the-localdict--globaldict-definition-split).
+
 **Restore semantics.**  Names interned in global survive `restore`;
 names interned in local (the default) at `save_level > 0` are
 unlinked when their save level rolls back.  A Dict allocated globally
@@ -5913,7 +5947,7 @@ addr-invalid addr-null addr-read-only addr-read-write
 
 Top-level dicts (reachable via `//:systemdict:name` or `//name` if unambiguous):
 ```
-systemdict protocoldict localdict errordict numbers
+systemdict protocoldict globaldict localdict errordict numbers
 ```
 Nested dicts (reachable only via their parent path):
 ```
@@ -6089,6 +6123,7 @@ control operator has enough companion slots, all operator indices are in range.
 ```
 locals-pool-count    locals-overflow-count
 localdict-length      localdict-maxlength
+globaldict-length     globaldict-maxlength
 ```
 `locals-pool-count` counts recycled `|locals|#N` dicts in the indexed pool
 (maxlength 1..16).  `locals-overflow-count` counts those in the overflow

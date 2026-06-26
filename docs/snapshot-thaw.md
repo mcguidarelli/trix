@@ -607,7 +607,7 @@ a fixed sentinel) to give a 1-in-2^96 false-positive rate when validating
 that a cell is still on the free list. The sentinel values are recomputed
 from the cell's own offset at thaw time; no cross-image drift is possible.
 
-**SNAPSHOT_VERSION = 178** is the current snapshot format (see
+**SNAPSHOT_VERSION = 185** is the current snapshot format (see
 `src/types.inl`).  Earlier images are rejected by thaw with a
 `InvalidImageFile` error.  The counter is a single monotonic integer:
 any change to header layout, blob format, or stored-state semantics
@@ -615,7 +615,11 @@ that would invalidate an older image bumps it.  Recent revisions
 include the global-VM allocator state (`gvm_free_head`, fastbins,
 GC scratch), `curr_alloc_global` per-coroutine flag persistence, and
 `gc_current_gen` -- all required for the global VM to round-trip
-without false marks or stale free-list state.
+without false marks or stale free-list state -- and, for the
+`localdict` / `globaldict` split, the `globaldict_offset` (v183), the
+per-bucket `name_global_mask` (v182), the `localdict_maybe_global`
+GC-skip flag (v184), and the `value_reaches_global` path-stack
+workspace offset (v185).
 
 ### CRC-32 Integrity
 

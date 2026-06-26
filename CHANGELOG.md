@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new `/dict-conflict` error (exit code 61). The permanent dict-stack count rises from
   3 to 4, and the snapshot format is bumped to **v183** (new `globaldict_offset`
   header field and the `GlobalDict` name ordinal).
+- **`vm-gc-profile` / `vm-gc-profile-report` -- per-section global-GC timing
+  (debug builds only).** A `TRIX_DEBUGGER`-gated stopwatch that attributes
+  stop-the-world GC time across the root-walk sections -- stacks, coroutines,
+  global names, object tables, named dictionaries, and the isolated `localdict`
+  scan. `vm-gc-profile` toggles collection; `vm-gc-profile-report` prints
+  cumulative nanoseconds and pass counts per section. Both compile out under
+  `-DNDEBUG`, so the user-facing operator count is unchanged; they exist to
+  measure the root-walk fast paths below.
 
 ### Changed
 - **BREAKING: the user dictionary `userdict` is renamed `localdict`.** The operator
@@ -34,6 +42,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forthcoming `globaldict` (global VM) sits alongside `localdict` (local VM); the
   new name makes the local-VM role explicit. No snapshot-format change — the
   snapshot's user-dict offset field was renamed in place.
+
+### Performance
+- **Global-GC root-walk fast paths.** The stop-the-world global mark-sweep's
+  root walk gained four short-circuits that cut its fixed per-pass cost: a
+  maintained live-block counter (`m_gvm_user_block_count`) replaces a full
+  count-walk; leaf and no-op object kinds skip the mark work-queue entirely
+  (`gc_kind_has_no_children`); the global-`Name` root walk is skipped wholesale
+  when no global names exist; and a per-bucket global-name mask
+  (`m_name_global_mask`) restricts that walk to the buckets that actually hold a
+  global binding. The mask rides the snapshot, bumping the format to **v182**.
+- **The global mark-sweep now skips the local user dictionary (`localdict`).**
+  `localdict` is a program's largest mutable GC root -- every plain `def` lands
+  there -- yet code that keeps its globals in `globaldict` stores no reference
+  into global VM through it at all. A write-barrier flag,
+  `m_localdict_maybe_global`, is set whenever a global-VM value is stored into a
+  local container; while it is clear the collector skips the entire `localdict`
+  subtree, including its descent during the dict-stack walk. A `TRIX_DEBUGGER`
+  oracle marks `localdict` anyway on every clear-flag pass and asserts it reached
+  zero global blocks, so a barrier gap is a test failure rather than silent
+  use-after-free; global `Name` references are excluded from the barrier (they
+  are section-3 roots, not reached through `localdict`). The flag is part of the
+  snapshot, bumping the format to **v184**. For the bundled Z-machine interpreter
+  -- whose 311-proc `localdict` walk dominated GC -- routing its global-owning
+  `z-run` definition into `globaldict` (a `true set-global ... false set-global`
+  wrapper) cuts the measured per-pass GC cost roughly **240x** (~392 us to
+  ~1.6 us).
+- **Precise re-skip via store-time deep scans.** The skip flag now clears as
+  soon as `localdict` provably reaches no global block again -- even while other
+  globals remain live -- instead of only when the global heap empties entirely.
+  Soundness is preserved by an iterative, allocation-free closure walk
+  (`value_reaches_global`, traversing a pre-allocated local-VM path stack -- no
+  recursion, no heap container) run at the barrier when a local composite is
+  stored: a value that buries a global re-arms the flag immediately, closing the
+  hole in which a later `def` could otherwise hide a global behind an
+  already-clear flag. The path-stack workspace offset is added to the snapshot
+  header, bumping the format to **v185** (the current snapshot format).
 
 ## [0.11.0] - 2026-06-24
 

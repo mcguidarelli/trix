@@ -192,6 +192,20 @@ This is useful in test suites that want to assert specific reclamation
 behaviour, or in long-running services that want to amortise GC cost
 during idle periods rather than letting it fire at allocation time.
 
+#### Keeping GC cheap
+
+The mark phase walks every reachable root, and `localdict` -- where
+every plain `def` lands -- is usually the largest one.  The collector
+**skips `localdict` entirely** whenever it provably holds no reference
+into global VM, so the cheapest GC is one where your persistent state
+lives in `globaldict` (via `set-global`) or in global containers reached
+from other roots, leaving `localdict` free of global references.  Store
+a global value directly into a local definition and the skip simply
+turns itself off until that value is gone; you pay only for what you
+actually entangle.  See [Local + Global VM](local-global-vm.md) for the
+`globaldict` / `set-global` split and [Skipping localdict](#skipping-localdict)
+for the mechanism.
+
 ### Introspection
 
 ```trix
@@ -477,9 +491,13 @@ single generation.
    pre-flip value so the flip makes them look unmarked.
 2. **Root scan**: `walk_all_roots()` walks every root set the
    interpreter exposes -- operand / exec / error / dict
-   stacks; system dicts (`systemdict`, `localdict`, `errordict`,
-   `handlersdict`); the root-objects array; and the per-save-level
-   suspension journal chains via `Save::gc_walk_chain`.
+   stacks; the permanent base dictionaries (`systemdict`,
+   `protocoldict`, `globaldict`, `localdict`) plus `errordict` and
+   `handlersdict`; the global `Name` table; the root-objects array; and
+   the per-save-level suspension journal chains via
+   `Save::gc_walk_chain`.  **`localdict` is conditionally skipped** when
+   it provably holds no reference into global VM -- see
+   [Skipping localdict](#skipping-localdict).
 3. **Object marking**: `gc_mark_object(Object o)` resolves `o` to a
    global block (no-op for local-VM Objects and for ExtValue
    payloads), then stamps `m_mark_gen = m_gc_current_gen` and pushes
@@ -544,6 +562,97 @@ probe's marks, leaving generations of slack.)
 `gc-current-gen` exposes this bit to user code -- see [Status
 keys](#status-keys) above.
 
+### Skipping localdict
+
+`localdict` -- the local user dictionary every plain `def` writes to --
+is a program's largest mutable GC root.  For code that keeps its
+persistent state in `globaldict` (or in global containers reached from
+other roots), `localdict` holds **no reference into global VM at all**,
+yet the root walk would still descend its every bucket and decode every
+stored procedure body on every pass.  For the bundled Z-machine
+interpreter that descent -- 311 procedures -- was ~353 us, dominating a
+~392 us pass.  The collector skips `localdict` whenever it provably
+cannot reach a global block; for that workload the per-pass GC cost
+falls roughly **240x** (~392 us to ~1.6 us).  Three pieces make the
+skip sound.
+
+**The flag.** `m_localdict_maybe_global` (`src/member_vars.inl`) is true
+iff `localdict` *might* transitively reference a global block.  When it
+is clear the mark phase skips `localdict` in **both** places it would
+otherwise be reached: the dict-stack walk
+(`gc_mark_local_container` short-circuits the descent when the offset is
+`m_localdict`) and the named-dict walk (`localdict` is dropped from that
+list outright).  Skipping only one leaves the other to walk it -- the
+first cut of this feature dropped it from the named-dict walk alone and
+measured net-zero, because the dict-stack walk still descended it.
+
+**The write-barrier.** `Save::note_global_into_local` (`src/save.inl`)
+arms the flag whenever a global-VM value is stored into a local
+container that is barrier-relevant to `localdict`.  The gate
+`Dict::barrier_relevant_for_localdict` excludes the independently-walked
+dictionaries (`globaldict`, `systemdict`, `protocoldict`, `errordict`,
+`handlersdict`, the eq dict / set, and frames) so their constant churn
+does not arm the flag.  A global `Name` reference does **not** arm it:
+Names are global-table roots, kept alive there, and their binding slot
+is a non-rooting cache that is not followed.
+
+**Precise clear + store-time deep scan.** When the flag is set, each GC
+pass pre-marks the global Names and then runs an isolated `localdict`
+closure mark (`gc_mark_localdict_isolated`, the canonical walk reused so
+there is no traversal-duplication drift); if it reaches zero non-Name
+global blocks the flag is cleared -- recovering the skip as soon as
+`localdict` is clean again, even while other globals remain live.  That
+clear is sound only because the barrier also re-arms on a *buried*
+global: when a local composite is stored and a global heap exists,
+`value_reaches_global` walks the stored value's closure and re-sets the
+flag if it finds a live global block.  Without the deep scan a sequence
+like "build global `G`, drop it into local array `A` while `A` is still
+on the stack (so the shallow barrier sees a local store), let a GC clear
+the flag, then `/x A def`" would hide `G` behind a clear flag and the
+next sweep would free a still-rooted block.
+
+`value_reaches_global` (`src/gc.inl`, with `Dict::vrg_dict_step` for the
+bucket cursor) is **iterative and allocation-free**: it traverses a
+pre-allocated local-VM path stack (`m_vrg_workspace_offset`,
+`VrgFrame[256]`, ~4 KB, allocated once at init) -- no recursion, no heap
+container.  A depth cap (256) and a visit budget (65536) make it
+*conservative-true*: exhausting either reports "reaches global", which
+is always safe (an over-armed flag just costs one more `localdict` walk,
+which the next precise clear undoes).  `Cell` and `Continuation` are
+treated conservative-true as well.
+
+**The debug oracle.** Under `TRIX_DEBUGGER` (the default debug build),
+every pass that is *about* to skip `localdict` marks it anyway -- after
+pre-marking the global Names -- and asserts the isolated scan reached
+zero non-Name global blocks.  A barrier gap is therefore a loud test
+failure under ASan rather than a silent release use-after-free; the
+assertion compiles out under `-DNDEBUG`.  This oracle is what caught the
+four store sites the static instrumentation sweep missed
+(`scratch_collect`, `lvar_bind`, the scanner's proc-body copy, and
+`make_packed_data`).
+
+### Root-walk fast paths
+
+Independent of the `localdict` skip, the fixed per-pass cost of
+`walk_all_roots` was cut by four short-circuits:
+
+* **Maintained live-block count.** `m_gvm_user_block_count` is kept
+  current on every alloc / free, replacing a full count-walk of the
+  region.
+* **Leaf / no-op enqueue skip.** `gc_kind_has_no_children` lets
+  `gc_mark_object` mark-and-stop for leaf and no-op kinds instead of
+  pushing them onto the work queue only to pop them and do nothing.
+* **Name-table walk skip.** The global `Name` root walk is skipped
+  wholesale when `m_has_global_names` is false, and otherwise restricted
+  to the buckets a per-bucket mask (`m_name_global_mask`) marks as
+  holding a global binding.
+
+Per-section attribution for this tuning is available in debug builds via
+`vm-gc-profile` (toggle collection) and `vm-gc-profile-report` (print
+cumulative nanoseconds and pass counts per root-walk section, including
+the isolated `localdict` scan).  Both are `TRIX_DEBUGGER`-gated and
+compile out under `-DNDEBUG`.
+
 ### GC scratch buffer
 
 `m_gc_scratch_offset` (`src/gc.inl`).  A lazily-allocated global
@@ -572,7 +681,8 @@ allocation's offset is relative to `m_vm_base`, so the heap is
 position-independent and snapshots round-trip without pointer
 relocation.
 
-Two fields in `SnapShotHeader` (`src/snapshot.inl`) capture GC state:
+Several fields in `SnapShotHeader` (`src/snapshot.inl`) capture GC and
+dict state:
 
 * `uint8_t gc_current_gen` -- saved value of `m_gc_current_gen` at
   snapshot time.  Restoring it is **mandatory**: the bit must never
@@ -582,8 +692,18 @@ Two fields in `SnapShotHeader` (`src/snapshot.inl`) capture GC state:
 * `uint8_t curr_alloc_global` -- per-coroutine flag for the main
   coroutine.  Per-coroutine context flags for other coroutines are
   serialized inside each `CoroutineContext` block.
+* `vm_offset_t globaldict_offset` -- the second user dictionary
+  ([Skipping localdict](#skipping-localdict)); added at **v183**.
+* `vm_offset_t name_global_mask_offset` -- the per-bucket global-Name
+  mask backing the name-table walk skip; added at **v182**.
+* `bool localdict_maybe_global` -- the `localdict`-skip flag, saved and
+  restored **exact** (never re-derived on thaw, or a buried global could
+  be swept after restore); added at **v184**.
+* `vm_offset_t vrg_workspace_offset` -- the `value_reaches_global` path
+  stack, allocated in local VM so the offset rides the snapshot blob;
+  added at **v185**.
 
-Current `SNAPSHOT_VERSION` is **178** (`src/types.inl`).
+Current `SNAPSHOT_VERSION` is **185** (`src/types.inl`).
 
 ### Source file map
 
@@ -591,9 +711,10 @@ Current `SNAPSHOT_VERSION` is **178** (`src/types.inl`).
 | --- | --- |
 | `src/vm_heap.inl` | Top-level dispatch: `vm_alloc_dispatch<T>` chooses local vs global based on `m_curr_alloc_global`.  Offset validation helpers. |
 | `src/gvm_heap.inl` | Allocator: fastbins, free list, coalesce, top-edge reclaim.  `GvmBlock`, `ChunkKind` enum, magic constant, `gvm_for_each`. |
-| `src/gc.inl` | Mark-sweep: root walk, `gc_mark_object`, per-kind walkers' dispatch table, sweep, generation flip-flop. |
+| `src/gc.inl` | Mark-sweep: root walk, `gc_mark_object`, per-kind walkers' dispatch table, sweep, generation flip-flop.  The `localdict` skip: `gc_mark_localdict_isolated`, `value_reaches_global`, the precise clear, the debug oracle, and the `vm-gc-profile` / `vm-gc-profile-report` debug ops. |
+| `src/dict.inl` | `barrier_relevant_for_localdict` (the write-barrier gate) and `vrg_dict_step` (the deep-scan bucket cursor) for the `localdict` skip. |
 | `src/hash.inl` | Hash primitives extracted from `vm_heap.inl` (used by the visited-set and elsewhere). |
-| `src/save.inl` | `is_global()` / `is_above_barrier()` short-circuit global offsets in the save journal. |
+| `src/save.inl` | `is_global()` / `is_above_barrier()` short-circuit global offsets in the save journal.  `note_global_into_local` is the `localdict` write-barrier. |
 | `src/snapshot.inl` | `SnapShotHeader` layout including `gc_current_gen` and `curr_alloc_global`. |
 | `src/ops_system.inl` | `vm-global-info` op (histogram). |
 | `src/gc.inl` | `vm-global-gc` op. |
@@ -657,10 +778,18 @@ The compile-time safety net is the missing-case error from
   (commit `d3f2e3a`).
 * `tests/test_logic_global_results.trx` -- `find-all` accumulator
   routing through global VM, GC after accumulation.
+* `tests/test_gc_localdict_precise.trx` -- the `localdict` skip: a
+  buried global of every composite kind survives a sweep, plus a cycle,
+  a 300-deep nest, the precise clear, and the store-time re-arm.
+* `tests/test_gc_stress_localdict.trx` -- the same machinery under
+  `vm-gc-stress` (a GC before every global allocation).
+* `tests/test_gc_localdict_snapshot.trx` + `gc_localdict_snapshot_thaw.trx`
+  -- round-trip the `localdict_maybe_global` flag and the
+  `vrg_workspace_offset` path stack across a snapshot/thaw.
 
 Snapshot tests (`run_snapshot_tests`) round-trip the global region
 including the `gc_current_gen` and `curr_alloc_global` fields; the suite
-passes against the current `SNAPSHOT_VERSION` (178).
+passes against the current `SNAPSHOT_VERSION` (185).
 
 ---
 

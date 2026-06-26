@@ -82,10 +82,11 @@ error.
 after allocation (binding cache depends on stable offsets).
 
 **dict stack** — The lookup chain for executable names: systemdict and
-protocoldict at the bottom, localdict above, then any dicts pushed by
-`begin` and any *frame dicts* from `|locals|` procs.  Lookup walks top
-down; `def` writes to the top non-frame dict (frame dicts are bound by
-`local-def`).
+protocoldict at the bottom, then globaldict and localdict, then any dicts
+pushed by `begin` and any *frame dicts* from `|locals|` procs.  Lookup
+walks top down; a plain `def` writes to the top non-frame base dict --
+localdict by default, or globaldict for a genuinely-new name while
+`set-global` is active (frame dicts are bound by `local-def`).
 
 **dispatch row** — One entry in the consteval row lists of
 `src/dispatch.inl` (`{SystemName::X, fn, "name"sv}`): the
@@ -146,6 +147,16 @@ managed by the global allocator and a mark-sweep GC.  Allocations there survive
 per-form `$/foo` / `$\foo` / `<lit>#$` directives, or any runtime
 `int -- container` op while `m_curr_alloc_global` is true.
 
+**globaldict** — The second permanent user dictionary, on the dict stack
+directly below *localdict* (above *protocoldict*).  Its struct lives in
+local VM but its entries persist into *global VM*, so definitions made
+through it survive `save` / `restore`.  A genuinely-new `def` / `override`
+/ `def-persist` / `store` routes here instead of *localdict* while
+`set-global` is active; an existing name keeps its *sticky home*.  A name
+in both base dicts raises `/dict-conflict`.  Keeping persistent state here
+is what lets the GC skip *localdict* (see **localdict skip**).  Capacity
+`--globaldict-size` (default 64).
+
 **golden test** — A black-box test whose contract is exact bytes:
 `tests/golden/<name>.trx` runs in a fresh interpreter and combined
 stdout+stderr must equal the blessed `<name>.expected`.  See
@@ -178,6 +189,16 @@ snapshot format) and permanent — do not propose widening it.
 **literal** — An Object whose Execute bit (bit 7 of aat_t) is 0.  When
 the interpreter encounters a literal on the exec stack, it pushes it to
 the operand stack as data.  Contrast with executable.
+
+**localdict skip** — A GC optimization: the global mark-sweep walks
+*localdict* (the largest mutable root, where every plain `def` lands) only
+when `m_localdict_maybe_global` is set.  A write-barrier
+(`Save::note_global_into_local`) arms the flag whenever a global value is
+stored where localdict could reach it; a per-pass precise clear, made
+sound by the store-time deep scan `value_reaches_global`, turns the skip
+back on once localdict is clean again.  A `TRIX_DEBUGGER` oracle asserts
+the flag-clear case really reaches no global.  See
+[gvm-heap-gc.md](gvm-heap-gc.md).
 
 **lvar** — Logic variable.  A tagged value (`/lvar [null] tag`) used by
 the logic/backtracking system.  Binding is a journaled array put;

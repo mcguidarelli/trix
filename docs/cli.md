@@ -371,6 +371,7 @@ unparseable value is a usage error (exit 1).
 | `--stream-io` | MODE | `all` | `none`, `all`, or a comma list |
 | `--name-buckets` | N | 2053 | snaps to a prime in the bucket table |
 | `--localdict-size` | N | 512 | 256 .. 50000 |
+| `--globaldict-size` | N | 64 | 16 .. 50000 |
 | `--eq-string` | N | 128 | 0 .. 256 |
 | `--eq-array` | N | 32 | 0 .. 256 |
 | `--eq-proc` | N | 32 | 0 .. 256 |

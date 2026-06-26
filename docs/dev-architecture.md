@@ -232,8 +232,10 @@ A **Name** is an interned reference; a **Dict** is a hash table of name ->
 Object.  Name resolution walks the dictionary stack top-to-bottom, short-cut by
 a per-call-site binding cache.  System operators live in `systemdict` at the
 bottom of the stack; `protocoldict` (protocol-dispatch procs, filled by
-`def-protocol`) sits above it, then `localdict`; `begin` / `use` push further
-scopes on top.  See [Name Lookup](name-lookup.md) and [Collections](collections.md).
+`def-protocol`) sits above it, then `globaldict` (global-VM-backed user
+definitions, written when `set-global` is active), then `localdict`;
+`begin` / `use` push further scopes on top.  See
+[Name Lookup](name-lookup.md) and [Collections](collections.md).
 
 ### 4.4 The VM heap
 
@@ -242,7 +244,10 @@ All composite Objects live in a single `malloc`'d block, partitioned into a
 region** (short-lived scratch, grown downward from the global region's edge),
 and a **global region** with its own `dlmalloc`-style allocator and mark-sweep
 garbage collector.  Local-region allocation is O(1) and reclaimed wholesale;
-only the global region is GC'd.  The region invariants -- and the temp-clobber
+only the global region is GC'd.  The mark phase skips `localdict` entirely
+whenever a write-barrier proves it holds no reference into the global region,
+so programs that keep persistent state in `globaldict` pay almost nothing for
+the largest user root.  The region invariants -- and the temp-clobber
 rule maintainers must respect -- are in [VM Internals](vm-internals.md),
 [Global Heap / GC](gvm-heap-gc.md), and [VM Regions](vm-regions.md).
 

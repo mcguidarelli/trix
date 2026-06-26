@@ -45,10 +45,13 @@ The execution model is the PostScript model.
 - **One operand stack.**  Values are pushed and popped; operators consume their
   arguments from the top.  `count` reports the depth, exactly as in PostScript.
 - **A dictionary stack.**  `begin` pushes a dictionary, `end` pops it, and a
-  bare name is resolved by walking the stack top-down, with `systemdict` at the
-  bottom and `localdict` above it -- Trix's name for PostScript's `userdict`.
-  (Trix also provides dedicated `errordict` and `protocoldict` system
-  dictionaries.)
+  bare name is resolved by walking the stack top-down.  Trix's permanent base
+  dictionaries mirror PostScript's, bottom to top: `systemdict`, `protocoldict`,
+  `globaldict` -- the direct analogue of PostScript's `globaldict` -- and
+  `localdict` on top, Trix's name for PostScript's `userdict`.  (`protocoldict`,
+  which holds protocol-dispatch procedures, and the dedicated `errordict` are
+  Trix additions; the `globaldict` / `localdict` definition split is covered in
+  [§4.4](#44-memory-model-local-and-global-vm).)
 - **Literal, executable, and immediate names.**  `/x` pushes the name as data,
   `x` looks it up and executes the result, and `//x` resolves *at scan time* --
   PostScript's immediately-evaluated name.
@@ -275,7 +278,7 @@ What differs:
 
 | Aspect | PostScript | Trix |
 | --- | --- | --- |
-| Choosing the region | Modal `setglobal` / `currentglobal`; everything allocated while the mode is set -- including scanned literals -- lands in that region | Lexical `${...}` (plus `$/name`, the `#=` eqref family, the `-persist` operators); only operator *results* are made global, so a literal scanned inside `${...}` stays local |
+| Choosing the region | Modal `setglobal` / `currentglobal`; everything allocated while the mode is set -- including scanned literals -- lands in that region | Either lexical (`${...}`, `$/name`, the `#=` eqref family, the `-persist` operators) or modal (`set-global` / `current-global`, the direct analogue of `setglobal`); the lexical forms make only operator *results* global, so a literal scanned inside `${...}` stays local |
 | Why global exists | Sharing across execution contexts: each context has a private local VM, and global VM is the shared arena for fonts and resources | Outliving a `save` scope; one save lineage is shared across all coroutines, so there is no per-context private heap to escape |
 | Name objects | Simple objects -- a name has no VM residence, so it never participates in the rule and a name key stores anywhere | Heap-allocated and region-bound -- a name first interned above a save barrier is local and restore-fragile, so it must be interned global (`$/k` or `${ /k }`) before it keys a global container |
 | Rolling back a global write | Never -- `restore` does not touch global VM | Almost never -- the lone exception is logic-variable bindings, journaled so backtracking can undo them |
@@ -287,6 +290,45 @@ Two Trix-only contracts have no PostScript analog: the `-persist` and root `#=`
 value-vs-container test that tells you exactly when a store needs help, are in
 [Local and Global VM](local-global-vm.md); for the allocator and collector
 internals see [VM Regions](vm-regions.md) and [Global Heap / GC](gvm-heap-gc.md).
+
+### 4.5 The `localdict` / `globaldict` definition split
+
+PostScript Level 2 keeps two user dictionaries on the dictionary stack --
+`userdict` in local VM and `globaldict` in global VM -- and `setglobal` decides
+which one a fresh `def` lands in.  Trix carries this over directly: `localdict`
+(PostScript's `userdict`) and `globaldict` sit on the dict stack, and
+`set-global` plays the role of `setglobal`.
+
+```trix
+/here 1 def                       % new name -> localdict (default, local mode)
+true set-global
+/there 2 def                      % new name -> globaldict (global mode)
+false set-global
+(here came from localdict) here 1 eq assert
+(there came from globaldict) there 2 eq assert
+(ok) =
+```
+
+Two refinements tighten the PostScript model:
+
+- **Sticky home.**  A base-dict name keeps the dictionary it was *first* defined
+  in.  Re-`def`'ing an existing `localdict` name updates it in place even under
+  `set-global`; only a genuinely-new name is placed by the current mode.  This
+  avoids the PostScript footgun where toggling `setglobal` silently creates a
+  shadowing binding in the other dictionary.
+- **Conflict detection.**  A name present in *both* base dictionaries -- only
+  reachable by a direct `put` that bypassed routing -- raises the new
+  `/dict-conflict` error rather than silently resolving to whichever sits higher
+  on the stack.
+
+The split also pays for itself at GC time.  `globaldict`'s entries live in
+global VM and are reclaimed by the mark-sweep collector, while `localdict` holds
+restore-scoped definitions.  Because the collector **skips `localdict` whenever
+it provably references no global data**, keeping persistent state in
+`globaldict` (via `set-global`) makes the global GC dramatically cheaper -- for
+the bundled Z-machine interpreter, routing its one global-owning definition into
+`globaldict` cut per-pass GC cost roughly 240x.  See
+[`gvm-heap-gc.md` § Skipping localdict](gvm-heap-gc.md#skipping-localdict).
 
 ---
 

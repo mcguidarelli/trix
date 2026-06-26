@@ -581,7 +581,7 @@ and `try-catch` handlers. Every error code is both throwable and catchable.
 `/opstack-overflow` -- Operand stack capacity exceeded.
 `/execstack-overflow` -- Exec stack capacity exceeded (e.g., infinite recursion).
 `/dictstack-overflow` -- Dict stack capacity exceeded (too many nested `begin`).
-`/dictstack-underflow` -- `end` called with only the permanent dicts (systemdict, protocoldict, localdict) on stack.
+`/dictstack-underflow` -- `end` called with only the permanent dicts (systemdict, protocoldict, globaldict, localdict) on stack.
 `/errstack-overflow` -- Error stack capacity exceeded (too many nested try-catch/finally).
 `/unmatched-mark` -- `count-to-mark` or `clear-to-mark` with no mark on stack.
 

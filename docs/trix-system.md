@@ -174,13 +174,13 @@ Everything in Trix runs on a single contiguous block of memory.
 ### 3.1 The Heap Model
 
 ```
-m_vm_base                                              m_vm_limit
-  |                                                        |
-  v                                                        v
-  [systemdict|protocoldict|localdict|errordict|stacks|...data...| free ]
-                                                   ^
-                                                   |
-                                              m_vm_ptr
+m_vm_base                                                                m_vm_limit
+  |                                                                               |
+  v                                                                               v
+  [systemdict|protocoldict|globaldict|localdict|errordict|stacks|...data...| free ]
+                                                              ^
+                                                              |
+                                                         m_vm_ptr
 ```
 
 The VM heap is a single `malloc`-allocated block (1 MB default, 256KB minimum).

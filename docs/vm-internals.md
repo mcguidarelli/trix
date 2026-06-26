@@ -876,7 +876,7 @@ the dict stack:
 The path is parsed by `dict_path_search()`:
 
 1. Identify the root dict by the first segment (systemdict, localdict,
-   errordict, handlersdict, modules, or any dict entry in systemdict).
+   globaldict, errordict, handlersdict, modules, or any dict entry in systemdict).
 2. Walk each intermediate segment, looking up the next dict.
 3. Return the final value.
 

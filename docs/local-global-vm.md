@@ -361,6 +361,24 @@ You never have to root these references manually. For the allocator and
 GC internals -- mark roots, sweep, growth direction -- see
 [`gvm-heap-gc.md`](gvm-heap-gc.md).
 
+### The localdict skip
+
+The local user dictionary -- `localdict`, where every plain `def` lands
+-- is itself a local container the GC would otherwise descend on every
+pass, and for most programs it is the single largest root. So the
+collector tracks, with a write-barrier armed by exactly the stores
+described above, whether `localdict` *might* hold any reference into
+global VM, and skips walking it entirely when it provably does not. The
+guarantee in this section is unchanged: a global value buried in a local
+definition keeps `localdict` flagged, so it is still walked and the
+global still survives. The practical consequence is a best practice --
+keep your persistent state in `globaldict` (via `set-global`) rather
+than in plain `def`s, and `localdict` stays skippable, which is the
+cheapest GC. See [`gvm-heap-gc.md` § Skipping
+localdict](gvm-heap-gc.md#skipping-localdict) for the mechanism and
+[`from-postscript.md`](from-postscript.md) for the `localdict` /
+`globaldict` split.
+
 ---
 
 ## 8. Worked Examples
