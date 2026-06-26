@@ -399,6 +399,8 @@ private:
             return std::pair{trx->m_systemdict, sv.data() + ":systemdict:"sv.size()};
         } else if (sv.starts_with(":localdict:"sv)) {
             return std::pair{trx->m_localdict, sv.data() + ":localdict:"sv.size()};
+        } else if (sv.starts_with(":globaldict:"sv)) {
+            return std::pair{trx->m_globaldict, sv.data() + ":globaldict:"sv.size()};
         } else if (sv.starts_with(":errordict:"sv)) {
             return std::pair{trx->m_errordict, sv.data() + ":errordict:"sv.size()};
         } else if (sv.starts_with(":handlersdict:"sv)) {
@@ -456,12 +458,13 @@ private:
     // Hierarchical path-based name lookup using ':' as separator.
     // A name starting with ':' is treated as a path rather than a simple name.
     // Path format: :rootdict:segment0:...:leafname
-    //   The root dict must be one of: systemdict, localdict, errordict, handlersdict.
+    //   The root dict must be one of: systemdict, localdict, globaldict, errordict, handlersdict.
     //   Each intermediate segment is looked up as a Name in the preceding Dict.
     //   Returns nullptr if the path does not resolve.
     // Examples:
     //   :systemdict:numbers:real:pi
     //   :localdict:user_symbol
+    //   :globaldict:user_symbol
     //   :errordict:command
     //   :handlersdict:dict-full
     //   :status:vm-used

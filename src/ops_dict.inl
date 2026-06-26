@@ -280,28 +280,59 @@ static void require_operator_to_override(Trix *trx, Object key_ptr) {
     }
 }
 
+// Write a global definition (a def / override that current-global routed into
+// globaldict).  A global binding must outlive the enclosing save/restore, so
+// above save level 0 it goes through the persist path (entry allocated in global
+// VM, journal-skipped) guarded by the -persist family's above-barrier ref-check;
+// at level 0 it degrades to a plain put (level 0 never rolls back).  Mirrors
+// def-persist's body -- globaldict IS the persistent half of the dict split.
+// throws: above-barrier, vm-full, dict-full, read-only, type-check
+static void put_global_def(Trix *trx, Dict *dict, Object *key_ptr, Object *val_ptr) {
+    if (Save::is_active(trx)) {
+        if (Save::is_above_barrier(trx, *val_ptr)) {
+            trx->error(Error::AboveBarrier, "global def: value lives above the save barrier and would dangle on restore");
+        } else if (Save::is_above_barrier(trx, *key_ptr)) {
+            trx->error(Error::AboveBarrier, "global def: key lives above the save barrier");
+        } else {
+            dict->put_persist_or_create(trx, *key_ptr, *val_ptr);
+        }
+    } else {
+        // level 0: plain put -- NoBinding so a shadowing frame is not bypassed
+        // (see def_op, engine bug #21).
+        dict->put(trx, *key_ptr, *val_ptr, Dict::BindingMode::NoBinding);
+    }
+}
+
 // def: key any :- --
 // Defines key with value in the current dictionary, walking past any
 // |...| frame dicts on the dict stack to find the first non-frame
 // (typically localdict at module scope, or whatever was begin'd by the
-// caller).  Use `local-def` to bind into the current frame.
-// throws: vm-full, dict-full, opstack-underflow, read-only, type-check, invalid-name
+// caller).  At the permanent base a name keeps a STICKY home: if key is
+// already bound in localdict or globaldict it is UPDATED there regardless of
+// mode; only a genuinely-new name is placed by set-global (globaldict when
+// active, where it persists across save/restore, else localdict).  A name
+// somehow present in BOTH base dicts raises /dict-conflict.  Use `local-def`
+// to bind into the current frame.
+// throws: vm-full, dict-full, opstack-underflow, read-only, type-check, invalid-name, dict-conflict, above-barrier
 static void def_op(Trix *trx) {
     trx->verify_operands(VerifyAny, VerifyKey);
     reject_reserved_name(trx, *(trx->m_op_ptr - 1));
     reject_operator_shadow(trx, *(trx->m_op_ptr - 1));
 
-    auto dict_obj_ptr = Dict::dict_stack_first_nonframe(trx);
-    auto dict = dict_obj_ptr->dict_value(trx);
+    auto dict = Dict::def_target_dict(trx, *(trx->m_op_ptr - 1));
     if (dict->has_write_access()) {
         auto val_ptr = trx->m_op_ptr;
         auto key_ptr = (val_ptr - 1);
-        // NoBinding (clear), not Bind: `def` targets the first NON-frame dict, but a
-        // |...| frame ABOVE may shadow this name -- Bind would repoint the m_binding
-        // cache at this lower-priority entry so a later bare lookup wrongly skips the
-        // shadowing frame.  Clearing forces the next lookup to re-walk and cache the
-        // true topmost binding (engine bug #21).
-        dict->put(trx, *key_ptr, *val_ptr, Dict::BindingMode::NoBinding);
+        if (dict == trx->m_globaldict) {
+            put_global_def(trx, dict, key_ptr, val_ptr);
+        } else {
+            // NoBinding (clear), not Bind: `def` targets the first NON-frame dict, but a
+            // |...| frame ABOVE may shadow this name -- Bind would repoint the m_binding
+            // cache at this lower-priority entry so a later bare lookup wrongly skips the
+            // shadowing frame.  Clearing forces the next lookup to re-walk and cache the
+            // true topmost binding (engine bug #21).
+            dict->put(trx, *key_ptr, *val_ptr, Dict::BindingMode::NoBinding);
+        }
         trx->m_op_ptr -= 2;
     } else {
         trx->error(Error::ReadOnly, "attempt to update a ReadOnly dict");
@@ -316,21 +347,25 @@ static void def_op(Trix *trx) {
 // documenting act rather than the silent foot-gun a bare `def` of an operator
 // name used to be.  Note: shadowing changes only late-binding resolution; an
 // already-`#e`-early-bound body or an already-cached name still reaches the
-// operator -- override states intent, it does not retroactively rebind.
-// throws: vm-full, dict-full, opstack-underflow, read-only, type-check, invalid-name, undefined
+// operator -- override states intent, it does not retroactively rebind.  Resolves
+// its target exactly like `def` (sticky home; new names placed by set-global).
+// throws: vm-full, dict-full, opstack-underflow, read-only, type-check, invalid-name, undefined, dict-conflict, above-barrier
 static void override_op(Trix *trx) {
     trx->verify_operands(VerifyAny, VerifyKey);
     reject_reserved_name(trx, *(trx->m_op_ptr - 1));
     require_operator_to_override(trx, *(trx->m_op_ptr - 1));
 
-    auto dict_obj_ptr = Dict::dict_stack_first_nonframe(trx);
-    auto dict = dict_obj_ptr->dict_value(trx);
+    auto dict = Dict::def_target_dict(trx, *(trx->m_op_ptr - 1));
     if (dict->has_write_access()) {
         auto val_ptr = trx->m_op_ptr;
         auto key_ptr = (val_ptr - 1);
-        // NoBinding: like def_op, a frame above may shadow -- clear to keep the cache
-        // coherent with dict-stack precedence (engine bug #21).
-        dict->put(trx, *key_ptr, *val_ptr, Dict::BindingMode::NoBinding);
+        if (dict == trx->m_globaldict) {
+            put_global_def(trx, dict, key_ptr, val_ptr);
+        } else {
+            // NoBinding: like def_op, a frame above may shadow -- clear to keep the cache
+            // coherent with dict-stack precedence (engine bug #21).
+            dict->put(trx, *key_ptr, *val_ptr, Dict::BindingMode::NoBinding);
+        }
         trx->m_op_ptr -= 2;
     } else {
         trx->error(Error::ReadOnly, "attempt to update a ReadOnly dict");
@@ -343,16 +378,16 @@ static void override_op(Trix *trx) {
 // At sl > 0 enforces the -persist family ref-check: above-barrier key
 // or value raises /above-barrier.  Missing keys are CREATED -- new
 // DictEntry slots are allocated in global VM so the new
-// binding survives restore.  The target dict is the first non-frame
-// dict from the top of the dict stack (matching def's resolution).
-// throws: above-barrier, vm-full, dict-full, opstack-underflow, read-only, type-check, invalid-name
+// binding survives restore.  The target dict is resolved exactly like `def`
+// (sticky home: an existing name is updated in place; a new name is placed by
+// set-global, into globaldict when active).
+// throws: above-barrier, vm-full, dict-full, opstack-underflow, read-only, type-check, invalid-name, dict-conflict
 static void def_persist_op(Trix *trx) {
     trx->verify_operands(VerifyAny, VerifyKey);
     reject_reserved_name(trx, *(trx->m_op_ptr - 1));
     reject_operator_shadow(trx, *(trx->m_op_ptr - 1));
 
-    auto dict_obj_ptr = Dict::dict_stack_first_nonframe(trx);
-    auto dict = dict_obj_ptr->dict_value(trx);
+    auto dict = Dict::def_target_dict(trx, *(trx->m_op_ptr - 1));
     if (!dict->has_write_access()) {
         trx->error(Error::ReadOnly, "attempt to update a ReadOnly dict");
     } else {
@@ -549,15 +584,25 @@ static void bind_into_dict_op(Trix *trx) {
 }
 
 // current-dict: :- dict
-// Pushes the current writable dictionary -- the first non-frame dict
-// from the top of the dict stack.  Skips |...| frames since `def` and
-// `store` skip them too; current-dict matches their target.
+// Pushes the current writable dictionary -- the first non-frame dict from the
+// top of the dict stack (skipping |...| frames, like `def`/`store`).  Because
+// `def`'s target is name-dependent under the localdict/globaldict split (sticky
+// home), current-dict reports where a genuinely-NEW name would land: a
+// begin-pushed dict, or at the permanent base globaldict under set-global, else
+// localdict.  A `def` of an already-bound name may resolve to its sticky home
+// instead.
 // throws: opstack-overflow
 static void currentdict_op(Trix *trx) {
     trx->require_op_capacity(1);
 
-    auto dict_obj_ptr = Dict::dict_stack_first_nonframe(trx);
-    *++trx->m_op_ptr = *dict_obj_ptr;
+    auto base = Dict::dict_stack_first_nonframe(trx)->dict_value(trx);
+    Dict *dict{nullptr};
+    if ((base == trx->m_localdict) && trx->m_curr_alloc_global) {
+        dict = trx->m_globaldict;
+    } else {
+        dict = base;
+    }
+    *++trx->m_op_ptr = Object::make_dict(trx->ptr_to_offset(dict));
 }
 
 // int dict
@@ -751,10 +796,10 @@ static void maxlength_op(Trix *trx) {
 // store: key value :- --
 // Stores value under key in the first writable dict that contains
 // key.  If key is not present anywhere on the dict stack, falls back
-// to the current dict -- the first non-frame from the top, matching
-// `def`'s target.  Existing-binding hits inside a |...| frame are
-// honored (they reflect explicit local-def intent and `store` is the
-// idiomatic way to update a local in place).
+// to the current dict -- the first non-frame from the top, or globaldict
+// under set-global, matching `def`'s target.  Existing-binding hits inside
+// a |...| frame are honored (they reflect explicit local-def intent and
+// `store` is the idiomatic way to update a local in place).
 // throws: opstack-underflow, type-check
 static void store_op(Trix *trx) {
     trx->verify_operands(VerifyAny, VerifyKey);
@@ -762,10 +807,25 @@ static void store_op(Trix *trx) {
     auto val_ptr = trx->m_op_ptr;
     auto key_ptr = (val_ptr - 1);
     auto [dict_ptr, _] = Dict::key_lookup(trx, key_ptr);
-    // Fallback to first non-frame on dict stack when key not found anywhere.
-    auto dict = (dict_ptr != nullptr) ? dict_ptr->dict_value(trx) : Dict::dict_stack_first_nonframe(trx)->dict_value(trx);
+    // An existing binding anywhere on the dict stack wins (key_lookup already
+    // walked the frames plus localdict AND globaldict).  When the key is found
+    // nowhere, create in the routed base dict -- a new name lands in localdict, or
+    // globaldict under set-global, matching def's resolution.
+    Dict *dict{nullptr};
+    if (dict_ptr != nullptr) {
+        dict = dict_ptr->dict_value(trx);
+    } else {
+        dict = Dict::def_target_dict(trx, *key_ptr);
+    }
     if (dict->has_write_access()) {
-        dict->put(trx, *key_ptr, *val_ptr, Dict::BindingMode::Bind);
+        if (dict == trx->m_globaldict) {
+            // A write into globaldict must keep it global-safe (R6 + persist), the
+            // same path def uses, whether updating an existing global binding or
+            // creating a new one.
+            put_global_def(trx, dict, key_ptr, val_ptr);
+        } else {
+            dict->put(trx, *key_ptr, *val_ptr, Dict::BindingMode::Bind);
+        }
         trx->m_op_ptr -= 2;
     } else {
         trx->error(Error::ReadOnly, "attempt to update a ReadOnly dict");

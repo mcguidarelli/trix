@@ -654,6 +654,8 @@ and `try-catch` handlers. Every error code is both throwable and catchable.
 
 `/stack-effect` -- A `|params -- outputs|` procedure's body does not match its declared stack effect (raised at scan time; disable with `--no-stack-check`).
 
+`/dict-conflict` -- A `def` (or `override` / `def-persist`) would bind a name that is already defined in the sibling base dict: localdict and globaldict must not both hold the same name. `undef` it in the other dict first, or choose the target deliberately with `set-global`.
+
 ### Snapshot Errors
 
 `/invalid-image-file` -- Snapshot file is corrupt or incompatible.

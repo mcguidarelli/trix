@@ -121,10 +121,14 @@ ok get-string-stream length 0 gt  ok close-stream
 % SECTION 5: global-VM region pass
 % ====================================================================
 
+% gscr is an always-local OpaqueHandle (make-screen ignores set-global), so it is
+% bound in localdict OUTSIDE the ${} block; a `def` inside ${} would route to
+% globaldict and correctly reject the local screen.  The screen OPS still run under
+% ${} to exercise the global-alloc region.
+/gscr 4 3 make-screen def
 ${
     { 5000 5000 make-screen } try
     /limit-check eq (global: make-screen cells cap) rt-ok clear
-    /gscr 4 3 make-screen def
     { gscr 1 1 0x110000 7 0 0 screen-put-cell } try
     /range-check eq (global: cp beyond 0x10FFFF rejected) rt-ok clear
     gscr 0 0 65 7 0 0 screen-put-cell pop

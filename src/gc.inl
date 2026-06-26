@@ -323,6 +323,7 @@ vm_size_t gc_count_live_blocks() {
 //
 [[nodiscard]] vm_size_t gc_live_block_count() {
     assert((m_gvm_user_block_count == gc_count_live_blocks()) && "m_gvm_user_block_count drifted from the live-block heap tally");
+
     return m_gvm_user_block_count;
 }
 
@@ -1488,7 +1489,14 @@ void walk_all_roots() {
     // skip local-VM offsets); Dict::gc_walk_contents internally
     // calls gc_mark_object on each key/value, and gc_mark_object's range
     // check screens local-VM payloads while marking global ones.
-    for (auto *dict_ptr : {m_systemdict, m_protocoldict, m_localdict, m_errordict, m_handlersdict}) {
+    // globaldict joins this set: it is a LOCAL-VM header like localdict, but a
+    // `def` under set-global routes through put_persist_or_create, which allocates
+    // the binding's DictEntry as a standalone global-VM HashEntry block chained
+    // into globaldict's local buckets.  gc_walk_contents back-marks those entries
+    // via the bucket chain, so the global sweep keeps them.  (Phase 3 will drop
+    // localdict here once routing makes it provably local-only; until then BOTH
+    // base dicts can own global VM and must be walked.)
+    for (auto *dict_ptr : {m_systemdict, m_protocoldict, m_localdict, m_globaldict, m_errordict, m_handlersdict}) {
         if (dict_ptr != nullptr) {
             Dict::gc_walk_contents(this, ptr_to_offset(dict_ptr));
         }

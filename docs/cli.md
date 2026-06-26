@@ -669,6 +669,7 @@ Here `/undefined` maps to exit code 41. A few commonly-seen codes:
 | 54 | `/execution-limit` | `--max-ops` cap reached |  |  |
 | 59 | `/time-limit` | `--timeout` wall-clock deadline reached |  |  |
 | 60 | `/stack-effect` | ` | params -- outputs | ` declaration violated at scan time |
+| 61 | `/dict-conflict` | `def` of a name already bound in the sibling base dict (localdict vs globaldict) |  |  |
 
 Codes 0..124 are reserved for Trix errors; 125 is an uncaught C++ exception;
 126/127 are POSIX-reserved; 128+N means "killed by signal N". A

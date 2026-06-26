@@ -1681,6 +1681,43 @@ public:
         return nullptr;
     }
 
+    // Resolve the base-dict write target for def / override / def-persist and for
+    // store's create path, given the key being defined.  Starts from
+    // dict_stack_first_nonframe (skipping |...| frames):
+    //   - A begin-pushed user dict (first-nonframe != localdict) wins outright; the
+    //     localdict/globaldict split routing applies only at the permanent base.
+    //   - At the permanent base a name keeps a STICKY home: if it is already bound in
+    //     localdict or globaldict the write UPDATES it there regardless of mode; a
+    //     genuinely-new name is placed by current-global (globaldict under set-global,
+    //     else localdict).  This keeps the two base dicts mutually exclusive per name
+    //     by construction.  A name found in BOTH (reachable only via a direct put that
+    //     bypassed this routing) raises /dict-conflict as a defensive guard.
+    // throws: dict-conflict
+    [[nodiscard]] static Dict *def_target_dict(Trix *trx, Object key_obj) {
+        auto base = dict_stack_first_nonframe(trx)->dict_value(trx);
+        if (base != trx->m_localdict) {
+            return base;
+        } else if ((trx->m_globaldict->m_length == 0) && !trx->m_curr_alloc_global) {
+            // Fast path: no globals in play -- a new OR existing name is local either way.
+            return trx->m_localdict;
+        } else {
+            auto hash = key_obj.hash(trx);
+            auto in_local = (trx->m_localdict->find_dict_entry(trx, key_obj, hash) != nullptr);
+            auto in_global = (trx->m_globaldict->find_dict_entry(trx, key_obj, hash) != nullptr);
+            if (in_local && in_global) {
+                trx->error(Error::DictConflict, "name is defined in BOTH localdict and globaldict; undef one to disambiguate");
+            } else if (in_local) {
+                return trx->m_localdict;
+            } else if (in_global) {
+                return trx->m_globaldict;
+            } else if (trx->m_curr_alloc_global) {
+                return trx->m_globaldict;
+            } else {
+                return trx->m_localdict;
+            }
+        }
+    }
+
     // Searches a bucket chain for a key match, handling Name/String duality.
     // Name keys match by offset against Name entries and by content against String entries
     // (binary token stream dicts use String keys for the same logical names).
@@ -2032,7 +2069,12 @@ public:
 
         // R6 pointer hygiene: a global dict clones a fragile-local SCALAR key/value
         // into global, and rejects a NON-scalar fragile-local upfront (see Dict::put).
-        auto container_is_global = is_global(trx);
+        // globaldict is a LOCAL-VM header, but the entry this allocates is GLOBAL VM
+        // (gvm_alloc, journal-skipped so the global def survives restore) -- so its
+        // key/value must be global too, or a deeper restore would reclaim a local
+        // value out from under the surviving entry (dangling ref).  Treat it as a
+        // global container for the R6 clone/reject even though its header is local.
+        auto container_is_global = (is_global(trx) || (this == trx->m_globaldict));
         Save::reject_local_into_global(trx, container_is_global, key_obj, "put-persist");
         Save::reject_local_into_global(trx, container_is_global, val_obj, "put-persist");
 
@@ -2931,10 +2973,8 @@ public:
         if (!dict->has_no_global_refs()) {
             auto is_set = dict->is_set_data();
 
-            // Range used to skip back-walks for entries in the Dict's own
-            // block (already covered by the Dict's mark).  Only meaningful
-            // for global Dicts: local-VM Dicts are never swept by GC, so
-            // their expansion blocks (also local-VM) don't need a walker.
+            // Range used to skip back-walks for entries in a GLOBAL Dict's own
+            // block (already covered by the Dict's own mark).
             auto dict_is_global = trx->is_global(payload_offset);
             vm_offset_t dict_payload_end = nulloffset;
             if (dict_is_global) {
@@ -2942,16 +2982,24 @@ public:
                 dict_payload_end = static_cast<vm_offset_t>(payload_offset + trx->gvm_get_payload_size(block_size));
             }
             auto mark_aux_if_external = [&](vm_offset_t entry_offset) {
-                if (dict_is_global && ((entry_offset < payload_offset) || (entry_offset >= dict_payload_end))) {
-                    // Entries outside the Dict's own block are standalone ChunkKind::HashEntry
-                    // blocks: expansion-pool blocks (expand_dict / expand_set) AND -persist
-                    // entries (put_persist_or_create / set_add_persist_or_create).  They are
-                    // reachable ONLY through this bucket / free-list chain, so we mark the
-                    // owning block here or a vm_global_gc pass sweeps it out from under the
-                    // live Dict header.  HashEntry is a GC LEAF -- the entries' key/value are
-                    // marked by the bucket walk below; the block just needs to survive the
-                    // sweep (and must NOT be tagged Dict/Set, or it gets re-walked as a header
-                    // and mis-reads an entry's m_key/m_value bytes as bucket offsets).
+                // A standalone GLOBAL-VM HashEntry block needs marking or the global
+                // sweep reclaims it out from under the live Dict header.  This covers
+                // a global Dict's expansion-pool blocks AND -persist entries
+                // (put_persist_or_create / set_add_persist_or_create) hung off the
+                // bucket / free-list chain.  CRUCIALLY this also applies to a LOCAL-VM
+                // Dict (localdict/globaldict): a `def`-persist or a set-global `def`
+                // allocates the entry in GLOBAL VM even though the header is local, so
+                // the entry is external+global and must be marked here -- only the
+                // local pool/expansion blocks of a local Dict are exempt (never swept).
+                // For a global Dict, entries inside its own payload are already marked
+                // via the Dict header, so skip that range.
+                auto entry_is_global = trx->is_global(entry_offset);
+                auto inside_own_block = (dict_is_global && (entry_offset >= payload_offset) && (entry_offset < dict_payload_end));
+                if (entry_is_global && !inside_own_block) {
+                    // HashEntry is a GC LEAF -- the entries' key/value are marked by the
+                    // bucket walk below; the block just needs to survive the sweep (and
+                    // must NOT be tagged Dict/Set, or it gets re-walked as a header and
+                    // mis-reads an entry's m_key/m_value bytes as bucket offsets).
                     auto owning = trx->gvm_find_owning_payload(entry_offset, ChunkKind::HashEntry);
                     if (owning != nulloffset) {
                         trx->mark_global_offset(owning);

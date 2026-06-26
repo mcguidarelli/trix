@@ -489,8 +489,9 @@ enum struct Error : Error_t {
     UserError,
     TimeLimit,
     StackEffect,
+    DictConflict,
 };
-static constexpr auto ErrorCount{+Error::StackEffect + 1};
+static constexpr auto ErrorCount{+Error::DictConflict + 1};
 // The Error enum doubles as the process exit code on uncaught error: the
 // runtime exits with status `+error`.  Reserve 125+ for shell/POSIX-defined
 // codes (125 = uncaught C++ exception, 126/127 = shell-reserved, 128+N =
@@ -688,6 +689,9 @@ static_assert(ErrorCount <= 125,
 
     case Error::StackEffect:
         return "stack-effect"sv;
+
+    case Error::DictConflict:
+        return "dict-conflict"sv;
 
     default:
         assert(false && "error_sv: unknown Error");

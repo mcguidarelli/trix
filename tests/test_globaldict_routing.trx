@@ -1,0 +1,126 @@
+% ====================================================================
+% test_globaldict_routing.trx -- localdict/globaldict split: def routing
+% ====================================================================
+% Exercises the STICKY-HOME resolution for def / override / def-persist /
+% store under the localdict (local VM) / globaldict (global VM) split:
+%   - a NEW name is placed by current-global (set-global on -> globaldict,
+%     else localdict);
+%   - an EXISTING base-dict name keeps its home and is UPDATED in place
+%     regardless of mode -- so `set-global; /existing def` does NOT reroute
+%     or raise /dict-conflict (the documented allocate-global-bind-local idiom);
+%   - a global def at sl>0 PERSISTS (survives restore); globaldict stays
+%     GLOBAL-ONLY at sl>0 (a restore-fragile local value is rejected);
+%   - /dict-conflict is DEFENSIVE: only a direct put into both base dicts can
+%     place a name in both, and a subsequent def then raises it.
+% Membership is probed with `//localdict KEY known?` / `//globaldict KEY known?`.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune, GC-invisible local-VM byte slot
+% (see test_global_dict.trx); the file THROWS at EOF so test_all sees the verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% SECTION 1: new-name mode routing
+% ====================================================================
+/ln 7 def
+ln 7 eq                              (s1: local def value) rt-ok
+//localdict /ln known?               (s1: new name, no set-global -> localdict) rt-ok
+//globaldict /ln known? not          (s1: new local name NOT in globaldict) rt-ok
+
+true set-global /gn 8 def false set-global
+gn 8 eq                              (s1: global def value) rt-ok
+//globaldict /gn known?              (s1: new name, set-global -> globaldict) rt-ok
+//localdict /gn known? not           (s1: new global name NOT in localdict) rt-ok
+clear
+
+% ====================================================================
+% SECTION 2: sticky-local -- update under set-global stays local, no conflict
+% ====================================================================
+/sink null def
+true set-global  12345 /sink exch def  false set-global
+sink 12345 eq                        (s2: sticky-local value updated) rt-ok
+//localdict /sink known?             (s2: sink stays in localdict) rt-ok
+//globaldict /sink known? not        (s2: no globaldict shadow / no conflict) rt-ok
+clear
+
+% ====================================================================
+% SECTION 3: sticky-global -- update WITHOUT set-global stays global
+% ====================================================================
+true set-global /g 1 def false set-global
+/g 2 def
+g 2 eq                               (s3: sticky-global value updated) rt-ok
+//globaldict /g known?               (s3: g stays in globaldict) rt-ok
+//localdict /g known? not            (s3: no localdict shadow) rt-ok
+clear
+
+% ====================================================================
+% SECTION 4: persist -- global def at sl>0 survives restore
+% ====================================================================
+save /sv4 exch def
+true set-global  /surv 42 def  false set-global
+sv4 restore
+surv 42 eq                           (s4: global def survives restore) rt-ok
+//globaldict /surv known?            (s4: surv persisted in globaldict) rt-ok
+clear
+
+% ====================================================================
+% SECTION 5: defensive /dict-conflict (reachable only via direct put)
+% ====================================================================
+/d 1 def
+//globaldict /d 2 put                % direct put: d now lives in BOTH base dicts
+{ /d 3 def } try /dict-conflict eq   (s5: def of a both-dict name -> /dict-conflict) rt-ok
+//globaldict /d undef                % undo the manual both-membership
+clear
+
+% ====================================================================
+% SECTION 6: current-dict mode default (where a NEW name would land)
+% ====================================================================
+true set-global  current-dict //globaldict eq  false set-global
+                                     (s6: current-dict is globaldict under set-global) rt-ok
+current-dict //localdict eq          (s6: current-dict is localdict by default) rt-ok
+clear
+
+% ====================================================================
+% SECTION 7: store routing (create by mode; update keeps sticky home)
+% ====================================================================
+true set-global  /st 5 store  false set-global
+//globaldict /st known?              (s7: store-create under set-global -> globaldict) rt-ok
+st 5 eq                              (s7: store-create value) rt-ok
+
+/sl 1 def
+true set-global  /sl 9 store  false set-global
+sl 9 eq                              (s7: store-update sticky-local value) rt-ok
+//localdict /sl known?               (s7: store-update stays in localdict) rt-ok
+//globaldict /sl known? not          (s7: store-update no globaldict shadow) rt-ok
+clear
+
+% ====================================================================
+% SECTION 8: globaldict global-only at sl>0 (a local value is rejected)
+% ====================================================================
+save /sv8 exch def
+{ 3 array  true set-global  /la exch def } try
+false set-global
+/above-barrier eq                    (s8: restore-fragile local into globaldict -> /above-barrier) rt-ok
+//globaldict /la known? not          (s8: rejected def left nothing in globaldict) rt-ok
+sv8 restore
+clear
+
+% ====================================================================
+% SECTION 9: def-persist routes like def (new name under set-global -> globaldict)
+% ====================================================================
+save /sv9 exch def
+true set-global  /dp 99 def-persist  false set-global
+sv9 restore
+dp 99 eq                             (s9: def-persist global binding survives restore) rt-ok
+//globaldict /dp known?              (s9: def-persist landed in globaldict) rt-ok
+clear
+
+% ====================================================================
+% Done
+% ====================================================================
+(Globaldict routing tests complete.) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

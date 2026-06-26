@@ -158,6 +158,7 @@ exit codes" at the bottom.
 | `/execution-limit` | Per-process or per-actor instruction budget exhausted (when enabled) | Long-running tight loops in budgeted contexts | Re-architect to yield (`coroutine`) or raise the budget |
 | `/time-limit` | Wall-clock deadline (`--timeout`) reached while executing | Long-running or non-terminating scripts under a `--timeout` budget | Raise/clear the deadline; only fires while ops run, not while parked |
 | `/stack-effect` | A `\|params -- outputs\|` procedure's body does not match its declared stack effect | Scanning a proc whose body leaves the wrong count, underflows its inputs, or has an unbalanced `if`/`if-else`/`repeat` branch | Fix the body or the declaration; or scan with `--no-stack-check` to disable the check |
+| `/dict-conflict` | A `def` would define a name already bound in the sibling base dict (localdict vs globaldict) | Defining the same name once under `set-global` and once without | `undef` the name in the other dict first, or pick the dict deliberately with `set-global` |
 | `/unsupported` | Op recognised but not supported in this combination | `{ ... }#pw` (packed proc + writable), some HandleKind-specific gaps | Choose the supported variant (`{ ... }#aw` for a writable proc body) |
 
 ## Internal / catch-all

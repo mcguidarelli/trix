@@ -2352,7 +2352,7 @@ the failure context.
 /scan-type-fail  /scan-type-mismatch
 /require  /ensure  /execution-limit  /unhandled-capture
 /effect-not-handled  /protocol  /match  /above-barrier  /user-error
-/time-limit  /stack-effect
+/time-limit  /stack-effect  /dict-conflict
 ```
 
 **User-defined error names:** any Name may be passed to `throw` or `throw-with`
@@ -2369,7 +2369,7 @@ its process exit status reflects how the run ended:
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Clean exit -- script ran to completion, or `quit` was invoked |
-| `1`..`60` | Uncaught error reached `default-handler`; the value is the underlying `Error` enum (see below) |
+| `1`..`61` | Uncaught error reached `default-handler`; the value is the underlying `Error` enum (see below) |
 | `11` (`/io-read-error`) | `EndOfStream` exception escaped initialization or the interpreter loop |
 | `125` | Uncaught C++ host exception (`std::exception` or unknown) |
 | `128+N` | Killed by signal `N` (standard Unix shell convention; not set by Trix) |
@@ -2384,7 +2384,7 @@ The numeric value is the position of the error in the `Error` enum in
 `src/types.inl` (declaration order, not the doc list above).  Common ones:
 `/assert-failed` = 1, `/div-by-zero` = 5, `/io-read-error` = 11, `/type-check`
 = 40, `/undefined` = 41, `/user-error` = 58, `/time-limit` = 59,
-`/stack-effect` = 60, `/invalid-name`
+`/stack-effect` = 60, `/dict-conflict` = 61, `/invalid-name`
 = 19.  User-defined
 names thrown via `throw-with` map to `/user-error` (58) regardless of the name.
 
@@ -5153,10 +5153,10 @@ error).  `(none)` means the operator raises no error.
 | `dedupe` | `opstack-underflow`, `type-check`, `vm-full` |
 | `deep-eq` | `limit-check`, `opstack-underflow` |
 | `deep-ne` | `limit-check`, `opstack-underflow` |
-| `def` | `dict-full`, `invalid-name`, `opstack-underflow`, `read-only`, `type-check`, `vm-full` |
+| `def` | `above-barrier`, `dict-conflict`, `dict-full`, `invalid-name`, `opstack-underflow`, `read-only`, `type-check`, `vm-full` |
 | `def-default-method` | `dict-full`, `opstack-underflow`, `protocol`, `type-check`, `vm-full` |
 | `def-method` | `dict-full`, `opstack-underflow`, `protocol`, `type-check`, `vm-full` |
-| `def-persist` | `above-barrier`, `dict-full`, `invalid-name`, `opstack-underflow`, `read-only`, `type-check`, `vm-full` |
+| `def-persist` | `above-barrier`, `dict-conflict`, `dict-full`, `invalid-name`, `opstack-underflow`, `read-only`, `type-check`, `vm-full` |
 | `def-protocol` | `dict-full`, `opstack-underflow`, `protocol`, `range-check`, `type-check`, `vm-full` |
 | `default-handler` | `opstack-underflow`, `type-check` |
 | `deflate` | `internal-error`, `opstack-underflow`, `type-check`, `vm-full` |
@@ -5500,7 +5500,7 @@ error).  `(none)` means the operator raises no error.
 | `or` | `opstack-underflow`, `type-check` |
 | `or?` | `execstack-overflow`, `opstack-underflow`, `type-check` |
 | `over` | `opstack-overflow`, `opstack-underflow`, `vm-full` |
-| `override` | `dict-full`, `invalid-name`, `opstack-underflow`, `read-only`, `type-check`, `undefined`, `vm-full` |
+| `override` | `above-barrier`, `dict-conflict`, `dict-full`, `invalid-name`, `opstack-underflow`, `read-only`, `type-check`, `undefined`, `vm-full` |
 | `pack` | `invalid-format-string`, `opstack-underflow`, `range-check`, `type-check`, `unmatched-mark`, `vm-full` |
 | `pack-size` | `invalid-format-string`, `opstack-underflow`, `type-check` |
 | `packed` | `limit-check`, `opstack-underflow`, `type-check`, `vm-full` |

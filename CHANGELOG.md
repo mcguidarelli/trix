@@ -8,15 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **`globaldict` -- a second user dictionary, groundwork for a PostScript-style
+- **`globaldict` -- a second user dictionary implementing a PostScript-style
   local/global definition split.** A fixed-capacity dictionary pre-allocated in local
   VM and placed on the dict stack directly below `localdict`, pushed by the new
   `globaldict` operator. `--globaldict-size=N` sets its capacity (default 64; range
-  16..50000) and `:status:globaldict-length` / `:status:globaldict-maxlength` report
-  it. This adds the dictionary, its snapshot persistence, and the dict-stack slot
-  only; definitions are not yet routed to it (`def` still targets `localdict`). The
-  permanent dict-stack count rises from 3 to 4, and the snapshot format is bumped to
-  **v183** (new `globaldict_offset` header field and the `GlobalDict` name ordinal).
+  16..50000), `:status:globaldict-length` / `:status:globaldict-maxlength` report it,
+  and the `:globaldict:` name path resolves into it. `def` / `override` /
+  `def-persist` / `store` route by **sticky home**: a base-dict name keeps the
+  dictionary it was first defined in and is updated there regardless of allocation
+  mode (so `set-global; /existing def` updates the existing binding in place); only a
+  genuinely-new name is placed by `set-global` -- globaldict when active, else
+  localdict. A global definition made above save level 0 persists across `restore`,
+  and globaldict accepts only global values there. A name present in BOTH base
+  dictionaries -- reachable only by a direct `put` that bypassed routing -- raises the
+  new `/dict-conflict` error (exit code 61). The permanent dict-stack count rises from
+  3 to 4, and the snapshot format is bumped to **v183** (new `globaldict_offset`
+  header field and the `GlobalDict` name ordinal).
 
 ### Changed
 - **BREAKING: the user dictionary `userdict` is renamed `localdict`.** The operator
