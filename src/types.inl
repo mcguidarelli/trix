@@ -1078,7 +1078,13 @@ static constexpr std::string_view PRERELEASE{"-dev"};
 // after it, and (b) adds globaldict_offset (vm_offset_t) to SnapShotHeader so thaw
 // can re-point m_globaldict.  A pre-v183 image mismatches on both counts; the
 // version gate rejects it.
-static constexpr uint32_t SNAPSHOT_VERSION{183};
+// v184 adds localdict_maybe_global (bool) to SnapShotHeader: m_localdict_maybe_global,
+// the flag gating the GC's localdict skip (true => localdict may transitively own
+// global VM and must be marked; false => the global sweep skips it).  Its EXACT value
+// is saved/restored -- never re-derived on thaw -- so a restored image keeps walking
+// or skipping localdict precisely as the saved run did.  A pre-v184 image lacks the
+// field; the version gate rejects the mismatch.
+static constexpr uint32_t SNAPSHOT_VERSION{184};
 public:
 using vm_offset_t = vm_size_t;
 static constexpr vm_offset_t nulloffset{0};

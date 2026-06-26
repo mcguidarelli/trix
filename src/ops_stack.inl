@@ -534,6 +534,8 @@ static void array_store_op(Trix *trx) {
             Save::save_object(trx, dst_ptr);
         }
         *dst_ptr = src_ptr->make_copy(curr_save_level);
+        // GC localdict-skip barrier: a global value array-stored into a local array.
+        Save::note_global_into_local(trx, dst_is_global, *dst_ptr);
 
         ++src_ptr;
         ++dst_ptr;
@@ -604,6 +606,8 @@ static void array_store_persist_op(Trix *trx) {
         // for the same fix.
         dst_ptr->maybe_free_extvalue(trx);
         *dst_ptr = src_ptr->make_copy(Save::BASE);
+        // GC localdict-skip barrier: a global value array-stored into a local array.
+        Save::note_global_into_local(trx, dst_is_global, *dst_ptr);
 
         ++src_ptr;
         ++dst_ptr;

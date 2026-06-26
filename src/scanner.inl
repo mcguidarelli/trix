@@ -2082,6 +2082,13 @@ make_proc_object(Trix *trx, Object *base, length_t length, Object *saved_op_ptr,
                 } else {
                     auto [alloc_ptr, alloc_offset] = trx->vm_alloc_dispatch_n<Object>(length, Trix::ChunkKind::Array);
                     std::copy_n(base, length, alloc_ptr);
+                    // GC localdict-skip barrier: a proc `{ ... ${[...]} ... }` scanned in
+                    // LOCAL VM embeds its nested ${...} global literal as an element, so the
+                    // local proc body references a global block.  See note_global_into_local.
+                    auto proc_is_global = trx->is_global(alloc_offset);
+                    for (length_t i = 0; i < length; ++i) {
+                        Save::note_global_into_local(trx, proc_is_global, alloc_ptr[i]);
+                    }
                     return literal_pair(Object::make_array(alloc_offset, length, Object::ExecutableAttrib, access));
                 }
             }

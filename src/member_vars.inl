@@ -179,6 +179,15 @@ Dict *m_systemdict{nullptr};
 Dict *m_protocoldict{nullptr};
 Dict *m_localdict{nullptr};
 Dict *m_globaldict{nullptr};
+
+// Phase 3 GC-skip flag: true when localdict MAY transitively reference a global-VM
+// block -- a global value/key stored into localdict or into a local container
+// reachable from it, or a def-persist global entry hung off localdict's buckets.
+// Set conservatively by the Save::note_global_into_local write-barrier; cleared by
+// the GC's isolated localdict mark once that closure is proven global-free.  When
+// false the global mark-sweep SKIPS localdict entirely (the headline win).  Rides
+// the snapshot via SnapShotHeader::localdict_maybe_global (exact value, no re-derive).
+bool m_localdict_maybe_global{false};
 Dict *m_errordict{nullptr};
 Dict *m_handlersdict{nullptr};
 

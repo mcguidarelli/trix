@@ -1489,14 +1489,16 @@ void walk_all_roots() {
     // skip local-VM offsets); Dict::gc_walk_contents internally
     // calls gc_mark_object on each key/value, and gc_mark_object's range
     // check screens local-VM payloads while marking global ones.
-    // globaldict joins this set: it is a LOCAL-VM header like localdict, but a
+    // globaldict is here: it is a LOCAL-VM header like localdict, but a
     // `def` under set-global routes through put_persist_or_create, which allocates
     // the binding's DictEntry as a standalone global-VM HashEntry block chained
     // into globaldict's local buckets.  gc_walk_contents back-marks those entries
-    // via the bucket chain, so the global sweep keeps them.  (Phase 3 will drop
-    // localdict here once routing makes it provably local-only; until then BOTH
-    // base dicts can own global VM and must be walked.)
-    for (auto *dict_ptr : {m_systemdict, m_protocoldict, m_localdict, m_globaldict, m_errordict, m_handlersdict}) {
+    // via the bucket chain, so the global sweep keeps them.
+    // localdict is DELIBERATELY ABSENT (Phase 3 GC-skip): it is walked separately
+    // and only when m_localdict_maybe_global is set -- see the isolated localdict
+    // pre-pass in vm_global_gc_impl.  When that flag is clear the global sweep skips
+    // localdict entirely, which is the whole point of the localdict/globaldict split.
+    for (auto *dict_ptr : {m_systemdict, m_protocoldict, m_globaldict, m_errordict, m_handlersdict}) {
         if (dict_ptr != nullptr) {
             Dict::gc_walk_contents(this, ptr_to_offset(dict_ptr));
         }
@@ -1672,6 +1674,25 @@ vm_size_t vm_global_gc() {
     }
 }
 
+// Mark localdict's transitive closure in ISOLATION and report how many global
+// blocks it reached.  Called as a Phase-B pre-pass BEFORE walk_all_roots, so when
+// it runs nothing else is marked yet: the delta in m_gc_marked_count is EXACTLY the
+// number of live global blocks reachable from localdict -- a root-independent
+// answer (a global also reachable from, say, the operand stack is still counted
+// here, which is the conservative-correct behaviour).  The marks it sets are real
+// and persist for the rest of the pass; walk_all_roots re-encountering localdict's
+// objects short-circuits on the already-marked / visit-set checks.  The returned
+// count drives only the TRIX_DEBUGGER skip oracle (it must be 0 when the flag was
+// clear); the production clear is the monotonic m_gvm_user_block_count==0 rule.
+[[nodiscard]] vm_size_t gc_mark_localdict_isolated() {
+    auto before = m_gc_marked_count;
+    Dict::gc_walk_contents(this, ptr_to_offset(m_localdict));
+    while (m_gc_work_head != nulloffset) {
+        walk_block_contents(gc_work_pop());
+    }
+    return (m_gc_marked_count - before);
+}
+
 vm_size_t vm_global_gc_impl() {
     // Drain the runtime pool free lists before mark+sweep.  These
     // chains hold recyclable blocks the runtime hasn't returned to
@@ -1757,6 +1778,42 @@ vm_size_t vm_global_gc_impl() {
             assert(m_gc_work_head == nulloffset);
             assert(m_gc_visit_head == nulloffset);
             m_gc_marked_count = 0;
+
+            // Phase 3 localdict pre-pass.  localdict is NOT in the section-5 walk; it
+            // is marked HERE, in isolation, and ONLY when it may transitively own
+            // global VM (m_localdict_maybe_global).  The flag is set by the
+            // note_global_into_local write-barrier the moment a global value FIRST
+            // enters a barrier-relevant local container, and is MONOTONIC while any
+            // global user block lives -- cleared only when m_gvm_user_block_count
+            // reaches 0.  That monotonicity is what makes the skip sound: a global
+            // already trips the flag at its first local store, and the flag cannot go
+            // clear again while that global (or any other) is alive, so a value moved
+            // INTO localdict's closure later -- even buried inside a local composite
+            // whose own header is local -- can never slip behind a cleared flag.
+            // (A per-pass "scan localdict, clear if it reached no global" would be
+            // unsound: it could clear while a global-bearing local container is still
+            // transient outside localdict, then miss it entering localdict.)
+            //
+            // When the flag is clear the global sweep skips localdict entirely.  A
+            // TRIX_DEBUGGER build still marks it via the oracle and asserts the skip
+            // was safe (localdict reaches no live global block), turning any
+            // write-barrier gap into a test failure rather than a silent release-build
+            // heap corruption.
+            if (m_gvm_user_block_count == 0) {
+                m_localdict_maybe_global = false;  // no global blocks exist -> localdict owns none
+            }
+            gc_profile_begin();
+            if (m_localdict_maybe_global) {
+                static_cast<void>(gc_mark_localdict_isolated());  // keep localdict's reachable globals live
+            }
+#ifdef TRIX_DEBUGGER
+            else {
+                assert((gc_mark_localdict_isolated() == 0) &&
+                       "localdict skipped by GC but reaches a live global block -- "
+                       "note_global_into_local write-barrier gap");
+            }
+#endif
+            gc_profile_tick(GcProfileSection::LocalDictScan);
 
             walk_all_roots();
             gc_profile_pass_end();
@@ -1883,6 +1940,7 @@ static void vm_gc_profile_report_op(Trix *trx) {
                                                                               "eqref"sv,
                                                                               "save-journal"sv,
                                                                               "root-tail"sv,
+                                                                              "localdict-scan"sv,
                                                                               "mark-drain"sv,
                                                                               "sweep"sv};
 

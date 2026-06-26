@@ -1,0 +1,63 @@
+% ====================================================================
+% test_gc_localdict_skip.trx -- localdict/globaldict GC split: the
+% note_global_into_local write-barrier keeps a global block reachable
+% ONLY through localdict alive across a global GC.  localdict is dropped
+% from the section-5 mark and skipped whenever it provably owns no global
+% VM; the barrier flags it so the skip never sweeps a still-rooted global.
+%
+% Each section drives one entry route, stores a global where the ONLY root
+% is a localdict binding, forces vm-global-gc, and asserts the global is
+% intact (poison/UAF would corrupt the contents).  A TRIX_DEBUGGER build
+% additionally runs the skip oracle on every GC here.
+% ====================================================================
+
+% rt-ok counts failures in a restore-immune, GC-invisible local-VM byte slot;
+% the file THROWS /rt-assertions-failed at EOF so the suite sees the verdict.
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+% ====================================================================
+% A) a GLOBAL value bound DIRECTLY to a localdict name (route 1)
+% ====================================================================
+${ [ 11 22 33 ] } /ga exch def
+vm-global-gc pop
+ga length 3 eq                       (A: global array in localdict survives GC) rt-ok
+ga 2 get 33 eq                       (A: ... last element intact)               rt-ok
+ga 0 get 11 eq                       (A: ... first element intact)              rt-ok
+
+% ====================================================================
+% B) a GLOBAL buried in a LOCAL array that itself lives in localdict
+%    (route 3: the holder is local, its element references global VM)
+% ====================================================================
+/holder 1 array def
+holder 0 ${ [ 44 55 ] } put
+vm-global-gc pop
+holder 0 get length 2 eq             (B: global buried in local-array-in-localdict survives) rt-ok
+holder 0 get 1 get 55 eq             (B: ... buried element intact)             rt-ok
+
+% ====================================================================
+% C) a global value REPLACING an existing local binding in localdict
+%    (sticky-home update: the entry stays in localdict, its value goes global)
+% ====================================================================
+/gc-slot 0 def                       % local binding in localdict
+gc-slot 0 eq                         (C: local slot starts local)               rt-ok
+${ [ 7 8 9 ] } /gc-slot exch def      % overwrite with a global value (route 1, sticky)
+vm-global-gc pop
+gc-slot length 3 eq                  (C: sticky-updated global value survives GC) rt-ok
+gc-slot 1 get 8 eq                   (C: ... element intact)                    rt-ok
+
+% ====================================================================
+% D) globals in globaldict + a pure-local proc in localdict: the GC must
+%    keep the globaldict global AND the localdict proc must still run
+% ====================================================================
+true set-global  /gd ${ [ 100 200 ] } def  false set-global
+/localproc { 1 2 add } def
+vm-global-gc pop
+gd length 2 eq                       (D: globaldict global survives GC)         rt-ok
+gd 1 get 200 eq                      (D: ... element intact)                    rt-ok
+localproc 3 eq                       (D: localdict proc still runs)             rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_gc_localdict_skip: ALL TESTS PASSED) =
+(__test_ok__) =

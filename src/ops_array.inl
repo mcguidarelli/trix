@@ -115,7 +115,10 @@ static void dict_extract_op(Trix *trx, bool extract_keys) {
         if (next_offset == nulloffset) {
             break;
         } else {
-            dst_ptr[i++] = (extract_keys ? key : value).make_clone(trx);
+            dst_ptr[i] = (extract_keys ? key : value).make_clone(trx);
+            // GC localdict-skip barrier: a dict's global key/value cloned into a local array.
+            Save::note_global_into_local(trx, trx->is_global(dst_offset), dst_ptr[i]);
+            ++i;
             entry_offset = next_offset;
             bucket_idx = next_idx;
         }
@@ -515,6 +518,9 @@ static void append_op(Trix *trx) {
     trx->gc_root_push_oneoff(result_obj);
     clone_array_elements(trx, arr_ptr, dst_ptr, src_length);
     dst_ptr[src_length] = elem_ptr->make_clone(trx);
+    // GC localdict-skip barrier: the appended element may be a global ref in a local result
+    // (clone_array_elements already barriers the copied prefix).
+    Save::note_global_into_local(trx, trx->is_global(dst_offset), dst_ptr[src_length]);
     trx->gc_root_pop_oneoff();
 
     elem_ptr->maybe_free_extvalue(trx);
@@ -1366,6 +1372,8 @@ static void put_op(Trix *trx) {
                         Save::save_object(trx, dst_ptr);
                     }
                     *dst_ptr = any_ptr->make_copy(curr_save_level);
+                    // GC localdict-skip barrier: a global value put into a local array.
+                    Save::note_global_into_local(trx, dst_global, *dst_ptr);
                 }
                 index_ptr->maybe_free_extvalue(trx);
             } else {
@@ -1457,6 +1465,8 @@ static void put_persist_op(Trix *trx) {
                         // for the same fix.
                         dst_ptr->maybe_free_extvalue(trx);
                         *dst_ptr = any_ptr->make_copy(Save::BASE);
+                        // GC localdict-skip barrier: a global value put into a local array.
+                        Save::note_global_into_local(trx, dst_global, *dst_ptr);
                     }
                     index_ptr->maybe_free_extvalue(trx);
                 } else {

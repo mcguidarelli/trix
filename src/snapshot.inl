@@ -155,7 +155,9 @@ struct SnapShotHeader {
     save_level_t max_save_level;
     save_level_t curr_save_level;
     bool sid_wrapped;
-    bool curr_alloc_global;  // m_curr_alloc_global (the set-global / current-global flag)
+    bool curr_alloc_global;        // m_curr_alloc_global (the set-global / current-global flag)
+    bool localdict_maybe_global;   // m_localdict_maybe_global: localdict may transitively own global VM
+                                   // (gates the GC's localdict skip).  Exact value saved/restored, never re-derived.
     uint8_t gc_current_gen;  // m_gc_current_gen at save time (a 1-bit flip-flop, {0,1}).  Restoring
                              // this is MANDATORY: m_gc_current_gen must never reset to a default on
                              // thaw.  Without it the post-thaw GC's first flip would collide with the
@@ -327,7 +329,8 @@ static_assert(sizeof(SnapShotHeader) == 600);  // guard against silent layout ch
                                                // live free-block counter consumed existing pad in v168;
                                                // v174 added operator_table_signature + operator_count;
                                                // v182 added name_global_mask_offset;
-                                               // v183 added globaldict_offset, reusing existing interior pad -- size unchanged)
+                                               // v183 added globaldict_offset, reusing existing interior pad -- size unchanged;
+                                               // v184 added localdict_maybe_global (bool), reusing interior pad -- size unchanged)
 static_assert(offsetof(SnapShotHeader, checksum) == 592);  // checksum must be the last field
 
 //===--- CRC-32 /ISO-HDLC (IEEE 802.3) reflected polynomial Checksum ---===//

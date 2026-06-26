@@ -233,6 +233,21 @@ public:
     // restore-fragile local-VM storage).
     [[nodiscard]] bool is_global(const Trix *trx) const { return (reinterpret_cast<const vm_t *>(this) >= trx->m_vm_global); }
 
+    // True iff a global-VM value stored into THIS dict/set could make localdict
+    // transitively own global VM -- i.e. this is localdict or a user dict/set,
+    // which can become reachable from localdict once def'd into it.  False for
+    // containers the GC walks INDEPENDENTLY of localdict (the other permanent base
+    // dicts, the eqref tables, and |locals| frame scopes): a global value there is
+    // already kept alive by its own root, so it must NOT flag localdict.  Flagging
+    // globaldict or a frame -- both written constantly -- would force localdict to
+    // be walked every pass and defeat the whole skip.  Gates the
+    // Save::note_global_into_local write-barrier at the dict/set store sites.
+    [[nodiscard]] bool barrier_relevant_for_localdict(const Trix *trx) const {
+        return !(is_frame() || (this == trx->m_systemdict) || (this == trx->m_protocoldict) ||
+                 (this == trx->m_globaldict) || (this == trx->m_errordict) ||
+                 (this == trx->m_handlersdict) || (this == trx->m_eqdict) || (this == trx->m_eqset));
+    }
+
     [[nodiscard]] length_t length() const { return m_length; }
 
     [[nodiscard]] length_t maxlength() const { return m_maxlength; }
@@ -1900,6 +1915,13 @@ public:
         Save::reject_local_into_global(trx, container_is_global, key_obj, "put");
         Save::reject_local_into_global(trx, container_is_global, val_obj, "put");
 
+        // GC localdict-skip barrier: a global value/key landing in localdict or a
+        // user dict (reachable from localdict once def'd) flags localdict for marking.
+        if (barrier_relevant_for_localdict(trx)) {
+            Save::note_global_into_local(trx, container_is_global, key_obj);
+            Save::note_global_into_local(trx, container_is_global, val_obj);
+        }
+
         auto dict = this;
         auto is_eqdict = (dict == trx->m_eqdict);
         auto hash = key_obj.hash(trx);
@@ -2025,6 +2047,11 @@ public:
         Save::reject_local_into_global(trx, container_is_global, key_obj, "put-persist");
         Save::reject_local_into_global(trx, container_is_global, val_obj, "put-persist");
 
+        // GC localdict-skip barrier (see Dict::put): only the value is (over)written here.
+        if (barrier_relevant_for_localdict(trx)) {
+            Save::note_global_into_local(trx, container_is_global, val_obj);
+        }
+
         auto hash = key_obj.hash(trx);
         auto bucket_index = fastmod_u32(hash, bucket_magic_for(m_bucket_count), m_bucket_count);
         auto entry = find_in_chain<DictEntry>(trx, key_obj, m_buckets[bucket_index]);
@@ -2078,6 +2105,14 @@ public:
         Save::reject_local_into_global(trx, container_is_global, key_obj, "put-persist");
         Save::reject_local_into_global(trx, container_is_global, val_obj, "put-persist");
 
+        // GC localdict-skip barrier (see Dict::put): a global value/key into a
+        // barrier-relevant dict flags localdict.  The new-entry case below also
+        // flags it unconditionally -- the fresh entry is itself a global block.
+        if (barrier_relevant_for_localdict(trx)) {
+            Save::note_global_into_local(trx, container_is_global, key_obj);
+            Save::note_global_into_local(trx, container_is_global, val_obj);
+        }
+
         auto hash = key_obj.hash(trx);
         auto bucket_index = fastmod_u32(hash, bucket_magic_for(m_bucket_count), m_bucket_count);
         auto entry = find_in_chain<DictEntry>(trx, key_obj, m_buckets[bucket_index]);
@@ -2129,6 +2164,16 @@ public:
             // restore as long as the dict header itself does (BASE or global).
             m_buckets[bucket_index] = new_offset;
             ++m_length;
+
+            // Route 2 of the GC localdict-skip barrier: this fresh DictEntry is a
+            // GLOBAL-VM block now reachable through a LOCAL-header dict's buckets.
+            // For localdict (or a user dict reachable from it) that means localdict
+            // transitively owns global VM even when key/value are local -- flag it so
+            // the GC marks localdict instead of skipping it.  globaldict is excluded
+            // (it is walked in section 5; its persist entries are kept there).
+            if (barrier_relevant_for_localdict(trx)) {
+                trx->m_localdict_maybe_global = true;
+            }
 
             return &new_entry->m_value;
         }
@@ -2643,6 +2688,12 @@ public:
         auto container_is_global = is_global(trx);
         Save::reject_local_into_global(trx, container_is_global, key_obj, "set-add");
 
+        // GC localdict-skip barrier (see Dict::put): a global key into a user set
+        // reachable from localdict flags localdict.
+        if (barrier_relevant_for_localdict(trx)) {
+            Save::note_global_into_local(trx, container_is_global, key_obj);
+        }
+
         auto is_eqset = (this == trx->m_eqset);
 
         if (find_set_entry(trx, key_obj) != nullptr) {
@@ -2716,6 +2767,13 @@ public:
         auto container_is_global = is_global(trx);
         Save::reject_local_into_global(trx, container_is_global, key_obj, "set-add-persist");
 
+        // GC localdict-skip barrier (see Dict::put): a global key into a user set
+        // reachable from localdict flags localdict; the new global entry below flags
+        // it unconditionally for a barrier-relevant set (route 2).
+        if (barrier_relevant_for_localdict(trx)) {
+            Save::note_global_into_local(trx, container_is_global, key_obj);
+        }
+
         if (find_set_entry(trx, key_obj) != nullptr) {
             // Already a member: matches set_put's silent no-op.
             key_obj.maybe_free_extvalue(trx);
@@ -2748,6 +2806,13 @@ public:
             // restore as long as the set header itself does (BASE or global).
             m_buckets[bucket_index] = new_offset;
             ++m_length;
+
+            // Route 2 of the GC localdict-skip barrier (see put_persist_or_create):
+            // this fresh SetEntry is a GLOBAL-VM block reachable through a LOCAL set's
+            // buckets; for a set reachable from localdict, flag localdict.
+            if (barrier_relevant_for_localdict(trx)) {
+                trx->m_localdict_maybe_global = true;
+            }
         }
     }
 

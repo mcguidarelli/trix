@@ -571,8 +571,13 @@ template<typename T>
     auto count = static_cast<length_t>(m_scratch_ptr - m_scratch_base);
     auto [elem_ptr, arr_offset] = vm_alloc_n<T>(count);
     auto src_ptr = static_cast<T *>(m_scratch_base);
+    // GC localdict-skip barrier: vm_alloc_n builds the collected array in LOCAL VM, but
+    // the arena items (find-all / find-n / aggregate solutions captured inside ${...})
+    // can reference global blocks; flag localdict if any does.  See note_global_into_local.
+    auto collected_is_global = is_global(arr_offset);
     for (length_t i = 0; i < count; ++i) {
         elem_ptr[i] = src_ptr[i];
+        Save::note_global_into_local(this, collected_is_global, elem_ptr[i]);
     }
     for (length_t i = 0; i < count; ++i) {
         src_ptr[i] = T::make_null();

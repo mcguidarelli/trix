@@ -1291,10 +1291,11 @@ enum struct GcProfileSection : uint8_t {
     ObjTables,    // section 4: well-known cache + root-objects array
     NamedDicts,   // section 5: systemdict / localdict / errordict / handlers / protocol
     Eqref,        // section 6: eqref tables (eqdict / eqset / eqproc storage)
-    SaveJournal,  // section 7: per-save-level journal chains
-    RootTail,     // sections 8-11: last-error, misc cells, reactive batch, debugger
-    MarkDrain,    // phase B: work-queue drain (walk_block_contents loop)
-    Sweep,        // phase C: gc_sweep_unmarked
+    SaveJournal,    // section 7: per-save-level journal chains
+    RootTail,       // sections 8-11: last-error, misc cells, reactive batch, debugger
+    LocalDictScan,  // phase B pre-pass: isolated localdict-closure mark (skip-or-clear)
+    MarkDrain,      // phase B: work-queue drain (walk_block_contents loop)
+    Sweep,          // phase C: gc_sweep_unmarked
 };
 static constexpr uint8_t GcProfileSectionCount{+GcProfileSection::Sweep + 1};
 

@@ -557,6 +557,7 @@ static void snapshot_op(Trix *trx) {
                 h.vm_global_used = static_cast<uint32_t>(trx->m_vm_limit - trx->m_vm_global);
                 h.vm_capacity = static_cast<uint32_t>(trx->m_vm_limit - trx->m_vm_base);
                 h.curr_alloc_global = trx->m_curr_alloc_global;
+                h.localdict_maybe_global = trx->m_localdict_maybe_global;
                 h.gc_current_gen = trx->m_gc_current_gen;
                 h.gvm_free_head = trx->m_gvm_free_head;
                 for (length_t i = 0; i < GvmFastBinCount; ++i) {
@@ -1096,6 +1097,7 @@ static void restore_from_header(Trix *trx, const SnapShotHeader *h) {
     trx->m_vm_temp_ptr = trx->m_vm_limit;                    // no temps active after thaw
     trx->m_vm_global = trx->m_vm_limit - h->vm_global_used;  // restore global watermark from snapshot
     trx->m_curr_alloc_global = h->curr_alloc_global;
+    trx->m_localdict_maybe_global = h->localdict_maybe_global;  // exact flag value survives thaw (never re-derived)
     trx->m_gc_current_gen = h->gc_current_gen;
     trx->m_gvm_free_head = h->gvm_free_head;  // free-list head survives thaw
     for (length_t i = 0; i < GvmFastBinCount; ++i) {

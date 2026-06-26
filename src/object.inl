@@ -1557,6 +1557,16 @@ public:
             object.m_extvalue_save_level = extvalue_save_level_for_alloc(trx, new_offset);
             object.m_offset = new_offset;
         }
+        // GC localdict-skip barrier choke: make_clone_local is the "keep it local"
+        // element clone used by the array aggregations (zip / group / window / dedup /
+        // intersperse ...).  It is SHALLOW for a composite -- the clone keeps the
+        // source's offset -- so cloning a GLOBAL composite into a local-intended result
+        // leaves a global reference inside a local container.  Flag it (conservatively;
+        // a clone into a global result is a harmless over-flag).  See
+        // Save::note_global_into_local.
+        if (uses_vm() && trx->is_global(storage_offset())) {
+            trx->m_localdict_maybe_global = true;
+        }
         return object;
     }
 
@@ -3348,6 +3358,15 @@ public:
             obj.set_save_level(curr_save_level);
             return obj;
         });
+        // GC localdict-skip barrier: an array literal `[ ... ]` built in LOCAL VM whose
+        // element references a global block leaves a global reference in a local
+        // container.  (For the global `[...]#$ / ${[...]}` path dst_is_global is true and
+        // each note is a no-op; the =array singleton over-flags harmlessly.)  See
+        // Save::note_global_into_local.
+        auto dst_is_global = trx->is_global(trx->ptr_to_offset(dst));
+        for (length_t i = 0; i < length; ++i) {
+            Save::note_global_into_local(trx, dst_is_global, dst[i]);
+        }
     }
 
     [[nodiscard]] static Object make_array_from_mark(Trix *trx,
@@ -4092,6 +4111,11 @@ public:
         callable.set_save_level(curr_save_level);
         storage[1] = callable;
 
+        // GC localdict-skip barrier: a global value/callable captured in a local Curry.
+        auto curry_is_global = trx->is_global(offset);
+        Save::note_global_into_local(trx, curry_is_global, value);
+        Save::note_global_into_local(trx, curry_is_global, callable);
+
         Object object;
         object.m_aat = (ExecutableAttrib | +Type::Curry);
         object.m_object_save_level = Save::BASE;
@@ -4146,6 +4170,11 @@ public:
 
         result.set_save_level(curr_save_level);
         storage[ThunkStorageResult] = result;
+
+        // GC localdict-skip barrier: a global proc/result captured in a local Thunk.
+        auto thunk_is_global = trx->is_global(offset);
+        Save::note_global_into_local(trx, thunk_is_global, proc);
+        Save::note_global_into_local(trx, thunk_is_global, result);
 
         Object object;
         object.m_aat = (LiteralAttrib | +Type::Thunk);
@@ -4236,6 +4265,9 @@ public:
 
         payload.set_save_level(curr_save_level);
         storage[Object::TaggedValueIndex] = payload;
+
+        // GC localdict-skip barrier: a global payload captured in a local Tagged.
+        Save::note_global_into_local(trx, trx->is_global(offset), payload);
 
         Object object;
         object.m_aat = (LiteralAttrib | +Type::Tagged);
@@ -5186,6 +5218,13 @@ public:
                 auto n = static_cast<vm_size_t>(emit_packed_element(trx, ptr, *object, enc));
                 remaining -= n;
                 packed_size += n;
+                // GC localdict-skip barrier: a composite element is packed as an offset
+                // reference, so a LOCAL Packed (m_curr_alloc_global false; the eqproc
+                // singleton is engine-walked) that encodes a GLOBAL block leaves a global
+                // reference inside a local container.  See note_global_into_local.
+                if (!is_eqproc) {
+                    Save::note_global_into_local(trx, trx->m_curr_alloc_global, *object);
+                }
             }
 
             if (is_eqproc) {
@@ -6304,9 +6343,16 @@ static void container_interval(Trix *trx, Object *container, length_t index, len
 // consistent with the array path (make_clone, no set_save_level).
 static void clone_array_elements(Trix *trx, Object *src, Object *dst_ptr, length_t count) {
     if (src->is_array()) {
+        // GC localdict-skip barrier: make_clone is shallow for a composite, so a
+        // global element cloned into a LOCAL destination leaves a global reference in
+        // a local container.  dst_ptr may point at a real array payload OR a temp
+        // scratch buffer; both read as "local" and an over-flag on the latter is
+        // harmless (monotonic until no global blocks remain).  See note_global_into_local.
+        auto dst_is_global = trx->is_global(trx->ptr_to_offset(dst_ptr));
         auto src_ptr = src->array_objects(trx);
         for (length_t i = 0; i < count; ++i) {
             dst_ptr[i] = src_ptr[i].make_clone(trx);
+            Save::note_global_into_local(trx, dst_is_global, dst_ptr[i]);
         }
     } else {
         auto packed_data = src->const_packed_span(trx);

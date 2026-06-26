@@ -1007,6 +1007,24 @@ public:
         }
     }
 
+    // Write-barrier counterpart to reject_local_into_global, for the OPPOSITE
+    // direction.  R6 forbids a restore-fragile LOCAL value in a GLOBAL container;
+    // this notes the (permitted) case of a GLOBAL-VM value reference stored into a
+    // LOCAL container.  Such a store can make localdict transitively own global VM
+    // (when the container is, or later becomes, reachable from localdict), which
+    // would otherwise let the GC's localdict-skip reclaim a global block reachable
+    // solely via localdict.  Setting m_localdict_maybe_global forces the next GC to
+    // mark localdict's closure instead of skipping it; that mark self-clears the
+    // flag once the closure is proven global-free.  Conservative by design: a no-op
+    // for a local (or non-VM scalar) value, so over-calling at store sites is
+    // harmless -- it never corrupts, at worst walks localdict one extra pass.  Call
+    // at EVERY site that writes an Object into a local-capable container slot.
+    static void note_global_into_local(Trix *trx, bool container_is_global, Object val_obj) {
+        if (!container_is_global && val_obj.uses_vm() && trx->is_global(val_obj.storage_offset())) {
+            trx->m_localdict_maybe_global = true;
+        }
+    }
+
     // Deep-clone a SCALAR (ExtValue/WideValue) restore-fragile local value into
     // the global region so a global container can hold it across restore (mirrors
     // cell_set_core's Option B), freeing the original local ExtValue.  Returns the

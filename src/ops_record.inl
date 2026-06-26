@@ -178,6 +178,19 @@ static_assert(alignof(RecordInstance) == alignof(Object));
     return index;
 }
 
+// GC localdict-skip barrier for a freshly-built record.  Records are immutable, so
+// scanning the finished field block ONCE covers every per-field make_clone path with
+// a single call (a global field reference in a LOCAL record means localdict, once the
+// record is def'd into it, transitively owns global VM).  No-op for a global record
+// or for all-local fields.  See Save::note_global_into_local.
+static void note_record_fields_barrier(Trix *trx, vm_offset_t instance_offset, const RecordInstance *inst,
+                                       length_t field_count) {
+    auto inst_is_global = trx->is_global(instance_offset);
+    for (length_t i = 0; i < field_count; ++i) {
+        Save::note_global_into_local(trx, inst_is_global, inst->m_fields[i]);
+    }
+}
+
 // Clone a record instance, replacing one field with a new value.
 // Returns the new instance offset.
 // Routes through m_curr_alloc_global: when set, the new instance lands in
@@ -220,6 +233,7 @@ record_clone_replacing_field(Trix *trx, const RecordInstance *inst, length_t fie
             new_inst->m_fields[i] = inst->m_fields[i].make_clone(trx);
         }
     }
+    note_record_fields_barrier(trx, new_offset, new_inst, field_count);
 
     trx->gc_root_pop_oneoff();  // drop the temp root; the caller publishes the record
     return new_offset;
@@ -367,6 +381,7 @@ static void make_record_op(Trix *trx) {
         val.set_save_level(curr_save_level);
         inst->m_fields[i] = val;
     }
+    note_record_fields_barrier(trx, instance_offset, inst, arr_len);
 
     // Collapse the stack: the record (now fully built) replaces the deepest
     // operand; the name array above it is discarded.
@@ -403,6 +418,7 @@ static void at_record_ctor_op(Trix *trx) {
         val.set_save_level(curr_save_level);
         inst->m_fields[i - 1] = val;
     }
+    note_record_fields_barrier(trx, instance_offset, inst, field_count);
 
     *ptr = Object::make_record(instance_offset, field_count);
     trx->m_op_ptr = ptr;
@@ -655,6 +671,8 @@ static void at_record_map_step_op(Trix *trx) {
     auto result = *trx->m_op_ptr;
     result.set_save_level(trx->m_curr_save_level);
     new_inst->m_fields[field_index] = result;
+    // GC localdict-skip barrier: a map proc may return a global value into a local record.
+    Save::note_global_into_local(trx, trx->is_global(trx->ptr_to_offset(new_inst)), result);
 
     auto next_index = static_cast<length_t>(field_index + 1);
     if (next_index < field_count) {
@@ -772,6 +790,8 @@ static void record_merge_op(Trix *trx) {
             }
         }
 
+        note_record_fields_barrier(trx, m_inst_offset, merged_inst, merged_count);
+
         --trx->m_op_ptr;
         *trx->m_op_ptr = Object::make_record(m_inst_offset, merged_count);
 
@@ -834,6 +854,7 @@ static void record_select_op(Trix *trx) {
             new_inst->m_fields[s] = obj;
         }
     }
+    note_record_fields_barrier(trx, new_offset, new_inst, sel_count);
 
     --trx->m_op_ptr;
     *trx->m_op_ptr = Object::make_record(new_offset, sel_count);
@@ -924,6 +945,7 @@ static void record_from_dict_op(Trix *trx) {
             inst->m_fields[i] = field;
         }
     }
+    note_record_fields_barrier(trx, inst_offset, inst, name_count);
 
     // Collapse the stack: the fully-built record replaces the deepest operand
     // (dict); the name array above it is discarded.
@@ -1001,6 +1023,7 @@ static void record_zip_op(Trix *trx) {
                 field.set_save_level(curr_save_level);
                 inst->m_fields[c] = field;
             }
+            note_record_fields_barrier(trx, inst_offset, inst, name_count);
         }
 
         // Link the shared schema into every built instance (no allocation here, so

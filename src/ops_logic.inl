@@ -226,6 +226,10 @@ static void lvar_bind(Trix *trx, Object lvar, Object value, bool value_consumabl
     } else {
         elem_data[0] = value.make_clone(trx).make_copy(curr_save_level);
     }
+    // GC localdict-skip barrier: a global value bound into a LOCAL lvar's binding array
+    // (e.g. a local logic-var unified with a ${...} Long mid-search) makes localdict
+    // own global VM while the binding stands.  See Save::note_global_into_local.
+    Save::note_global_into_local(trx, trx->is_global(trx->ptr_to_offset(elem_data)), elem_data[0]);
 }
 
 // Result of unify_impl.  matched=true on successful unification, false on
@@ -671,6 +675,11 @@ static void copy_term_add_lvar(Trix *trx, CopyTermState &state, vm_offset_t offs
         *++trx->m_op_ptr = Object::make_record(new_offset, field_count);
         for (length_t i = 0; i < field_count; ++i) {
             new_inst->m_fields[i] = copy_term_impl(trx, inst->m_fields[i], state, depth + 1);
+        }
+        // GC localdict-skip barrier: a copied field may be a global ref in a local record.
+        auto new_inst_is_global = trx->is_global(new_offset);
+        for (length_t i = 0; i < field_count; ++i) {
+            Save::note_global_into_local(trx, new_inst_is_global, new_inst->m_fields[i]);
         }
         --trx->m_op_ptr;
         return Object::make_record(new_offset, field_count);
