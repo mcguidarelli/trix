@@ -90,11 +90,11 @@ the numeric-type tag -- Trix distinguishes `Integer`, `UInteger`, `Long`,
 
 % Recursion
 /fact { dup 1 le { pop 1 } { dup 1 sub fact mul } if-else } def
-10 fact =                   % 3628800
+10 fact =                        % 3628800
 
 % Strings with interpolation
 /greeting (world) def
-(hello \{greeting}!) =               % hello world!
+(hello \{greeting}!) =           % hello world!
 
 % Infix math
 $(3 + 4 * 2) =                   % 11
