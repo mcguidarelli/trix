@@ -17,7 +17,8 @@ mkdir -p "$TMPDIR"
 cleanup() {
     rm -rf "$TMPDIR"
     rm -f tests/snapshot.img tests/actor_snapshot.img tests/supervision_snapshot.img \
-        tests/memory_stream_snapshot.img tests/eqref_binding_snapshot.img tests/frame_dict_snapshot.img
+        tests/memory_stream_snapshot.img tests/eqref_binding_snapshot.img tests/frame_dict_snapshot.img \
+        tests/gc_localdict_snapshot.img
 }
 trap cleanup EXIT
 
@@ -306,6 +307,61 @@ if [ -f tests/frame_dict_snapshot.img ]; then
     rm -f tests/frame_dict_snapshot.img
 else
     fail "tests/frame_dict_snapshot.img not created"
+fi
+
+# ====================================================================
+# TEST GROUP 1g: localdict GC-skip State Round-Trip (Phase 5)
+# m_localdict_maybe_global (v184) + m_vrg_workspace_offset (v185)
+# ====================================================================
+echo ""
+echo "--- Group 1g: localdict GC-skip State Round-Trip ---"
+
+# Phase 1: bury a global rooted only via localdict (flag set), snap-shot,
+# then GC + a fresh deep scan in the post-snap section.
+if $PS tests/test_gc_localdict_snapshot.trx > "$TMPDIR/gcl_p1.out" 2>"$TMPDIR/gcl_p1.err"; then
+    pass "localdict-skip phase-1 (snap-shot) succeeded"
+else
+    fail "localdict-skip phase-1 (snap-shot) failed"
+    cat "$TMPDIR/gcl_p1.err" >&2
+fi
+
+if grep -qE "^FAILED:|^FAIL #|^[[:space:]]*FAIL:|FAILURES = [1-9]" "$TMPDIR/gcl_p1.out" 2>/dev/null; then
+    fail "localdict-skip phase-1 has test failures"
+    grep -E "^FAILED:|^FAIL #|^[[:space:]]*FAIL:|FAILURES = [1-9]" "$TMPDIR/gcl_p1.out"
+else
+    pass "localdict-skip phase-1 all assertions passed"
+fi
+
+# Phase 2: thaw -- restored flag must keep the buried global alive across a GC,
+# and the restored workspace offset must serve a fresh post-thaw deep scan.
+if [ -f tests/gc_localdict_snapshot.img ]; then
+    if $PS tests/gc_localdict_snapshot_thaw.trx > "$TMPDIR/gcl_p2.out" 2>"$TMPDIR/gcl_p2.err"; then
+        pass "localdict-skip phase-2 (thaw) succeeded"
+    else
+        fail "localdict-skip phase-2 (thaw) failed"
+        cat "$TMPDIR/gcl_p2.err" >&2
+    fi
+
+    if grep -qE "^FAILED:|^FAIL #|^[[:space:]]*FAIL:|FAILURES = [1-9]" "$TMPDIR/gcl_p2.out" 2>/dev/null; then
+        fail "localdict-skip phase-2 has test failures"
+        grep -E "^FAILED:|^FAIL #|^[[:space:]]*FAIL:|FAILURES = [1-9]" "$TMPDIR/gcl_p2.out"
+    else
+        pass "localdict-skip phase-2 all assertions passed"
+    fi
+
+    grep "^sl:" "$TMPDIR/gcl_p1.out" > "$TMPDIR/gcl_p1_snap.out" 2>/dev/null || true
+    grep "^sl:" "$TMPDIR/gcl_p2.out" > "$TMPDIR/gcl_p2_snap.out" 2>/dev/null || true
+
+    if [ -s "$TMPDIR/gcl_p2_snap.out" ] && diff -q "$TMPDIR/gcl_p1_snap.out" "$TMPDIR/gcl_p2_snap.out" > /dev/null 2>&1; then
+        pass "localdict-skip phase-2 output matches phase-1"
+    else
+        fail "localdict-skip phase-2 output differs from phase-1"
+        diff "$TMPDIR/gcl_p1_snap.out" "$TMPDIR/gcl_p2_snap.out" || true
+    fi
+
+    rm -f tests/gc_localdict_snapshot.img
+else
+    fail "tests/gc_localdict_snapshot.img not created"
 fi
 
 # ====================================================================

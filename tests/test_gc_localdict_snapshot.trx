@@ -1,0 +1,45 @@
+% ====================================================================
+% test_gc_localdict_snapshot.trx -- Phase 5 snap-shot round-trip of the
+% localdict-skip state: m_localdict_maybe_global (the flag, v184) and
+% m_vrg_workspace_offset (the deep-scan path-stack, v185).
+% ====================================================================
+% Phase 1: bury a global so the ONLY root is a localdict binding (flag set),
+% pin a second global in globaldict (count stays > 0), snap-shot, then run a
+% post-snap section.  Phase 2 (gc_localdict_snapshot_thaw.trx): `thaw` resumes
+% from the snap-shot point and re-runs that section.
+%
+% The section proves BOTH restored fields:
+%   * FLAG: a GC right after thaw must NOT sweep the buried global -- it can
+%     only survive if m_localdict_maybe_global came back SET (else the sweep
+%     skips localdict and frees a still-rooted global; ASan / the oracle trip).
+%   * WORKSPACE: a fresh store-time deep scan after thaw (a local array burying
+%     a global, def'd into localdict after a precise clear) walks the path-stack
+%     at m_vrg_workspace_offset -- a bad offset would crash.
+% sl:-prefixed lines must match line-for-line between phase 1 and phase 2.
+
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+true set-global  /gpin ${ [ 42 ] } def  false set-global
+1 array dup 0 ${ [ 7 8 9 ] } put  /buried exch def     % buried -> A -> G; root only via localdict; flag set
+gpin 0 get 42 eq                     (pre-snap: pinned global in globaldict)       rt-ok
+buried 0 get 2 get 9 eq              (pre-snap: buried global built in localdict)  rt-ok
+
+(tests/gc_localdict_snapshot.img) snap-shot
+
+% ==== post-snap-shot: runs in BOTH phase 1 and phase 2 (after thaw) ====
+vm-global-gc pop                                       % FLAG restored set => localdict walked => buried survives
+(sl: buried-elem=) print buried 0 get 1 get =
+(sl: pinned-elem=) print gpin 0 get =
+
+/buried 0 def                                          % release -> localdict clean
+1 array dup 0 ${ [ 5 6 ] } put                          % A2 on stack, A2[0]=global
+vm-global-gc pop                                       % precise clear: flag clears (A2 stack-rooted)
+/buried2 exch def                                      % A2 into localdict -> DEEP scan walks the workspace
+vm-global-gc pop                                       % localdict walked -> A2's global survives
+(sl: deepscan-elem=) print buried2 0 get 1 get =
+(sl: ok) =
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(__test_ok__) =

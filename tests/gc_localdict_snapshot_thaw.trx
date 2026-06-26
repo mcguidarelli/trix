@@ -1,0 +1,6 @@
+% gc_localdict_snapshot_thaw.trx -- phase 2: thaw the localdict-skip
+% snap-shot.  Run test_gc_localdict_snapshot.trx first to produce
+% tests/gc_localdict_snapshot.img.  `thaw` resumes execution from the
+% snap-shot point, re-running that file's post-snap section against the
+% restored m_localdict_maybe_global flag + m_vrg_workspace_offset.
+(tests/gc_localdict_snapshot.img) thaw

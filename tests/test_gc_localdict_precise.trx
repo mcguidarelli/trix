@@ -1,0 +1,127 @@
+% ====================================================================
+% test_gc_localdict_precise.trx -- Phase 5: the value_reaches_global
+% store-time deep scan + the PRECISE per-GC clear.
+%
+% Phase 3 skips localdict when m_localdict_maybe_global is clear; the
+% MONOTONIC clear only re-clears once ALL global blocks die.  Phase 5
+% clears it PRECISELY -- as soon as localdict's closure is proven
+% global-free, even while other globals live -- made sound by a store-time
+% deep scan (value_reaches_global) that re-arms the flag when a global
+% BURIED in a local composite later enters localdict.
+%
+% A TRIX_DEBUGGER build runs the skip oracle on every vm-global-gc here:
+% if value_reaches_global ever MISSED a buried global the oracle aborts,
+% and an actual sweep of a still-rooted global trips ASan -- so "survives"
+% is a real soundness check.  value_reaches_global classifies every
+% composite KIND on a distinct path, so section K exercises one kind each.
+%
+% Per-kind dance (so the DEEP scan -- not the shallow barrier -- is tested):
+%   build K with a global one level in, ON THE OP-STACK; GC while K is only
+%   stack-rooted so the precise clear fires (flag clear); def K into
+%   localdict so the deep scan must RE-ARM the flag; GC; the global survives.
+% gpin keeps a global alive in globaldict for the whole file, so the
+% monotonic count==0 clear can never fire -- every clear here is precise.
+% ====================================================================
+
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+true set-global  /gpin ${ [ 42 ] } def  false set-global
+gpin 0 get 42 eq                     (setup: pinned global in globaldict)         rt-ok
+
+% --- ARRAY: A[0] = global ---
+1 array dup 0 ${ [ 7 8 9 ] } put
+vm-global-gc pop  /kArr exch def  vm-global-gc pop
+kArr 0 get 2 get 9 eq                (Array: buried global survived)              rt-ok
+/kArr 0 def                                          % release so the next clear is precise
+
+% --- PACKED (proc): array holding a local proc whose body buries a global ---
+1 array dup 0 { ${ [ 7 8 9 ] } } put
+vm-global-gc pop  /kPk exch def  vm-global-gc pop
+kPk 0 get exec 1 get 8 eq             (Packed: global buried in a local proc survived) rt-ok
+/kPk 0 def
+
+% --- DICT: D[/gk] = global ---
+1 dict dup /gk ${ [ 7 8 9 ] } put
+vm-global-gc pop  /kDict exch def  vm-global-gc pop
+kDict /gk get 0 get 7 eq              (Dict: buried global value survived)         rt-ok
+/kDict 0 def
+
+% --- SET: a global array as a member ---
+1 set ${ [ 7 8 9 ] } set-add
+vm-global-gc pop  /kSet exch def  vm-global-gc pop
+kSet members 0 get 2 get 9 eq        (Set: buried global member survived)         rt-ok
+/kSet 0 def
+
+% --- TAGGED: payload = global ---
+${ [ 7 8 9 ] } /pl tag
+vm-global-gc pop  /kTag exch def  vm-global-gc pop
+kTag tag-value 0 get 7 eq            (Tagged: buried global payload survived)      rt-ok
+/kTag 0 def
+
+% --- RECORD: field = global ---
+${ [ 7 8 9 ] } [ /fld ] record
+vm-global-gc pop  /kRec exch def  vm-global-gc pop
+kRec /fld get 1 get 8 eq             (Record: buried global field survived)        rt-ok
+/kRec 0 def
+
+% --- CURRY: curried value = global (deep scan descends curry slots) ---
+${ [ 7 8 9 ] } { length } curry
+vm-global-gc pop  /kCur exch def  vm-global-gc pop
+kCur 3 eq                            (Curry: buried global survived (length applied)) rt-ok
+/kCur 0 def
+
+% --- THUNK: proc slot buries a global ---
+{ ${ [ 7 8 9 ] } } thunk
+vm-global-gc pop  /kThk exch def  vm-global-gc pop
+/kThk load is-thunk                  (Thunk: object intact, GC oracle silent)      rt-ok
+/kThk 0 def
+
+% --- CELL: value = global (deep scan conservatively flags Cell) ---
+${ [ 7 8 9 ] } cell
+vm-global-gc pop  /kCell exch def  vm-global-gc pop
+/kCell load is-cell                  (Cell: object intact, GC oracle silent)       rt-ok
+/kCell 0 def
+
+% ====================================================================
+% EDGE / BOUNDS
+% ====================================================================
+
+% --- CYCLE: a self-referential local array (NO global) must TERMINATE the
+%     deep scan (depth-cap conservative hit) -- not hang -- and the GC's own
+%     cycle-safe mark must still run. ---
+2 array dup 1 2 index put                            % A[1] = A (cycle); A[0] still null
+dup 0 ${ [ 5 6 ] } put                               % A[0] = global -> short-circuits the scan
+vm-global-gc pop  /kCyc exch def  vm-global-gc pop
+kCyc 0 get 0 get 5 eq                (Cycle: global in a cyclic array survived)    rt-ok
+kCyc 1 get 0 get 0 get 5 eq          (Cycle: cycle link still valid)               rt-ok
+/kCyc 0 def
+
+% --- DEEP NEST: nest a global ~300 deep (past VRG_MAX_DEPTH=256).  The deep
+%     scan hits the depth cap and conservatively flags, so the flag stays set
+%     and the GC keeps the deep global alive (the GC's own work-stack handles
+%     arbitrary depth). ---
+${ [ 7 8 9 ] }                                       % bottom: global
+0 1 300 { pop 1 array dup 0 4 -1 roll put } for       % wrap 301x: deeply-nested local arrays
+vm-global-gc pop  /kDeep exch def  vm-global-gc pop
+kDeep 0 get is-array                 (Deep nest: chain survived (conservative flag)) rt-ok
+/kDeep 0 def
+
+% ====================================================================
+% PRECISE CLEAR + RE-ARM (correctness; the skip itself is oracle-validated)
+% ====================================================================
+${ [ 1 2 3 ] } /lvar exch def
+vm-global-gc pop
+lvar length 3 eq                     (Precise: global bound in localdict survives) rt-ok
+/lvar 0 def                                          % overwrite local -> localdict clean
+0 1 8 { pop vm-global-gc pop } for                    % precise clear fires, then skips
+lvar 0 eq                            (Precise: rebound local value intact)         rt-ok
+gpin 0 get 42 eq                     (Precise: pinned global survives the clear)   rt-ok
+${ [ 11 22 ] } /lvar2 exch def                        % re-arm: new global into a clean localdict
+0 1 4 { pop vm-global-gc pop } for
+lvar2 1 get 22 eq                    (Re-arm: global survives after a clear)       rt-ok
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_gc_localdict_precise: ALL TESTS PASSED) =
+(__test_ok__) =

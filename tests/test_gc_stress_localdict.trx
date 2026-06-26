@@ -1,0 +1,75 @@
+% ====================================================================
+% test_gc_stress_localdict.trx -- GC-stress for the Phase-5 localdict
+% deep scan (value_reaches_global) + precise clear.
+% ====================================================================
+% Debug-only (needs the vm-gc-stress operator, TRIX_DEBUGGER).  Run via
+% tests/run_gc_stress_tests.sh; run_all.sh skips it.
+%
+% `vm-gc-stress` makes gvm_alloc fire a full vm_global_gc before EVERY
+% global user allocation.  Each ${ [ ... ] } below therefore triggers a
+% complete mark-sweep -- with the TRIX_DEBUGGER skip oracle live -- WHILE
+% an earlier global is buried in a local composite that is (or is about to
+% be) bound into localdict.  If the store-time deep scan ever failed to
+% re-arm m_localdict_maybe_global, that GC would skip localdict and sweep a
+% still-rooted global: the oracle aborts, or ASan trips on the use.  So the
+% value compares below are a real soundness check under continuous GC.
+%
+% gpin stays alive in globaldict the whole run, so m_gvm_user_block_count
+% never reaches 0 -- the monotonic clear can never fire and every clear
+% between churn iterations is the PRECISE clear.
+
+/rt-fails 1 string def
+rt-fails 0 16#0#b put
+/rt-ok { exch { = } { (FAILED: ) print = rt-fails 0  rt-fails 0 get /integer-type cast 1 add dup 255 gt { pop 255 } if /byte-type cast  put } if-else } def
+
+true vm-gc-stress
+
+% Pin a global so the monotonic count==0 clear can never fire.
+true set-global  /gpin ${ [ 99 ] } def  false set-global
+
+% --- churn: bury a global in a local ARRAY bound into localdict, verify,
+%     release; repeat.  Each ${...} fires a stressed GC mid-churn. ---
+/ok true def
+0 1 60 {
+    pop
+    1 array dup 0 ${ [ 7 8 9 ] } put
+    /churn exch def
+    churn 0 get 1 get 8 eq  ok and  /ok exch def
+    /churn 0 def
+} for
+ok                                   (stress: 60x array-buried global survived)    rt-ok
+
+% --- churn across DICT then TAGGED (distinct deep-scan paths) ---
+/ok2 true def
+0 1 40 {
+    pop
+    1 dict dup /k ${ [ 1 2 3 ] } put
+    /cd exch def
+    cd /k get 2 get 3 eq  ok2 and  /ok2 exch def
+    /cd 0 def
+    ${ [ 4 5 6 ] } /pl tag
+    /ct exch def
+    ct tag-value 0 get 4 eq  ok2 and  /ok2 exch def
+    /ct 0 def
+} for
+ok2                                  (stress: 40x dict+tagged buried global survived) rt-ok
+
+% --- precise-clear churn: bind a global directly into localdict, overwrite
+%     with a local value (localdict goes clean -> precise clear must fire on
+%     the next stressed alloc), re-bind.  gpin must survive throughout. ---
+/ok3 true def
+0 1 50 {
+    pop
+    ${ [ 8 ] } /slot exch def         % global into localdict -> flag set
+    /slot 0 def                       % overwrite local -> localdict clean
+    ${ [ 7 ] } pop                    % a stressed GC fires here: precise clear, then skip
+    gpin 0 get 99 eq  ok3 and  /ok3 exch def
+    slot 0 eq  ok3 and  /ok3 exch def
+} for
+ok3                                  (stress: 50x precise clear + re-arm, gpin alive) rt-ok
+
+false vm-gc-stress
+
+rt-fails 0 get /integer-type cast 0 gt { /rt-assertions-failed throw } if
+(test_gc_stress_localdict: ALL TESTS PASSED) =
+(__test_ok__) =
