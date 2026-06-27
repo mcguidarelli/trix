@@ -2248,7 +2248,14 @@
     /scratch 24 array local-def
     /wnext n chunked-array local-def
     /wdir  n chunked-array local-def
-    /remaining n 1 sub local-def
+    % Count the cells we must still bring into the tree.  On a fresh grid this
+    % is every cell (w*h - 1); when masking has pre-marked the out-of-component
+    % cells visited (Section 14), it is exactly the active component, so the same
+    % generator carves a single masked piece without spinning forever trying to
+    % reach cells it can no longer walk to.  Counted via the descriptor's `vis`
+    % so it works on every topology (theta/upsilon store the bit differently).
+    /remaining -1 local-def
+    0 1 n 1 sub {|ci| g ci w mod ci w div vis not { /remaining remaining 1 add store } if} for
     /scan 0 local-def
 
     g sx sy mrk
@@ -2296,7 +2303,10 @@
     /h g grid-h local-def
     /n w h mul local-def
     /scratch 24 array local-def
-    /unvisited n 1 sub local-def
+    % Cells still to visit -- whole grid normally, one component under masking
+    % (Section 14).  Counted via the descriptor's `vis` so it is topology-correct.
+    /unvisited -1 local-def
+    0 1 n 1 sub {|ci| g ci w mod ci w div vis not { /unvisited unvisited 1 add store } if} for
     /cx sx local-def
     /cy sy local-def
     g cx cy mrk
@@ -4405,6 +4415,503 @@
 } def
 
 % ============================================================================
+%  Section 14: Masking -- arbitrary-shape mazes (square grid)
+% ============================================================================
+%
+%  A mask restricts the maze to a chosen subset of the WxH square grid:
+%  carving happens only in "in-mask" cells, and the renderer leaves the
+%  out-of-mask cells as background, so the corridors spell out a word, a
+%  logo, or an analytic shape (disc/ring/frame).
+%
+%  A mask mirrors the grid: a packed [w h rows] triple where rows is an
+%  h-element array of w-byte strings, byte != 0 meaning "in-mask".  The carve
+%  hooks the SAME generic engine (Section 7D-ter) through a wrapper descriptor
+%  whose `neighbors` drops any neighbour that is out-of-mask -- so a wall on
+%  the mask boundary is never carved and renders as the silhouette edge for
+%  free.  Disconnected masks (separate letters, logo strokes) are handled by
+%  carving each connected COMPONENT independently: kruskal lists every in-mask
+%  wall in one forest pass; the other six generators are seeded once per
+%  component over an isolated grid (the other components pre-marked visited).
+%  `mask-current` carries the active mask into `masked-neighbors`.
+
+% ----- mask data structure --------------------------------------------------
+/mask-current null def           % active mask, set for the duration of a carve
+
+/mask-w    { 0 get } def
+/mask-h    { 1 get } def
+/mask-rows { 2 get } def
+
+% (w h) make-mask -- [w h rows] all-zero (nothing in mask yet)
+/make-mask {|w h -- mask|#+1
+    /rows h array local-def
+    0 1 h 1 sub {|y| rows y  (\x00) w repeat-string  put} for
+    [ w h rows ]
+} def
+
+% (m x y) mask-in? -- bool: true if (x,y) is in-bounds AND its byte is non-zero
+/mask-in? {|m x y -- bool|#+1
+    x 0 ge { x m mask-w lt } and? { y 0 ge } and? { y m mask-h lt } and? {
+        m mask-rows y get x get  0b ne
+    } { false } if-else
+} def
+
+% (m x y v) mask-set -- write byte v at (x,y); silently ignores out-of-bounds
+/mask-set {|m x y v -- |
+    x 0 ge { x m mask-w lt } and? { y 0 ge } and? { y m mask-h lt } and? {
+        m mask-rows y get  x  v  put
+    } if
+} def
+
+% (m) mask-count -- number of in-mask cells (used by the self-test)
+/mask-count {|m -- int|#+4
+    /w m mask-w local-def
+    /h m mask-h local-def
+    /c 0 local-def
+    0 1 h 1 sub {|y|#+3
+        0 1 w 1 sub {|x|#+1  m x y mask-in? { /c c 1 add store } if} for
+    } for
+    c
+} def
+
+% ----- analytic mask shapes -------------------------------------------------
+%   A real-valued centre keeps even and odd dimensions symmetric.
+
+% (w h) mask-disc -- filled circle inscribed in the grid
+/mask-disc {|w h -- mask|#+6
+    /m w h make-mask local-def
+    /cx w 1 sub /real-type cast 2.0r div local-def
+    /cy h 1 sub /real-type cast 2.0r div local-def
+    /r  w h min /real-type cast 2.0r div  0.5r sub  local-def
+    /r2 r r mul local-def
+    0 1 h 1 sub {|y|#+4
+        0 1 w 1 sub {|x|#+3
+            /dx x /real-type cast cx sub local-def
+            /dy y /real-type cast cy sub local-def
+            dx dx mul dy dy mul add  r2 le { m x y 1b mask-set } if
+        } for
+    } for
+    m
+} def
+
+% (w h) mask-ring -- annulus: inside the disc but outside an inner disc
+/mask-ring {|w h -- mask|#+8
+    /m w h make-mask local-def
+    /cx w 1 sub /real-type cast 2.0r div local-def
+    /cy h 1 sub /real-type cast 2.0r div local-def
+    /ro w h min /real-type cast 2.0r div  0.5r sub  local-def
+    /ri ro 0.55r mul local-def
+    /ro2 ro ro mul local-def
+    /ri2 ri ri mul local-def
+    0 1 h 1 sub {|y|#+5
+        0 1 w 1 sub {|x|#+4
+            /dx x /real-type cast cx sub local-def
+            /dy y /real-type cast cy sub local-def
+            /d2 dx dx mul dy dy mul add local-def
+            d2 ro2 le { d2 ri2 ge } and? { m x y 1b mask-set } if
+        } for
+    } for
+    m
+} def
+
+% (w h) mask-frame -- hollow rectangular border band
+/mask-frame {|w h -- mask|#+5
+    /m w h make-mask local-def
+    /t  w h min 6 div  1 max  local-def       % band thickness
+    0 1 h 1 sub {|y|#+4
+        0 1 w 1 sub {|x|#+3
+            x t lt  x w 1 sub t sub ge  or
+            y t lt  or  y h 1 sub t sub ge  or
+                { m x y 1b mask-set } if
+        } for
+    } for
+    m
+} def
+
+% ----- text mask (the built-in 5x7 A-Z font, Section 12) --------------------
+%   Each font pixel becomes a `scale`x`scale` block of cells so the corridors
+%   have room to wind.  Glyphs are 5 wide x 7 tall with a 1-pixel gap; bit 4
+%   of each row byte is the leftmost column (matching -draw-glyph).
+/GLYPH-W   5 def
+/GLYPH-H   7 def
+/GLYPH-GAP 1 def
+
+% (word scale) mask-text -- mask shaped like the (upper-cased) word
+/mask-text {|word scale -- mask|#+9
+    /nl word length local-def
+    /adv GLYPH-W GLYPH-GAP add local-def         % per-letter advance in font px
+    /fw nl adv mul GLYPH-GAP sub local-def        % font-px width (drop trailing gap)
+    /m  fw scale mul  GLYPH-H scale mul  make-mask local-def
+    0 1 nl 1 sub {|li|#+5
+        /glyph word li get -glyph-at local-def
+        /lx li adv mul local-def                   % font-px origin of this glyph
+        0 1 GLYPH-H 1 sub {|gy|#+4
+            /grow glyph gy get /uinteger-type cast local-def
+            0 1 GLYPH-W 1 sub {|gx|#+3
+                grow  4 gx sub  shift-right  1u and  0u ne {
+                    /bx lx gx add scale mul local-def
+                    /by gy scale mul local-def
+                    0 1 scale 1 sub {|sy|#+2
+                        0 1 scale 1 sub {|sx|#+1  m bx sx add by sy add 1b mask-set} for
+                    } for
+                } if
+            } for
+        } for
+    } for
+    m
+} def
+
+% ----- logo mask (the in-repo ASCII wordmark, rasterised) -------------------
+%   Each non-space character of the banner becomes a `scale`x`scale` block of
+%   in-mask cells.  The art is the same slash-art that heads every source file
+%   (reproduced here as data, ASCII-only).  Raw strings keep the backslashes
+%   literal.  Scale it up so the 1-char strokes are several cells thick.
+/LOGO-ART [
+    <(   ______    _)>
+    <(  /_  __/___(_)_  __)>
+    <(   / / / __/ /\ \/ /)>
+    <(  / / / / / /  > . <)>
+    <( /_/ /_/ /_/  /_/\_\)>
+] def
+
+% (scale) mask-logo -- mask shaped like the Trix wordmark
+/mask-logo {|scale -- mask|#+8
+    /art LOGO-ART local-def
+    /ah art length local-def
+    /aw 0 local-def
+    0 1 ah 1 sub {|y|#+1  /aw  art y get length  aw max  store} for
+    /m  aw scale mul  ah scale mul  make-mask local-def
+    0 1 ah 1 sub {|ay|#+5
+        /line art ay get local-def
+        /ll line length local-def
+        0 1 aw 1 sub {|ax|#+4
+            ax ll lt { line ax get 32b ne } { false } if-else {
+                /bx ax scale mul local-def
+                /by ay scale mul local-def
+                0 1 scale 1 sub {|sy|#+2
+                    0 1 scale 1 sub {|sx|#+1  m bx sx add by sy add 1b mask-set} for
+                } for
+            } if
+        } for
+    } for
+    m
+} def
+
+% (opt) -mask-scale-for -- resolve the cells-per-pixel scale (--mask-scale,
+%   else a shape default of 4 -- enough room for a maze in each stroke).
+/-mask-scale-for {| -- scale|  opt-mask-scale 0 gt { opt-mask-scale } { 4 } if-else} def
+
+% (m margin) mask-pad -- embed mask m centred in a canvas with `margin` extra
+%   cells on every side (new cells out-of-mask).  Used by --mask-invert so the
+%   punched-out shape sits inside a surrounding maze rather than flush to the
+%   image edge.
+/mask-pad {|m margin -- m'|#+4
+    /w m mask-w local-def
+    /h m mask-h local-def
+    /m2  w margin 2 mul add   h margin 2 mul add  make-mask local-def
+    0 1 h 1 sub {|y|#+2
+        0 1 w 1 sub {|x|#+1
+            m x y mask-in? { m2 x margin add y margin add 1b mask-set } if
+        } for
+    } for
+    m2
+} def
+
+% (m) mask-invert -- complement: in-mask <-> out-of-mask, same dimensions.  The
+%   shape becomes the holes and the surrounding cells become the maze.
+/mask-invert {|m -- m'|#+3
+    /w m mask-w local-def
+    /h m mask-h local-def
+    /m2 w h make-mask local-def
+    0 1 h 1 sub {|y|#+1
+        0 1 w 1 sub {|x|  m x y mask-in? not { m2 x y 1b mask-set } if} for
+    } for
+    m2
+} def
+
+% ----- masked descriptor (wraps the square engine) --------------------------
+%   masked-neighbors calls the base square enumerator, then drops every
+%   neighbour outside mask-current, compacting the survivors in place.  The
+%   boundary wall is therefore never offered to a generator and stays closed.
+/masked-neighbors {|g cx cy out -- count|#+7
+    /cnt g cx cy out square-neighbors local-def
+    /wr 0 local-def
+    0 1 cnt 1 sub {|k|#+6
+        /rb 3 k mul local-def
+        /nx out rb       get local-def
+        /ny out rb 1 add get local-def
+        /nd out rb 2 add get local-def
+        mask-current nx ny mask-in? {
+            /wb 3 wr mul local-def
+            out wb       nx put
+            out wb 1 add ny put
+            out wb 2 add nd put
+            /wr wr 1 add store
+        } if
+    } for
+    wr
+} def
+
+/masked-square-desc <<
+    (neighbors) { masked-neighbors }
+    (link)      { carve-wall }
+    (visited?)  { cell-visited? }
+    (mark)      { mark-visited }
+    (open?)     { square-open? }
+    (make-grid) { make-grid }
+    (bfs-solve) { bfs-solve }
+>> def
+
+% ----- connected-component labelling ----------------------------------------
+%   Floods the in-mask cells via masked-neighbors, assigning each connected
+%   group a label 0..ncomp-1 (out-of-mask cells stay -1).  Returns the per-cell
+%   label field (h arrays of w Integers), an array of per-component seed flat-
+%   indices, and the component count.  Requires mask-current == mask.
+/-make-label-field {|w h -- labels|#+1
+    /labels h array local-def
+    0 1 h 1 sub {|y|#+1
+        /row w array local-def
+        0 1 w 1 sub {|x| row x -1 put} for
+        labels y row put
+    } for
+    labels
+} def
+
+% (g mask) mask-components -- labels seeds ncomp
+/mask-components {|g mask -- labels seeds ncomp|#+9
+    /w mask mask-w local-def
+    /h mask mask-h local-def
+    /n w h mul local-def
+    /labels w h -make-label-field local-def
+    /seeds n chunked-array local-def
+    /ncomp 0 local-def
+    /scratch 24 array local-def
+    /queue n chunked-array local-def
+    0 1 h 1 sub {|sy|#+12
+        0 1 w 1 sub {|sx|#+12
+            mask sx sy mask-in?  labels sy get sx get -1 eq  and {
+                seeds ncomp  sy w mul sx add  chunked-put
+                labels sy get sx ncomp put
+                /qh 0 local-def
+                /qt 1 local-def
+                queue 0  sy w mul sx add  chunked-put
+                { qh qt lt } {||#+8
+                    /ci queue qh chunked-get local-def
+                    /qh qh 1 add store
+                    /cnt g  ci w mod  ci w div  scratch masked-neighbors local-def
+                    0 1 cnt 1 sub {|k|#+4
+                        /b 3 k mul local-def
+                        /nx scratch b       get local-def
+                        /ny scratch b 1 add get local-def
+                        labels ny get nx get -1 eq {
+                            labels ny get nx ncomp put
+                            queue qt  ny w mul nx add  chunked-put
+                            /qt qt 1 add store
+                        } if
+                    } for
+                } while
+                /ncomp ncomp 1 add store
+            } if
+        } for
+    } for
+    labels seeds ncomp
+} def
+
+% (mask) -mask-comp-count -- number of 4-connected in-mask components.  Standalone
+%   flood-fill (does not touch mask-current); used by the self-test.
+/-mask-comp-count {|mask -- int|#+8
+    /w mask mask-w local-def
+    /h mask mask-h local-def
+    /seen w h make-mask local-def
+    /comps 0 local-def
+    /stack w h mul chunked-array local-def
+    0 1 h 1 sub {|sy|#+10
+        0 1 w 1 sub {|sx|#+10
+            mask sx sy mask-in?  seen sx sy mask-in? not  and {
+                /comps comps 1 add store
+                /sp 0 local-def
+                stack 0  sy w mul sx add  chunked-put  /sp 1 store
+                seen sx sy 1b mask-set
+                { sp 0 gt } {||#+6
+                    /sp sp 1 sub store
+                    /ci stack sp chunked-get local-def
+                    /ccx ci w mod local-def
+                    /ccy ci w div local-def
+                    0 1 3 {|d|#+4
+                        /inf DIRS d get local-def
+                        /nx ccx inf 0 get add local-def
+                        /ny ccy inf 1 get add local-def
+                        mask nx ny mask-in?  seen nx ny mask-in? not  and {
+                            seen nx ny 1b mask-set
+                            stack sp  ny w mul nx add  chunked-put
+                            /sp sp 1 add store
+                        } if
+                    } for
+                } while
+            } if
+        } for
+    } for
+    comps
+} def
+
+% (g mask) -mask-edge-count -- undirected open walls between two in-mask cells.
+%   For a perfect carve this equals (in-mask cells - components).
+/-mask-edge-count {|g mask -- int|#+5
+    /w mask mask-w local-def
+    /h mask mask-h local-def
+    /e 0 local-def
+    0 1 h 1 sub {|y|#+4
+        0 1 w 1 sub {|x|#+3
+            mask x y mask-in? {
+                /v g x y cell-at local-def
+                v WALL-E and 0b eq  { mask x 1 add y mask-in? } and? { /e e 1 add store } if
+                v WALL-S and 0b eq  { mask x y 1 add mask-in? } and? { /e e 1 add store } if
+            } if
+        } for
+    } for
+    e
+} def
+
+% ----- per-component carve --------------------------------------------------
+/clear-visited-all {|g|#+2
+    /w g grid-w local-def
+    /h g grid-h local-def
+    0 1 h 1 sub {|y|#+1
+        0 1 w 1 sub {|x|  g x y  g x y cell-at VISITED 16#FF#b xor and  set-cell} for
+    } for
+} def
+
+% (g labels w h L) isolate-component -- mark every cell whose label != L
+%   VISITED and every cell whose label == L unvisited, so a seeded generator
+%   (Section 7D-ter) carves exactly component L.
+/isolate-component {|g labels w h L -- |#+1
+    0 1 h 1 sub {|y|#+2
+        0 1 w 1 sub {|x|#+1
+            labels y get x get L eq
+                { g x y  g x y cell-at VISITED 16#FF#b xor and  set-cell }
+                { g x y  g x y cell-at VISITED            or     set-cell }
+                if-else
+        } for
+    } for
+} def
+
+% (g mask algo) carve-masked -- carve a perfect maze into the in-mask cells,
+%   one connected component at a time.  kruskal lists every in-mask wall in a
+%   single forest pass; the other six generators are seeded once per component
+%   over an isolated grid.  Leaves all VISITED bits clear.
+/carve-masked {|g mask algo -- |#+8
+    /mask-current mask store
+    algo (kruskal) eq {
+        masked-square-desc g g-kruskal
+    } {
+        /w mask mask-w local-def
+        /h mask mask-h local-def
+        g mask mask-components
+        [ /labels /seeds /ncomp ] bind-locals
+        0 1 ncomp 1 sub {|L|#+3
+            g labels w h L isolate-component
+            /si seeds L chunked-get local-def
+            masked-square-desc g algo  si w mod  si w div  dispatch-algo-td
+        } for
+    } if-else
+    g clear-visited-all
+    /mask-current null store
+} def
+
+% ----- masked renderers -----------------------------------------------------
+%   Identical geometry to mono-render / color-render, except out-of-mask cells
+%   are left as the black background (floor never painted, boundary walls never
+%   carved), so the lit corridors trace the mask shape.
+
+/masked-mono-render {|g mask cell-px wall-px|#+10
+    /cw g grid-w local-def
+    /ch g grid-h local-def
+    /step cell-px wall-px add local-def
+    /img-w cw step mul wall-px add local-def
+    /img-h ch step mul wall-px add local-def
+    /rows img-w img-h make-pixel-rows local-def
+    rows img-w img-h 0b 0b 0b fill-pixels
+    0 1 ch 1 sub {|cy|#+8
+        0 1 cw 1 sub {|cx|#+10
+            mask cx cy mask-in? {
+                /v g cx cy cell-at local-def
+                /x0 cx step mul wall-px add local-def
+                /y0 cy step mul wall-px add local-def
+                /x1 x0 cell-px add 1 sub local-def
+                /y1 y0 cell-px add 1 sub local-def
+                rows x0 y0 x1 y1 16#FF#b 16#FF#b 16#FF#b fill-rect
+                v WALL-E and 0b eq {
+                    rows  x1 1 add  y0  x1 wall-px add  y1  16#FF#b 16#FF#b 16#FF#b fill-rect
+                } if
+                v WALL-S and 0b eq {
+                    rows  x0  y1 1 add  x1  y1 wall-px add  16#FF#b 16#FF#b 16#FF#b fill-rect
+                } if
+            } if
+        } for
+    } for
+    [ img-w img-h rows ]
+} def
+
+/masked-color-render {|g mask cell-px wall-px dist max-d cmap stops|#+12
+    /cw g grid-w local-def
+    /ch g grid-h local-def
+    /step cell-px wall-px add local-def
+    /img-w cw step mul wall-px add local-def
+    /img-h ch step mul wall-px add local-def
+    /rows img-w img-h make-pixel-rows local-def
+    rows img-w img-h 0b 0b 0b fill-pixels
+    0 1 ch 1 sub {|cy|#+12
+        0 1 cw 1 sub {|cx|#+12
+            mask cx cy mask-in? {
+                /v g cx cy cell-at local-def
+                /d-cell dist cy get cx get local-def
+                cmap stops d-cell max-d cmap-color
+                [ /cr /cg /cb ] bind-locals
+                /x0 cx step mul wall-px add local-def
+                /y0 cy step mul wall-px add local-def
+                /x1 x0 cell-px add 1 sub local-def
+                /y1 y0 cell-px add 1 sub local-def
+                rows x0 y0 x1 y1 cr cg cb fill-rect
+                v WALL-E and 0b eq {
+                    rows  x1 1 add  y0  x1 wall-px add  y1  cr cg cb fill-rect
+                } if
+                v WALL-S and 0b eq {
+                    rows  x0  y1 1 add  x1  y1 wall-px add  cr cg cb fill-rect
+                } if
+            } if
+        } for
+    } for
+    [ img-w img-h rows ]
+} def
+
+% (g mask) masked-bfs-all -- per-component BFS distance field + global max.
+%   Each component is coloured by its own internal geodesic distance from its
+%   seed; the disjoint per-component fields merge without colliding.
+/masked-bfs-all {|g mask -- dist max-d|#+9
+    /w mask mask-w local-def
+    /h mask mask-h local-def
+    /dist w h make-dist-field local-def
+    /gmax 0u local-def
+    /mask-current mask store
+    g mask mask-components
+    [ /labels /seeds /ncomp ] bind-locals
+    /mask-current null store
+    0 1 ncomp 1 sub {|L|#+6
+        /si seeds L chunked-get local-def
+        g  si w mod  si w div  bfs-distances
+        /cmax exch local-def
+        /cdist exch local-def
+        cmax gmax gt { /gmax cmax store } if
+        0 1 h 1 sub {|y|#+3
+            0 1 w 1 sub {|x|#+2
+                /dv cdist y get x get local-def
+                dv 16#FFFFFFFF#u ne { dist y get x dv put } if
+            } for
+        } for
+    } for
+    dist gmax
+} def
+
+% ============================================================================
 %  Section 99: in-source tests (run by `--self-test`).  All `expect`
 %  failures abort with the offending label printed.
 % ============================================================================
@@ -5254,6 +5761,67 @@
     (compare: header adds height)         ph single-h gt  expect
 } def
 
+% ----- masking (Section 14) ----------------------------------------------
+%   Exercises the mask builders, the masked descriptor's per-component carve,
+%   and the perfect-forest invariant (edges == in-mask-cells - components) for
+%   all seven portable algorithms -- which doubles as a connectivity check,
+%   since a generator that left any in-mask cell isolated would fall short.
+/test-mask {||#+14
+    1ul rand-seed
+    % basic mask ops
+    /tm 4 3 make-mask local-def
+    (mask: fresh mask empty)               tm mask-count 0 eq                          expect
+    tm 1 1 1b mask-set
+    (mask: set then in?)                   tm 1 1 mask-in?                             expect
+    (mask: unset not in?)                  tm 0 0 mask-in? not                         expect
+    (mask: out-of-bounds not in?)          tm 9 9 mask-in? not                         expect
+    (mask: count after one set)            tm mask-count 1 eq                          expect
+
+    % text mask: the 'I' glyph lights 11 of its 5x7 pixels
+    /ti (I) 1 mask-text local-def
+    (mask-text: I glyph = 11 cells)        ti mask-count 11 eq                         expect
+    (mask-text: I is 5 wide)               ti mask-w 5 eq                              expect
+    (mask-text: I is 7 tall)               ti mask-h 7 eq                              expect
+
+    % disc mask: nonempty, a strict subset, centre in / corner out, one piece
+    /td 11 11 mask-disc local-def
+    (mask-disc: nonempty)                  td mask-count 0 gt                          expect
+    (mask-disc: strict subset)             td mask-count 121 lt                        expect
+    (mask-disc: centre in, corner out)     td 5 5 mask-in?  td 0 0 mask-in? not  and   expect
+    (mask-disc: one component)             td -mask-comp-count 1 eq                    expect
+
+    % invert + pad transforms
+    /tp ti 2 mask-pad local-def
+    (mask-pad: grows by 2*margin each axis) tp mask-w 9 eq  tp mask-h 11 eq  and       expect
+    (mask-pad: preserves in-mask count)     tp mask-count ti mask-count eq             expect
+    /tv ti mask-invert local-def
+    (mask-invert: complements the count)    tv mask-count  ti mask-w ti mask-h mul  ti mask-count sub  eq  expect
+
+    % two separated bars carve into two perfect components; the gap is untouched
+    /mb 11 1 make-mask local-def
+    0 1 4  {|x| mb x 0 1b mask-set} for
+    6 1 10 {|x| mb x 0 1b mask-set} for
+    (mask: two-bar mask has two comps)     mb -mask-comp-count 2 eq                    expect
+    /gb 11 1 make-grid local-def
+    gb mb (backtrack) carve-masked
+    (mask-carve: gap cell untouched)       gb 5 0 cell-at 16#0F#b eq                   expect
+    (mask-carve: edges = cells - comps)    gb mb -mask-edge-count  8 eq                expect
+    (mask-carve: visited cleared after)    gb 0 0 cell-visited? not                    expect
+
+    % every portable algorithm carves a single-component disc into a perfect maze
+    /algos [ (backtrack) (kruskal) (wilson) (aldous-broder) (prim) (hunt-kill) (growing-tree) ] local-def
+    0 1 algos length 1 sub {|ai|#+6
+        /alg algos ai get local-def
+        /dm 9 9 mask-disc local-def
+        /dg 9 9 make-grid local-def
+        dg dm alg carve-masked
+        /cells dm mask-count local-def
+        /comps dm -mask-comp-count local-def
+        /edges dg dm -mask-edge-count local-def
+        (mask-algo: disc is a perfect forest)  edges  cells comps sub  eq            expect
+    } for
+} def
+
 % ============================================================================
 %  Section 100: CLI + main dispatch
 % ============================================================================
@@ -5280,6 +5848,10 @@
 /opt-self-test  false     def
 /opt-bench      false     def         % run timing harness instead of generating a maze
 /opt-metrics    false     def         % print a read-only quality report (all grids; twistiness on square only)
+/opt-mask       ()        def         % "" = none; disc | ring | frame | logo | text (square grid)
+/opt-mask-word  ()        def         % the word for --mask-text
+/opt-mask-scale 0         def         % cells per font/logo pixel; 0 = shape default (4)
+/opt-mask-invert false     def         % punch the shape out of a full maze (inverse)
 
 % (--) print-help -- write usage to stdout and quit the interpreter.
 /print-help {
@@ -5324,6 +5896,16 @@ OPTIONS
   Multi-panel:
     --compare A,B,C     Run several algos against the same seed and
                         stitch the panels into one image.
+
+  Masking (square grid):  carve a maze in the shape of a word/logo/figure
+    --mask SHAPE        disc | ring | frame | logo
+                        (disc/ring/frame use --size; logo is the wordmark)
+    --mask-text WORD    carve a maze shaped like WORD (built-in 5x7 font)
+    --mask-scale N      cells per font/logo pixel (default 4)
+    --mask-invert       Punch the shape out of a full maze (the inverse:
+                        the maze fills around the shape, which becomes holes)
+                        Works with any --algo and any --color; disconnected
+                        shapes (letters) become one perfect maze per piece.
 
   Reproducibility:
     --seed N            RNG seed (default 0 = clock-seeded)
@@ -5391,6 +5973,11 @@ EXAMPLES
                     /opt-wall-px 1 store  /opt-algo (eller) store  /i i 1 add store }
     (--bench)     { /opt-bench true store  /i i 1 add store }
     (--metrics)   { /opt-metrics true store  /i i 1 add store }
+    (--mask)      { /opt-mask args i 1 add get store  /i i 2 add store }
+    (--mask-text) { /opt-mask (text) store
+                    /opt-mask-word args i 1 add get store  /i i 2 add store }
+    (--mask-scale){ /opt-mask-scale args i 1 add get to-number store  /i i 2 add store }
+    (--mask-invert){ /opt-mask-invert true store  /i i 1 add store }
     (--quiet)     { /opt-quiet true store  /i i 1 add store }
 >> def
 
@@ -5783,6 +6370,7 @@ opt-self-test {
     test-png-triangle-color
     test-font
     test-compare
+    test-mask
     (amazing.trx self-test ok\n) print
 } {
     % Seed the PRNG.  In compare mode we re-seed before EACH panel so
@@ -5793,6 +6381,43 @@ opt-self-test {
 
     /t-start clock def
 
+    opt-mask () ne {
+        % ---- Masked maze (square grid): carve only the in-mask cells, so the
+        % corridors trace a word / logo / analytic figure.  Disconnected shapes
+        % become one perfect maze per connected component (see Section 14).
+        -effective-seed rand-seed
+        /mask
+            opt-mask (text) eq { opt-mask-word -mask-scale-for mask-text }
+            { opt-mask (logo) eq { -mask-scale-for mask-logo }
+            { opt-mask (disc) eq { opt-w opt-h mask-disc }
+            { opt-mask (ring) eq { opt-w opt-h mask-ring }
+            { opt-mask (frame) eq { opt-w opt-h mask-frame }
+            { (Unknown --mask: ) print opt-mask print nl
+              (Valid: disc | ring | frame | logo, or --mask-text WORD) print nl
+              (unknown mask) false assert
+            } if-else } if-else } if-else } if-else } if-else
+            def
+        % --mask-invert: pad the shape into a larger canvas and complement it,
+        % so the maze fills AROUND the shape and the shape becomes holes.
+        opt-mask-invert {
+            /mask  mask  mask mask-w  mask mask-h  min 4 div 4 max  mask-pad  mask-invert  store
+        } if
+        /opt-w mask mask-w store          % report the real (mask-derived) size
+        /opt-h mask mask-h store
+        /grid mask mask-w  mask mask-h  make-grid def
+        grid mask opt-algo carve-masked
+        opt-color (mono) eq {
+            /pic grid mask opt-cell-px opt-wall-px masked-mono-render def
+        } {
+            grid mask masked-bfs-all
+            /max-d exch def
+            /dist  exch def
+            opt-color get-cmap
+            /cmap-stops exch def
+            /cmap-buf   exch def
+            /pic grid mask opt-cell-px opt-wall-px dist max-d cmap-buf cmap-stops masked-color-render def
+        } if-else
+    } {
     opt-compare () eq not {
         % Compare mode: split the algo list, render each panel mono,
         % stitch them with bitmap-font labels.  Skips grid/color/
@@ -5920,6 +6545,7 @@ opt-self-test {
         } if-else
     } if-else } if-else } if-else } if-else
     } if-else
+    } if-else
 
     /t-render clock def
 
@@ -5932,7 +6558,7 @@ opt-self-test {
     % bfs-solve and draw-path-overlay use that topology's neighbor
     % rules and cell-center geometry.  Hex/theta default --end is
     % already resolved above for square; recompute for non-square.
-    opt-solve {
+    opt-solve  opt-mask () eq  and {
         opt-end-x 0 lt { /opt-end-x opt-w 1 sub store } if
         opt-end-y 0 lt { /opt-end-y opt-h 1 sub store } if
         /ribbon-px 2 opt-cell-px 4 div max def

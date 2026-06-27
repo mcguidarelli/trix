@@ -27,7 +27,7 @@ whose file format is assembled in Trix.
 
 This manual is self-contained: read it end to end and you will come away
 understanding how each maze algorithm works, what kind of maze it produces and
-why, how those algorithms generalize off the square grid, and how ~5,600 lines
+why, how those algorithms generalize off the square grid, and how ~6,600 lines
 of Trix turn the result into a real `.png` on disk. No prior background assumed;
 the only Trix-specific idea you need is the [save/restore arena and global
 VM](../docs/local-global-vm.md), which shows up where the hot loops touch a
@@ -49,10 +49,11 @@ on the 128K Macintosh in 1984.
 4. [Grid Topologies](#4-grid-topologies)
 5. [Distance Fields and Colormaps](#5-distance-fields-and-colormaps)
 6. [Overlays: Solve, Braid, Weave](#6-overlays-solve-braid-weave)
-7. [The PNG Encoder](#7-the-png-encoder)
-8. [Command-Line Reference](#8-command-line-reference)
-9. [Implementation Tour](#9-implementation-tour)
-10. [Further Reading](#10-further-reading)
+7. [Masking: Shape-Carved Mazes](#7-masking-shape-carved-mazes)
+8. [The PNG Encoder](#8-the-png-encoder)
+9. [Command-Line Reference](#9-command-line-reference)
+10. [Implementation Tour](#10-implementation-tour)
+11. [Further Reading](#11-further-reading)
 
 ---
 
@@ -477,7 +478,69 @@ over the other.
 
 ---
 
-## 7. The PNG Encoder
+## 7. Masking: Shape-Carved Mazes
+
+Masking restricts the maze to a chosen subset of the square grid, so the
+corridors trace a **word, a logo, or an analytic figure** instead of filling a
+plain rectangle. It is the same idea as Walter Pullen's Daedalus mask images,
+but every mask here is generated in-process -- there are no bundled image files.
+
+```bash
+./trix --vm-size=64M examples/amazing.trx --mask-text MAZE --out word.png
+./trix --vm-size=64M examples/amazing.trx --mask logo --color viridis --out logo.png
+./trix --vm-size=64M examples/amazing.trx --mask disc --size 28x28 --color inferno --out disc.png
+./trix --vm-size=64M examples/amazing.trx --mask-text TRIX --mask-invert --color magma --out punch.png
+```
+
+### 7.1 What a mask is
+
+A mask mirrors the grid: a `[w h rows]` triple whose `rows` is an array of
+`w`-byte strings, a byte `!= 0` meaning **in-mask**. Four built-in sources, all
+self-contained:
+
+| Source | Flag | How it is built |
+| --- | --- | --- |
+| **Text** | `--mask-text WORD` | the bundled 5×7 A–Z font ([§10.2](#102-the---compare-font)); each font pixel becomes a `--mask-scale` × `--mask-scale` block of cells |
+| **Logo** | `--mask logo` | the slash-art Trix wordmark from the source headers, rasterised character-by-character |
+| **Analytic** | `--mask disc` / `ring` / `frame` | a circle / annulus / border band inscribed in the `--size` grid |
+| **Inverse** | add `--mask-invert` | the shape is padded into a larger canvas and complemented, so the maze fills *around* it and the shape becomes holes |
+
+So you get the figure two ways: by default the **corridors are the shape**; with
+`--mask-invert` the **shape is punched out** of a full maze.
+
+### 7.2 Carving only the in-mask cells
+
+The carve reuses the generic engine (§[10.1](#101-section-map), Section 7D-ter)
+unchanged. A wrapper descriptor, `masked-square-desc`, delegates everything to
+the square descriptor except `neighbors`: `masked-neighbors` calls the base
+enumerator and then **drops every neighbour that is out-of-mask**. Because a wall
+is only ever carved between two in-mask cells, the boundary walls are never
+touched -- they stay closed and the renderer draws them as the crisp silhouette
+edge for free.
+
+A word or logo is usually **disconnected** (separate letters, separate strokes),
+so the carve runs per connected component:
+
+- **Kruskal** lists every in-mask wall in a single pass; its union-find naturally
+  yields one spanning tree per component (a spanning *forest*).
+- The other six generators are **seeded once per component** over an isolated
+  grid -- the cells of every other component are temporarily marked visited, so a
+  seeded backtracker / Wilson / Aldous-Broder / Prim / Hunt-and-Kill /
+  Growing-Tree fills exactly its own piece. (Wilson and Aldous-Broder terminate
+  when the region is fully visited, so they count the *unvisited* cells through
+  the descriptor first -- on a full grid that is every cell, under a mask it is
+  one component.)
+
+The result is a perfect maze in every connected piece: the self-test asserts
+`open-edges == in-mask-cells - components` for all seven algorithms, which also
+certifies that no cell was left stranded. Masking composes with every `--color`
+(each component is shaded by its own internal BFS distance) and any `--algo`;
+`--solve`, `--braid`, and `--weave` are square-rectangle overlays and are skipped
+under a mask.
+
+---
+
+## 8. The PNG Encoder
 
 `amazing.trx` writes real `.png` files with **no libpng**: the PNG file *format*
 -- the chunk structure, headers, and scanline framing -- is assembled in Trix.
@@ -495,7 +558,7 @@ So the honest one-liner is: **the PNG format is built in Trix over the engine's
 native `deflate` (zlib) and hand-rolled `crc32`/`adler32` ops.** No libpng, and
 zlib only for the DEFLATE step.
 
-### 7.1 File structure
+### 8.1 File structure
 
 The encoder (Sections 2-4) emits, in order:
 
@@ -511,7 +574,7 @@ The encoder (Sections 2-4) emits, in order:
 
 Every chunk is framed as `length (BE u32) ‖ type ‖ data ‖ crc32(type ‖ data)`.
 
-### 7.2 Two IDAT backends
+### 8.2 Two IDAT backends
 
 The 65,535-byte string cap bites again, this time on the *compressed* buffer.
 `amazing.trx` picks a backend by size (`write-idat`):
@@ -527,7 +590,7 @@ This is why `--monster` (a 1001×1001 PNG) works at all.
 
 ---
 
-## 8. Command-Line Reference
+## 9. Command-Line Reference
 
 Flags are parsed in `/parse-args` against a string-keyed `arg-dispatch` table. A bare non-flag argument is taken as the output filename.
 
@@ -549,6 +612,10 @@ Flags are parsed in `/parse-args` against a string-keyed `arg-dispatch` table. A
 | `--braid` | float `0..1` | Fraction of dead-ends to remove | `0.0` |
 | `--weave` | -- | Buck-style overpasses (square + backtrack only) | off |
 | `--compare` | `A,B,C` | Side-by-side mono panels of several algorithms | -- |
+| `--mask` | name | Carve the maze into a shape: `disc` / `ring` / `frame` / `logo` ([§7](#7-masking-shape-carved-mazes), square grid) | -- |
+| `--mask-text` | `WORD` | Carve the maze into a word using the built-in 5×7 font | -- |
+| `--mask-scale` | int | Cells per font/logo pixel | `4` |
+| `--mask-invert` | -- | Punch the shape out of a full maze (the inverse) | off |
 | `--stress` | -- | Preset: 200×200 Eller's | -- |
 | `--monster` | -- | Preset: 1000×1000 Eller's (needs a large VM) | -- |
 | `--bench` | -- | Time all eleven algorithms; write no PNG | off |
@@ -615,51 +682,53 @@ cells and roughly ~4× the time, so a 2000×2000 maze is ten-plus minutes.
 
 ---
 
-## 9. Implementation Tour
+## 10. Implementation Tour
 
-### 9.1 Section map
+### 10.1 Section map
 
 The file is organized into numbered `Section N` headers (grep `^%  Section`):
 
-| Section | Contents                                               |
-| ------- | ------------------------------------------------------ |
-| 2-4     | PNG container, IDAT framing, `write-png`               |
-| 5 / 4B  | Cell encoding, grid, chunked-array                     |
-| 5B-5E   | Hex / theta / triangle / upsilon grids                 |
-| 6-7     | Direction shuffle; recursive backtracker               |
-| 7B      | Union-find helper (`-uf-find`, backs generic Kruskal)  |
-| 7C-*    | Per-topology backtrackers (test oracles)               |
-| 7D-ter  | Topology descriptor vtable + generic algorithm engine  |
-| 7D-7G   | Eller; binary-tree; sidewinder; recursive division; braid |
-| 7D / 7F | BFS distance field; path solver; hardest pair          |
-| 8-10E   | Pixel buffer; mono and color renderers per grid        |
-| 11-13   | Solve overlay; 5×7 font; compare mode                  |
-| 99      | `--self-test` suite                                    |
-| 100     | CLI parsing, main dispatch, `--bench` / `--metrics`    |
+| Section | Contents                                                                         |
+| ------- | -------------------------------------------------------------------------------- |
+| 2-4     | PNG container, IDAT framing, `write-png`                                         |
+| 5 / 4B  | Cell encoding, grid, chunked-array                                               |
+| 5B-5E   | Hex / theta / triangle / upsilon grids                                           |
+| 6-7     | Direction shuffle; recursive backtracker                                         |
+| 7B      | Union-find helper (`-uf-find`, backs generic Kruskal)                            |
+| 7C-*    | Per-topology backtrackers (test oracles)                                         |
+| 7D-ter  | Topology descriptor vtable + generic algorithm engine                            |
+| 7D-7G   | Eller; binary-tree; sidewinder; recursive division; braid                        |
+| 7D / 7F | BFS distance field; path solver; hardest pair                                    |
+| 8-10E   | Pixel buffer; mono and color renderers per grid                                  |
+| 11-13   | Solve overlay; 5×7 font; compare mode                                            |
+| 14      | Masking: mask builders, masked descriptor, per-component carve, masked renderers |
+| 99      | `--self-test` suite                                                              |
+| 100     | CLI parsing, main dispatch, `--bench` / `--metrics`                              |
 
-### 9.2 The `--compare` font
+### 10.2 The `--compare` font
 
 `--compare` labels each panel using a tiny built-in **5×7 bitmap font** (Section
 12): 26 glyphs (A-Z), 7 bytes each, **182 bytes** total, with
 lowercase folded to uppercase and unknown characters rendered blank.
 
-### 9.3 Self-test
+### 10.3 Self-test
 
-`--self-test` runs **115 assertions** across 28 test procedures (the `opt-self-test` block):
+`--self-test` runs **179 assertions** across 29 test procedures (the `opt-self-test` block):
 Adler-32 vectors, chunked-array primitives, cell bit-encoding, a PNG checkerboard
 round-trip, a per-algorithm connectivity invariant (every algorithm must yield a
 fully connected spanning tree), the recursive-division perfect-maze check (connected
 *and* exactly `w*h-1` passages -- the failure modes a wall-adder has that carvers
 don't), colormap endpoints, end-to-end color renders,
 BFS-solve correctness on all five grids, braid-to-zero-dead-ends at `P=1.0`,
-weave under-cell presence with intact connectivity, font glyph bits, and compare
-geometry. Run it with a large VM:
+weave under-cell presence with intact connectivity, font glyph bits, compare
+geometry, and the masking builders + per-component perfect-forest invariant for all
+seven portable algorithms. Run it with a large VM:
 
 ```sh
 ./trix --vm-size=64M examples/amazing.trx --self-test
 ```
 
-### 9.4 The gallery
+### 10.4 The gallery
 
 [`gallery.sh`](gallery.sh) renders a curated showcase -- by default **41 PNGs**
 (every algorithm, every colormap, plus solve/braid/weave feature shots) into
@@ -674,7 +743,7 @@ examples/gallery.sh --full   # adds the slow 200×200 stress render
 
 ---
 
-## 10. Further Reading
+## 11. Further Reading
 
 - **Jamis Buck, *Mazes for Programmers* (Pragmatic Bookshelf, 2015).** The
   definitive practical tour of these algorithms, the grid abstractions (square /

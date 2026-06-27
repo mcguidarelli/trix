@@ -7,7 +7,7 @@
 # demand -- the gallery itself is NOT committed to git (binary blobs).
 #
 # Usage:
-#   examples/gallery.sh              Default: 80 PNGs
+#   examples/gallery.sh              Default: 86 PNGs
 #   examples/gallery.sh --full       Adds the 200x200 --stress entry and the
 #                                    full-res 1000x1000 --monster (~3 min)
 #   examples/gallery.sh --quiet      Suppresses per-step echo
@@ -129,6 +129,16 @@ for grid in hex theta triangle upsilon; do
             --color viridis --size 16x16 --cell-px 14
     done
 done
+
+# Masking: carve the maze into a word / logo / analytic figure (square grid).
+# Disconnected shapes (letters) become one perfect maze per connected piece.
+[[ "$QUIET" -eq 0 ]] && echo "Masking (shape-carved mazes):"
+run "mask-logo.png"          --mask logo
+run "mask-text-amazing.png"  --mask-text AMAZING --color viridis
+run "mask-disc.png"          --mask disc  --size 28x28 --color inferno
+run "mask-ring.png"          --mask ring  --size 28x28 --color magma
+run "mask-frame.png"         --mask frame --size 28x28
+run "mask-trix-invert.png"   --mask-text TRIX --mask-invert --color magma
 
 [[ "$QUIET" -eq 0 ]] && echo "Compare:"
 run "compare-4-algos.png" --compare backtrack,kruskal,wilson,eller --size 16x16

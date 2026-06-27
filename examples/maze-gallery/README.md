@@ -1,6 +1,6 @@
 # Maze gallery
 
-Sample output from [`examples/amazing.trx`](../amazing.trx) — a ~5,400-line
+Sample output from [`examples/amazing.trx`](../amazing.trx) — a ~6,600-line
 pure-Trix maze generator (homage to Steve Capps' *Amazing* on the 128K Mac).
 Every image here is a real PNG whose format `amazing.trx` assembles itself in
 Trix -- no libpng, over the engine's native `deflate`/`crc32`/`adler32` ops --
@@ -31,6 +31,10 @@ examples/gallery.sh
 | [`color-turbo.png`](color-turbo.png) | **turbo** colormap (perceptually-ordered rainbow) on a Kruskal maze |
 | [`color-cubehelix.png`](color-cubehelix.png) | **cubehelix** colormap (grayscale-safe monotone luminance) on a Kruskal maze |
 | [`color-grayscale.png`](color-grayscale.png) | **grayscale** colormap (smooth black→white ramp) on a Kruskal maze |
+| [`mask-logo.png`](mask-logo.png) | **Masking** — the Trix wordmark (`--mask logo`) carved as maze corridors |
+| [`mask-text-amazing.png`](mask-text-amazing.png) | **Text mask** — `--mask-text AMAZING`, each letter its own perfect maze (built-in 5×7 font), viridis |
+| [`mask-disc.png`](mask-disc.png) | **Analytic mask** — `--mask disc`, a circular maze with an inferno distance heatmap |
+| [`mask-trix-invert.png`](mask-trix-invert.png) | **Inverse mask** — `--mask-text TRIX --mask-invert`: the letters are punched out of a full magma maze |
 
 Algorithms: recursive-backtracker, Kruskal, Wilson, Eller, binary-tree,
 sidewinder, Aldous-Broder, Prim, Hunt-and-Kill, Growing Tree,
