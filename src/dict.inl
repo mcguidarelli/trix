@@ -3122,6 +3122,25 @@ public:
                 }
             };
 
+            // Entry-count cull: m_length is the EXACT number of entries reachable
+            // through the bucket chains (++ on link, -- on unlink; key-updates and
+            // freelist entries excluded -- see put/remove).  The bucket array is
+            // sized for CAPACITY, so a sparse or empty dict has many empty trailing
+            // buckets; once the walk has marked m_length entries every live key/value
+            // is reached and the rest of the array is empty slots.  Stopping there
+            // walks ZERO buckets for an empty dict (the common case for globaldict /
+            // protocoldict / handlersdict / the eqref tables -- ~30% of the GC root
+            // floor was scanning their empty buckets) and culls the empty-bucket tail
+            // of a sparse one.  Debug builds suppress the early stop and assert the
+            // count matched, so any m_length drift becomes a test failure rather than
+            // a silently missed mark (a use-after-free).
+#ifdef NDEBUG
+            constexpr bool verify_full_walk = false;
+#else
+            constexpr bool verify_full_walk = true;
+#endif
+            auto live_entries = dict->m_length;
+            auto marked_entries = length_t{0};
             for (auto i = dict_bucket_count_t{0}; i < dict->m_bucket_count; ++i) {
                 auto offset = dict->m_buckets[i];
                 while (offset != nulloffset) {
@@ -3136,8 +3155,14 @@ public:
                         trx->gc_mark_object(entry->m_value);
                         offset = entry->m_next;
                     }
+                    ++marked_entries;
+                }
+                if ((marked_entries >= live_entries) && !verify_full_walk) {
+                    break;
                 }
             }
+            assert((marked_entries == live_entries) &&
+                   "Dict::gc_walk_contents: bucket entries != m_length -- entry-count GC cull predicate violated");
 
             // Free-list walk: handles expansion blocks where every entry is
             // back on the pool (put-then-remove cycle leaves no bucket-chain
