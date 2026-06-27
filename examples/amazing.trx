@@ -2425,6 +2425,56 @@
 } def
 
 % ============================================================================
+%  Section 7G: Hardest start/end pair (graph diameter via double BFS)
+% ============================================================================
+%
+%  The two cells whose shortest path is the longest in the maze (the tree
+%  diameter) make the hardest puzzle.  Standard double-BFS: BFS from an
+%  arbitrary corner to the farthest cell P, then BFS from P to the farthest
+%  cell Q; (P, Q) is a longest shortest-path.  Sound because the carved maze
+%  is connected (a spanning tree, plus any braid edges), so the first BFS
+%  reaches every cell and P is a true diameter endpoint.  Square grid.
+
+% (dist w h) dist-field-argmax -- bx by
+%   Cell with the greatest finite BFS distance in the w x h `dist` field
+%   (unreached cells hold 0xFFFFFFFF); first such cell in row-major order.
+/dist-field-argmax {|dist w h|#+4
+    /best-d 0u local-def
+    /best-x 0  local-def
+    /best-y 0  local-def
+    0 1 h 1 sub {|y|#+1
+        0 1 w 1 sub {|x|#+1
+            /d dist y get x get local-def
+            d 16#FFFFFFFF#u ne { d best-d gt {
+                /best-d d store
+                /best-x x store
+                /best-y y store
+            } if } if
+        } for
+    } for
+    best-x best-y
+} def
+
+% g hardest-pair -- sx sy ex ey
+%   The maze's two most distant cells (the diameter endpoints), for use as a
+%   solve start/end.  Two BFS passes via bfs-distances + dist-field-argmax.
+/hardest-pair {|g|#+8
+    /hw g grid-w local-def
+    /hh g grid-h local-def
+    g 0 0 bfs-distances pop          % dist (drop max-d)
+    /da exch local-def
+    da hw hh dist-field-argmax       % px py
+    /py exch local-def
+    /px exch local-def
+    g px py bfs-distances pop        % dist (drop max-d)
+    /db exch local-def
+    db hw hh dist-field-argmax       % qx qy
+    /qy exch local-def
+    /qx exch local-def
+    px py qx qy
+} def
+
+% ============================================================================
 %  Section 8: Pixel buffer + rendering helpers
 % ============================================================================
 
@@ -4745,6 +4795,7 @@
 /opt-end-x    -1          def         % -1 = (w-1)
 /opt-end-y    -1          def         % -1 = (h-1)
 /opt-solve    false       def
+/opt-hardest  false       def         % place start/end at the maze's diameter (square)
 /opt-braid    0.0r        def         % 0.0..1.0 fraction of dead-ends to braid
 /opt-weave    false       def         % enable Buck-style overpasses (backtrack only)
 /opt-compare  ()          def         % comma-separated algos: "" = single-maze mode
@@ -4781,6 +4832,8 @@ OPTIONS
 
   Solving / loops:
     --solve             Draw red ribbon overlay along shortest path
+    --hardest           Place start/end at the maze's two most distant
+                        cells (graph diameter) and solve it (square grid)
     --start X,Y         Path start cell (default 0,0)
     --end X,Y           Path end cell (-1,-1 means far corner)
     --braid F           Knock down a fraction F of dead-ends (0.0..1.0)
@@ -4861,6 +4914,9 @@ EXAMPLES
         } { a (--solve) eq {
             /opt-solve true store
             /i i 1 add store
+        } { a (--hardest) eq {
+            /opt-hardest true store
+            /i i 1 add store
         } { a (--braid) eq {
             /opt-braid args i 1 add get to-number /real-type cast store
             /i i 2 add store
@@ -4900,7 +4956,7 @@ EXAMPLES
             % Treat as positional output filename.
             /opt-out a store
             /i i 1 add store
-        } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else
+        } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else
     } while
 } def
 
@@ -4968,6 +5024,31 @@ command-line-args parse-args
 opt-bench {
     run-bench
 } {
+% ----- hardest start/end pair (graph diameter) ---------------------------
+%   On a perfect (tree) maze the diameter endpoints satisfy: the end is the
+%   farthest cell from the start, the two differ, and the solved path spans
+%   exactly diameter+1 cells.
+
+/test-hardest {||#+8
+    /g 12 9 make-grid local-def
+    g 0 0 recursive-backtracker
+    g hardest-pair
+    /hey exch local-def
+    /hex exch local-def
+    /hsy exch local-def
+    /hsx exch local-def
+    g hsx hsy bfs-distances
+    /hmax  exch local-def
+    /hdist exch local-def
+    (hardest: end is the farthest cell from start)
+        hdist hey get hex get  hmax  eq                       expect
+    (hardest: start and end differ)
+        hsx hex ne  hsy hey ne  or                            expect
+    /hpath g hsx hsy hex hey bfs-solve local-def
+    (hardest: solved path spans the diameter)
+        hpath length  hmax /integer-type cast 1 add  eq       expect
+} def
+
 opt-self-test {
     /opt-quiet true store    % suppress eller's progress lines + phase timings during self-test
     test-adler32
@@ -4980,6 +5061,7 @@ opt-self-test {
     test-png-hex-color
     test-png-theta-color
     test-bfs-solve
+    test-hardest
     test-hex-bfs-solve
     test-theta-bfs-solve
     test-triangle-bfs-solve
@@ -5094,6 +5176,19 @@ opt-self-test {
         % AFTER algo so spanning-tree connectivity is preserved before
         % we add loops on top.
         opt-braid 0.0r gt { grid opt-braid braid } if
+
+        % --hardest: place start/end at the maze's two most distant cells
+        % (the diameter) and imply --solve.  Runs after braid so the loops
+        % it may add are reflected in the distances.  Setting opt-start here
+        % (before render) also roots the colormap heatmap at the hard start.
+        opt-hardest {
+            grid hardest-pair
+            /opt-end-y   exch store
+            /opt-end-x   exch store
+            /opt-start-y exch store
+            /opt-start-x exch store
+            /opt-solve   true store
+        } if
 
         % Resolve --end defaults: -1 means "far corner".
         opt-end-x 0 lt { /opt-end-x opt-w 1 sub store } if
