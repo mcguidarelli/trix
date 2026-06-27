@@ -148,8 +148,8 @@ watch for it in the per-algorithm notes.
 
 All eleven algorithms below run on the **square** grid. (The four non-square grids
 are backtracker-only -- see [§4](#4-grid-topologies).) Select one with
-`--algo NAME`; the default is `backtrack`. The dispatch table is at lines
-5096-5112.
+`--algo NAME`; the default is `backtrack`. Dispatch is a string-keyed table
+(`algo-dispatch` / `dispatch-algo`, lines 5098-5119).
 
 Five of the eleven ignore the start cell entirely (`kruskal`, `eller`,
 `binary-tree`, `sidewinder`, `division`); the other six begin carving from
@@ -615,7 +615,7 @@ lowercase folded to uppercase and unknown characters rendered blank.
 
 ### 9.3 Self-test
 
-`--self-test` runs **101 assertions** across 27 test procedures (lines 5144-5174):
+`--self-test` runs **101 assertions** across 27 test procedures (lines 5151-5181):
 Adler-32 vectors, chunked-array primitives, cell bit-encoding, a PNG checkerboard
 round-trip, a per-algorithm connectivity invariant (every algorithm must yield a
 fully connected spanning tree), the recursive-division perfect-maze check (connected

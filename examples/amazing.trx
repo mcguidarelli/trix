@@ -5092,23 +5092,30 @@ EXAMPLES
     } for
 } def
 
+% Algorithm dispatch table.  Each handler runs inside dispatch-algo's frame, so
+% it resolves `g`/`sx`/`sy` dynamically; algos that ignore the start cell simply
+% never name `sx`/`sy`.  Adding an algorithm = one entry here + one in run-bench.
+/algo-dispatch <<
+    (backtrack)     { g sx sy recursive-backtracker }
+    (kruskal)       { g kruskal }
+    (wilson)        { g sx sy wilson }
+    (eller)         { g eller }
+    (binary-tree)   { g binary-tree }
+    (sidewinder)    { g sidewinder }
+    (aldous-broder) { g sx sy aldous-broder }
+    (prim)          { g sx sy prim }
+    (hunt-kill)     { g sx sy hunt-kill }
+    (growing-tree)  { g sx sy growing-tree }
+    (division)      { g recursive-division }
+>> def
+
 % (g algo sx sy) dispatch-algo --
 /dispatch-algo {|g algo sx sy -- r|#+1
-    algo (backtrack)     eq { g sx sy recursive-backtracker } {
-    algo (kruskal)       eq { g kruskal } {
-    algo (wilson)        eq { g sx sy wilson } {
-    algo (eller)         eq { g eller } {
-    algo (binary-tree)   eq { g binary-tree } {
-    algo (sidewinder)    eq { g sidewinder } {
-    algo (aldous-broder) eq { g sx sy aldous-broder } {
-    algo (prim)          eq { g sx sy prim } {
-    algo (hunt-kill)     eq { g sx sy hunt-kill } {
-    algo (growing-tree)  eq { g sx sy growing-tree } {
-    algo (division)      eq { g recursive-division } {
+    algo-dispatch algo known-get { exec } {
         (Unknown --algo: ) print algo print nl
         (Valid: backtrack | kruskal | wilson | eller | binary-tree | sidewinder | aldous-broder | prim | hunt-kill | growing-tree | division) print nl
         (unknown algo) false assert
-    } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else
+    } if-else
 } def
 
 command-line-args parse-args
