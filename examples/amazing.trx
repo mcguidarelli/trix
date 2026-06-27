@@ -4865,6 +4865,49 @@ EXAMPLES
     quit
 } def
 
+% Command-line dispatch table: flag string -> handler proc.  Built once.
+% Each handler runs inside parse-args' frame, so it resolves `args` and `i`
+% dynamically and advances `i` itself (value flags +2, toggles +1).  The
+% three handlers that bind a temp (`--size` / `--start` / `--end`) carry
+% their own `||` frame for `local-def`.  Unknown args fall through to the
+% positional-output-filename default in parse-args (see known-get below).
+/arg-dispatch <<
+    (--help)      { print-help }
+    (-h)          { print-help }
+    (--self-test) { /opt-self-test true store  /i i 1 add store }
+    (--size)      { ||#+1 /parts args i 1 add get (x) split local-def
+                    /opt-w parts 0 get to-number store
+                    /opt-h parts 1 get to-number store  /i i 2 add store }
+    (--cell-px)   { /opt-cell-px args i 1 add get to-number store  /i i 2 add store }
+    (--wall-px)   { /opt-wall-px args i 1 add get to-number store  /i i 2 add store }
+    (--seed)      { /opt-seed args i 1 add get to-number /ulong-type cast store
+                    /i i 2 add store }
+    (--out)       { /opt-out args i 1 add get store  /i i 2 add store }
+    (--algo)      { /opt-algo args i 1 add get store  /i i 2 add store }
+    (--color)     { /opt-color args i 1 add get store  /i i 2 add store }
+    (--start)     { ||#+1 /sparts args i 1 add get (,) split local-def
+                    /opt-start-x sparts 0 get to-number store
+                    /opt-start-y sparts 1 get to-number store  /i i 2 add store }
+    (--end)       { ||#+1 /eparts args i 1 add get (,) split local-def
+                    /opt-end-x eparts 0 get to-number store
+                    /opt-end-y eparts 1 get to-number store  /i i 2 add store }
+    (--solve)     { /opt-solve   true store  /i i 1 add store }
+    (--hardest)   { /opt-hardest true store  /i i 1 add store }
+    (--braid)     { /opt-braid args i 1 add get to-number /real-type cast store
+                    /i i 2 add store }
+    (--weave)     { /opt-weave true store  /i i 1 add store }
+    (--grid)      { /opt-grid args i 1 add get store  /i i 2 add store }
+    (--compare)   { /opt-compare args i 1 add get store  /i i 2 add store }
+    (--stress)    { /opt-w 200 store  /opt-h 200 store  /opt-cell-px 4 store
+                    /opt-wall-px 1 store  /opt-algo (eller) store  /i i 1 add store }
+    (--monster)   { % 1000x1000 in eller's O(1)-cells streaming mode; needs
+                    % --vm-size=64M; cell-px=2 + wall-px=1 -> ~3001x3001 px PNG.
+                    /opt-w 1000 store  /opt-h 1000 store  /opt-cell-px 2 store
+                    /opt-wall-px 1 store  /opt-algo (eller) store  /i i 1 add store }
+    (--bench)     { /opt-bench true store  /i i 1 add store }
+    (--quiet)     { /opt-quiet true store  /i i 1 add store }
+>> def
+
 % Walk command-line-args.  Single-arg flags toggle a global; flags
 % with values consume the next entry.  The first non-flag positional
 % becomes the output filename.
@@ -4873,90 +4916,11 @@ EXAMPLES
     /i 0 local-def
     { i n lt } {||#+5
         /a args i get local-def
-        a (--help) eq  a (-h) eq  or {
-            print-help
-        } { a (--self-test) eq {
-            /opt-self-test true store
-            /i i 1 add store
-        } { a (--size) eq {
-            /parts args i 1 add get (x) split local-def
-            /opt-w parts 0 get to-number store
-            /opt-h parts 1 get to-number store
-            /i i 2 add store
-        } { a (--cell-px) eq {
-            /opt-cell-px args i 1 add get to-number store
-            /i i 2 add store
-        } { a (--wall-px) eq {
-            /opt-wall-px args i 1 add get to-number store
-            /i i 2 add store
-        } { a (--seed) eq {
-            /opt-seed args i 1 add get to-number /ulong-type cast store
-            /i i 2 add store
-        } { a (--out) eq {
-            /opt-out args i 1 add get store
-            /i i 2 add store
-        } { a (--algo) eq {
-            /opt-algo args i 1 add get store
-            /i i 2 add store
-        } { a (--color) eq {
-            /opt-color args i 1 add get store
-            /i i 2 add store
-        } { a (--start) eq {
-            /sparts args i 1 add get (,) split local-def
-            /opt-start-x sparts 0 get to-number store
-            /opt-start-y sparts 1 get to-number store
-            /i i 2 add store
-        } { a (--end) eq {
-            /eparts args i 1 add get (,) split local-def
-            /opt-end-x eparts 0 get to-number store
-            /opt-end-y eparts 1 get to-number store
-            /i i 2 add store
-        } { a (--solve) eq {
-            /opt-solve true store
-            /i i 1 add store
-        } { a (--hardest) eq {
-            /opt-hardest true store
-            /i i 1 add store
-        } { a (--braid) eq {
-            /opt-braid args i 1 add get to-number /real-type cast store
-            /i i 2 add store
-        } { a (--weave) eq {
-            /opt-weave true store
-            /i i 1 add store
-        } { a (--grid) eq {
-            /opt-grid args i 1 add get store
-            /i i 2 add store
-        } { a (--compare) eq {
-            /opt-compare args i 1 add get store
-            /i i 2 add store
-        } { a (--stress) eq {
-            /opt-w 200 store
-            /opt-h 200 store
-            /opt-cell-px 4 store
-            /opt-wall-px 1 store
-            /opt-algo (eller) store
-            /i i 1 add store
-        } { a (--monster) eq {
-            % Phase C unlocks 1000x1000 in eller's O(1)-cells streaming mode.
-            % Needs --vm-size=64M or so; opt-cell-px=2 + opt-wall-px=1 keeps
-            % the rendered PNG to ~3001x3001 px.
-            /opt-w 1000 store
-            /opt-h 1000 store
-            /opt-cell-px 2 store
-            /opt-wall-px 1 store
-            /opt-algo (eller) store
-            /i i 1 add store
-        } { a (--bench) eq {
-            /opt-bench true store
-            /i i 1 add store
-        } { a (--quiet) eq {
-            /opt-quiet true store
-            /i i 1 add store
-        } {
-            % Treat as positional output filename.
+        arg-dispatch a known-get { exec } {
+            % Unknown arg -> positional output filename.
             /opt-out a store
             /i i 1 add store
-        } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else } if-else
+        } if-else
     } while
 } def
 
