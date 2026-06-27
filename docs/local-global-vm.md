@@ -439,6 +439,15 @@ sv restore
 (ok) =
 ```
 
+There is a second way to make a `localdict` definition outlive `restore`:
+`def-persist`, which records its entry in global VM so the binding is not
+journaled and survives the rollback. It works, but it carries a GC cost -- the
+global persist entry makes `localdict` reference global VM, which arms the
+GC-skip flag and forces the collector to walk `localdict` again on every pass
+until that entry is gone. For a definition that should *both* persist and keep
+GC cheap, prefer `globaldict` (via `set-global`): the entry lives in
+`globaldict`, `localdict` stays free of global references, and the skip holds.
+
 ### The value rule still applies to globaldict
 
 Defining *into* `globaldict` is a store into a global container, so the
