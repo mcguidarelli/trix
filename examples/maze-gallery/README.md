@@ -17,13 +17,13 @@ examples/gallery.sh
 
 | Image | Shows |
 | --- | --- |
-| [`grid-upsilon-viridis.png`](grid-upsilon-viridis.png) | **Upsilon** grid (octagons + squares), viridis shading — the README hero |
-| [`grid-theta-viridis.png`](grid-theta-viridis.png) | Concentric **polar** grid, viridis distance shading |
+| [`grid-upsilon-viridis.png`](grid-upsilon-viridis.png) | **Upsilon** grid (octagons + squares), viridis shading |
+| [`grid-theta-viridis.png`](grid-theta-viridis.png) | Concentric **polar** grid (theta), viridis distance shading — the README topology hero |
 | [`grid-hex-magma.png`](grid-hex-magma.png) | **Hex** grid (pointy-top, odd-r offset), magma colormap |
 | [`grid-triangle-inferno.png`](grid-triangle-inferno.png) | **Triangle** grid (alternating up/down), inferno colormap |
 | [`compare-4-algos.png`](compare-4-algos.png) | Four algorithms side by side (backtracker, Kruskal, Wilson, Eller) |
 | [`algo-division-magma.png`](algo-division-magma.png) | **Recursive division** (wall-adding), magma heatmap — the color bands trace its nested-room subdivision |
-| [`algo-division-turbo.png`](algo-division-turbo.png) | **Recursive division** at 100×100, turbo heatmap — the README's third hero shot |
+| [`algo-division-grayscale.png`](algo-division-grayscale.png) | **Recursive division** (wall-adding), grayscale heatmap — the README algorithm hero; nested gray blocks trace the subdivision |
 | [`grid-hex-solve.png`](grid-hex-solve.png) | Hex maze with the solution path overlaid in red |
 | [`monster-magma.png`](monster-magma.png) | **Monster** heatmap — a 400×400 maze (160k cells) in magma distance shading |
 | [`monster-division-rainbow.png`](monster-division-rainbow.png) | **Monster recursive-division** — 400×400 (160k cells), rainbow heatmap; the color blocks expose the recursive partition hierarchy |
@@ -31,7 +31,7 @@ examples/gallery.sh
 | [`color-turbo.png`](color-turbo.png) | **turbo** colormap (perceptually-ordered rainbow) on a Kruskal maze |
 | [`color-cubehelix.png`](color-cubehelix.png) | **cubehelix** colormap (grayscale-safe monotone luminance) on a Kruskal maze |
 | [`color-grayscale.png`](color-grayscale.png) | **grayscale** colormap (smooth black→white ramp) on a Kruskal maze |
-| [`mask-logo.png`](mask-logo.png) | **Masking** — the `Trix` wordmark (`--mask logo`, Roboto Bold), each letter its own perfect maze |
+| [`mask-logo.png`](mask-logo.png) | **SVG masking** — the real Trix logo (`--mask logo`, turbo) cut out of a maze, rasterised from `assets/trix-logo.svg` by `tools/gen_mask_svg.py` |
 | [`mask-text-amazing.png`](mask-text-amazing.png) | **Text mask** — `--mask-text 'Amazing!'` (Roboto Bold, default font), inferno; mixed case + punctuation, descenders honored |
 | [`mask-font-roboto.png`](mask-font-roboto.png) | **Font select** — `--mask-text Trix --font roboto-mono-bold`, turbo (Apache-2.0 bitmap atlas) |
 | [`mask-font-hershey.png`](mask-font-hershey.png) | **Stroke font** — `--mask-text Trix --font hershey-serif`, viridis (public-domain Hershey, rendered in pure Trix) |

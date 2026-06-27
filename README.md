@@ -24,7 +24,7 @@ C++23 | Single-Header | ASan/UBSan clean | Apache 2.0
 ```
 
 <p align="center">
-  <img src="examples/maze-gallery/grid-upsilon-viridis.png" alt="An octagonal (upsilon) maze rendered to PNG by examples/amazing.trx" width="400">
+  <img src="examples/maze-gallery/grid-theta-viridis.png" alt="A circular (theta/polar) maze rendered to PNG by examples/amazing.trx" width="400">
 </p>
 
 <p align="center"><em>Sample output from the Trix program
@@ -32,20 +32,21 @@ C++23 | Single-Header | ASan/UBSan clean | Apache 2.0
 grid topologies. <a href="examples/maze-gallery/">More in the gallery.</a></em></p>
 
 <p align="center">
-  <img src="examples/maze-gallery/algo-division-turbo.png" alt="A 100x100 recursive-division maze rendered as a turbo distance heatmap by examples/amazing.trx" width="400">
+  <img src="examples/maze-gallery/algo-division-grayscale.png" alt="A recursive-division maze rendered as a grayscale distance heatmap by examples/amazing.trx" width="400">
 </p>
 
-<p align="center"><em>Recursive division as a turbo distance field &mdash; the color
-blocks trace the algorithm's nested-room subdivision (a 100&times;100 maze).</em></p>
+<p align="center"><em>Recursive division as a grayscale distance field &mdash; the
+nested gray blocks trace the algorithm's room subdivision.</em></p>
 
 <p align="center">
-  <img src="examples/maze-gallery/mask-logo.png" alt="The word Trix carved as a maze by examples/amazing.trx via font masking" width="400">
+  <img src="examples/maze-gallery/mask-logo.png" alt="The real Trix logo cut out of a turbo-colored maze by examples/amazing.trx via SVG masking" width="400">
 </p>
 
-<p align="center"><em>Masking carves the maze into a shape &mdash; here the
-<code>Trix</code> wordmark (<code>--mask logo</code>), each letter its own
-perfect maze. Also words (<code>--mask-text</code>, selectable <code>--font</code>),
-analytic figures, and the inverse cut-out. See the
+<p align="center"><em>Masking carves the maze into a shape &mdash; here the real
+Trix logo (<code>--mask logo</code>), cut out of a maze from its own SVG
+(rasterised by <code>tools/gen_mask_svg.py</code>). Also any SVG
+(<code>--mask-file</code>), words (<code>--mask-text</code>, selectable
+<code>--font</code>), analytic figures, and the inverse cut-out. See the
 <a href="examples/maze-gallery/">gallery</a>.</em></p>
 
 <p align="center">

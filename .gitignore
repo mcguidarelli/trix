@@ -72,7 +72,7 @@ examples/maze-gallery/*
 !examples/maze-gallery/monster-magma.png
 !examples/maze-gallery/algo-division-magma.png
 !examples/maze-gallery/monster-division-rainbow.png
-!examples/maze-gallery/algo-division-turbo.png
+!examples/maze-gallery/algo-division-grayscale.png
 !examples/maze-gallery/color-cividis.png
 !examples/maze-gallery/color-turbo.png
 !examples/maze-gallery/color-cubehelix.png

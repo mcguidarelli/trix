@@ -70,9 +70,9 @@ done
 
 # Curated colored showcase: recursive-division's nested-room structure is
 # most legible as a distance heatmap (the bands trace the subdivision).
-[[ "$QUIET" -eq 0 ]] && echo "Recursive-division showcase (magma + turbo heatmaps):"
-run "algo-division-magma.png" --algo division --color magma --size 30x30  --cell-px 16
-run "algo-division-turbo.png" --algo division --color turbo --size 100x100 --cell-px 6 --wall-px 1
+[[ "$QUIET" -eq 0 ]] && echo "Recursive-division showcase (magma + grayscale heatmaps):"
+run "algo-division-magma.png"     --algo division --color magma     --size 30x30 --cell-px 16
+run "algo-division-grayscale.png" --algo division --color grayscale --size 30x30 --cell-px 16
 
 [[ "$QUIET" -eq 0 ]] && echo "Colormaps (kruskal, square 30x30):"
 for color in viridis magma inferno plasma cividis turbo rainbow cubehelix grayscale two-tone; do
@@ -93,7 +93,7 @@ run "grid-theta.png"      --grid theta --size 6x12 --cell-px 18
 [[ "$QUIET" -eq 0 ]] && echo "Hex / theta color (Group 8):"
 run "grid-hex-viridis.png"    --grid hex --color viridis --size 14x14 --cell-px 14
 run "grid-hex-magma.png"      --grid hex --color magma --size 14x14 --cell-px 14
-run "grid-theta-viridis.png"  --grid theta --color viridis --size 6x12 --cell-px 18
+run "grid-theta-viridis.png"  --grid theta --color viridis --size 10x24 --cell-px 16
 run "grid-theta-inferno.png"  --grid theta --color inferno --size 6x12 --cell-px 18
 
 [[ "$QUIET" -eq 0 ]] && echo "Hex / theta solve (Group 9):"
@@ -132,11 +132,12 @@ done
 
 # Masking: carve the maze into a word / logo / analytic figure (square grid).
 # Disconnected shapes (letters) become one perfect maze per connected piece.
-# --mask-text / --mask logo render through a selectable --font: roboto-bold
-# (default bitmap), roboto-mono-bold, and the public-domain hershey-* stroke
-# fonts (examples/mask-fonts/).
+# --mask logo carves the real Trix logo (an SVG rasterised to a mask by
+# tools/gen_mask_svg.py, examples/mask-shapes/).  --mask-text renders through a
+# selectable --font: roboto-bold (default bitmap), roboto-mono-bold, and the
+# public-domain hershey-* stroke fonts (examples/mask-fonts/).
 [[ "$QUIET" -eq 0 ]] && echo "Masking (shape-carved mazes):"
-run "mask-logo.png"          --mask logo --color viridis --cell-px 10 --wall-px 1
+run "mask-logo.png"          --mask logo --color turbo --cell-px 8 --wall-px 1
 run "mask-text-amazing.png"  --mask-text 'Amazing!' --color inferno --cell-px 9 --wall-px 1
 run "mask-font-roboto.png"   --mask-text Trix --font roboto-mono-bold --color turbo --cell-px 9 --wall-px 1
 run "mask-font-hershey.png"  --mask-text Trix --font hershey-serif --color viridis --cell-px 9 --wall-px 1

@@ -2865,6 +2865,33 @@
 %  Section 8: Pixel buffer + rendering helpers
 % ============================================================================
 
+% ----- maze colors (CLI-settable via --wall-color / --bg-color) -------------
+%   The renderers draw maze LINES in (opt-wall-*) over a passage/background of
+%   (opt-bg-*).  Square / masked / theta init the image to the wall color and
+%   paint passages on top; hex / triangle / upsilon init to the background and
+%   stroke the walls on top -- both honor the same two colors.  Defaults are the
+%   classic black-on-white maze.  Referenced by name (late-bound) in the
+%   renderers below, so a CLI override applied before render time takes effect.
+/opt-wall-r 0b def     /opt-wall-g 0b def     /opt-wall-b 0b def        % line color
+/opt-bg-r 16#FF#b def  /opt-bg-g 16#FF#b def  /opt-bg-b 16#FF#b def     % passage / bg
+
+% (cb) -hex-nibble -- 0..15 from one ASCII hex digit (0-9, a-f, A-F)
+/-hex-nibble {|cb -- n|#+1
+    /c cb /integer-type cast local-def
+    c 48 ge { c 57 le } and?
+        { c 48 sub }
+        { c 97 ge { c 102 le } and? { c 87 sub } { c 55 sub } if-else }
+        if-else
+} def
+
+% (s) -parse-rgb -- r g b bytes from a "RRGGBB" (or "#RRGGBB") hex string
+/-parse-rgb {|s -- r g b|#+1
+    /o s length 7 ge { 1 } { 0 } if-else local-def
+    s o       get -hex-nibble 16 mul  s o 1 add get -hex-nibble add  /byte-type cast
+    s o 2 add get -hex-nibble 16 mul  s o 3 add get -hex-nibble add  /byte-type cast
+    s o 4 add get -hex-nibble 16 mul  s o 5 add get -hex-nibble add  /byte-type cast
+} def
+
 % (img-w img-h) make-pixel-rows -- array-of-scanline-strings (RGB)
 /make-pixel-rows {|w h|#+1
     /rows h array local-def
@@ -2997,17 +3024,17 @@
 
         % 2. Tunnel wall stubs in W and E slabs, shoulder y-ranges only
         sh-top-y1 y0 ge {
-            rows bx0 y0 x0 1 sub        sh-top-y1 0b 0b 0b fill-rect
-            rows x1 1 add y0 bx1        sh-top-y1 0b 0b 0b fill-rect
+            rows bx0 y0 x0 1 sub        sh-top-y1 opt-wall-r opt-wall-g opt-wall-b fill-rect
+            rows x1 1 add y0 bx1        sh-top-y1 opt-wall-r opt-wall-g opt-wall-b fill-rect
         } if
         y1 sh-bot-y0 ge {
-            rows bx0 sh-bot-y0 x0 1 sub y1 0b 0b 0b fill-rect
-            rows x1 1 add sh-bot-y0 bx1 y1 0b 0b 0b fill-rect
+            rows bx0 sh-bot-y0 x0 1 sub y1 opt-wall-r opt-wall-g opt-wall-b fill-rect
+            rows x1 1 add sh-bot-y0 bx1 y1 opt-wall-r opt-wall-g opt-wall-b fill-rect
         } if
 
         % 3. Bridge bands (full width across slab+cell+slab)
-        rows bx0 by1 bx1 by1 wall-px add 1 sub 0b 0b 0b fill-rect
-        rows bx0 by2 bx1 by2 wall-px add 1 sub 0b 0b 0b fill-rect
+        rows bx0 by1 bx1 by1 wall-px add 1 sub opt-wall-r opt-wall-g opt-wall-b fill-rect
+        rows bx0 by2 bx1 by2 wall-px add 1 sub opt-wall-r opt-wall-g opt-wall-b fill-rect
 
         % 4. Drop shadow under the bottom band (cell core only)
         /sh-y0 by2 wall-px add local-def
@@ -3029,17 +3056,17 @@
 
         % 2. Tunnel wall stubs in N and S slabs, shoulder x-ranges only
         sh-lf-x1 x0 ge {
-            rows x0 by0 sh-lf-x1   y0 1 sub  0b 0b 0b fill-rect
-            rows x0 y1 1 add  sh-lf-x1   by1  0b 0b 0b fill-rect
+            rows x0 by0 sh-lf-x1   y0 1 sub  opt-wall-r opt-wall-g opt-wall-b fill-rect
+            rows x0 y1 1 add  sh-lf-x1   by1  opt-wall-r opt-wall-g opt-wall-b fill-rect
         } if
         x1 sh-rt-x0 ge {
-            rows sh-rt-x0 by0   x1 y0 1 sub  0b 0b 0b fill-rect
-            rows sh-rt-x0 y1 1 add   x1 by1  0b 0b 0b fill-rect
+            rows sh-rt-x0 by0   x1 y0 1 sub  opt-wall-r opt-wall-g opt-wall-b fill-rect
+            rows sh-rt-x0 y1 1 add   x1 by1  opt-wall-r opt-wall-g opt-wall-b fill-rect
         } if
 
         % 3. Bridge bands (full height across slab+cell+slab)
-        rows bx1 by0 bx1 wall-px add 1 sub by1 0b 0b 0b fill-rect
-        rows bx2 by0 bx2 wall-px add 1 sub by1 0b 0b 0b fill-rect
+        rows bx1 by0 bx1 wall-px add 1 sub by1 opt-wall-r opt-wall-g opt-wall-b fill-rect
+        rows bx2 by0 bx2 wall-px add 1 sub by1 opt-wall-r opt-wall-g opt-wall-b fill-rect
 
         % 4. Drop shadow to the right of the right band (cell core only)
         /sh-x0 bx2 wall-px add local-def
@@ -3072,7 +3099,7 @@
     /rows img-w img-h make-pixel-rows local-def
 
     % Paint everything black first.
-    rows img-w img-h 0b 0b 0b fill-pixels
+    rows img-w img-h opt-wall-r opt-wall-g opt-wall-b fill-pixels
 
     0 1 ch 1 sub {|cy|#+8
         0 1 cw 1 sub {|cx|#+10
@@ -3083,22 +3110,22 @@
             /y1 y0 cell-px add 1 sub local-def
 
             % Floor of this cell
-            rows x0 y0 x1 y1 16#FF#b 16#FF#b 16#FF#b fill-rect
+            rows x0 y0 x1 y1 opt-bg-r opt-bg-g opt-bg-b fill-rect
 
             % East wall open?  Punch out the slab to the right.
             v WALL-E and 0b eq {
                 rows  x1 1 add  y0   x1 wall-px add   y1
-                      16#FF#b 16#FF#b 16#FF#b fill-rect
+                      opt-bg-r opt-bg-g opt-bg-b fill-rect
             } if
             % South wall open?  Punch out the slab below.
             v WALL-S and 0b eq {
                 rows  x0   y1 1 add   x1   y1 wall-px add
-                      16#FF#b 16#FF#b 16#FF#b fill-rect
+                      opt-bg-r opt-bg-g opt-bg-b fill-rect
             } if
             % Weave overpass artwork (no-op when v isn't WEAVE-UNDER).
             % Mono passes white as the deck colour; the helper darkens
             % it locally for shoulder tint and drop shadow.
-            rows x0 y0 cell-px wall-px v 16#FF#b 16#FF#b 16#FF#b -draw-bridge-weave
+            rows x0 y0 cell-px wall-px v opt-bg-r opt-bg-g opt-bg-b -draw-bridge-weave
         } for
     } for
 
@@ -3287,7 +3314,7 @@
     /img-h ch step mul wall-px add local-def
     /rows img-w img-h make-pixel-rows local-def
 
-    rows img-w img-h 0b 0b 0b fill-pixels
+    rows img-w img-h opt-wall-r opt-wall-g opt-wall-b fill-pixels
 
     0 1 ch 1 sub {|cy|#+12
         0 1 cw 1 sub {|cx|#+12
@@ -3364,7 +3391,7 @@
     /margin   wall-px                   local-def
     /img-w  cw col-step mul half-w add wall-px add margin 2 mul add  local-def
     /img-h  ch row-step mul half-r add margin 2 mul add              local-def
-    /rows img-w img-h 16#FF#b 16#FF#b 16#FF#b make-pixel-rows-filled local-def
+    /rows img-w img-h opt-bg-r opt-bg-g opt-bg-b make-pixel-rows-filled local-def
 
     0 1 ch 1 sub {|hy|#+10
         0 1 cw 1 sub {|hx|#+15
@@ -3391,7 +3418,7 @@
                     /va-y  center-y  edge 1 get half-r mul add  local-def
                     /vb-x  center-x  edge 2 get half-w mul add  local-def
                     /vb-y  center-y  edge 3 get half-r mul add  local-def
-                    rows va-x va-y vb-x vb-y wall-px 0b 0b 0b -draw-line
+                    rows va-x va-y vb-x vb-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
             } for
         } for
@@ -3436,7 +3463,7 @@
     /margin   wall-px                   local-def
     /img-w  cw col-step mul half-w add wall-px add margin 2 mul add  local-def
     /img-h  ch row-step mul half-r add margin 2 mul add              local-def
-    /rows img-w img-h 16#FF#b 16#FF#b 16#FF#b make-pixel-rows-filled local-def
+    /rows img-w img-h opt-bg-r opt-bg-g opt-bg-b make-pixel-rows-filled local-def
 
     0 1 ch 1 sub {|hy|#+15
         0 1 cw 1 sub {|hx|#+18
@@ -3468,7 +3495,7 @@
                     /va-y  center-y  edge 1 get half-r mul add  local-def
                     /vb-x  center-x  edge 2 get half-w mul add  local-def
                     /vb-y  center-y  edge 3 get half-r mul add  local-def
-                    rows va-x va-y vb-x vb-y wall-px 0b 0b 0b -draw-line
+                    rows va-x va-y vb-x vb-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
             } for
         } for
@@ -3504,7 +3531,7 @@
     /cx img-size 2 div local-def
     /cy img-size 2 div local-def
 
-    /rows img-size img-size 0b 0b 0b make-pixel-rows-filled local-def
+    /rows img-size img-size opt-wall-r opt-wall-g opt-wall-b make-pixel-rows-filled local-def
 
     /two-pi 6.2831853r local-def
     /sec-step       two-pi sectors /real-type cast div local-def
@@ -3550,9 +3577,9 @@
                     local-def
 
                 is-wall not {
-                    rows py get  px 3 mul       16#FF#b put
-                    rows py get  px 3 mul 1 add 16#FF#b put
-                    rows py get  px 3 mul 2 add 16#FF#b put
+                    rows py get  px 3 mul       opt-bg-r put
+                    rows py get  px 3 mul 1 add opt-bg-g put
+                    rows py get  px 3 mul 2 add opt-bg-b put
                 } if
             } if-else
         } for
@@ -3590,7 +3617,7 @@
     /img-size outer-r wall-px add 2 mul local-def
     /cx img-size 2 div local-def
     /cy img-size 2 div local-def
-    /rows img-size img-size 0b 0b 0b make-pixel-rows-filled local-def
+    /rows img-size img-size opt-wall-r opt-wall-g opt-wall-b make-pixel-rows-filled local-def
 
     /two-pi 6.2831853r local-def
     /sec-step       two-pi sectors /real-type cast div local-def
@@ -3678,7 +3705,7 @@
     /margin wall-px local-def
     /img-w  cw 1 add s mul 2 div  margin 2 mul add  local-def
     /img-h  ch h-tri mul  margin 2 mul add  local-def
-    /rows img-w img-h 16#FF#b 16#FF#b 16#FF#b make-pixel-rows-filled local-def
+    /rows img-w img-h opt-bg-r opt-bg-g opt-bg-b make-pixel-rows-filled local-def
 
     0 1 ch 1 sub {|tcy|#+12
         0 1 cw 1 sub {|tcx|#+15
@@ -3692,13 +3719,13 @@
                 /br-x   tcx 2 add s mul 2 div margin add local-def
                 /br-y   bl-y local-def
                 tv 16#01#b and 0b ne {
-                    rows apex-x apex-y bl-x bl-y wall-px 0b 0b 0b -draw-line
+                    rows apex-x apex-y bl-x bl-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
                 tv 16#02#b and 0b ne {
-                    rows apex-x apex-y br-x br-y wall-px 0b 0b 0b -draw-line
+                    rows apex-x apex-y br-x br-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
                 tv 16#04#b and 0b ne {
-                    rows bl-x bl-y br-x br-y wall-px 0b 0b 0b -draw-line
+                    rows bl-x bl-y br-x br-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
             } {
                 /tl-x   tcx s mul 2 div margin add local-def
@@ -3708,13 +3735,13 @@
                 /apex-x tcx 1 add s mul 2 div margin add local-def
                 /apex-y tcy 1 add h-tri mul margin add local-def
                 tv 16#01#b and 0b ne {
-                    rows tl-x tl-y apex-x apex-y wall-px 0b 0b 0b -draw-line
+                    rows tl-x tl-y apex-x apex-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
                 tv 16#02#b and 0b ne {
-                    rows tr-x tr-y apex-x apex-y wall-px 0b 0b 0b -draw-line
+                    rows tr-x tr-y apex-x apex-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
                 tv 16#04#b and 0b ne {
-                    rows tl-x tl-y tr-x tr-y wall-px 0b 0b 0b -draw-line
+                    rows tl-x tl-y tr-x tr-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
             } if-else
         } for
@@ -3750,7 +3777,7 @@
     /margin wall-px local-def
     /img-w  cw 1 add s mul 2 div  margin 2 mul add  local-def
     /img-h  ch h-tri mul  margin 2 mul add  local-def
-    /rows img-w img-h 16#FF#b 16#FF#b 16#FF#b make-pixel-rows-filled local-def
+    /rows img-w img-h opt-bg-r opt-bg-g opt-bg-b make-pixel-rows-filled local-def
 
     0 1 ch 1 sub {|tcy|#+18
         0 1 cw 1 sub {|tcx|#+22
@@ -3777,13 +3804,13 @@
                 } for
 
                 tv 16#01#b and 0b ne {
-                    rows apex-x apex-y bl-x bl-y wall-px 0b 0b 0b -draw-line
+                    rows apex-x apex-y bl-x bl-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
                 tv 16#02#b and 0b ne {
-                    rows apex-x apex-y br-x bl-y wall-px 0b 0b 0b -draw-line
+                    rows apex-x apex-y br-x bl-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
                 tv 16#04#b and 0b ne {
-                    rows bl-x bl-y br-x bl-y wall-px 0b 0b 0b -draw-line
+                    rows bl-x bl-y br-x bl-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
             } {
                 /tl-x   tcx s mul 2 div margin add local-def
@@ -3803,13 +3830,13 @@
                 } for
 
                 tv 16#01#b and 0b ne {
-                    rows tl-x tl-y apex-x apex-y wall-px 0b 0b 0b -draw-line
+                    rows tl-x tl-y apex-x apex-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
                 tv 16#02#b and 0b ne {
-                    rows tr-x tl-y apex-x apex-y wall-px 0b 0b 0b -draw-line
+                    rows tr-x tl-y apex-x apex-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
                 tv 16#04#b and 0b ne {
-                    rows tl-x tl-y tr-x tl-y wall-px 0b 0b 0b -draw-line
+                    rows tl-x tl-y tr-x tl-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                 } if
             } if-else
         } for
@@ -3867,7 +3894,7 @@
     /margin q wall-px add local-def
     /img-w cw pitch mul margin 2 mul add local-def
     /img-h ch pitch mul margin 2 mul add local-def
-    /rows img-w img-h 16#FF#b 16#FF#b 16#FF#b make-pixel-rows-filled local-def
+    /rows img-w img-h opt-bg-r opt-bg-g opt-bg-b make-pixel-rows-filled local-def
 
     % Octagon vertex offsets (8 entries: x then y).
     /ovx 8 array local-def
@@ -3913,7 +3940,7 @@
                         /ub-i ud 1 add 8 mod local-def
                         /ub-x cx ovx ub-i get add local-def
                         /ub-y cy ovy ub-i get add local-def
-                        rows ua-x ua-y ub-x ub-y wall-px 0b 0b 0b -draw-line
+                        rows ua-x ua-y ub-x ub-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                     } if
                 } for
             } {
@@ -3925,7 +3952,7 @@
                         /sb-i sd 1 add 4 mod local-def
                         /sb-x cx svx sb-i get add local-def
                         /sb-y cy svy sb-i get add local-def
-                        rows sa-x sa-y sb-x sb-y wall-px 0b 0b 0b -draw-line
+                        rows sa-x sa-y sb-x sb-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                     } if
                 } for
             } if-else
@@ -3979,7 +4006,7 @@
     /margin q wall-px add local-def
     /img-w cw pitch mul margin 2 mul add local-def
     /img-h ch pitch mul margin 2 mul add local-def
-    /rows img-w img-h 16#FF#b 16#FF#b 16#FF#b make-pixel-rows-filled local-def
+    /rows img-w img-h opt-bg-r opt-bg-g opt-bg-b make-pixel-rows-filled local-def
 
     % Octagon vertex offsets v0..v7 (clockwise from upper-left of N edge).
     /ovx 8 array local-def
@@ -4026,7 +4053,7 @@
                         /ub-i ud 1 add 8 mod local-def
                         /ub-x cx ovx ub-i get add local-def
                         /ub-y cy ovy ub-i get add local-def
-                        rows ua-x ua-y ub-x ub-y wall-px 0b 0b 0b -draw-line
+                        rows ua-x ua-y ub-x ub-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                     } if
                 } for
             } {
@@ -4038,7 +4065,7 @@
                         /sb-i sd 1 add 4 mod local-def
                         /sb-x cx svx sb-i get add local-def
                         /sb-y cy svy sb-i get add local-def
-                        rows sa-x sa-y sb-x sb-y wall-px 0b 0b 0b -draw-line
+                        rows sa-x sa-y sb-x sb-y wall-px opt-wall-r opt-wall-g opt-wall-b -draw-line
                     } if
                 } for
             } if-else
@@ -4396,7 +4423,7 @@
     /panel-h panels 0 get 1 get local-def
     /total-w  panel-w n mul  gutter n 1 sub mul add  local-def
     /total-h  panel-h label-h add  local-def
-    /total-rows total-w total-h 16#FF#b 16#FF#b 16#FF#b make-pixel-rows-filled local-def
+    /total-rows total-w total-h opt-bg-r opt-bg-g opt-bg-b make-pixel-rows-filled local-def
 
     0 1 n 1 sub {|i|#+8
         /panel panels i get local-def
@@ -4408,7 +4435,7 @@
             /dst-row total-rows y yoff add get local-def
             dst-row xoff 3 mul src-row put-interval
         } for
-        total-rows  xoff 4 add  4  algos i get  0b 0b 0b -draw-label
+        total-rows  xoff 4 add  4  algos i get  opt-wall-r opt-wall-g opt-wall-b -draw-label
     } for
 
     [ total-w total-h total-rows ]
@@ -4561,31 +4588,34 @@
 } def
 
 % ----- hi-res font registry (lazy-loaded mask-fonts/*.trx) ------------------
-%   `--mask-text WORD` and `--mask logo` (= the word "Trix") render through a
-%   selectable font.  `5x7` is the built-in block font above; the hi-res faces
-%   (roboto-bold, roboto-mono-bold = bitmap atlases; hershey-* = stroke fonts)
-%   live in examples/mask-fonts/<name>.trx and register THEMSELVES into
-%   MASK-FONTS when required.  A font is loaded once, on first use.
+%   `--mask-text WORD` renders through a selectable font.  `5x7` is the built-in
+%   block font above; the hi-res faces (roboto-bold, roboto-mono-bold = bitmap
+%   atlases; hershey-* = stroke fonts) live in examples/mask-fonts/<name>.trx and
+%   register THEMSELVES into MASK-FONTS when required.  A font is loaded once, on
+%   first use.  (`--mask logo` is the real SVG logo -- see MASK-SHAPES below.)
 
 /MASK-FONTS 8 dynamic-dict def     % name -> font dict (filled by the font files)
 
-% (name) -font-path -- locate mask-fonts/<name>.trx: --font-dir if given, else
-%   the first existing candidate (works run-from-repo-root or run-from-examples).
-/-font-path {|name -- path|#+3
-    /cands
-        opt-font-dir () ne
-            { [ opt-font-dir ] }
-            { [ (examples/mask-fonts) (mask-fonts) ] }
-            if-else
-        local-def
+% (name dirs) -asset-path -- first existing dirs[i]/name.trx, else dirs[0]/...
+%   (works run-from-repo-root or run-from-examples).  Shared by the font and the
+%   mask-shape loaders below.
+/-asset-path {|name dirs -- path|#+2
     /found () local-def
-    0 1 cands length 1 sub {|i|#+1
+    0 1 dirs length 1 sub {|i|#+1
         found () eq {
-            /p cands i get (/) concat name concat (.trx) concat local-def
+            /p dirs i get (/) concat name concat (.trx) concat local-def
             p file-exists? { /found p store } if
         } if
     } for
-    found () ne { found } { cands 0 get (/) concat name concat (.trx) concat } if-else
+    found () ne { found } { dirs 0 get (/) concat name concat (.trx) concat } if-else
+} def
+
+% (name) -font-path -- locate mask-fonts/<name>.trx: --font-dir if given, else
+%   the bundled-then-local candidates.
+/-font-path {|name -- path|#+1
+    name
+    opt-font-dir () ne { [ opt-font-dir ] } { [ (examples/mask-fonts) (mask-fonts) ] } if-else
+    -asset-path
 } def
 
 % (name) -load-font -- return the named font dict, requiring its file once.
@@ -4600,6 +4630,37 @@
         path require
     } if
     MASK-FONTS name get
+} def
+
+% ----- SVG / external mask shapes (lazy-loaded mask-shapes/*.trx) ------------
+%   `--mask logo` and `--mask-file NAME` carve a maze from a 1-bit silhouette
+%   that tools/gen_mask_svg.py rasterised from an SVG (Trix has no SVG engine,
+%   so the host tool renders it once).  Each file registers ONE [w h rows] mask
+%   into MASK-SHAPES and is loaded on first use.  The bundled `trix-logo` ships
+%   pre-inverted -- its in-mask is the maze that SURROUNDS the slash-art, so the
+%   logo reads as channels cut out of a maze (its thin strokes are unusable as
+%   positive corridors); `--mask logo --mask-invert` recovers the filled strokes.
+/MASK-SHAPES 4 dynamic-dict def     % name -> [w h rows] mask (filled by the files)
+
+% (name) -mask-shape-path -- locate mask-shapes/<name>.trx (--mask-dir or auto).
+/-mask-shape-path {|name -- path|#+1
+    name
+    opt-mask-dir () ne { [ opt-mask-dir ] } { [ (examples/mask-shapes) (mask-shapes) ] } if-else
+    -asset-path
+} def
+
+% (name) -load-mask-shape -- return the named [w h rows] mask, requiring once.
+/-load-mask-shape {|name -- mask|#+1
+    MASK-SHAPES name known? not {
+        /path name -mask-shape-path local-def
+        path file-exists? not {
+            (amazing: mask shape not found: ) print name print ( (looked in ) print path print
+            (); use --mask-dir, or run from the repo root) print nl
+            (mask shape not found) false assert
+        } if
+        path require
+    } if
+    MASK-SHAPES name get
 } def
 
 % (m) mask-trim -- crop the mask to its in-mask bounding box (drops the empty
@@ -4989,7 +5050,7 @@
     /img-w cw step mul wall-px add local-def
     /img-h ch step mul wall-px add local-def
     /rows img-w img-h make-pixel-rows local-def
-    rows img-w img-h 0b 0b 0b fill-pixels
+    rows img-w img-h opt-wall-r opt-wall-g opt-wall-b fill-pixels
     0 1 ch 1 sub {|cy|#+8
         0 1 cw 1 sub {|cx|#+10
             mask cx cy mask-in? {
@@ -4998,12 +5059,12 @@
                 /y0 cy step mul wall-px add local-def
                 /x1 x0 cell-px add 1 sub local-def
                 /y1 y0 cell-px add 1 sub local-def
-                rows x0 y0 x1 y1 16#FF#b 16#FF#b 16#FF#b fill-rect
+                rows x0 y0 x1 y1 opt-bg-r opt-bg-g opt-bg-b fill-rect
                 v WALL-E and 0b eq {
-                    rows  x1 1 add  y0  x1 wall-px add  y1  16#FF#b 16#FF#b 16#FF#b fill-rect
+                    rows  x1 1 add  y0  x1 wall-px add  y1  opt-bg-r opt-bg-g opt-bg-b fill-rect
                 } if
                 v WALL-S and 0b eq {
-                    rows  x0  y1 1 add  x1  y1 wall-px add  16#FF#b 16#FF#b 16#FF#b fill-rect
+                    rows  x0  y1 1 add  x1  y1 wall-px add  opt-bg-r opt-bg-g opt-bg-b fill-rect
                 } if
             } if
         } for
@@ -5018,7 +5079,7 @@
     /img-w cw step mul wall-px add local-def
     /img-h ch step mul wall-px add local-def
     /rows img-w img-h make-pixel-rows local-def
-    rows img-w img-h 0b 0b 0b fill-pixels
+    rows img-w img-h opt-wall-r opt-wall-g opt-wall-b fill-pixels
     0 1 ch 1 sub {|cy|#+12
         0 1 cw 1 sub {|cx|#+12
             mask cx cy mask-in? {
@@ -5926,7 +5987,7 @@
 %   and the perfect-forest invariant (edges == in-mask-cells - components) for
 %   all seven portable algorithms -- which doubles as a connectivity check,
 %   since a generator that left any in-mask cell isolated would fall short.
-/test-mask {||#+14
+/test-mask {||#+17
     1ul rand-seed
     % basic mask ops
     /tm 4 3 make-mask local-def
@@ -5990,6 +6051,26 @@
     /fs (hershey-sans) -load-font local-def
     (font: hershey-sans is a stroke font)       fs (kind) get (stroke) eq            expect
     (font: hershey-sans Trix is non-empty)      (Trix) fs 1 mask-text-stroke mask-count 0 gt  expect
+
+    % SVG mask shapes (mask-shapes/*.trx): the bundled logo loads via the same
+    % registry/loader path that --mask logo and --mask-file use.
+    /ml (trix-logo) -load-mask-shape local-def
+    /mlcells ml mask-w ml mask-h mul local-def
+    (mask-shape: trix-logo loads 330 wide)      ml mask-w 330 eq                     expect
+    (mask-shape: trix-logo is a dense cutout)   ml mask-count  mlcells 2 div  gt     expect
+    (mask-shape: trix-logo has logo holes)      ml mask-count  mlcells          lt   expect
+
+    % --wall-color / --bg-color hex parsing
+    (color: -hex-nibble 9)   (9) 0 get -hex-nibble 9  eq                             expect
+    (color: -hex-nibble a)   (a) 0 get -hex-nibble 10 eq                             expect
+    (color: -hex-nibble F)   (F) 0 get -hex-nibble 15 eq                             expect
+    (7c3aed) -parse-rgb
+    /tcb exch local-def  /tcg exch local-def  /tcr exch local-def
+    (color: -parse-rgb R=7c)  tcr /integer-type cast 124 eq                          expect
+    (color: -parse-rgb G=3a)  tcg /integer-type cast 58  eq                          expect
+    (color: -parse-rgb B=ed)  tcb /integer-type cast 237 eq                          expect
+    (color: -parse-rgb strips leading #)  (#ff8000) -parse-rgb /integer-type cast 0 eq
+        exch /integer-type cast 128 eq  and  exch /integer-type cast 255 eq  and     expect
 } def
 
 % ============================================================================
@@ -6000,6 +6081,7 @@
 /opt-w        20          def
 /opt-h        20          def
 /opt-cell-px  16          def
+/opt-cell-set false       def         % did the user pass --cell-px? (auto-size hi-res masks if not)
 /opt-wall-px  2           def
 /opt-seed     0u          def         % 0 = clock-seeded
 /opt-grid     (square)    def         % square | hex | theta | triangle | upsilon
@@ -6018,13 +6100,15 @@
 /opt-self-test  false     def
 /opt-bench      false     def         % run timing harness instead of generating a maze
 /opt-metrics    false     def         % print a read-only quality report (all grids; twistiness on square only)
-/opt-mask       ()        def         % "" = none; disc | ring | frame | logo | text (square grid)
+/opt-mask       ()        def         % "" = none; disc | ring | frame | logo | text | file (square grid)
 /opt-mask-word  ()        def         % the word for --mask-text
 /opt-mask-scale 0         def         % cells per font/logo pixel; 0 = shape default (4)
 /opt-mask-invert false     def         % punch the shape out of a full maze (inverse)
 /opt-mask-margin -1        def         % --mask-invert surround thickness in cells; -1 = auto
 /opt-font       (roboto-bold) def      % 5x7 | roboto-bold | roboto-mono-bold | hershey-* | <custom>
 /opt-font-dir   ()         def         % override dir for mask-fonts/*.trx (default examples/mask-fonts)
+/opt-mask-file  ()         def         % NAME for --mask-file (a mask-shapes/*.trx)
+/opt-mask-dir   ()         def         % override dir for mask-shapes/*.trx (default examples/mask-shapes)
 
 % (--) print-help -- write usage to stdout and quit the interpreter.
 /print-help {
@@ -6040,6 +6124,8 @@ OPTIONS
     --size WxH          Cells per axis (default 20x20)
     --cell-px N         Pixels per cell (default 16)
     --wall-px N         Wall thickness in pixels (default 2)
+    --wall-color HEX    Maze line color as RRGGBB (default 000000 = black)
+    --bg-color HEX      Passage/background color as RRGGBB (default FFFFFF)
 
   Topology + algorithm:
     --grid TYPE         square | hex | theta | triangle | upsilon (default square)
@@ -6071,10 +6157,14 @@ OPTIONS
                         stitch the panels into one image.
 
   Masking (square grid):  carve a maze in the shape of a word/logo/figure
-    --mask SHAPE        disc | ring | frame | logo  (logo = the "Trix" wordmark)
-                        (disc/ring/frame use --size)
+    --mask SHAPE        disc | ring | frame | logo
+                        (logo = the real Trix logo, cut out of a maze;
+                         disc/ring/frame use --size)
     --mask-text WORD    carve a maze shaped like WORD
-    --font NAME         font for --mask-text / --mask logo:
+    --mask-file NAME    carve from a mask-shapes/<NAME>.trx (an SVG rasterised
+                        by tools/gen_mask_svg.py)
+    --mask-dir DIR      where to find the mask-shapes/*.trx (default auto)
+    --font NAME         font for --mask-text:
                         5x7 (built-in block) | roboto-bold (default) |
                         roboto-mono-bold | hershey-sans | hershey-serif |
                         or any examples/mask-fonts/<name>.trx
@@ -6125,8 +6215,15 @@ EXAMPLES
     (--size)      { ||#+1 /parts args i 1 add get (x) split local-def
                     /opt-w parts 0 get to-number store
                     /opt-h parts 1 get to-number store  /i i 2 add store }
-    (--cell-px)   { /opt-cell-px args i 1 add get to-number store  /i i 2 add store }
+    (--cell-px)   { /opt-cell-px args i 1 add get to-number store
+                    /opt-cell-set true store  /i i 2 add store }
     (--wall-px)   { /opt-wall-px args i 1 add get to-number store  /i i 2 add store }
+    (--wall-color){ args i 1 add get -parse-rgb
+                    /opt-wall-b exch store  /opt-wall-g exch store  /opt-wall-r exch store
+                    /i i 2 add store }
+    (--bg-color)  { args i 1 add get -parse-rgb
+                    /opt-bg-b exch store  /opt-bg-g exch store  /opt-bg-r exch store
+                    /i i 2 add store }
     (--seed)      { /opt-seed args i 1 add get to-number /ulong-type cast store
                     /i i 2 add store }
     (--out)       { /opt-out args i 1 add get store  /i i 2 add store }
@@ -6161,6 +6258,9 @@ EXAMPLES
     (--mask-margin){ /opt-mask-margin args i 1 add get to-number store  /i i 2 add store }
     (--font)      { /opt-font args i 1 add get store  /i i 2 add store }
     (--font-dir)  { /opt-font-dir args i 1 add get store  /i i 2 add store }
+    (--mask-file) { /opt-mask (file) store
+                    /opt-mask-file args i 1 add get store  /i i 2 add store }
+    (--mask-dir)  { /opt-mask-dir args i 1 add get store  /i i 2 add store }
     (--quiet)     { /opt-quiet true store  /i i 1 add store }
 >> def
 
@@ -6568,17 +6668,22 @@ opt-self-test {
         % ---- Masked maze (square grid): carve only the in-mask cells, so the
         % corridors trace a word / logo / analytic figure.  Disconnected shapes
         % become one perfect maze per connected component (see Section 14).
+        opt-grid (square) ne {
+            stderr (amazing: masking is square-grid only; ignoring --grid ) write-string
+            stderr opt-grid write-string  stderr (\n) write-string  stderr flush-stream
+        } if
         -effective-seed rand-seed
         /mask
             opt-mask (text) eq { opt-mask-word -build-text-mask }
-            { opt-mask (logo) eq { (Trix) -build-text-mask }
+            { opt-mask (logo) eq { (trix-logo) -load-mask-shape }
+            { opt-mask (file) eq { opt-mask-file -load-mask-shape }
             { opt-mask (disc) eq { opt-w opt-h mask-disc }
             { opt-mask (ring) eq { opt-w opt-h mask-ring }
             { opt-mask (frame) eq { opt-w opt-h mask-frame }
             { (Unknown --mask: ) print opt-mask print nl
-              (Valid: disc | ring | frame | logo, or --mask-text WORD) print nl
+              (Valid: disc | ring | frame | logo, or --mask-text WORD / --mask-file NAME) print nl
               (unknown mask) false assert
-            } if-else } if-else } if-else } if-else } if-else
+            } if-else } if-else } if-else } if-else } if-else } if-else
             def
         % --mask-invert: pad the shape into a larger canvas and complement it,
         % so the maze fills AROUND the shape and the shape becomes holes.
@@ -6595,6 +6700,12 @@ opt-self-test {
         } if
         /opt-w mask mask-w store          % report the real (mask-derived) size
         /opt-h mask mask-h store
+        % Loaded masks (--mask logo / --mask-file) can be large; unless the user
+        % set --cell-px, size cells so the image lands near ~2800px wide instead
+        % of exploding at the default 16 (analytic/text masks keep the default).
+        opt-cell-set not  { opt-mask (logo) eq  opt-mask (file) eq  or }  and? {
+            /opt-cell-px  2800 mask mask-w div  opt-wall-px sub  2 max  store
+        } if
         /grid mask mask-w  mask mask-h  make-grid def
         grid mask opt-algo carve-masked
         opt-color (mono) eq {

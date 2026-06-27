@@ -8,17 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **`examples/amazing.trx`: masking -- carve mazes into words, the Trix logo, and
-  shapes.** `--mask disc|ring|frame|logo` and `--mask-text WORD` restrict the
-  square-grid maze to an arbitrary in-mask cell set; disconnected shapes (separate
-  letters) become one perfect maze per connected component, and `--mask-invert`
-  (with `--mask-margin`) punches the shape out of a full maze instead. Text renders
-  through a selectable `--font` (`--font-dir` to locate the data): a built-in 5x7
-  block font, hi-res **Roboto** bitmap atlases (Apache-2.0), and **Hershey** stroke
-  fonts (public domain) rendered in pure Trix by stroking centerlines. Fonts are
-  generated from real faces by host tools (`tools/gen_mask_font.py` /
-  `gen_hershey_font.py`); only the derived glyph data is committed
-  (`examples/mask-fonts/`). Masking composes with any `--algo` and `--color`.
+- **`examples/amazing.trx`: masking -- carve mazes into words, the Trix logo, any
+  SVG, and shapes.** `--mask disc|ring|frame|logo`, `--mask-text WORD`, and
+  `--mask-file NAME` restrict the square-grid maze to an arbitrary in-mask cell set;
+  disconnected shapes (separate letters) become one perfect maze per connected
+  component, and `--mask-invert` (with `--mask-margin`) punches the shape out of a
+  full maze instead. Text renders through a selectable `--font` (`--font-dir` to
+  locate the data): a built-in 5x7 block font, hi-res **Roboto** bitmap atlases
+  (Apache-2.0), and **Hershey** stroke fonts (public domain) rendered in pure Trix
+  by stroking centerlines. Fonts are generated from real faces by host tools
+  (`tools/gen_mask_font.py` / `gen_hershey_font.py`); only the derived glyph data is
+  committed (`examples/mask-fonts/`). `--mask logo` carves the **real Trix logo**,
+  cut out of a maze, and `--mask-file` carves any other SVG -- both via
+  `tools/gen_mask_svg.py`, which rasterises an SVG to a 1-bit mask
+  (`examples/mask-shapes/`, `--mask-dir` to locate it); only the logo's derived mask
+  is committed. Masking composes with any `--algo` and `--color`.
+- **`examples/amazing.trx`: `--wall-color` / `--bg-color`.** The maze line color and
+  the passage/background color are now configurable as `RRGGBB` hex (default black
+  lines on a white background), honored across every grid topology and both mono and
+  distance-heatmap renders.
 - **`globaldict` -- a second user dictionary implementing a PostScript-style
   local/global definition split.** A fixed-capacity dictionary pre-allocated in local
   VM and placed on the dict stack directly below `localdict`, pushed by the new

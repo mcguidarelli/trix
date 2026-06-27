@@ -481,14 +481,16 @@ over the other.
 ## 7. Masking: Shape-Carved Mazes
 
 Masking restricts the maze to a chosen subset of the square grid, so the
-corridors trace a **word, a logo, or an analytic figure** instead of filling a
-plain rectangle. It is the same idea as Walter Pullen's Daedalus mask images,
-but no bitmap images are bundled -- masks come from text rendered through a
-selectable font, or from analytic geometry.
+corridors trace a **word, a logo, an SVG, or an analytic figure** instead of
+filling a plain rectangle. It is the same idea as Walter Pullen's Daedalus mask
+images: masks come from text rendered through a selectable font, from analytic
+geometry, or from an SVG rasterised to a 1-bit silhouette by a host tool (only
+the Trix logo's derived mask is bundled -- see [§7.4](#74-svg-masks)).
 
 ```bash
 ./trix --vm-size=64M examples/amazing.trx --mask-text 'Amazing!' --out word.png
-./trix --vm-size=64M examples/amazing.trx --mask logo --color viridis --out logo.png
+./trix --vm-size=128M examples/amazing.trx --mask logo --color turbo --out logo.png
+./trix --vm-size=128M examples/amazing.trx --mask-file star --color viridis --out star.png
 ./trix --vm-size=64M examples/amazing.trx --mask-text Trix --font hershey-serif --out hershey.png
 ./trix --vm-size=64M examples/amazing.trx --mask disc --size 28x28 --color inferno --out disc.png
 ./trix --vm-size=64M examples/amazing.trx --mask-text Trix --mask-invert --color magma --out punch.png
@@ -502,7 +504,8 @@ A mask mirrors the grid: a `[w h rows]` triple whose `rows` is an array of
 | Source | Flag | How it is built |
 | --- | --- | --- |
 | **Text** | `--mask-text WORD` | the word rendered through `--font` (see [§7.3](#73-fonts)); each font pixel becomes a `--mask-scale` × `--mask-scale` block of cells |
-| **Logo** | `--mask logo` | the word `Trix` rendered through the selected font |
+| **Logo** | `--mask logo` | the real Trix logo, cut out of a maze -- a mask rasterised from `assets/trix-logo.svg` (see [§7.4](#74-svg-masks)) |
+| **SVG** | `--mask-file NAME` | any SVG you rasterised to `examples/mask-shapes/<NAME>.trx` (see [§7.4](#74-svg-masks)) |
 | **Analytic** | `--mask disc` / `ring` / `frame` | a circle / annulus / border band inscribed in the `--size` grid |
 | **Inverse** | add `--mask-invert` | the shape is padded into a larger canvas (`--mask-margin`) and complemented, so the maze fills *around* it and the shape becomes holes |
 
@@ -541,7 +544,7 @@ under a mask.
 
 ### 7.3 Fonts
 
-`--mask-text` and `--mask logo` render through a selectable `--font`. Trix has no
+`--mask-text` renders through a selectable `--font`. Trix has no
 FreeType, so a font cannot be rasterised inside the VM; instead each font is
 pre-rendered by a host tool into a Trix data file under `examples/mask-fonts/`,
 which `amazing.trx` loads on first use (lazily; non-masking runs never touch
@@ -585,6 +588,43 @@ only matters if you intend to *commit / redistribute* the generated atlas. This
 project therefore bundles only **Apache-2.0** (Roboto) and **public-domain**
 (Hershey) glyph data; see `tools/gen_mask_font.py` for a license-by-font table
 and the root `NOTICE.md` for attribution.
+
+### 7.4 SVG masks
+
+`--mask logo` carves the **real Trix logo**, and `--mask-file NAME` carves any
+SVG you choose. Trix has no SVG rasteriser, so -- exactly as with fonts -- a host
+tool renders the SVG **once** into a `[w h rows]` mask under
+`examples/mask-shapes/`, which `amazing.trx` loads on first use. Only the derived
+1-bit mask is committed, never the source `.svg`; the maze engine is
+source-agnostic, so an SVG mask carves like any other.
+
+The tool is [`tools/gen_mask_svg.py`](../tools/gen_mask_svg.py). Install the
+renderer (Debian/Ubuntu) with `sudo apt install python3-cairosvg python3-pil
+python3-numpy`, then:
+
+```bash
+# regenerate the bundled logo from assets/trix-logo.svg
+python3 tools/gen_mask_svg.py
+
+# rasterise any SVG for your own local mazes (not committed)
+python3 tools/gen_mask_svg.py star.svg --name star
+./trix --vm-size=128M examples/amazing.trx --mask-file star --color turbo --out star.png
+```
+
+It classifies ink at high resolution (luminance `< --threshold`, so a faint
+subtitle is dropped while dark artwork is kept), then downsamples by **area
+coverage** so thin strokes survive instead of washing out. `--dilate` thickens
+strokes; `--invert` ships the **cutout** (the maze fills *around* the shape) and
+`--margin` adds a surrounding band.
+
+The bundled `trix-logo` is line-art, so it ships pre-inverted: its in-mask region
+is the maze *surrounding* the slash-art, and the logo reads as channels cut out
+of the maze. `--mask logo` auto-sizes `--cell-px` so the image lands near
+~3000 px (override with your own `--cell-px`); `--mask logo --mask-invert`
+recovers the (thin) filled strokes. A mask is a 1-bit silhouette with no colours
+or paths from the artwork, so rasterising an SVG for your own output is
+unencumbered; the source license only matters if you *commit / redistribute* the
+generated mask. See [`examples/mask-shapes/README.md`](mask-shapes/).
 
 ---
 
@@ -649,6 +689,8 @@ Flags are parsed in `/parse-args` against a string-keyed `arg-dispatch` table. A
 | `--size` | `WxH` | Maze size in cells (rings × sectors for `theta`) | `20x20` |
 | `--cell-px` | int | Pixels per cell | `16` |
 | `--wall-px` | int | Wall thickness in pixels | `2` |
+| `--wall-color` | `RRGGBB` | Maze line color (hex; `#` optional) | `000000` |
+| `--bg-color` | `RRGGBB` | Passage / background color (hex) | `FFFFFF` |
 | `--seed` | uint | RNG seed; `0` seeds from the clock | `0` |
 | `--out` | file | Output PNG path (or pass it positionally) | `maze.png` |
 | `--algo` | name | Generation algorithm (7 portable to all grids; eller/binary-tree/sidewinder/division square-only) | `backtrack` |
@@ -660,9 +702,11 @@ Flags are parsed in `/parse-args` against a string-keyed `arg-dispatch` table. A
 | `--braid` | float `0..1` | Fraction of dead-ends to remove | `0.0` |
 | `--weave` | -- | Buck-style overpasses (square + backtrack only) | off |
 | `--compare` | `A,B,C` | Side-by-side mono panels of several algorithms | -- |
-| `--mask` | name | Carve the maze into a shape: `disc` / `ring` / `frame` / `logo` ([§7](#7-masking-shape-carved-mazes), square grid) | -- |
+| `--mask` | name | Carve the maze into a shape: `disc` / `ring` / `frame` / `logo` (the real Trix logo, [§7.4](#74-svg-masks); square grid) | -- |
 | `--mask-text` | `WORD` | Carve the maze into a word, rendered through `--font` | -- |
-| `--font` | name | Font for `--mask-text` / `--mask logo` ([§7.3](#73-fonts)): `5x7` / `roboto-bold` / `roboto-mono-bold` / `hershey-sans` / `hershey-serif` / custom | `roboto-bold` |
+| `--mask-file` | `NAME` | Carve from `mask-shapes/<NAME>.trx`, an SVG rasterised by `tools/gen_mask_svg.py` ([§7.4](#74-svg-masks)) | -- |
+| `--mask-dir` | dir | Where to find `mask-shapes/*.trx` | auto |
+| `--font` | name | Font for `--mask-text` ([§7.3](#73-fonts)): `5x7` / `roboto-bold` / `roboto-mono-bold` / `hershey-sans` / `hershey-serif` / custom | `roboto-bold` |
 | `--font-dir` | dir | Where to find `mask-fonts/*.trx` | auto |
 | `--mask-scale` | int | Cells per font pixel | `1` hi-res, `4` for `5x7` |
 | `--mask-invert` | -- | Punch the shape out of a full maze (the inverse) | off |
