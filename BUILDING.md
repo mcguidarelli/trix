@@ -101,6 +101,8 @@ A C++23 compiler already provides all of these; they are listed for completeness
 | `std::numbers` (`pi_v`, `e_v`)                                                                                                     | `<numbers>`             | Math constants                                    |
 | `std::midpoint`, `std::lerp`                                                                                                       | `<numeric>` / `<cmath>` | Overflow-safe midpoint and interpolation          |
 | `std::ranges::for_each` (and other ranges algorithms)                                                                              | `<algorithm>`           | Case-folding and small in-place transforms        |
+| `std::lexicographical_compare_three_way`                                                                                           | `<algorithm>`           | Three-way string comparison                       |
+| `std::strong_order`, `std::is_lt` / `is_gt` / `is_lteq`                                                                            | `<compare>`             | IEEE 754-2019 `totalOrder` predicates and string ordering |
 | `<chrono>` calendar (`year_month_day`, `weekday`, `sys_days`, `hh_mm_ss`)                                                          | `<chrono>`              | Date/time operators                               |
 | `<chrono>` time zones (`zoned_time`, `current_zone`)                                                                               | `<chrono>`              | Local-time conversion                             |
 | `[[likely]]` / `[[unlikely]]`                                                                                                      | *(attribute)*           | Hot-path branch hints                             |
@@ -125,8 +127,10 @@ intrinsics.  Portability across both compilers — including signed and unsigned
 
 Several modern features are deliberately **not** used, so their absence is by
 design rather than oversight: named `concept` definitions (only `requires`-clauses
-over type traits appear), deducing `this` / explicit object parameters, three-way
-comparison (`operator<=>`), `using enum`, template lambdas (`[]<typename T>`),
+over type traits appear), deducing `this` / explicit object parameters, a
+user-defined `operator<=>` (the `<compare>` comparison functions *are* used — see
+the C++20 table — but no type defines its own spaceship), `using enum`, template
+lambdas (`[]<typename T>`),
 `char8_t` / `std::u8string`, and the C++20 concurrency additions (`std::jthread`,
 `std::stop_token`, `std::latch`, `std::barrier`, `std::counting_semaphore`,
 `std::atomic_ref`) — threading uses plain `std::thread`.  (`std::source_location`
