@@ -71,20 +71,42 @@ non-conforming build fails to compile rather than miscompiling:
 
 ### C++23 features required
 
-| Feature                       | Header        | Used for                                |
-| ----------------------------- | ------------- | --------------------------------------- |
-| `std::print` / `std::println` | `<print>`     | All formatted console output            |
-| `std::byteswap`               | `<bit>`       | Endian conversion in binary pack/unpack |
-| `std::unreachable`            | `<utility>`   | Marking dispatch-table dead ends        |
-| `[[assume(...)]]`             | *(attribute)* | Optimizer hints on hot invariants       |
+| Feature                       | Header          | Used for                                     |
+| ----------------------------- | --------------- | -------------------------------------------- |
+| `std::print` / `std::println` | `<print>`       | All formatted console output                 |
+| `std::unreachable`            | `<utility>`     | Marking dispatch-table dead ends             |
+| `std::byteswap`               | `<bit>`         | Endian conversion in binary pack/unpack      |
+| `std::to_underlying`          | `<utility>`     | Enum-to-integer in the embedding API         |
+| `std::string_view::contains`  | `<string_view>` | The `contains` string operator               |
+| `std::ranges::contains`       | `<algorithm>`   | Name-bucket count membership test            |
+| `[[assume(...)]]`             | *(attribute)*   | Optimizer hints on hot invariants            |
+| `if consteval`                | *(language)*    | Compile-time vs. runtime split in the hasher |
 
 These are what make the floor `gcc-15` / `clang-20+`: full library support for
-`<print>`, `std::byteswap`, and `std::unreachable` lands in those releases.  The
-codebase also leans on several features that are **C++20** (a C++23 compiler
-already provides them) — `std::format` (which itself needs a C++23-era
-libstdc++), `std::span`, `std::bit_cast`, `std::ranges`, the `<bit>` algorithms
-(`std::popcount`, `std::countl_zero`, `std::countr_zero`), and the `[[likely]]`
-/ `[[unlikely]]` attributes.
+`<print>`, `std::byteswap`, `std::unreachable`, and the C++23 `contains`
+members lands in those releases.
+
+### C++20 features used
+
+A C++23 compiler already provides all of these; they are listed for completeness
+(and for anyone gauging a partial backport).
+
+| Feature                                                                                                                            | Header                  | Used for                                          |
+| ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------- | ------------------------------------------------- |
+| `std::format` / `std::format_to` / `std::vformat`                                                                                  | `<format>`              | Internal string formatting (needs a C++23-era libstdc++) |
+| `std::span`                                                                                                                        | `<span>`                | Non-owning views over dispatch tables and buffers |
+| `std::bit_cast`                                                                                                                    | `<bit>`                 | Type-punning reals/integers without UB            |
+| `std::endian`                                                                                                                      | `<bit>`                 | Native/big/little endian selection                |
+| `std::popcount`, `countl_zero`, `countr_zero`, `countl_one`, `has_single_bit`, `bit_width`, `bit_ceil`, `bit_floor`, `rotl`, `rotr` | `<bit>`                 | Bit twiddling in the numeric and hashing paths    |
+| `std::numbers` (`pi_v`, `e_v`)                                                                                                     | `<numbers>`             | Math constants                                    |
+| `std::midpoint`, `std::lerp`                                                                                                       | `<numeric>` / `<cmath>` | Overflow-safe midpoint and interpolation          |
+| `std::ranges::for_each` (and other ranges algorithms)                                                                              | `<algorithm>`           | Case-folding and small in-place transforms        |
+| `<chrono>` calendar (`year_month_day`, `weekday`, `sys_days`, `hh_mm_ss`)                                                          | `<chrono>`              | Date/time operators                               |
+| `<chrono>` time zones (`zoned_time`, `current_zone`)                                                                               | `<chrono>`              | Local-time conversion                             |
+| `[[likely]]` / `[[unlikely]]`                                                                                                      | *(attribute)*           | Hot-path branch hints                             |
+| `consteval` (immediate functions)                                                                                                  | *(language)*            | Building operator / name dispatch tables at compile time |
+| Constrained templates via `requires`-clauses                                                                                       | *(language)*            | Type-gating the bitwise / stream / verify helpers |
+| Designated initializers                                                                                                            | *(language)*            | Aggregate construction                            |
 
 ### Compiler builtins and extensions
 
@@ -100,6 +122,16 @@ All are common to both GCC and Clang:
 There is no inline assembly, no computed `goto`, and no other platform-specific
 intrinsics.  Portability across both compilers — including signed and unsigned
 `char` — is verified in CI.
+
+Several modern features are deliberately **not** used, so their absence is by
+design rather than oversight: named `concept` definitions (only `requires`-clauses
+over type traits appear), deducing `this` / explicit object parameters, three-way
+comparison (`operator<=>`), `using enum`, template lambdas (`[]<typename T>`),
+`char8_t` / `std::u8string`, and the C++20 concurrency additions (`std::jthread`,
+`std::stop_token`, `std::latch`, `std::barrier`, `std::counting_semaphore`,
+`std::atomic_ref`) — threading uses plain `std::thread`.  (`std::source_location`
+is likewise unused; the `source_location` symbols in the sources are Trix's own
+method returning a custom `SourceLocation` struct.)
 
 ## Quick build with `build.sh`
 
