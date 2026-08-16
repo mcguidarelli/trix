@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.12.0] - 2026-08-16
 
+- **Release tarballs now come in a `-debugger` variant.** The default
+  `trix-linux-<arch>.tar.gz` stays debugger-free -- the `debug-*` op family and
+  breakpoint machinery are deliberately not in the shipping build -- so `--inspect` has
+  never worked from a published binary. A second `trix-linux-<arch>-debugger.tar.gz` is now
+  built per arch with `-DTRIX_DEBUGGER=ON` and ships `lib/*.trx` beside the binary, which
+  the inspector needs at run time: its UI is written in Trix and loaded from
+  `lib/debugger.trx` through the binary-relative arm of the module search path. The release
+  job asserts all three properties -- the variant reports the `debugger` feature, accepts
+  `--inspect`, and the default build does *not* -- so the two cannot silently converge.
+  Checksums for both tarballs share the existing per-arch `.sha256` file.
+
 - **Snapshot-thaw fuzz harness (`fuzz/fuzz_thaw.cpp`).** Targets `startup_image()` -- the
   `--image` / `-l` boot thaw path: header validation, section reads, CRC gates,
   `restore_from_header()`, `apply_fixup_streams()`, stdio reattach, and post-thaw execution

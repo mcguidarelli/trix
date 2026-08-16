@@ -327,7 +327,18 @@ cd trix-v*-linux-x86_64
 ./trix --version
 ```
 
-Every release also ships a versioned tarball (`trix-vX.Y.Z-linux-x86_64.tar.gz`) for archival; the unversioned name above always points to the latest release.  See the [releases page](https://github.com/mcguidarelli/trix/releases) for older versions and full source snapshots.
+Every release also ships a versioned tarball (`trix-vX.Y.Z-linux-x86_64.tar.gz`) for archival; the unversioned name above always points to the latest release.  See the [releases page](https://github.com/mcguidarelli/trix/releases) for older versions and full source snapshots.  `arm64` tarballs use the same names with `linux-arm64`.
+
+The default binaries are built **without** the interactive debugger, so `--inspect` and the `debug-*` operators are absent from them.  If you want the full-screen inspector, take the `-debugger` tarball instead:
+
+```bash
+curl -LO https://github.com/mcguidarelli/trix/releases/latest/download/trix-linux-x86_64-debugger.tar.gz
+tar xzf trix-linux-x86_64-debugger.tar.gz
+cd trix-v*-linux-x86_64-debugger
+./trix --inspect yourscript.trx
+```
+
+It is the same optimized build with `-DTRIX_DEBUGGER=ON`, and it carries a `lib/` directory beside the binary -- the inspector's UI is written in Trix and loaded from `lib/debugger.trx` at run time, so keep the two together when you move the binary.  Checksums for both tarballs are in the one `trix-linux-x86_64.sha256` file.
 
 Runtime dependencies: `libreadline` and `zlib` (both optional — a
 `--no-readline` / `--no-zlib` build drops them).  On Ubuntu/Debian:

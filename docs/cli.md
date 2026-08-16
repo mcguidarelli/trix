@@ -579,7 +579,10 @@ above cover all of them.
 
 These flags exist only in builds compiled with the debugger feature (check
 `trix --version` for `debugger` in the feature list; they are absent from a
-release build that compiles it out). There are two distinct facilities:
+release build that compiles it out). The default release tarball is one of
+those: build with `-DTRIX_DEBUGGER=ON`, or download the separate
+`trix-linux-<arch>-debugger.tar.gz`, which ships the inspector along with the
+`lib/` directory it loads its UI from. There are two distinct facilities:
 
 - **`-d` / `--debug`** enables the interactive *debugger substrate* -- the
   `debug-*` introspection operators and breakpoint machinery a script can

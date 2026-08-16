@@ -7,6 +7,15 @@ name: Release
 # The workflow builds a Release binary (no sanitizers), strips it,
 # packages trix + LICENSE + README.md into a tarball, computes a
 # SHA256 checksum, and attaches both to a GitHub Release for the tag.
+#
+# Each arch also produces a SECOND, separately-named tarball built with
+# -DTRIX_DEBUGGER=ON.  The default tarball stays debugger-free on purpose --
+# the debug-* op family and breakpoint machinery are not wanted in the
+# shipping build -- so --inspect is unavailable there.  The -debugger tarball
+# carries it, and must also ship lib/*.trx: the inspector's UI is written in
+# Trix and loaded at runtime by `require`, which finds it via the
+# binary-relative <bin_dir>/lib arm of the module search path.  That is why
+# lib/ sits beside the binary inside the tarball.
 
 on:
   push:
@@ -74,7 +83,63 @@ jobs:
           # Upload an arch-only alias too so README install commands don't
           # need to change each release.
           cp "${STAGE}.tar.gz" trix-linux-x86_64.tar.gz
-          sha256sum "${STAGE}.tar.gz" trix-linux-x86_64.tar.gz > trix-linux-x86_64.sha256
+
+      - name: Configure debugger variant (Release + TRIX_DEBUGGER)
+        env:
+          CC: gcc-15
+          CXX: g++-15
+        run: >
+          cmake -B build-dbg -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DTRIX_SANITIZERS=OFF
+          -DTRIX_DEBUGGER=ON
+
+      - name: Build debugger variant
+        run: cmake --build build-dbg
+
+      - name: Strip debugger binaries
+        run: strip build-dbg/trix build-dbg/tetrix build-dbg/chip8
+
+      - name: Verify the debugger variant really carries the inspector
+        run: |
+          build-dbg/trix --version
+          build-dbg/trix --version | grep -q ' debugger' \
+            || { echo "FATAL: debugger feature absent from the debugger build"; exit 1; }
+          # --inspect with no filename must reach the argument check, not the
+          # unknown-option path; that proves the flag is compiled in.
+          if build-dbg/trix --inspect 2>&1 | grep -q 'unrecognized option'; then
+            echo "FATAL: --inspect not compiled into the debugger build"; exit 1
+          fi
+          # The default tarball's binary must NOT have it.
+          if build/trix --version | grep -q ' debugger'; then
+            echo "FATAL: debugger leaked into the default release build"; exit 1
+          fi
+
+      - name: Stage debugger artifact
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          STAGE="trix-v${VERSION}-linux-x86_64-debugger"
+          mkdir -p "$STAGE"
+          cp build-dbg/trix build-dbg/tetrix build-dbg/chip8 "$STAGE/"
+          # NOTICE.md must accompany any distribution (Apache License 4(d)).
+          cp LICENSE NOTICE.md README.md "$STAGE/"
+          # lib/ beside the binary: --inspect requires lib/debugger.trx at
+          # runtime and resolves it through <bin_dir>/lib.
+          mkdir -p "$STAGE/lib"
+          cp lib/*.trx "$STAGE/lib/"
+          test -f "$STAGE/lib/debugger.trx" \
+            || { echo "FATAL: lib/debugger.trx missing from the debugger tarball"; exit 1; }
+          tar czf "${STAGE}.tar.gz" "$STAGE"
+          cp "${STAGE}.tar.gz" trix-linux-x86_64-debugger.tar.gz
+
+      - name: Checksum all x86_64 artifacts
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          sha256sum \
+            "trix-v${VERSION}-linux-x86_64.tar.gz" \
+            trix-linux-x86_64.tar.gz \
+            "trix-v${VERSION}-linux-x86_64-debugger.tar.gz" \
+            trix-linux-x86_64-debugger.tar.gz > trix-linux-x86_64.sha256
           ls -la *.tar.gz *.sha256
 
       - name: Create GitHub Release
@@ -87,6 +152,8 @@ jobs:
           files: |
             trix-v${{ steps.version.outputs.version }}-linux-x86_64.tar.gz
             trix-linux-x86_64.tar.gz
+            trix-v${{ steps.version.outputs.version }}-linux-x86_64-debugger.tar.gz
+            trix-linux-x86_64-debugger.tar.gz
             trix-linux-x86_64.sha256
 
   linux-arm64:
@@ -148,7 +215,63 @@ jobs:
           cp LICENSE NOTICE.md README.md "$STAGE/"
           tar czf "${STAGE}.tar.gz" "$STAGE"
           cp "${STAGE}.tar.gz" trix-linux-arm64.tar.gz
-          sha256sum "${STAGE}.tar.gz" trix-linux-arm64.tar.gz > trix-linux-arm64.sha256
+
+      - name: Configure debugger variant (Release + TRIX_DEBUGGER)
+        env:
+          CC: gcc-15
+          CXX: g++-15
+        run: >
+          cmake -B build-dbg -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DTRIX_SANITIZERS=OFF
+          -DTRIX_DEBUGGER=ON
+
+      - name: Build debugger variant
+        run: cmake --build build-dbg
+
+      - name: Strip debugger binaries
+        run: strip build-dbg/trix build-dbg/tetrix build-dbg/chip8
+
+      - name: Verify the debugger variant really carries the inspector
+        run: |
+          build-dbg/trix --version
+          build-dbg/trix --version | grep -q ' debugger' \
+            || { echo "FATAL: debugger feature absent from the debugger build"; exit 1; }
+          # --inspect with no filename must reach the argument check, not the
+          # unknown-option path; that proves the flag is compiled in.
+          if build-dbg/trix --inspect 2>&1 | grep -q 'unrecognized option'; then
+            echo "FATAL: --inspect not compiled into the debugger build"; exit 1
+          fi
+          # The default tarball's binary must NOT have it.
+          if build/trix --version | grep -q ' debugger'; then
+            echo "FATAL: debugger leaked into the default release build"; exit 1
+          fi
+
+      - name: Stage debugger artifact
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          STAGE="trix-v${VERSION}-linux-arm64-debugger"
+          mkdir -p "$STAGE"
+          cp build-dbg/trix build-dbg/tetrix build-dbg/chip8 "$STAGE/"
+          # NOTICE.md must accompany any distribution (Apache License 4(d)).
+          cp LICENSE NOTICE.md README.md "$STAGE/"
+          # lib/ beside the binary: --inspect requires lib/debugger.trx at
+          # runtime and resolves it through <bin_dir>/lib.
+          mkdir -p "$STAGE/lib"
+          cp lib/*.trx "$STAGE/lib/"
+          test -f "$STAGE/lib/debugger.trx" \
+            || { echo "FATAL: lib/debugger.trx missing from the debugger tarball"; exit 1; }
+          tar czf "${STAGE}.tar.gz" "$STAGE"
+          cp "${STAGE}.tar.gz" trix-linux-arm64-debugger.tar.gz
+
+      - name: Checksum all arm64 artifacts
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          sha256sum \
+            "trix-v${VERSION}-linux-arm64.tar.gz" \
+            trix-linux-arm64.tar.gz \
+            "trix-v${VERSION}-linux-arm64-debugger.tar.gz" \
+            trix-linux-arm64-debugger.tar.gz > trix-linux-arm64.sha256
           ls -la *.tar.gz *.sha256
 
       # Append-only: the Release already exists (created by linux-x86_64), so do
@@ -159,6 +282,8 @@ jobs:
           files: |
             trix-v${{ steps.version.outputs.version }}-linux-arm64.tar.gz
             trix-linux-arm64.tar.gz
+            trix-v${{ steps.version.outputs.version }}-linux-arm64-debugger.tar.gz
+            trix-linux-arm64-debugger.tar.gz
             trix-linux-arm64.sha256
 
   docker:
